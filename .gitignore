@@ -1,0 +1,23 @@
+node_modules
+dist
+.vite
+*.tsbuildinfo
+.vercel
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
+coverage
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Local working notes / agent config (kept local per repo convention)
+.claude
+CLAUDE.md
+AGENTS.md
+.superpowers/
+docs
