@@ -14,8 +14,8 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./tests/setup.ts'],
-    // When @fretwork/lib is added: its git-dep dist barrel uses directory imports
+    // @fretwork/lib's git-dep dist barrel uses directory imports
     // (`export * from './foo'`) that Node's ESM loader rejects — inline it so Vite resolves it.
-    // server: { deps: { inline: [/@fretwork\/lib/] } },
+    server: { deps: { inline: [/@fretwork\/lib/] } },
   },
 });
