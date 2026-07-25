@@ -1,39 +1,205 @@
-:root {
-  color-scheme: light dark;
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  line-height: 1.5;
+@import 'tailwindcss';
+
+/* ---------------------------------------------------------------------------
+ * Fraunces — display/title face. Variable (weight 100–900 + optical size),
+ * self-hosted latin subset so there's no network dependency at runtime.
+ * ------------------------------------------------------------------------- */
+@font-face {
+  font-family: 'Fraunces';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../assets/fonts/Fraunces-roman-var.woff2') format('woff2-variations');
 }
 
-* {
-  box-sizing: border-box;
+@font-face {
+  font-family: 'Fraunces';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../assets/fonts/Fraunces-italic-var.woff2') format('woff2-variations');
 }
 
-body {
-  margin: 0;
-  min-height: 100vh;
-  background: hsl(26 16% 13%);
-  color: hsl(38 30% 92%);
+/* ---------------------------------------------------------------------------
+ * Design tokens — the single source of truth for the whole app.
+ *
+ * The look is "physical hardware": a mid-charcoal ground (never near-black —
+ * that kills shadows — and never bright white), panels that lift off it, and a
+ * recessed tray the beat grid sits inside. Change a value here and it updates
+ * everywhere; nothing below should hard-code a colour.
+ * ------------------------------------------------------------------------- */
+@theme {
+  /* -- surfaces (dark → light as you rise off the ground) ------------------ */
+  --color-ground: #232529;
+  --color-panel: #2c2f36;
+  --color-panel-hi: #33363e;
+  --color-raise: #34373f;
+  --color-raise-hi: #3b3f48;
+
+  /* -- the tray: raised bezel around a sunken well ------------------------- */
+  --color-bezel: #40434c;
+  --color-bezel-lo: #2a2c33;
+  --color-rim: #4c5059;
+  --color-rim-dark: #191a1e;
+  --color-well: #1f2129;
+  --color-well-hi: #171820;
+  --color-well-line: #2f323b;
+  --color-beat-line: #454a55;
+
+  /* -- note blocks --------------------------------------------------------- */
+  --color-block: #31343c;
+  --color-block-hi: #3d414b;
+
+  /* -- accent: brushed brass. Marks roots, playhead, primary actions. ------ */
+  --color-brass: #b0894e;
+  --color-brass-hi: #d0a866;
+  --color-brass-lo: #8f6d3a;
+  --color-brass-ink: #20180d; /* text on top of brass */
+
+  /* -- reserved accents — kept for future differentiators (track colours,
+   *    categories, secondary states). Not used in the base theme. --------- */
+  --color-slate: #7089a9;
+  --color-slate-hi: #87a0bf;
+  --color-plum: #9a7290;
+  --color-plum-hi: #b085a5;
+
+  /* -- ink ----------------------------------------------------------------- */
+  --color-ink: #cdd2da; /* body — deliberately off-white, never #fff */
+  --color-ink-hi: #e6eaf0; /* headings / emphasis */
+  --color-ink-mut: #828a98; /* labels, captions, inactive */
+  --color-line: #3c404a;
+  --color-line-hi: #4a4f5a;
+
+  /* -- type ---------------------------------------------------------------- */
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* -- elevation. The whole aesthetic lives in these. ----------------------
+   * "raised" = lifts off the ground (panels, blocks, buttons)
+   * "sunken" = carved into it (the well the grid sits in)
+   * "pressed" = the depressed state of anything interactive
+   * ---------------------------------------------------------------------- */
+  --shadow-raised:
+    0 1px 0 rgb(255 255 255 / 0.08) inset, 0 3px 7px rgb(0 0 0 / 0.5),
+    0 8px 16px -8px rgb(0 0 0 / 0.5);
+  --shadow-raised-lg:
+    0 1px 0 rgb(255 255 255 / 0.06) inset, 0 6px 16px rgb(0 0 0 / 0.4),
+    0 30px 70px -30px rgb(0 0 0 / 1);
+  --shadow-bezel:
+    0 2px 0 rgb(255 255 255 / 0.1) inset, 0 -3px 6px rgb(0 0 0 / 0.5) inset,
+    0 18px 34px -16px rgb(0 0 0 / 0.7);
+  --shadow-sunken:
+    0 4px 12px rgb(0 0 0 / 0.65) inset, 0 -1px 0 rgb(255 255 255 / 0.04) inset;
+  --shadow-pressed:
+    0 2px 5px rgb(0 0 0 / 0.6) inset, 0 1px 0 rgb(255 255 255 / 0.04) inset;
+  --shadow-glow-brass: 0 0 10px rgb(176 137 78 / 0.7);
+
+  /* -- motion — short and mechanical; these are physical controls ---------- */
+  --ease-press: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.app {
-  max-width: 48rem;
-  margin: 0 auto;
-  padding: 3rem 1.5rem;
+/* ---------------------------------------------------------------------------
+ * Base
+ * ------------------------------------------------------------------------- */
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: var(--color-ground);
+    /* a faint overhead light, so the ground isn't a flat field */
+    background-image: radial-gradient(120% 80% at 50% -15%, #2a2d33, #1e2024);
+    background-attachment: fixed;
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Data, labels and readouts are monospace by default — this is an
+     instrument, and the numbers should line up. */
+  code,
+  kbd,
+  samp {
+    font-family: var(--font-mono);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brass-hi);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+    }
+  }
 }
 
-h1 {
-  margin: 0 0 0.5rem;
-  font-size: 2rem;
-}
+/* ---------------------------------------------------------------------------
+ * Components — the physical vocabulary.
+ *
+ * These are the recipes that would otherwise be repeated (multi-layer shadows,
+ * gradients). Everything else should use plain utilities. Restyle the app by
+ * editing the tokens above or these five classes.
+ * ------------------------------------------------------------------------- */
+@layer components {
+  /* A surface that lifts off the ground. The default container. */
+  .panel {
+    background-image: linear-gradient(180deg, var(--color-panel-hi), var(--color-panel));
+    border: 1px solid var(--color-rim-dark);
+    border-radius: 1rem;
+    box-shadow: var(--shadow-raised-lg);
+  }
 
-.muted {
-  opacity: 0.75;
-}
+  /* The raised bezel that frames the grid. Exaggerated on purpose — it's what
+     makes the contents read as sitting *inside* a physical container. */
+  .tray {
+    background-image: linear-gradient(180deg, var(--color-bezel), var(--color-bezel-lo));
+    border: 1px solid var(--color-rim-dark);
+    border-radius: 1.125rem;
+    box-shadow: var(--shadow-bezel);
+  }
 
-code {
-  font-family: ui-monospace, 'JetBrains Mono', monospace;
-  background: hsl(30 12% 20%);
-  padding: 0.1em 0.35em;
-  border-radius: 0.3em;
-  font-size: 0.9em;
+  /* The sunken well inside the tray, where lanes and blocks live. */
+  .well {
+    background-image: linear-gradient(180deg, var(--color-well-hi), var(--color-well));
+    border: 1px solid #101116;
+    border-radius: 0.75rem;
+    box-shadow: var(--shadow-sunken);
+  }
+
+  /* Anything you can push: buttons, note blocks, steppers. */
+  .pressable {
+    box-shadow: var(--shadow-raised);
+    transition:
+      transform 60ms var(--ease-press),
+      box-shadow 60ms var(--ease-press);
+  }
+
+  .pressable:active {
+    transform: translateY(2px);
+    box-shadow: var(--shadow-pressed);
+  }
+
+  /* A raised control — the neutral button/block body. */
+  .control {
+    background-image: linear-gradient(180deg, var(--color-raise-hi), var(--color-raise));
+    border: 1px solid var(--color-rim-dark);
+    color: var(--color-ink);
+  }
+
+  /* The same, in brass — primary actions, root notes, the playhead. */
+  .control-accent {
+    background-image: linear-gradient(180deg, var(--color-brass-hi), var(--color-brass));
+    border: 1px solid var(--color-brass-lo);
+    color: var(--color-brass-ink);
+  }
 }
