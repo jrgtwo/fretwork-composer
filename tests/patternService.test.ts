@@ -1,15 +1,19 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { PPQ } from '@fretwork/lib';
 import {
+  beginEditGesture,
   deleteNotes,
+  endEditGesture,
   getEditingPattern,
+  getSelectedIds,
   moveNote,
   openBlankPattern,
+  redo,
   resizeNote,
   selectNotes,
   setNoteFret,
   stampNote,
-  getSelectedIds,
+  undo,
 } from '../src/patterns/patternService';
 
 const noteAt = (index = 0) => getEditingPattern()!.events[index];
@@ -135,5 +139,82 @@ describe('patternService', () => {
 
       expect(getEditingPattern()!.durationTicks).toBeLessThan(grown);
     });
+  });
+});
+
+describe('undo / redo', () => {
+  it('undoes a stamp and redoes it', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+    expect(getEditingPattern()!.events).toHaveLength(1);
+
+    undo();
+    expect(getEditingPattern()!.events).toHaveLength(0);
+
+    redo();
+    expect(getEditingPattern()!.events).toHaveLength(1);
+  });
+
+  it('undoes a delete', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+    const id = noteAt().id;
+    deleteNotes([id]);
+    expect(getEditingPattern()!.events).toHaveLength(0);
+
+    undo();
+
+    expect(getEditingPattern()!.events.map((e) => e.id)).toEqual([id]);
+  });
+
+  it('undoes a fret change', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+    setNoteFret(noteAt().id, 12);
+    expect(noteAt().fret).toBe(12);
+
+    undo();
+
+    expect(noteAt().fret).toBe(5);
+  });
+
+  it('collapses a whole gesture into one undo step', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+    const id = noteAt().id;
+
+    // A drag: many moves, one undoable step.
+    beginEditGesture();
+    moveNote(id, PPQ);
+    moveNote(id, PPQ * 2);
+    moveNote(id, PPQ * 3);
+    endEditGesture();
+    expect(noteAt().startTick).toBe(PPQ * 3);
+
+    undo();
+
+    expect(noteAt().startTick).toBe(0);
+  });
+
+  it('records nothing for a gesture that moved nothing', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+
+    beginEditGesture();
+    endEditGesture(false);
+    undo();
+
+    // the stamp is what gets undone, not a phantom empty gesture
+    expect(getEditingPattern()!.events).toHaveLength(0);
+  });
+
+  it('does nothing when there is no history', () => {
+    expect(() => undo()).not.toThrow();
+    expect(getEditingPattern()!.events).toHaveLength(0);
+  });
+
+  it('starts a new pattern with a clean history', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+    openBlankPattern('Another');
+
+    undo();
+
+    expect(getEditingPattern()!.name).toBe('Another');
+    expect(getEditingPattern()!.events).toHaveLength(0);
   });
 });

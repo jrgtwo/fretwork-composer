@@ -1,12 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { PPQ, snapTick, ticksPerBar, type PatternEvent } from '@fretwork/lib';
 import {
+  beginEditGesture,
   deleteNotes,
+  endEditGesture,
   moveNote,
+  redo,
   resizeNote,
   selectNotes,
   stampNote,
+  undo,
   useEditingPattern,
+  useHistoryState,
   useSelectedIds,
 } from '../patterns/patternService';
 import {
@@ -41,6 +46,7 @@ type DragMode = 'move' | 'resize';
 export function Timeline() {
   const pattern = useEditingPattern();
   const selectedIds = useSelectedIds();
+  const { canUndo, canRedo } = useHistoryState();
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
   const pxPerBeat = ZOOM_LEVELS[zoomIndex];
   const areaRef = useRef<HTMLDivElement>(null);
@@ -57,15 +63,25 @@ export function Timeline() {
     return () => observer.disconnect();
   }, []);
 
-  // Delete removes the selection. Ignored while typing into a field.
+  // Editing shortcuts. All ignored while typing into a field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Backspace' && e.key !== 'Delete') return;
       const target = e.target as HTMLElement | null;
       if (target?.matches('input, textarea, [contenteditable]')) return;
-      if (selectedIds.length === 0) return;
-      e.preventDefault();
-      deleteNotes(selectedIds);
+
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+        return;
+      }
+
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        if (selectedIds.length === 0) return;
+        e.preventDefault();
+        deleteNotes(selectedIds);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -108,6 +124,8 @@ export function Timeline() {
     // Ticks between the pointer and the note's start, so it doesn't jump on grab.
     const grabOffset = tickAt(startX) - event.startTick;
     let moved = false;
+    // One undo step for the whole drag, not one per pointermove.
+    beginEditGesture();
 
     const onMove = (ev: PointerEvent) => {
       if (!moved && Math.abs(ev.clientX - startX) < DRAG_THRESHOLD && Math.abs(ev.clientY - startY) < DRAG_THRESHOLD) return;
@@ -130,6 +148,7 @@ export function Timeline() {
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      endEditGesture(moved); // a click that never moved isn't an edit
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -169,6 +188,25 @@ export function Timeline() {
           className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold disabled:opacity-40"
         >
           +
+        </button>
+        <span className="mx-1 h-4 w-px bg-line" />
+        <button
+          type="button"
+          aria-label="Undo"
+          disabled={!canUndo}
+          onClick={undo}
+          className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold disabled:opacity-40"
+        >
+          ↶
+        </button>
+        <button
+          type="button"
+          aria-label="Redo"
+          disabled={!canRedo}
+          onClick={redo}
+          className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold disabled:opacity-40"
+        >
+          ↷
         </button>
         <span className="flex-1" />
         <span className="font-mono text-[11px] font-bold text-ink-hi">

@@ -4,17 +4,19 @@ import userEvent from '@testing-library/user-event';
 import { PPQ } from '@fretwork/lib';
 import { Timeline } from '../src/timeline/Timeline';
 import {
+  clearHistory,
   getEditingPattern,
   getSelectedIds,
   openBlankPattern,
   stampNote,
 } from '../src/patterns/patternService';
 
-/** Two notes a beat apart on different strings. */
+/** Two notes a beat apart on different strings, as a freshly-loaded baseline. */
 function seedTwoNotes() {
   openBlankPattern('Test');
   stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
   stampNote({ stringIndex: 2, fret: 7, tick: PPQ, durationTicks: PPQ / 2 });
+  clearHistory(); // loading a pattern is not an undoable edit
 }
 
 const noteEl = (id: string) => document.querySelector<HTMLElement>(`[data-note="${id}"]`)!;
@@ -106,6 +108,42 @@ describe('Timeline', () => {
       await user.keyboard('{Delete}');
 
       expect(events()).toHaveLength(before);
+    });
+  });
+
+  describe('undo', () => {
+    it('undoes a stamp from the toolbar button', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const before = events().length;
+      const emptyLane = document.querySelector<HTMLElement>('[data-lane="E"]')!;
+
+      await user.pointer({ target: emptyLane, keys: '[MouseLeft]' });
+      expect(events()).toHaveLength(before + 1);
+
+      await user.click(screen.getByRole('button', { name: 'Undo' }));
+
+      expect(events()).toHaveLength(before);
+    });
+
+    it('undoes with the keyboard shortcut', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const target = events()[0];
+
+      await user.pointer({ target: noteEl(target.id), keys: '[MouseLeft]' });
+      await user.keyboard('{Delete}');
+      expect(events().find((e) => e.id === target.id)).toBeUndefined();
+
+      await user.keyboard('{Control>}z{/Control}');
+
+      expect(events().find((e) => e.id === target.id)).toBeDefined();
+    });
+
+    it('disables the buttons when there is nothing to undo or redo', () => {
+      render(<Timeline />);
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Redo' })).toBeDisabled();
     });
   });
 });

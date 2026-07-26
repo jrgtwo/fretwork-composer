@@ -4,7 +4,7 @@
  * no separate construction route that could drift from the real one.
  */
 import { PPQ } from '@fretwork/lib';
-import { openBlankPattern, stampNote } from '../patterns/patternService';
+import { clearHistory, openBlankPattern, stampNote } from '../patterns/patternService';
 
 /** [stringIndex (0 = high e), fret, startTick] */
 const NOTES: ReadonlyArray<readonly [number, number, number]> = [
@@ -25,4 +25,7 @@ export function seedDemoPattern(): void {
   NOTES.forEach(([stringIndex, fret, tick]) =>
     stampNote({ stringIndex, fret, tick, durationTicks: PPQ / 2 }),
   );
+  // Seeding isn't a user edit — the seeded pattern is the baseline, so undo
+  // shouldn't be able to unpick it note by note.
+  clearHistory();
 }
