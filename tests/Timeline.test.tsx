@@ -1,0 +1,111 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { PPQ } from '@fretwork/lib';
+import { Timeline } from '../src/timeline/Timeline';
+import {
+  getEditingPattern,
+  getSelectedIds,
+  openBlankPattern,
+  stampNote,
+} from '../src/patterns/patternService';
+
+/** Two notes a beat apart on different strings. */
+function seedTwoNotes() {
+  openBlankPattern('Test');
+  stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+  stampNote({ stringIndex: 2, fret: 7, tick: PPQ, durationTicks: PPQ / 2 });
+}
+
+const noteEl = (id: string) => document.querySelector<HTMLElement>(`[data-note="${id}"]`)!;
+const events = () => getEditingPattern()!.events;
+
+beforeEach(() => seedTwoNotes());
+
+describe('Timeline', () => {
+  it('renders a lane per string', () => {
+    render(<Timeline />);
+    expect(document.querySelectorAll('[data-lane]')).toHaveLength(6);
+  });
+
+  it('renders one element per pattern event', () => {
+    render(<Timeline />);
+
+    expect(document.querySelectorAll('[data-note]')).toHaveLength(events().length);
+    // 5th fret of the A string is D — the standard tuning reference note
+    expect(screen.getByTitle('Fret 5 · D')).toBeInTheDocument();
+    // 7th fret of the G string is also a D, an octave up
+    expect(screen.getByTitle('Fret 7 · D')).toBeInTheDocument();
+  });
+
+  it('places a note at its tick position, scaled by zoom', async () => {
+    const user = userEvent.setup();
+    render(<Timeline />);
+    const onBeatTwo = events().find((e) => e.startTick === PPQ)!;
+
+    // default zoom is 48px per beat, so a note one beat in sits at 48px
+    expect(noteEl(onBeatTwo.id).style.left).toBe('48px');
+
+    await user.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(noteEl(onBeatTwo.id).style.left).toBe('96px');
+  });
+
+  it('disables zoom controls at the extremes', async () => {
+    const user = userEvent.setup();
+    render(<Timeline />);
+
+    const zoomOut = screen.getByRole('button', { name: 'Zoom out' });
+    await user.click(zoomOut);
+    await user.click(zoomOut);
+    expect(zoomOut).toBeDisabled();
+  });
+
+  describe('editing', () => {
+    it('selects a note when you press it', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const target = events()[0];
+
+      await user.pointer({ target: noteEl(target.id), keys: '[MouseLeft]' });
+
+      expect(getSelectedIds()).toEqual([target.id]);
+      expect(noteEl(target.id)).toHaveAttribute('data-selected');
+    });
+
+    it('deletes the selection with the Delete key', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const target = events()[0];
+      const before = events().length;
+
+      await user.pointer({ target: noteEl(target.id), keys: '[MouseLeft]' });
+      await user.keyboard('{Delete}');
+
+      expect(events()).toHaveLength(before - 1);
+      expect(events().find((e) => e.id === target.id)).toBeUndefined();
+    });
+
+    it('stamps a note when you press empty lane space', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const before = events().length;
+      const emptyLane = document.querySelector<HTMLElement>('[data-lane="E"]')!;
+
+      await user.pointer({ target: emptyLane, keys: '[MouseLeft]' });
+
+      expect(events()).toHaveLength(before + 1);
+      // low E is the last lane
+      expect(events().some((e) => e.stringIndex === 5)).toBe(true);
+    });
+
+    it('ignores Delete while nothing is selected', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const before = events().length;
+
+      await user.keyboard('{Delete}');
+
+      expect(events()).toHaveLength(before);
+    });
+  });
+});

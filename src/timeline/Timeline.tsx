@@ -1,0 +1,266 @@
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { PPQ, snapTick, ticksPerBar, type PatternEvent } from '@fretwork/lib';
+import {
+  deleteNotes,
+  moveNote,
+  resizeNote,
+  selectNotes,
+  stampNote,
+  useEditingPattern,
+  useSelectedIds,
+} from '../patterns/patternService';
+import {
+  barBeatLines,
+  laneMetrics,
+  pxToTick,
+  tickToPx,
+  ZOOM_LEVELS,
+  DEFAULT_ZOOM_INDEX,
+} from './timelineMath';
+
+/** High → low, matching a `PatternEvent`'s stringIndex. */
+const STRING_LABELS = ['e', 'B', 'G', 'D', 'A', 'E'];
+const OPEN_MIDI = [64, 59, 55, 50, 45, 40];
+const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+const RULER_H = 20;
+const SNAP = PPQ / 4; // sixteenth-note grid
+const DEFAULT_DURATION = PPQ / 2;
+const DRAG_THRESHOLD = 3;
+
+const pitchName = (stringIndex: number, fret: number) =>
+  NOTE_NAMES[(OPEN_MIDI[stringIndex] + fret) % 12];
+
+type DragMode = 'move' | 'resize';
+
+/**
+ * The pattern editor's timeline: string lanes, a bar/beat ruler, and the events
+ * laid out in time. Every edit goes through the pattern service, so the lib's
+ * invariants (no same-string overlap, clamped durations, auto-fitted length)
+ * hold without this component knowing about them.
+ */
+export function Timeline() {
+  const pattern = useEditingPattern();
+  const selectedIds = useSelectedIds();
+  const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
+  const pxPerBeat = ZOOM_LEVELS[zoomIndex];
+  const areaRef = useRef<HTMLDivElement>(null);
+  const lanesRef = useRef<HTMLDivElement>(null);
+  const [areaHeight, setAreaHeight] = useState(240);
+
+  // Rows follow the pane height, which the user can drag — measure, don't assume.
+  useLayoutEffect(() => {
+    const el = areaRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => setAreaHeight(entry.contentRect.height));
+    observer.observe(el);
+    setAreaHeight(el.getBoundingClientRect().height);
+    return () => observer.disconnect();
+  }, []);
+
+  // Delete removes the selection. Ignored while typing into a field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+      const target = e.target as HTMLElement | null;
+      if (target?.matches('input, textarea, [contenteditable]')) return;
+      if (selectedIds.length === 0) return;
+      e.preventDefault();
+      deleteNotes(selectedIds);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedIds]);
+
+  if (!pattern) return null;
+
+  const ts = pattern.timeSignature;
+  const bars = Math.max(1, Math.ceil(pattern.durationTicks / ticksPerBar(ts)));
+  const width = tickToPx(bars * ticksPerBar(ts), pxPerBeat);
+  const lines = barBeatLines(bars, ts, pxPerBeat);
+  const { rowHeight, noteHeight, noteTop, isTall } = laneMetrics(
+    areaHeight,
+    STRING_LABELS.length,
+    RULER_H,
+  );
+
+  const carve = (w: number, dark: number, light: number) =>
+    `repeating-linear-gradient(90deg,transparent 0 ${w - 2}px,` +
+    `rgb(0 0 0/${dark}) ${w - 2}px ${w - 1}px,rgb(255 255 255/${light}) ${w - 1}px ${w}px)`;
+  const gridImage = [
+    carve(tickToPx(SNAP, pxPerBeat), 0.3, 0.022),
+    carve(pxPerBeat, 0.5, 0.045),
+    carve(tickToPx(ticksPerBar(ts), pxPerBeat), 0.72, 0.085),
+  ].join(',');
+
+  /** Pointer x → tick, measured against the lane's own box so scrolling is free. */
+  const tickAt = (clientX: number) => {
+    const rect = lanesRef.current?.getBoundingClientRect();
+    return pxToTick(clientX - (rect?.left ?? 0), pxPerBeat);
+  };
+
+  const startDrag = (event: PatternEvent, mode: DragMode) => (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    selectNotes([event.id]);
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    // Ticks between the pointer and the note's start, so it doesn't jump on grab.
+    const grabOffset = tickAt(startX) - event.startTick;
+    let moved = false;
+
+    const onMove = (ev: PointerEvent) => {
+      if (!moved && Math.abs(ev.clientX - startX) < DRAG_THRESHOLD && Math.abs(ev.clientY - startY) < DRAG_THRESHOLD) return;
+      moved = true;
+
+      if (mode === 'resize') {
+        const end = snapTick(tickAt(ev.clientX), SNAP);
+        resizeNote(event.id, Math.max(SNAP, end - event.startTick));
+        return;
+      }
+
+      const tick = Math.max(0, snapTick(tickAt(ev.clientX) - grabOffset, SNAP));
+      const rows = Math.round((ev.clientY - startY) / rowHeight);
+      const stringIndex = Math.max(
+        0,
+        Math.min(STRING_LABELS.length - 1, event.stringIndex + rows),
+      );
+      moveNote(event.id, tick, stringIndex);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  /** Clicking empty lane space places a note there. */
+  const onLaneDown = (stringIndex: number) => (e: React.PointerEvent) => {
+    if (e.target !== e.currentTarget) return;
+    const tick = snapTick(tickAt(e.clientX), SNAP);
+    // Reuse the last-used fret so repeated stamping doesn't reset to 0.
+    const fret = selectedIds.length
+      ? (pattern.events.find((ev) => ev.id === selectedIds[0])?.fret ?? 0)
+      : 0;
+    stampNote({ stringIndex, fret, tick, durationTicks: DEFAULT_DURATION });
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="mb-1.5 flex flex-none items-center gap-1.5">
+        <span className="font-mono text-[9px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
+          Zoom
+        </span>
+        <button
+          type="button"
+          aria-label="Zoom out"
+          disabled={zoomIndex === 0}
+          onClick={() => setZoomIndex((i) => Math.max(0, i - 1))}
+          className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold disabled:opacity-40"
+        >
+          –
+        </button>
+        <button
+          type="button"
+          aria-label="Zoom in"
+          disabled={zoomIndex === ZOOM_LEVELS.length - 1}
+          onClick={() => setZoomIndex((i) => Math.min(ZOOM_LEVELS.length - 1, i + 1))}
+          className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold disabled:opacity-40"
+        >
+          +
+        </button>
+        <span className="flex-1" />
+        <span className="font-mono text-[11px] font-bold text-ink-hi">
+          {bars} {bars === 1 ? 'bar' : 'bars'} · {pattern.events.length} notes
+        </span>
+      </div>
+
+      <div ref={areaRef} className="grid min-h-0 flex-1 grid-cols-[24px_1fr]">
+        <div className="flex flex-col" style={{ paddingTop: RULER_H }}>
+          {STRING_LABELS.map((label) => (
+            <span
+              key={label}
+              style={{ height: rowHeight }}
+              className="flex items-center justify-end pr-1.5 font-mono text-[9px] font-bold text-ink-mut"
+            >
+              {label}
+            </span>
+          ))}
+        </div>
+
+        <div className="well overflow-x-auto overflow-y-hidden">
+          <div className="relative" style={{ width }}>
+            <div className="relative" style={{ height: RULER_H }}>
+              {lines.map((line) => (
+                <span key={`${line.bar}.${line.beat}`}>
+                  <i
+                    aria-hidden
+                    className={`absolute top-0 bottom-0 w-px ${line.isBar ? 'bg-beat-line' : 'bg-well-line'}`}
+                    style={{ left: line.x }}
+                  />
+                  <span
+                    className="absolute top-1 pl-1 font-mono text-[8.5px] font-bold text-ink-mut"
+                    style={{ left: line.x }}
+                  >
+                    {line.isBar ? <b className="text-ink-hi">{line.bar}</b> : line.beat}
+                  </span>
+                </span>
+              ))}
+            </div>
+
+            <div className="lanes" ref={lanesRef}>
+              {STRING_LABELS.map((label, stringIndex) => (
+                <div
+                  key={label}
+                  data-lane={label}
+                  onPointerDown={onLaneDown(stringIndex)}
+                  style={{ height: rowHeight, backgroundImage: gridImage }}
+                  className="relative cursor-crosshair"
+                >
+                  {pattern.events
+                    .filter((event) => event.stringIndex === stringIndex)
+                    .map((event) => {
+                      const selected = selectedIds.includes(event.id);
+                      return (
+                        <div
+                          key={event.id}
+                          data-note={event.id}
+                          data-selected={selected || undefined}
+                          title={`Fret ${event.fret} · ${pitchName(stringIndex, event.fret)}`}
+                          onPointerDown={startDrag(event, 'move')}
+                          style={{
+                            left: tickToPx(event.startTick, pxPerBeat),
+                            width: Math.max(14, tickToPx(event.durationTicks, pxPerBeat) - 2),
+                            top: noteTop,
+                            height: noteHeight,
+                          }}
+                          className={`pressable absolute flex cursor-grab flex-col items-center justify-center gap-px rounded-[5px] font-mono text-[10.5px] font-bold select-none ${
+                            selected
+                              ? 'border border-brass bg-linear-to-b from-[#4a4433] to-[#3a3529] text-brass-hi shadow-[0_0_0_1px_var(--color-brass)]'
+                              : 'control'
+                          }`}
+                        >
+                          <span>{event.fret}</span>
+                          {isTall && (
+                            <span className="font-mono text-[8px] font-semibold opacity-70">
+                              {pitchName(stringIndex, event.fret)}
+                            </span>
+                          )}
+                          <span
+                            data-resize={event.id}
+                            onPointerDown={startDrag(event, 'resize')}
+                            className="absolute top-0 -right-1 bottom-0 w-2 cursor-ew-resize"
+                          />
+                        </div>
+                      );
+                    })}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,139 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { PPQ } from '@fretwork/lib';
+import {
+  deleteNotes,
+  getEditingPattern,
+  moveNote,
+  openBlankPattern,
+  resizeNote,
+  selectNotes,
+  setNoteFret,
+  stampNote,
+  getSelectedIds,
+} from '../src/patterns/patternService';
+
+const noteAt = (index = 0) => getEditingPattern()!.events[index];
+
+beforeEach(() => {
+  openBlankPattern('Test pattern');
+});
+
+describe('patternService', () => {
+  it('opens a blank pattern to edit', () => {
+    const pattern = getEditingPattern();
+    expect(pattern?.name).toBe('Test pattern');
+    expect(pattern?.events).toHaveLength(0);
+  });
+
+  it('stamps a note at an explicit tick', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: PPQ * 2, durationTicks: PPQ / 2 });
+
+    const event = noteAt();
+    expect(event.stringIndex).toBe(4);
+    expect(event.fret).toBe(5);
+    expect(event.startTick).toBe(PPQ * 2);
+  });
+
+  it('moves a note in time and between strings', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+
+    moveNote(noteAt().id, PPQ, 2);
+
+    expect(noteAt().startTick).toBe(PPQ);
+    expect(noteAt().stringIndex).toBe(2);
+  });
+
+  it('resizes a note', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+
+    resizeNote(noteAt().id, PPQ);
+
+    expect(noteAt().durationTicks).toBe(PPQ);
+  });
+
+  it('changes a note fret', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+
+    setNoteFret(noteAt().id, 12);
+
+    expect(noteAt().fret).toBe(12);
+  });
+
+  it('deletes notes', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+    const id = noteAt().id;
+
+    deleteNotes([id]);
+
+    expect(getEditingPattern()!.events).toHaveLength(0);
+  });
+
+  it('tracks selection', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+    const id = noteAt().id;
+
+    selectNotes([id]);
+    expect(getSelectedIds()).toEqual([id]);
+
+    selectNotes([]);
+    expect(getSelectedIds()).toEqual([]);
+  });
+
+  // These are the lib guarantees the seam exists to give us for free.
+  describe('invariants inherited from the lib', () => {
+    it('refuses to stamp on top of an existing note on the same string', () => {
+      stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ });
+      stampNote({ stringIndex: 4, fret: 7, tick: PPQ / 2, durationTicks: PPQ });
+
+      expect(getEditingPattern()!.events).toHaveLength(1);
+    });
+
+    it('allows the same tick on a different string', () => {
+      stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ });
+      stampNote({ stringIndex: 2, fret: 7, tick: 0, durationTicks: PPQ });
+
+      expect(getEditingPattern()!.events).toHaveLength(2);
+    });
+
+    it('clamps a resize so it cannot swallow the next note on that string', () => {
+      stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+      stampNote({ stringIndex: 4, fret: 7, tick: PPQ, durationTicks: PPQ / 2 });
+
+      const first = getEditingPattern()!.events.find((e) => e.startTick === 0)!;
+      resizeNote(first.id, PPQ * 4);
+
+      const resized = getEditingPattern()!.events.find((e) => e.id === first.id)!;
+      expect(resized.startTick + resized.durationTicks).toBeLessThanOrEqual(PPQ);
+    });
+
+    it('rejects a move that would overlap another note on that string', () => {
+      stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ });
+      stampNote({ stringIndex: 4, fret: 7, tick: PPQ * 2, durationTicks: PPQ });
+
+      const second = getEditingPattern()!.events.find((e) => e.startTick === PPQ * 2)!;
+      moveNote(second.id, 0);
+
+      // unchanged — the op returns the pattern untouched rather than corrupting it
+      expect(getEditingPattern()!.events.find((e) => e.id === second.id)!.startTick).toBe(PPQ * 2);
+    });
+
+    it('grows the pattern to fit a note placed beyond the end', () => {
+      const before = getEditingPattern()!.durationTicks;
+
+      stampNote({ stringIndex: 4, fret: 5, tick: before + PPQ * 4, durationTicks: PPQ });
+
+      expect(getEditingPattern()!.durationTicks).toBeGreaterThan(before);
+    });
+
+    it('shrinks the pattern back when that note is removed', () => {
+      const before = getEditingPattern()!.durationTicks;
+      stampNote({ stringIndex: 4, fret: 5, tick: before + PPQ * 4, durationTicks: PPQ });
+      const grown = getEditingPattern()!.durationTicks;
+      expect(grown).toBeGreaterThan(before);
+
+      deleteNotes([noteAt().id]);
+
+      expect(getEditingPattern()!.durationTicks).toBeLessThan(grown);
+    });
+  });
+});

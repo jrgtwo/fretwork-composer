@@ -196,6 +196,23 @@
     color: var(--color-ink);
   }
 
+  /* Timeline lanes. Each string sits in a recessed channel — a shadow across the
+     top edge and a light catch along the bottom — with zebra shading so adjacent
+     strings stay distinguishable without spending any colour on them. */
+  .lanes > [data-lane] {
+    box-shadow:
+      0 2px 3px -2px rgb(0 0 0 / 0.75) inset,
+      0 -1px 0 rgb(255 255 255 / 0.045) inset;
+  }
+
+  .lanes > [data-lane] + [data-lane] {
+    border-top: 1px solid rgb(0 0 0 / 0.5);
+  }
+
+  .lanes > [data-lane]:nth-child(even) {
+    background-color: rgb(255 255 255 / 0.026);
+  }
+
   /* The same, in brass — primary actions, root notes, the playhead. */
   .control-accent {
     background-image: linear-gradient(180deg, var(--color-brass-hi), var(--color-brass));
