@@ -7,17 +7,25 @@ import {
   clearHistory,
   getEditingPattern,
   openBlankPattern,
+  setArticulations,
   stampNote,
 } from '../src/patterns/patternService';
-import { readPitchSpec } from '../src/patterns/articulations';
+import { readNotePitch } from '../src/patterns/articulations';
 
 const note = () => getEditingPattern()!.events[0];
+const pitch = () => readNotePitch(note());
+
 const show = () => {
   const user = userEvent.setup();
-  const result = render(<NotePopup event={note()} pitchName="D" onClose={() => {}} />);
+  const props = () => ({
+    event: note(),
+    events: getEditingPattern()!.events,
+    pitchName: 'D',
+    onClose: () => {},
+  });
+  const result = render(<NotePopup {...props()} />);
   // The popup takes the event as a prop, so re-render after each edit.
-  const refresh = () =>
-    result.rerender(<NotePopup event={note()} pitchName="D" onClose={() => {}} />);
+  const refresh = () => result.rerender(<NotePopup {...props()} />);
   return { user, refresh };
 };
 
@@ -30,9 +38,7 @@ beforeEach(() => {
 describe('NotePopup', () => {
   it('changes the fret', async () => {
     const { user } = show();
-
-    await user.click(screen.getByRole('button', { name: 'Increase Fret' }));
-
+    await user.click(screen.getByRole('button', { name: 'Increase fret' }));
     expect(note().fret).toBe(6);
   });
 
@@ -71,80 +77,153 @@ describe('NotePopup', () => {
     expect(note().vibrato).toBe('wide');
   });
 
-  describe('pitch movement', () => {
-    it('adds a slide into the note', async () => {
+  describe('slides', () => {
+    it('slides into the note from below', async () => {
       const { user } = show();
-
-      await user.click(screen.getByRole('button', { name: 'Slide in' }));
-
-      expect(readPitchSpec(note()).in).toEqual({ semitones: -2, at: 0.15 });
+      await user.click(screen.getByRole('button', { name: '↗ below' }));
+      expect(pitch().slideIn).toBe('below');
     });
 
-    it('controls which side the movement is on — in and out together', async () => {
-      const { user, refresh } = show();
-
-      await user.click(screen.getByRole('button', { name: 'Slide in' }));
-      refresh();
-      await user.click(screen.getByRole('button', { name: 'Slide out' }));
-
-      const pitch = readPitchSpec(note());
-      expect(pitch.in).toBeDefined();
-      expect(pitch.out).toBeDefined();
+    it('slides out of the note downward', async () => {
+      const { user } = show();
+      await user.click(screen.getByRole('button', { name: 'out ↘' }));
+      expect(pitch().slideOut).toBe('down');
     });
 
-    it('resizes how long the slide takes', async () => {
+    it('keeps slide in and slide out independent', async () => {
       const { user, refresh } = show();
-      await user.click(screen.getByRole('button', { name: 'Slide in' }));
+
+      await user.click(screen.getByRole('button', { name: '↗ below' }));
       refresh();
+      await user.click(screen.getByRole('button', { name: 'out ↗' }));
 
-      await user.click(screen.getByRole('button', { name: 'Increase len' }));
-
-      expect(readPitchSpec(note()).in!.at).toBeCloseTo(0.2);
+      expect(pitch()).toMatchObject({ slideIn: 'below', slideOut: 'up' });
     });
 
-    it('positions a bend within the note', async () => {
+    it('swaps direction rather than stacking', async () => {
       const { user, refresh } = show();
-      await user.click(screen.getByRole('button', { name: 'Bend' }));
+
+      await user.click(screen.getByRole('button', { name: '↗ below' }));
       refresh();
+      await user.click(screen.getByRole('button', { name: '↘ above' }));
 
-      await user.click(screen.getByRole('button', { name: 'Increase start' }));
-
-      const bend = readPitchSpec(note()).bend!;
-      expect(bend.start).toBeCloseTo(0.15);
+      expect(pitch().slideIn).toBe('above');
     });
 
-    it('releases a bend back to pitch', async () => {
+    it('turns a slide off by picking it again', async () => {
       const { user, refresh } = show();
-      await user.click(screen.getByRole('button', { name: 'Bend' }));
+
+      await user.click(screen.getByRole('button', { name: '↗ below' }));
       refresh();
+      await user.click(screen.getByRole('button', { name: '↗ below' }));
 
-      await user.click(screen.getByRole('button', { name: 'Release' }));
+      expect(pitch().slideIn).toBeUndefined();
+    });
+  });
 
-      expect(readPitchSpec(note()).bend!.release).toBe(true);
+  describe('bends', () => {
+    it('bends the note, defaulting to a full step', async () => {
+      const { user } = show();
+      await user.click(screen.getByRole('button', { name: '⤴ bend' }));
+      expect(pitch().bend).toEqual({ kind: 'bend', semitones: 2 });
     });
 
-    it('clears all pitch movement', async () => {
+    it('changes the bend depth in musical steps', async () => {
       const { user, refresh } = show();
-      await user.click(screen.getByRole('button', { name: 'Slide in' }));
+      await user.click(screen.getByRole('button', { name: '⤴ bend' }));
       refresh();
 
-      await user.click(screen.getByRole('button', { name: 'Clear pitch' }));
+      await user.click(screen.getByRole('button', { name: '1½' }));
 
-      expect(readPitchSpec(note())).toEqual({
-        in: undefined,
-        out: undefined,
-        bend: undefined,
-      });
+      expect(pitch().bend!.semitones).toBe(3);
     });
 
-    it('warns that a bend and a slide share one pitch line', async () => {
-      const { user, refresh } = show();
-      await user.click(screen.getByRole('button', { name: 'Slide in' }));
+    it('bends and releases', async () => {
+      const { user } = show();
+      await user.click(screen.getByRole('button', { name: '⤴⤵ release' }));
+      expect(pitch().bend!.kind).toBe('bend-release');
+    });
+
+    it('only offers depth once a bend is on', async () => {
+      const { refresh } = show();
+      expect(screen.queryByRole('button', { name: '1½' })).not.toBeInTheDocument();
       refresh();
-      await user.click(screen.getByRole('button', { name: 'Bend' }));
+    });
+
+    it('warns when a bend and a slide would blend', async () => {
+      const { user, refresh } = show();
+      await user.click(screen.getByRole('button', { name: '↗ below' }));
+      refresh();
+      await user.click(screen.getByRole('button', { name: '⤴ bend' }));
       refresh();
 
       expect(screen.getByText(/share one pitch line/)).toBeInTheDocument();
     });
+
+    // A bend plus a slide can't be stored in the typed fields — it falls back
+    // to an explicit curve, and has to survive the round trip.
+    it('keeps both when a bend and a slide are combined', async () => {
+      const { user, refresh } = show();
+      await user.click(screen.getByRole('button', { name: '↗ below' }));
+      refresh();
+      await user.click(screen.getByRole('button', { name: '⤴ bend' }));
+
+      expect(pitch()).toMatchObject({ slideIn: 'below', bend: { kind: 'bend' } });
+    });
+  });
+
+  describe('ties', () => {
+    // The lib only merges a tie when the next note is adjacent, same string,
+    // same fret. Offering it otherwise would look like it worked and do nothing.
+    it('is unavailable with no adjacent note to tie to', () => {
+      show();
+      expect(screen.getByRole('button', { name: '⌒ tie' })).toBeDisabled();
+      expect(screen.getByText('no adjacent note')).toBeInTheDocument();
+    });
+
+    it('is available once a note starts exactly where this one ends', () => {
+      stampNote({ stringIndex: 4, fret: 5, tick: PPQ, durationTicks: PPQ });
+      show();
+      expect(screen.getByRole('button', { name: '⌒ tie' })).toBeEnabled();
+    });
+
+    it('stays unavailable when the next note is a different fret', () => {
+      stampNote({ stringIndex: 4, fret: 7, tick: PPQ, durationTicks: PPQ });
+      show();
+      expect(screen.getByRole('button', { name: '⌒ tie' })).toBeDisabled();
+    });
+
+    it('ties to the next note', async () => {
+      stampNote({ stringIndex: 4, fret: 5, tick: PPQ, durationTicks: PPQ });
+      const { user } = show();
+
+      await user.click(screen.getByRole('button', { name: '⌒ tie' }));
+
+      expect(note().tieToNext).toBe(true);
+    });
+
+    // Tied notes merge into one, so anything expressive on the follower is
+    // dropped — including the "tie a note on to add vibrato" idea.
+    it('warns that the tied note\'s articulations will not sound', async () => {
+      stampNote({ stringIndex: 4, fret: 5, tick: PPQ, durationTicks: PPQ });
+      const follower = getEditingPattern()!.events.find((e) => e.startTick === PPQ)!;
+      setArticulations(follower.id, { vibrato: 'wide' });
+
+      const { user, refresh } = show();
+      await user.click(screen.getByRole('button', { name: '⌒ tie' }));
+      refresh();
+
+      expect(screen.getByText(/won't sound/)).toBeInTheDocument();
+    });
+  });
+
+  it('clears all pitch movement', async () => {
+    const { user, refresh } = show();
+    await user.click(screen.getByRole('button', { name: '↗ below' }));
+    refresh();
+
+    await user.click(screen.getByRole('button', { name: 'Clear pitch' }));
+
+    expect(pitch()).toEqual({});
   });
 });

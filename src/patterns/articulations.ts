@@ -171,3 +171,179 @@ export function readPitchSpec(event: {
 }): PitchSpec {
   return parseCurve(event.bend?.points);
 }
+
+// ---------------------------------------------------------------------------
+// The musical layer.
+//
+// Guitarists think in tab: "slide into it from below", "bend a full step",
+// "slide off the end" — not in curve positions. The lib's typed `slide`/`bend`
+// fields already speak that language and are what notation would read, so we
+// use them wherever they can express what the user asked for.
+//
+// They can't express two things: a slide *into* and *out of* the same note (one
+// `slide` field), or a bend combined with a slide (playback drops the slide —
+// "bend takes priority"). For those we fall back to an explicit curve, which
+// composes both. That keeps the common cases clean and the rare ones possible.
+// ---------------------------------------------------------------------------
+
+// --------------------------------------------------------------------- ties ---
+
+/** The fields a tied follower would lose when it's folded into its leader. */
+const MERGED_AWAY = ['vibrato', 'bend', 'slide', 'hammerOn', 'pullOff', 'palmMute', 'ghost', 'tap'] as const;
+
+interface TieCandidate {
+  id: string;
+  stringIndex: number;
+  fret: number;
+  startTick: number;
+  durationTicks: number;
+}
+
+/**
+ * The note a tie would join to, if any.
+ *
+ * The lib merges tied chains only on strict adjacency — same string, same fret,
+ * and the follower starting exactly where the leader ends. Anything else and the
+ * tie is silently ignored at playback, so the UI shouldn't offer it.
+ */
+export function tieTargetFor<T extends TieCandidate>(
+  events: readonly T[],
+  event: TieCandidate,
+): T | undefined {
+  const end = event.startTick + event.durationTicks;
+  return events.find(
+    (candidate) =>
+      candidate.id !== event.id &&
+      candidate.stringIndex === event.stringIndex &&
+      candidate.fret === event.fret &&
+      candidate.startTick === end,
+  );
+}
+
+/**
+ * Articulations on a tied follower that playback will discard.
+ *
+ * `mergeTies` keeps the leader and skips the follower, so anything expressive on
+ * the second note is lost — including the "tie a second note to add vibrato at
+ * the end" trick, which looks reasonable but does nothing.
+ */
+export function articulationsLostToTie(
+  follower: Partial<Record<(typeof MERGED_AWAY)[number], unknown>> | undefined,
+): string[] {
+  if (!follower) return [];
+  return MERGED_AWAY.filter((key) => follower[key] !== undefined && follower[key] !== false);
+}
+
+export type SlideIn = 'below' | 'above';
+export type SlideOut = 'down' | 'up';
+export type BendKind = 'bend' | 'bend-release' | 'pre-bend' | 'release';
+
+export interface NotePitch {
+  slideIn?: SlideIn;
+  slideOut?: SlideOut;
+  bend?: { kind: BendKind; semitones: number };
+}
+
+export const NO_PITCH: NotePitch = {};
+
+/** How far a grace slide travels, in semitones. Matches the lib's own shapes. */
+const SLIDE_IN_DEPTH = 2;
+const SLIDE_OUT_DEPTH = 3;
+
+const needsCurve = (pitch: NotePitch) =>
+  (!!pitch.slideIn && !!pitch.slideOut) || (!!pitch.bend && (!!pitch.slideIn || !!pitch.slideOut));
+
+function toSpec(pitch: NotePitch): PitchSpec {
+  const spec: PitchSpec = { ...EMPTY_PITCH };
+  if (pitch.slideIn) {
+    spec.in = { semitones: pitch.slideIn === 'below' ? -SLIDE_IN_DEPTH : SLIDE_IN_DEPTH, at: 0.15 };
+  }
+  if (pitch.slideOut) {
+    spec.out = {
+      semitones: pitch.slideOut === 'down' ? -SLIDE_OUT_DEPTH : SLIDE_OUT_DEPTH,
+      at: 0.85,
+    };
+  }
+  if (pitch.bend) {
+    const { kind, semitones } = pitch.bend;
+    spec.bend =
+      kind === 'pre-bend'
+        ? { semitones, start: 0, end: 0 }
+        : kind === 'release'
+          ? { semitones, start: 0, end: 0, release: true }
+          : { semitones, start: 0.1, end: 0.6, release: kind === 'bend-release' };
+  }
+  return spec;
+}
+
+/** The articulation patch for a note's pitch movement. */
+export function toPitchPatch(pitch: NotePitch): {
+  slide?: { type: string; toFret?: number } | undefined;
+  bend?: unknown;
+} {
+  if (!pitch.slideIn && !pitch.slideOut && !pitch.bend) {
+    return { slide: undefined, bend: undefined };
+  }
+
+  if (needsCurve(pitch)) {
+    // One curve carries everything; the typed slide would be ignored anyway.
+    return { slide: undefined, ...toEventPatch(toSpec(pitch)) };
+  }
+
+  if (pitch.bend) {
+    const type = pitch.bend.kind === 'bend-release' ? 'bend-release' : pitch.bend.kind;
+    return { slide: undefined, bend: { type, semitones: pitch.bend.semitones } };
+  }
+
+  const type = pitch.slideIn
+    ? pitch.slideIn === 'below'
+      ? 'slide-in-below'
+      : 'slide-in-above'
+    : pitch.slideOut === 'down'
+      ? 'slide-out-down'
+      : 'slide-out-up';
+  return { slide: { type }, bend: undefined };
+}
+
+/** Read the musical model back off an event, from whichever form it was stored in. */
+export function readNotePitch(event: {
+  slide?: { type: string } | undefined;
+  bend?: { type?: string; semitones?: number; points?: readonly PitchPoint[] } | undefined;
+}): NotePitch {
+  // Stored as a curve — recover the shape from it.
+  if (event.bend?.points && event.bend.points.length >= 2) {
+    const spec = parseCurve(event.bend.points);
+    const pitch: NotePitch = {};
+    if (spec.in) pitch.slideIn = spec.in.semitones < 0 ? 'below' : 'above';
+    if (spec.out) pitch.slideOut = spec.out.semitones < 0 ? 'down' : 'up';
+    if (spec.bend) {
+      pitch.bend = {
+        kind: spec.bend.release ? 'bend-release' : 'bend',
+        semitones: spec.bend.semitones,
+      };
+    }
+    return pitch;
+  }
+
+  if (event.bend?.type) {
+    return {
+      bend: {
+        kind: event.bend.type as BendKind,
+        semitones: event.bend.semitones ?? 2,
+      },
+    };
+  }
+
+  switch (event.slide?.type) {
+    case 'slide-in-below':
+      return { slideIn: 'below' };
+    case 'slide-in-above':
+      return { slideIn: 'above' };
+    case 'slide-out-down':
+      return { slideOut: 'down' };
+    case 'slide-out-up':
+      return { slideOut: 'up' };
+    default:
+      return NO_PITCH;
+  }
+}

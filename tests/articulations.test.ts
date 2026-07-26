@@ -4,6 +4,8 @@ import {
   parseCurve,
   toEventPatch,
   readPitchSpec,
+  tieTargetFor,
+  articulationsLostToTie,
   EMPTY_PITCH,
   type PitchSpec,
 } from '../src/patterns/articulations';
@@ -103,5 +105,43 @@ describe('round-tripping through the event', () => {
 
   it('reads an empty spec from an event with no articulation', () => {
     expect(readPitchSpec({})).toEqual(EMPTY_PITCH);
+  });
+});
+
+describe('ties', () => {
+  const lead = { id: 'a', stringIndex: 4, fret: 5, startTick: 0, durationTicks: 240 };
+
+  it('finds an adjacent same-fret note on the same string', () => {
+    const next = { id: 'b', stringIndex: 4, fret: 5, startTick: 240, durationTicks: 240 };
+    expect(tieTargetFor([lead, next], lead)).toBe(next);
+  });
+
+  it('rejects a gap — the lib ignores non-adjacent ties', () => {
+    const next = { id: 'b', stringIndex: 4, fret: 5, startTick: 480, durationTicks: 240 };
+    expect(tieTargetFor([lead, next], lead)).toBeUndefined();
+  });
+
+  it('rejects a different fret', () => {
+    const next = { id: 'b', stringIndex: 4, fret: 7, startTick: 240, durationTicks: 240 };
+    expect(tieTargetFor([lead, next], lead)).toBeUndefined();
+  });
+
+  it('rejects a different string', () => {
+    const next = { id: 'b', stringIndex: 2, fret: 5, startTick: 240, durationTicks: 240 };
+    expect(tieTargetFor([lead, next], lead)).toBeUndefined();
+  });
+
+  // The "tie a note on to add vibrato at the end" idea doesn't work: the
+  // follower is skipped at playback, so its articulations vanish.
+  it('reports articulations a tied follower would lose', () => {
+    expect(articulationsLostToTie({ vibrato: 'wide', palmMute: true })).toEqual([
+      'vibrato',
+      'palmMute',
+    ]);
+  });
+
+  it('reports nothing for a plain follower', () => {
+    expect(articulationsLostToTie({})).toEqual([]);
+    expect(articulationsLostToTie(undefined)).toEqual([]);
   });
 });

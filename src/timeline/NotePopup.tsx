@@ -1,34 +1,48 @@
 import type { PatternEvent } from '@fretwork/lib';
-import { setArticulations, setNoteFret, setPitchSpec, deleteNotes } from '../patterns/patternService';
-import { EMPTY_PITCH, readPitchSpec, type PitchSpec } from '../patterns/articulations';
+import { deleteNotes, setArticulations, setNoteFret, setNotePitch } from '../patterns/patternService';
+import {
+  articulationsLostToTie,
+  readNotePitch,
+  tieTargetFor,
+  type NotePitch,
+} from '../patterns/articulations';
 
 /**
- * Per-note editing. Articulations are independent fields in the lib, so these
- * are toggles rather than a single choice — a note can be a palm-muted ghost
- * hammer-on with a bend and vibrato at once.
+ * Per-note editing, in tab vocabulary.
+ *
+ * Articulations are independent fields in the lib, so these are toggles rather
+ * than one choice — a note can be a palm-muted ghost hammer-on that bends and
+ * has vibrato. The pitch controls name what a guitarist would say ("slide in
+ * from below", "bend a full step"), not curve positions.
  */
 
-/** Booleans that simply flip on the event. */
+/** Bend depths guitarists actually use. */
+const DEPTHS = [
+  { semitones: 1, label: '½' },
+  { semitones: 2, label: 'full' },
+  { semitones: 3, label: '1½' },
+  { semitones: 4, label: '2' },
+] as const;
+
 const FLAGS = [
   { key: 'hammerOn', label: 'H-on' },
   { key: 'pullOff', label: 'P-off' },
-  { key: 'tieToNext', label: 'Tie' },
   { key: 'palmMute', label: 'P.Mute' },
   { key: 'ghost', label: 'Ghost' },
   { key: 'dead', label: 'Dead' },
   { key: 'tap', label: 'Tap' },
 ] as const;
 
-function Toggle({
+function Choice({
   on,
   label,
-  onClick,
   title,
+  onClick,
 }: {
   on: boolean;
   label: string;
-  onClick: () => void;
   title?: string;
+  onClick: () => void;
 }) {
   return (
     <button
@@ -45,73 +59,46 @@ function Toggle({
   );
 }
 
-function Stepper({
-  label,
-  value,
-  suffix,
-  onChange,
-  step = 1,
-  min = -Infinity,
-  max = Infinity,
-  format,
-}: {
-  label: string;
-  value: number;
-  suffix?: string;
-  onChange: (next: number) => void;
-  step?: number;
-  min?: number;
-  max?: number;
-  format?: (n: number) => string;
-}) {
-  const clamp = (n: number) => Math.min(max, Math.max(min, Math.round(n * 100) / 100));
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <span className="flex items-center gap-1">
-      <span className="font-mono text-[9px] tracking-[0.1em] text-ink-mut uppercase">{label}</span>
-      <button
-        type="button"
-        aria-label={`Decrease ${label}`}
-        onClick={() => onChange(clamp(value - step))}
-        className="pressable control rounded-md px-1.5 py-0.5 font-mono text-[9px] font-bold"
-      >
-        –
-      </button>
-      <span className="min-w-8 text-center font-mono text-[11px] font-bold text-ink-hi">
-        {format ? format(value) : value}
-        {suffix}
+    <div className="mb-1.5 flex items-center gap-1.5">
+      <span className="w-14 font-mono text-[9px] tracking-[0.1em] text-ink-mut uppercase">
+        {label}
       </span>
-      <button
-        type="button"
-        aria-label={`Increase ${label}`}
-        onClick={() => onChange(clamp(value + step))}
-        className="pressable control rounded-md px-1.5 py-0.5 font-mono text-[9px] font-bold"
-      >
-        +
-      </button>
-    </span>
+      {children}
+    </div>
   );
 }
 
-const pct = (n: number) => `${Math.round(n * 100)}%`;
-
 export function NotePopup({
   event,
+  events,
   pitchName,
   onClose,
 }: {
   event: PatternEvent;
+  /** The pattern's other notes — needed to know whether a tie has anywhere to go. */
+  events: readonly PatternEvent[];
   pitchName: string;
   onClose: () => void;
 }) {
-  const pitch = readPitchSpec(event);
+  const pitch = readNotePitch(event);
+  const update = (next: NotePitch) => setNotePitch(event.id, next);
 
-  const update = (next: PitchSpec) => setPitchSpec(event.id, next);
+  // A tie only sounds if the lib can merge it: same string, same fret, starting
+  // exactly where this note ends. Offering it otherwise would do nothing.
+  const tieTarget = tieTargetFor(events, event);
+  const lostToTie = event.tieToNext ? articulationsLostToTie(tieTarget) : [];
+
+  /** Selecting the active option again turns it off. */
+  const pick = <K extends keyof NotePitch>(key: K, value: NotePitch[K]) =>
+    update({ ...pitch, [key]: pitch[key] === value ? undefined : value });
 
   return (
     <div
       role="dialog"
       aria-label="Note options"
-      className="panel w-[320px] p-3"
+      className="panel w-[300px] p-3"
       onPointerDown={(e) => e.stopPropagation()}
     >
       <div className="mb-2.5 flex items-center gap-2 border-b border-line pb-2">
@@ -122,200 +109,169 @@ export function NotePopup({
         <span className="flex-1" />
         <button
           type="button"
+          aria-label="Decrease fret"
+          onClick={() => setNoteFret(event.id, Math.max(0, event.fret - 1))}
+          className="pressable control rounded-md px-1.5 py-0.5 font-mono text-[10px] font-bold"
+        >
+          –
+        </button>
+        <button
+          type="button"
+          aria-label="Increase fret"
+          onClick={() => setNoteFret(event.id, Math.min(24, event.fret + 1))}
+          className="pressable control rounded-md px-1.5 py-0.5 font-mono text-[10px] font-bold"
+        >
+          +
+        </button>
+        <button
+          type="button"
           aria-label="Close note options"
           onClick={onClose}
-          className="font-mono text-[12px] text-ink-mut hover:text-ink"
+          className="ml-1 font-mono text-[12px] text-ink-mut hover:text-ink"
         >
           ✕
         </button>
       </div>
 
-      <div className="mb-2.5 flex items-center gap-2">
-        <Stepper
-          label="Fret"
-          value={event.fret}
-          min={0}
-          max={24}
-          onChange={(n) => setNoteFret(event.id, n)}
+      {/* Slides read left-to-right the way they're played: into the note, then out. */}
+      <Row label="Slide in">
+        <Choice
+          on={pitch.slideIn === 'below'}
+          label="↗ below"
+          title="Slide up into the note"
+          onClick={() => pick('slideIn', 'below')}
         />
-      </div>
+        <Choice
+          on={pitch.slideIn === 'above'}
+          label="↘ above"
+          title="Slide down into the note"
+          onClick={() => pick('slideIn', 'above')}
+        />
+      </Row>
 
-      {/* ---- pitch movement: which side, how far, how long ---- */}
-      <fieldset className="mb-2.5">
-        <legend className="mb-1.5 font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-          Pitch movement
-        </legend>
+      <Row label="Slide out">
+        <Choice
+          on={pitch.slideOut === 'up'}
+          label="out ↗"
+          title="Slide up off the end of the note"
+          onClick={() => pick('slideOut', 'up')}
+        />
+        <Choice
+          on={pitch.slideOut === 'down'}
+          label="out ↘"
+          title="Slide down off the end of the note"
+          onClick={() => pick('slideOut', 'down')}
+        />
+      </Row>
 
-        <div className="mb-1.5 flex items-center gap-1.5">
-          <Toggle
-            on={!!pitch.in}
-            label="Slide in"
-            title="Approach the note from another pitch"
-            onClick={() =>
-              update({ ...pitch, in: pitch.in ? undefined : { semitones: -2, at: 0.15 } })
-            }
-          />
-          {pitch.in && (
-            <>
-              <Stepper
-                label="from"
-                value={pitch.in.semitones}
-                suffix=" st"
-                min={-12}
-                max={12}
-                onChange={(n) => update({ ...pitch, in: { ...pitch.in!, semitones: n } })}
-              />
-              <Stepper
-                label="len"
-                value={pitch.in.at}
-                step={0.05}
-                min={0.05}
-                max={0.9}
-                format={pct}
-                onChange={(n) => update({ ...pitch, in: { ...pitch.in!, at: n } })}
-              />
-            </>
-          )}
-        </div>
-
-        <div className="mb-1.5 flex items-center gap-1.5">
-          <Toggle
-            on={!!pitch.out}
-            label="Slide out"
-            title="Leave the note toward another pitch"
-            onClick={() =>
-              update({ ...pitch, out: pitch.out ? undefined : { semitones: 3, at: 0.85 } })
-            }
-          />
-          {pitch.out && (
-            <>
-              <Stepper
-                label="to"
-                value={pitch.out.semitones}
-                suffix=" st"
-                min={-12}
-                max={12}
-                onChange={(n) => update({ ...pitch, out: { ...pitch.out!, semitones: n } })}
-              />
-              <Stepper
-                label="from"
-                value={pitch.out.at}
-                step={0.05}
-                min={0.1}
-                max={0.95}
-                format={pct}
-                onChange={(n) => update({ ...pitch, out: { ...pitch.out!, at: n } })}
-              />
-            </>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Toggle
-            on={!!pitch.bend}
-            label="Bend"
+      <Row label="Bend">
+        {(
+          [
+            { kind: 'bend', label: '⤴ bend' },
+            { kind: 'bend-release', label: '⤴⤵ release' },
+            { kind: 'pre-bend', label: 'pre-bend' },
+          ] as const
+        ).map(({ kind, label }) => (
+          <Choice
+            key={kind}
+            on={pitch.bend?.kind === kind}
+            label={label}
             onClick={() =>
               update({
                 ...pitch,
-                bend: pitch.bend ? undefined : { semitones: 2, start: 0.1, end: 0.5 },
+                bend:
+                  pitch.bend?.kind === kind
+                    ? undefined
+                    : { kind, semitones: pitch.bend?.semitones ?? 2 },
               })
             }
           />
-          {pitch.bend && (
-            <>
-              <Stepper
-                label="depth"
-                value={pitch.bend.semitones}
-                suffix=" st"
-                step={0.5}
-                min={-12}
-                max={12}
-                onChange={(n) => update({ ...pitch, bend: { ...pitch.bend!, semitones: n } })}
-              />
-              <Stepper
-                label="start"
-                value={pitch.bend.start}
-                step={0.05}
-                min={0}
-                max={0.9}
-                format={pct}
-                onChange={(n) => update({ ...pitch, bend: { ...pitch.bend!, start: n } })}
-              />
-              <Stepper
-                label="end"
-                value={pitch.bend.end}
-                step={0.05}
-                min={0.05}
-                max={1}
-                format={pct}
-                onChange={(n) => update({ ...pitch, bend: { ...pitch.bend!, end: n } })}
-              />
-              <Toggle
-                on={!!pitch.bend.release}
-                label="Release"
-                title="Return to pitch before the note ends"
-                onClick={() =>
-                  update({
-                    ...pitch,
-                    bend: { ...pitch.bend!, release: !pitch.bend!.release },
-                  })
-                }
-              />
-            </>
-          )}
-        </div>
-        {(pitch.in || pitch.out || pitch.bend) && (
-          <p className="mt-1.5 font-mono text-[9px] text-ink-mut">
-            {hasCurveConflict(pitch)
-              ? 'Bend and slide share one pitch line — they blend into a single curve.'
-              : ' '}
-          </p>
-        )}
-      </fieldset>
+        ))}
+      </Row>
 
-      {/* ---- vibrato: whole-note only, see docs/FOLLOW-UPS.md ---- */}
-      <fieldset className="mb-2.5">
-        <legend className="mb-1.5 font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-          Vibrato
-        </legend>
-        <div className="flex items-center gap-1.5">
-          {(['slight', 'wide'] as const).map((intensity) => (
-            <Toggle
-              key={intensity}
-              on={event.vibrato === intensity}
-              label={intensity}
-              title="Applies across the whole note — position and length aren't adjustable yet"
-              onClick={() =>
-                setArticulations(event.id, {
-                  vibrato: event.vibrato === intensity ? undefined : intensity,
-                })
-              }
-            />
-          ))}
-          <span className="font-mono text-[9px] text-ink-mut">whole note</span>
-        </div>
-      </fieldset>
-
-      <fieldset className="mb-2.5">
-        <legend className="mb-1.5 font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-          Technique
-        </legend>
-        <div className="grid grid-cols-4 gap-1.5">
-          {FLAGS.map(({ key, label }) => (
-            <Toggle
-              key={key}
-              on={!!event[key]}
+      {pitch.bend && (
+        <Row label="Depth">
+          {DEPTHS.map(({ semitones, label }) => (
+            <Choice
+              key={label}
+              on={pitch.bend!.semitones === semitones}
               label={label}
-              onClick={() => setArticulations(event.id, { [key]: event[key] ? undefined : true })}
+              title={`${label} step bend`}
+              onClick={() => update({ ...pitch, bend: { ...pitch.bend!, semitones } })}
             />
           ))}
-        </div>
-      </fieldset>
+          <span className="font-mono text-[9px] text-ink-mut">steps</span>
+        </Row>
+      )}
+
+      {pitch.bend && (pitch.slideIn || pitch.slideOut) && (
+        <p className="mb-1.5 font-mono text-[9px] leading-relaxed text-ink-mut">
+          Bend and slide share one pitch line — they'll blend into a single move.
+        </p>
+      )}
+
+      <Row label="Vibrato">
+        {(['slight', 'wide'] as const).map((intensity) => (
+          <Choice
+            key={intensity}
+            on={event.vibrato === intensity}
+            label={intensity}
+            title="Applies across the whole note — length isn't adjustable yet"
+            onClick={() =>
+              setArticulations(event.id, {
+                vibrato: event.vibrato === intensity ? undefined : intensity,
+              })
+            }
+          />
+        ))}
+        <span className="font-mono text-[9px] text-ink-mut">whole note</span>
+      </Row>
+
+      <Row label="Tie">
+        <button
+          type="button"
+          aria-pressed={!!event.tieToNext}
+          disabled={!tieTarget}
+          title={
+            tieTarget
+              ? 'Ring on into the next note instead of re-picking it'
+              : 'Needs a note starting exactly where this one ends, on the same string and fret'
+          }
+          onClick={() =>
+            setArticulations(event.id, { tieToNext: event.tieToNext ? undefined : true })
+          }
+          className={`pressable rounded-lg px-2 py-1.5 font-mono text-[9px] font-bold uppercase disabled:cursor-not-allowed disabled:opacity-40 ${
+            event.tieToNext ? 'control-accent' : 'control'
+          }`}
+        >
+          ⌒ tie
+        </button>
+        {!tieTarget && (
+          <span className="font-mono text-[9px] text-ink-mut">no adjacent note</span>
+        )}
+      </Row>
+
+      {lostToTie.length > 0 && (
+        <p className="mb-1.5 font-mono text-[9px] leading-relaxed text-ink-mut">
+          The tied note's {lostToTie.join(', ')} won't sound — tied notes merge into one.
+        </p>
+      )}
+
+      <div className="mt-2.5 mb-2.5 grid grid-cols-3 gap-1.5 border-t border-line pt-2.5">
+        {FLAGS.map(({ key, label }) => (
+          <Choice
+            key={key}
+            on={!!event[key]}
+            label={label}
+            onClick={() => setArticulations(event.id, { [key]: event[key] ? undefined : true })}
+          />
+        ))}
+      </div>
 
       <div className="flex gap-1.5 border-t border-line pt-2.5">
         <button
           type="button"
-          onClick={() => update(EMPTY_PITCH)}
+          onClick={() => update({})}
           className="pressable control rounded-lg px-2.5 py-1.5 font-mono text-[9px] font-bold uppercase"
         >
           Clear pitch
@@ -334,9 +290,4 @@ export function NotePopup({
       </div>
     </div>
   );
-}
-
-/** Bend and slide are drawn on one pitch line, so they combine rather than layer. */
-function hasCurveConflict(pitch: PitchSpec): boolean {
-  return !!pitch.bend && (!!pitch.in || !!pitch.out);
 }

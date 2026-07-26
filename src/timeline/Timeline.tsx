@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { PPQ, snapTick, ticksPerBar, type PatternEvent } from '@fretwork/lib';
-import { readPitchSpec } from '../patterns/articulations';
+import { readNotePitch } from '../patterns/articulations';
 import { NotePopup } from './NotePopup';
 import {
   beginEditGesture,
@@ -38,26 +38,106 @@ const pitchName = (stringIndex: number, fret: number) =>
   NOTE_NAMES[(OPEN_MIDI[stringIndex] + fret) % 12];
 
 /**
- * Compact marks for what's on a note, so its articulations are readable without
- * opening anything. Pitch movement is derived from the curve, since that's where
- * slides and bends actually live.
+ * Marks drawn on a note, positioned where the articulation actually happens:
+ * slides-in hang off the left edge, slides-out off the right, bends sit above,
+ * and technique flags tuck under. Reading it should mirror playing it.
  */
-function articulationMarks(event: PatternEvent): string {
-  const pitch = readPitchSpec(event);
-  const marks: string[] = [];
-  if (pitch.in) marks.push(pitch.in.semitones < 0 ? '↗' : '↘');
-  if (pitch.bend) marks.push(pitch.bend.release ? '⤴⤵' : '⤴');
-  if (pitch.out) marks.push(pitch.out.semitones < 0 ? '↘' : '↗');
-  if (event.vibrato) marks.push('〜');
-  if (event.hammerOn) marks.push('H');
-  if (event.pullOff) marks.push('P');
-  if (event.palmMute) marks.push('PM');
-  if (event.tieToNext) marks.push('⌒');
-  if (event.tap) marks.push('T');
-  return marks.join(' ');
+function NoteMarks({ event }: { event: PatternEvent }) {
+  const pitch = readNotePitch(event);
+  const flags = [
+    event.hammerOn && 'H',
+    event.pullOff && 'P',
+    event.tap && 'T',
+    event.palmMute && 'PM',
+    event.ghost && '( )',
+    event.tieToNext && '⌒',
+  ].filter(Boolean) as string[];
+
+  return (
+    <>
+      {pitch.slideIn && (
+        <span
+          title={`Slide in from ${pitch.slideIn}`}
+          className="absolute top-1/2 -left-2.5 -translate-y-1/2 font-mono text-[10px] leading-none text-brass-hi"
+        >
+          {pitch.slideIn === 'below' ? '╱' : '╲'}
+        </span>
+      )}
+      {pitch.slideOut && (
+        <span
+          title={`Slide out ${pitch.slideOut}`}
+          className="absolute top-1/2 -right-2.5 -translate-y-1/2 font-mono text-[10px] leading-none text-brass-hi"
+        >
+          {pitch.slideOut === 'up' ? '╱' : '╲'}
+        </span>
+      )}
+      {pitch.bend && (
+        <span
+          title={`Bend ${pitch.bend.semitones} semitones`}
+          className="absolute -top-2 left-1/2 -translate-x-1/2 font-mono text-[8px] leading-none whitespace-nowrap text-brass-hi"
+        >
+          {pitch.bend.kind === 'bend-release' ? '⤴⤵' : pitch.bend.kind === 'pre-bend' ? '•⤴' : '⤴'}
+        </span>
+      )}
+      {event.vibrato && (
+        <span
+          title={`${event.vibrato} vibrato`}
+          className="absolute -top-1.5 right-0.5 font-mono text-[8px] leading-none text-brass-hi"
+        >
+          {event.vibrato === 'wide' ? '≈' : '~'}
+        </span>
+      )}
+      {flags.length > 0 && (
+        <span className="absolute -bottom-1.5 left-0.5 font-mono text-[7px] leading-none text-ink-mut">
+          {flags.join(' ')}
+        </span>
+      )}
+    </>
+  );
 }
 
 type DragMode = 'move' | 'resize';
+
+/**
+ * Places its child next to `rect`, preferring below and flipping above when
+ * there isn't room. Measures the child after mount rather than assuming a size,
+ * since the popup's height changes as sub-controls appear.
+ */
+function AnchoredTo({ rect, children }: { rect: DOMRect; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const gap = 8;
+    const left = Math.min(
+      window.innerWidth - width - gap,
+      Math.max(gap, rect.left + rect.width / 2 - width / 2),
+    );
+    const below = rect.bottom + gap;
+    const top = below + height > window.innerHeight - gap
+      ? Math.max(gap, rect.top - height - gap)
+      : below;
+    setPos({ left, top });
+  }, [rect]);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: 'fixed',
+        left: pos?.left ?? rect.left,
+        top: pos?.top ?? rect.bottom + 8,
+        // Avoid a flash at the wrong spot before the first measurement.
+        visibility: pos ? 'visible' : 'hidden',
+      }}
+    >
+      {children}
+    </div>
+  );
+}
 
 /**
  * The pattern editor's timeline: string lanes, a bar/beat ruler, and the events
@@ -69,7 +149,8 @@ export function Timeline() {
   const pattern = useEditingPattern();
   const selectedIds = useSelectedIds();
   const { canUndo, canRedo } = useHistoryState();
-  const [popupFor, setPopupFor] = useState<string | null>(null);
+  // Anchored to the note's on-screen box, captured when the popup is opened.
+  const [popupFor, setPopupFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
   const pxPerBeat = ZOOM_LEVELS[zoomIndex];
   const areaRef = useRef<HTMLDivElement>(null);
@@ -122,7 +203,7 @@ export function Timeline() {
     RULER_H,
   );
   // Read fresh each render so the popup reflects edits made through it.
-  const popupNote = popupFor ? pattern.events.find((e) => e.id === popupFor) : undefined;
+  const popupNote = popupFor ? pattern.events.find((e) => e.id === popupFor.id) : undefined;
 
   const carve = (w: number, dark: number, light: number) =>
     `repeating-linear-gradient(90deg,transparent 0 ${w - 2}px,` +
@@ -304,11 +385,7 @@ export function Timeline() {
                               : 'control'
                           }`}
                         >
-                          {articulationMarks(event) && (
-                            <span className="absolute -top-0.5 left-0.5 font-mono text-[7.5px] font-bold text-brass-hi">
-                              {articulationMarks(event)}
-                            </span>
-                          )}
+                          <NoteMarks event={event} />
                           <span>{event.fret}</span>
                           {isTall && (
                             <span className="font-mono text-[8px] font-semibold opacity-70">
@@ -320,7 +397,14 @@ export function Timeline() {
                               type="button"
                               aria-label="Note options"
                               onPointerDown={(e) => e.stopPropagation()}
-                              onClick={() => setPopupFor(event.id)}
+                              onClick={(e) =>
+                                setPopupFor({
+                                  id: event.id,
+                                  anchor: (
+                                    e.currentTarget.closest('[data-note]') as HTMLElement
+                                  ).getBoundingClientRect(),
+                                })
+                              }
                               className="control-accent pressable absolute top-1/2 -right-2.5 flex h-[18px] w-[18px] -translate-y-1/2 items-center justify-center rounded-[5px] font-mono text-[10px] leading-none"
                             >
                               ⋯
@@ -341,13 +425,16 @@ export function Timeline() {
         </div>
       </div>
 
-      {popupNote && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center pb-6" onPointerDown={() => setPopupFor(null)}>
-          <NotePopup
-            event={popupNote}
-            pitchName={pitchName(popupNote.stringIndex, popupNote.fret)}
-            onClose={() => setPopupFor(null)}
-          />
+      {popupNote && popupFor && (
+        <div className="fixed inset-0 z-50" onPointerDown={() => setPopupFor(null)}>
+          <AnchoredTo rect={popupFor.anchor}>
+            <NotePopup
+              event={popupNote}
+              events={pattern.events}
+              pitchName={pitchName(popupNote.stringIndex, popupNote.fret)}
+              onClose={() => setPopupFor(null)}
+            />
+          </AnchoredTo>
         </div>
       )}
     </div>

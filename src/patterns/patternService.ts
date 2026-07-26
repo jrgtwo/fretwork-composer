@@ -24,7 +24,7 @@ import {
   type Tick,
 } from '@fretwork/lib';
 import { createHistory } from './history';
-import { toEventPatch, type PitchSpec } from './articulations';
+import { toPitchPatch, type NotePitch } from './articulations';
 
 type SelectionMode = 'replace' | 'add' | 'toggle';
 
@@ -205,8 +205,8 @@ export function setArticulations(
   store().updateEventArticulations(id, patch);
 }
 
-/** Replace the note's pitch curve (bends and slides). */
-export function setPitchSpec(id: string, spec: PitchSpec): void {
+/** Replace the note's pitch movement — slides and bends. */
+export function setNotePitch(id: string, pitch: NotePitch): void {
   capture();
-  store().updateEventArticulations(id, toEventPatch(spec) as never);
+  store().updateEventArticulations(id, toPitchPatch(pitch) as never);
 }
