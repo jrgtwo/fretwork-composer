@@ -39,6 +39,16 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
   const paneById = (id: string) => specs.find((p) => p.id === id)!;
   const filler = fillerId(order, specs, states);
   const empty = allCollapsed(order, states);
+  // Panes the dragged one could land between. A drop index equal to this length
+  // means "after the last pane", which needs its own indicator below the stack.
+  const others = dragging ? order.filter((id) => id !== dragging) : [];
+
+  const dropline = (
+    <div
+      data-testid="dropline"
+      className="my-0.5 h-1 flex-none rounded-sm bg-brass-hi shadow-[0_0_10px_rgb(208_168_102/0.6)]"
+    />
+  );
 
   const setHeight = useCallback((id: string, height: number) => {
     setStates((prev) => ({ ...prev, [id]: { ...prev[id], height } }));
@@ -130,16 +140,11 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
         const state = states[id];
         const isFiller = filler === id && !state.collapsed;
         const target = splitTarget(order, i, specs, states);
-        const othersIndex = order.filter((o) => o !== dragging).indexOf(id);
+        const othersIndex = others.indexOf(id);
 
         return (
           <div key={id} className="contents">
-            {dropIndex !== null && dragging && othersIndex === dropIndex && (
-              <div
-                data-testid="dropline"
-                className="my-0.5 h-1 flex-none rounded-sm bg-brass-hi shadow-[0_0_10px_rgb(208_168_102/0.6)]"
-              />
-            )}
+            {dropIndex !== null && othersIndex === dropIndex && dropline}
 
             <section
               data-pane={id}
@@ -198,6 +203,9 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
           </div>
         );
       })}
+
+      {/* dropping past the last pane — the loop above can only draw *before* a pane */}
+      {dropIndex !== null && dropIndex >= others.length && dropline}
 
       {empty && (
         <div className="flex flex-1 flex-col items-center justify-center gap-2.5 rounded-xl border border-dashed border-line bg-black/10">
