@@ -24,6 +24,7 @@ import {
   type Tick,
 } from '@fretwork/lib';
 import { createHistory } from './history';
+import { toEventPatch, type PitchSpec } from './articulations';
 
 type SelectionMode = 'replace' | 'add' | 'toggle';
 
@@ -190,4 +191,22 @@ export function deleteNotes(ids: readonly string[]): void {
 
 export function selectNotes(ids: readonly string[], mode: SelectionMode = 'replace'): void {
   store().selectEvents(ids, mode);
+}
+
+/**
+ * Patch articulation fields. `undefined` clears a field; the lib keeps
+ * hammer-on and pull-off mutually exclusive for us.
+ */
+export function setArticulations(
+  id: string,
+  patch: Parameters<ReturnType<typeof store>['updateEventArticulations']>[1],
+): void {
+  capture();
+  store().updateEventArticulations(id, patch);
+}
+
+/** Replace the note's pitch curve (bends and slides). */
+export function setPitchSpec(id: string, spec: PitchSpec): void {
+  capture();
+  store().updateEventArticulations(id, toEventPatch(spec) as never);
 }

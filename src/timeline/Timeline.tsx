@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { PPQ, snapTick, ticksPerBar, type PatternEvent } from '@fretwork/lib';
+import { readPitchSpec } from '../patterns/articulations';
+import { NotePopup } from './NotePopup';
 import {
   beginEditGesture,
   deleteNotes,
@@ -35,6 +37,26 @@ const DRAG_THRESHOLD = 3;
 const pitchName = (stringIndex: number, fret: number) =>
   NOTE_NAMES[(OPEN_MIDI[stringIndex] + fret) % 12];
 
+/**
+ * Compact marks for what's on a note, so its articulations are readable without
+ * opening anything. Pitch movement is derived from the curve, since that's where
+ * slides and bends actually live.
+ */
+function articulationMarks(event: PatternEvent): string {
+  const pitch = readPitchSpec(event);
+  const marks: string[] = [];
+  if (pitch.in) marks.push(pitch.in.semitones < 0 ? '↗' : '↘');
+  if (pitch.bend) marks.push(pitch.bend.release ? '⤴⤵' : '⤴');
+  if (pitch.out) marks.push(pitch.out.semitones < 0 ? '↘' : '↗');
+  if (event.vibrato) marks.push('〜');
+  if (event.hammerOn) marks.push('H');
+  if (event.pullOff) marks.push('P');
+  if (event.palmMute) marks.push('PM');
+  if (event.tieToNext) marks.push('⌒');
+  if (event.tap) marks.push('T');
+  return marks.join(' ');
+}
+
 type DragMode = 'move' | 'resize';
 
 /**
@@ -47,6 +69,7 @@ export function Timeline() {
   const pattern = useEditingPattern();
   const selectedIds = useSelectedIds();
   const { canUndo, canRedo } = useHistoryState();
+  const [popupFor, setPopupFor] = useState<string | null>(null);
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
   const pxPerBeat = ZOOM_LEVELS[zoomIndex];
   const areaRef = useRef<HTMLDivElement>(null);
@@ -98,6 +121,8 @@ export function Timeline() {
     STRING_LABELS.length,
     RULER_H,
   );
+  // Read fresh each render so the popup reflects edits made through it.
+  const popupNote = popupFor ? pattern.events.find((e) => e.id === popupFor) : undefined;
 
   const carve = (w: number, dark: number, light: number) =>
     `repeating-linear-gradient(90deg,transparent 0 ${w - 2}px,` +
@@ -279,11 +304,27 @@ export function Timeline() {
                               : 'control'
                           }`}
                         >
+                          {articulationMarks(event) && (
+                            <span className="absolute -top-0.5 left-0.5 font-mono text-[7.5px] font-bold text-brass-hi">
+                              {articulationMarks(event)}
+                            </span>
+                          )}
                           <span>{event.fret}</span>
                           {isTall && (
                             <span className="font-mono text-[8px] font-semibold opacity-70">
                               {pitchName(stringIndex, event.fret)}
                             </span>
+                          )}
+                          {selected && (
+                            <button
+                              type="button"
+                              aria-label="Note options"
+                              onPointerDown={(e) => e.stopPropagation()}
+                              onClick={() => setPopupFor(event.id)}
+                              className="control-accent pressable absolute top-1/2 -right-2.5 flex h-[18px] w-[18px] -translate-y-1/2 items-center justify-center rounded-[5px] font-mono text-[10px] leading-none"
+                            >
+                              ⋯
+                            </button>
                           )}
                           <span
                             data-resize={event.id}
@@ -299,6 +340,16 @@ export function Timeline() {
           </div>
         </div>
       </div>
+
+      {popupNote && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center pb-6" onPointerDown={() => setPopupFor(null)}>
+          <NotePopup
+            event={popupNote}
+            pitchName={pitchName(popupNote.stringIndex, popupNote.fret)}
+            onClose={() => setPopupFor(null)}
+          />
+        </div>
+      )}
     </div>
   );
 }
