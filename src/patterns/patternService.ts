@@ -56,8 +56,9 @@ export function findEvent(id: string): PatternEvent | undefined {
 }
 
 // ------------------------------------------------------------------ undo ---
-// ⚠ Belongs in the lib — see docs/FOLLOW-UPS.md. Everything undo-related is
-// confined to this section plus ./history so it can be deleted in one go.
+// LIB-GAP(1): the lib has no history support and no way to write a whole
+// pattern back. Everything undo-related is confined to this section plus
+// ./history so it can be deleted in one go. See docs/FOLLOW-UPS.md.
 
 const history = createHistory<Pattern>();
 

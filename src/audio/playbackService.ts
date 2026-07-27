@@ -179,6 +179,9 @@ function ensureEngine(pattern: Pattern): Engine | null {
 }
 
 // ------------------------------------------------------------- head loop ---
+// LIB-GAP(3b): delete this loop and subscribe to `scheduler.onHead` once the
+// scheduler starts its visual loop. See docs/FOLLOW-UPS.md.
+//
 // `EventScheduler.onHead` cannot drive a moving playhead in this build of the
 // lib: it has a `_stopVisualLoop` but no matching start, so head positions are
 // only emitted twice — once at transport start and once at stop. Reading the
@@ -277,6 +280,8 @@ export async function play(): Promise<void> {
     const active = ensureEngine(pattern);
     if (!active) return;
 
+    // LIB-GAP(3c): the engine should warm itself. Until it does, this ordering
+    // is load-bearing — see the comment below.
     // Building the voice kicks off the sampler downloads and the cabinet IR
     // render; `metronome.start()` then awaits `Tone.loaded()`. Start the
     // transport first and the first note fires into an empty buffer — silently.

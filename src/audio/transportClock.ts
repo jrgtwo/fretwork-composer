@@ -1,3 +1,7 @@
+// LIB-GAP(3a, 3b): this whole module is a workaround. Delete it and read the
+// lib directly once `getTransportTicks` stops throwing without an AudioContext
+// and `EventScheduler` actually starts its visual head loop.
+// See docs/FOLLOW-UPS.md § "Lib gaps we are masking".
 import { PPQ, getTransportTicks, wrapTick } from '@fretwork/lib';
 
 /**
