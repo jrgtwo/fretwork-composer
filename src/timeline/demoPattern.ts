@@ -6,18 +6,21 @@
 import { PPQ } from '@fretwork/lib';
 import { clearHistory, openBlankPattern, stampNote } from '../patterns/patternService';
 
-/** [stringIndex (0 = high e), fret, startTick] */
+/**
+ * [stringIndex, fret, startTick] — stringIndex follows the lib: 0 = low E,
+ * 5 = high e, matching its tuning arrays.
+ */
 const NOTES: ReadonlyArray<readonly [number, number, number]> = [
-  [4, 5, 0],
-  [3, 7, PPQ],
-  [2, 6, PPQ * 2],
-  [1, 5, PPQ * 3],
-  [2, 9, PPQ * 5],
-  [4, 5, PPQ * 8],
-  [3, 7, PPQ * 9],
-  [1, 5, PPQ * 10],
-  [0, 5, PPQ * 12],
-  [2, 9, PPQ * 13],
+  [1, 5, 0], //  A string, 5th fret — D
+  [2, 7, PPQ], //  D string
+  [3, 6, PPQ * 2], //  G string
+  [4, 5, PPQ * 3], //  B string
+  [3, 9, PPQ * 5],
+  [1, 5, PPQ * 8],
+  [2, 7, PPQ * 9],
+  [4, 5, PPQ * 10],
+  [5, 5, PPQ * 12], //  high e
+  [3, 9, PPQ * 13],
 ];
 
 export function seedDemoPattern(): void {

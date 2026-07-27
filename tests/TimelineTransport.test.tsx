@@ -1,0 +1,190 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { PPQ } from '@fretwork/lib';
+
+// jsdom has no Web Audio, so the engine is replaced wholesale — these tests
+// assert the timeline's wiring to the contract, never that anything sounds.
+vi.mock('../src/audio/playbackService', () => ({
+  usePlaybackEngine: vi.fn(),
+  play: vi.fn(() => Promise.resolve()),
+  stop: vi.fn(),
+  useIsPlaying: vi.fn(() => false),
+  useHeadTick: vi.fn((): number | null => null),
+  useActiveEventIds: vi.fn((): readonly string[] => []),
+  useClickMuted: vi.fn(() => false),
+  toggleClick: vi.fn(),
+}));
+
+import { Timeline } from '../src/timeline/Timeline';
+import {
+  play,
+  stop,
+  useActiveEventIds,
+  useHeadTick,
+  useIsPlaying,
+  usePlaybackEngine,
+  useClickMuted,
+  toggleClick,
+} from '../src/audio/playbackService';
+import {
+  clearHistory,
+  getEditingPattern,
+  openBlankPattern,
+  stampNote,
+} from '../src/patterns/patternService';
+
+function seedTwoNotes() {
+  openBlankPattern('Transport');
+  stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+  stampNote({ stringIndex: 2, fret: 7, tick: PPQ, durationTicks: PPQ / 2 });
+  clearHistory(); // loading a pattern is not an undoable edit
+}
+
+const noteEl = (id: string) => document.querySelector<HTMLElement>(`[data-note="${id}"]`)!;
+const events = () => getEditingPattern()!.events;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(useIsPlaying).mockReturnValue(false);
+  vi.mocked(useHeadTick).mockReturnValue(null);
+  vi.mocked(useActiveEventIds).mockReturnValue([]);
+  seedTwoNotes();
+});
+
+describe('Timeline transport', () => {
+  it('reads Play when stopped and starts playback when clicked', async () => {
+    const user = userEvent.setup();
+    render(<Timeline />);
+
+    await user.click(screen.getByRole('button', { name: 'Play' }));
+
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it('reads Stop while playing and halts playback when clicked', async () => {
+    const user = userEvent.setup();
+    vi.mocked(useIsPlaying).mockReturnValue(true);
+    render(<Timeline />);
+
+    expect(screen.queryByRole('button', { name: 'Play' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Stop' }));
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it('takes its label from the engine rather than from the click', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<Timeline />);
+
+    // The button keeps no transport state of its own, so a stop that originates
+    // in the engine — pattern end, a failed AudioContext — still flips it back.
+    await user.click(screen.getByRole('button', { name: 'Play' }));
+    expect(screen.getByRole('button', { name: 'Play' })).toBeInTheDocument();
+
+    vi.mocked(useIsPlaying).mockReturnValue(true);
+    rerender(<Timeline />);
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+
+    vi.mocked(useIsPlaying).mockReturnValue(false);
+    rerender(<Timeline />);
+    expect(screen.getByRole('button', { name: 'Play' })).toBeInTheDocument();
+  });
+
+  it('mounts the engine lifecycle', () => {
+    render(<Timeline />);
+    // Nothing else in the app calls it; without this the seam never receives a
+    // metronome and every play() is a silent no-op.
+    expect(usePlaybackEngine).toHaveBeenCalled();
+  });
+});
+
+describe('Timeline playhead', () => {
+  it('renders no playhead while the head tick is null', () => {
+    render(<Timeline />);
+    expect(screen.queryByTestId('playhead')).not.toBeInTheDocument();
+  });
+
+  it('positions the playhead at the head tick, scaled by zoom', async () => {
+    const user = userEvent.setup();
+    vi.mocked(useIsPlaying).mockReturnValue(true);
+    vi.mocked(useHeadTick).mockReturnValue(PPQ);
+    render(<Timeline />);
+
+    // default zoom is 48px per beat, so one beat in sits at 48px
+    expect(screen.getByTestId('playhead').style.left).toBe('48px');
+
+    await user.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(screen.getByTestId('playhead').style.left).toBe('96px');
+  });
+
+  it('shows the playhead at the left edge on tick zero', () => {
+    vi.mocked(useIsPlaying).mockReturnValue(true);
+    vi.mocked(useHeadTick).mockReturnValue(0);
+    render(<Timeline />);
+
+    // Tick 0 is a position, not "no playhead" — a truthiness check here would
+    // blank the head for the whole first tick and read as a dropped frame.
+    expect(screen.getByTestId('playhead').style.left).toBe('0px');
+  });
+
+  it('clears the playhead once the head goes null', () => {
+    vi.mocked(useIsPlaying).mockReturnValue(true);
+    vi.mocked(useHeadTick).mockReturnValue(PPQ);
+    const { rerender } = render(<Timeline />);
+    expect(screen.getByTestId('playhead')).toBeInTheDocument();
+
+    vi.mocked(useIsPlaying).mockReturnValue(false);
+    vi.mocked(useHeadTick).mockReturnValue(null);
+    rerender(<Timeline />);
+
+    expect(screen.queryByTestId('playhead')).not.toBeInTheDocument();
+  });
+});
+
+describe('Timeline active notes', () => {
+  it('marks only the notes that are currently sounding', () => {
+    const [sounding, silent] = events();
+    vi.mocked(useIsPlaying).mockReturnValue(true);
+    vi.mocked(useActiveEventIds).mockReturnValue([sounding.id]);
+    render(<Timeline />);
+
+    expect(noteEl(sounding.id)).toHaveAttribute('data-active');
+    expect(noteEl(silent.id)).not.toHaveAttribute('data-active');
+  });
+
+  it('moves the highlight as the sounding notes change', () => {
+    const [first, second] = events();
+    vi.mocked(useIsPlaying).mockReturnValue(true);
+    vi.mocked(useActiveEventIds).mockReturnValue([first.id]);
+    const { rerender } = render(<Timeline />);
+
+    vi.mocked(useActiveEventIds).mockReturnValue([second.id]);
+    rerender(<Timeline />);
+
+    // The highlight has to be released as well as applied, or every note that
+    // ever sounded stays lit for the rest of the take.
+    expect(noteEl(first.id)).not.toHaveAttribute('data-active');
+    expect(noteEl(second.id)).toHaveAttribute('data-active');
+  });
+
+  describe('metronome click', () => {
+    it('offers to mute the click, which is separate from the notes', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+
+      await user.click(screen.getByRole('button', { name: 'Mute metronome click' }));
+
+      expect(toggleClick).toHaveBeenCalled();
+    });
+
+    it('flips its label once muted', () => {
+      vi.mocked(useClickMuted).mockReturnValue(true);
+      render(<Timeline />);
+
+      expect(screen.getByRole('button', { name: 'Unmute metronome click' })).toBeInTheDocument();
+    });
+  });
+});

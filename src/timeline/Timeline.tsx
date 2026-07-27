@@ -3,6 +3,16 @@ import { PPQ, snapTick, ticksPerBar, type PatternEvent } from '@fretwork/lib';
 import { readNotePitch } from '../patterns/articulations';
 import { NotePopup } from './NotePopup';
 import {
+  play,
+  stop,
+  useActiveEventIds,
+  useClickMuted,
+  useHeadTick,
+  useIsPlaying,
+  usePlaybackEngine,
+  toggleClick,
+} from '../audio/playbackService';
+import {
   beginEditGesture,
   deleteNotes,
   endEditGesture,
@@ -16,6 +26,7 @@ import {
   useHistoryState,
   useSelectedIds,
 } from '../patterns/patternService';
+import { useTimelineAutoScroll } from './useTimelineAutoScroll';
 import {
   barBeatLines,
   laneMetrics,
@@ -25,9 +36,17 @@ import {
   DEFAULT_ZOOM_INDEX,
 } from './timelineMath';
 
-/** High → low, matching a `PatternEvent`'s stringIndex. */
-const STRING_LABELS = ['e', 'B', 'G', 'D', 'A', 'E'];
-const OPEN_MIDI = [64, 59, 55, 50, 45, 40];
+/**
+ * Indexed by `PatternEvent.stringIndex`, which the lib defines low-to-high: its
+ * `standard` tuning is `['E2','A2','D3','G3','B3','E4']` and the scheduler reads
+ * `openStrings[stringIndex]`. Getting this backwards plays every note on the
+ * wrong string, so the array order here is not cosmetic.
+ */
+const STRING_LABELS = ['E', 'A', 'D', 'G', 'B', 'e'];
+const OPEN_MIDI = [40, 45, 50, 55, 59, 64];
+
+/** Tab puts the highest string on top, so rows run in reverse index order. */
+const ROW_ORDER = [...STRING_LABELS.keys()].reverse();
 const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
 const RULER_H = 20;
 const SNAP = PPQ / 4; // sixteenth-note grid
@@ -146,16 +165,26 @@ function AnchoredTo({ rect, children }: { rect: DOMRect; children: React.ReactNo
  * hold without this component knowing about them.
  */
 export function Timeline() {
+  usePlaybackEngine();
   const pattern = useEditingPattern();
   const selectedIds = useSelectedIds();
   const { canUndo, canRedo } = useHistoryState();
+  const isPlaying = useIsPlaying();
+  const headTick = useHeadTick();
+  const clickMuted = useClickMuted();
+  const activeIds = useActiveEventIds();
   // Anchored to the note's on-screen box, captured when the popup is opened.
   const [popupFor, setPopupFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
   const pxPerBeat = ZOOM_LEVELS[zoomIndex];
   const areaRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const [areaHeight, setAreaHeight] = useState(240);
+
+  // Keeps the playhead on screen. Runs its own transport-reading loop rather
+  // than reacting to head state — see the hook for why.
+  useTimelineAutoScroll(scrollerRef, pxPerBeat, isPlaying, pattern?.durationTicks ?? 0, true);
 
   // Rows follow the pane height, which the user can drag — measure, don't assume.
   useLayoutEffect(() => {
@@ -244,10 +273,12 @@ export function Timeline() {
       }
 
       const tick = Math.max(0, snapTick(tickAt(ev.clientX) - grabOffset, SNAP));
+      // Rows descend the screen but string indices ascend with pitch, so
+      // dragging down moves to a lower-numbered string.
       const rows = Math.round((ev.clientY - startY) / rowHeight);
       const stringIndex = Math.max(
         0,
-        Math.min(STRING_LABELS.length - 1, event.stringIndex + rows),
+        Math.min(STRING_LABELS.length - 1, event.stringIndex - rows),
       );
       moveNote(event.id, tick, stringIndex);
     };
@@ -314,6 +345,34 @@ export function Timeline() {
         >
           ↷
         </button>
+        <span className="mx-1 h-4 w-px bg-line" />
+        <button
+          type="button"
+          aria-label={isPlaying ? 'Stop' : 'Play'}
+          // `play` needs the click itself as the user gesture that unblocks the
+          // AudioContext, so it is called here rather than from an effect.
+          onClick={() => {
+            if (isPlaying) stop();
+            else void play();
+          }}
+          className={`pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold ${
+            isPlaying ? 'control-accent' : ''
+          }`}
+        >
+          {isPlaying ? '■' : '▶'}
+        </button>
+        <button
+          type="button"
+          aria-label={clickMuted ? 'Unmute metronome click' : 'Mute metronome click'}
+          aria-pressed={!clickMuted}
+          title="The click is separate from the notes — muting it doesn't affect playback"
+          onClick={toggleClick}
+          className={`pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold ${
+            clickMuted ? 'opacity-50' : 'control-accent'
+          }`}
+        >
+          {clickMuted ? '🔇' : '🔊'} click
+        </button>
         <span className="flex-1" />
         <span className="font-mono text-[11px] font-bold text-ink-hi">
           {bars} {bars === 1 ? 'bar' : 'bars'} · {pattern.events.length} notes
@@ -322,18 +381,18 @@ export function Timeline() {
 
       <div ref={areaRef} className="grid min-h-0 flex-1 grid-cols-[24px_1fr]">
         <div className="flex flex-col" style={{ paddingTop: RULER_H }}>
-          {STRING_LABELS.map((label) => (
+          {ROW_ORDER.map((stringIndex) => (
             <span
-              key={label}
+              key={stringIndex}
               style={{ height: rowHeight }}
               className="flex items-center justify-end pr-1.5 font-mono text-[9px] font-bold text-ink-mut"
             >
-              {label}
+              {STRING_LABELS[stringIndex]}
             </span>
           ))}
         </div>
 
-        <div className="well overflow-x-auto overflow-y-hidden">
+        <div ref={scrollerRef} className="well overflow-x-auto overflow-y-hidden">
           <div className="relative" style={{ width }}>
             <div className="relative" style={{ height: RULER_H }}>
               {lines.map((line) => (
@@ -354,10 +413,10 @@ export function Timeline() {
             </div>
 
             <div className="lanes" ref={lanesRef}>
-              {STRING_LABELS.map((label, stringIndex) => (
+              {ROW_ORDER.map((stringIndex) => (
                 <div
-                  key={label}
-                  data-lane={label}
+                  key={stringIndex}
+                  data-lane={STRING_LABELS[stringIndex]}
                   onPointerDown={onLaneDown(stringIndex)}
                   style={{ height: rowHeight, backgroundImage: gridImage }}
                   className="relative cursor-crosshair"
@@ -366,11 +425,13 @@ export function Timeline() {
                     .filter((event) => event.stringIndex === stringIndex)
                     .map((event) => {
                       const selected = selectedIds.includes(event.id);
+                      const active = activeIds.includes(event.id);
                       return (
                         <div
                           key={event.id}
                           data-note={event.id}
                           data-selected={selected || undefined}
+                          data-active={active || undefined}
                           title={`Fret ${event.fret} · ${pitchName(stringIndex, event.fret)}`}
                           onPointerDown={startDrag(event, 'move')}
                           style={{
@@ -383,7 +444,7 @@ export function Timeline() {
                             selected
                               ? 'border border-brass bg-linear-to-b from-[#4a4433] to-[#3a3529] text-brass-hi shadow-[0_0_0_1px_var(--color-brass)]'
                               : 'control'
-                          }`}
+                          } ${active ? 'border-brass-hi text-brass-hi shadow-glow-brass' : ''}`}
                         >
                           <NoteMarks event={event} />
                           <span>{event.fret}</span>
@@ -421,6 +482,18 @@ export function Timeline() {
                 </div>
               ))}
             </div>
+
+            {/* Sits in the scrolled content, not the viewport, so it tracks the
+                lanes when the well is scrolled. Transparent to the pointer, or
+                it would swallow clicks on the notes it crosses. */}
+            {headTick !== null && (
+              <div
+                data-testid="playhead"
+                aria-hidden
+                style={{ left: tickToPx(headTick, pxPerBeat), top: RULER_H }}
+                className="pointer-events-none absolute bottom-0 z-10 w-0.5 bg-brass-hi shadow-glow-brass"
+              />
+            )}
           </div>
         </div>
       </div>
