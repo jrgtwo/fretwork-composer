@@ -354,6 +354,15 @@ export function useClickMuted(): boolean {
   return useMetronomeStore((s) => s.clickMuted);
 }
 
+/** The live transport tempo. Distinct from the pattern's stored preference. */
+export function useTempo(): number {
+  return useMetronomeStore((s) => s.bpm);
+}
+
+export function setTempo(bpm: number): void {
+  useMetronomeStore.getState().setBpm(bpm);
+}
+
 export function toggleClick(): void {
   useMetronomeStore.getState().toggleClickMuted();
 }

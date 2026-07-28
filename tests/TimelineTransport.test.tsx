@@ -14,6 +14,8 @@ vi.mock('../src/audio/playbackService', () => ({
   useActiveEventIds: vi.fn((): readonly string[] => []),
   useClickMuted: vi.fn(() => false),
   toggleClick: vi.fn(),
+  useTempo: vi.fn(() => 80),
+  setTempo: vi.fn(),
 }));
 
 import { Timeline } from '../src/timeline/Timeline';
@@ -26,6 +28,7 @@ import {
   usePlaybackEngine,
   useClickMuted,
   toggleClick,
+  setTempo,
 } from '../src/audio/playbackService';
 import {
   clearHistory,
@@ -185,6 +188,36 @@ describe('Timeline active notes', () => {
       render(<Timeline />);
 
       expect(screen.getByRole('button', { name: 'Unmute metronome click' })).toBeInTheDocument();
+    });
+  });
+
+  describe('tempo and looping', () => {
+    it('shows the current tempo', () => {
+      render(<Timeline />);
+      expect(screen.getByText('80')).toBeInTheDocument();
+    });
+
+    // Tempo has two homes: the metronome plays it now, the pattern remembers it.
+    it('writes a tempo change to both the transport and the pattern', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+
+      await user.click(screen.getByRole('button', { name: 'Increase tempo' }));
+
+      expect(setTempo).toHaveBeenCalledWith(81);
+      expect(getEditingPattern()!.suggestedBpm).toBe(81);
+    });
+
+    it('toggles looping on the pattern', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const before = getEditingPattern()!.loop;
+
+      await user.click(
+        screen.getByRole('button', { name: before ? 'Turn looping off' : 'Turn looping on' }),
+      );
+
+      expect(getEditingPattern()!.loop).toBe(!before);
     });
   });
 });

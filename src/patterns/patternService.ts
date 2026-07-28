@@ -190,6 +190,23 @@ export function deleteNotes(ids: readonly string[]): void {
   store().deleteEvents(ids);
 }
 
+/**
+ * Whether editor playback repeats. Stored on the pattern (the lib defaults it to
+ * true) rather than held in transport state, so it survives reopening.
+ */
+export function setPatternLoop(loop: boolean): void {
+  store().setEditingPatternLoop(loop);
+}
+
+/**
+ * The pattern's preferred tempo. The lib treats this as the author's intent and
+ * loads it into the metronome when the pattern is opened; the metronome holds
+ * the live value during playback.
+ */
+export function setPatternBpm(bpm: number | null): void {
+  store().setEditingPatternSuggestedBpm(bpm);
+}
+
 export function selectNotes(ids: readonly string[], mode: SelectionMode = 'replace'): void {
   store().selectEvents(ids, mode);
 }

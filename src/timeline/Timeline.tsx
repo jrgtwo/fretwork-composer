@@ -8,6 +8,8 @@ import {
   useActiveEventIds,
   useClickMuted,
   useHeadTick,
+  useTempo,
+  setTempo,
   useIsPlaying,
   usePlaybackEngine,
   toggleClick,
@@ -20,6 +22,8 @@ import {
   redo,
   resizeNote,
   selectNotes,
+  setPatternBpm,
+  setPatternLoop,
   stampNote,
   undo,
   useEditingPattern,
@@ -172,6 +176,7 @@ export function Timeline() {
   const isPlaying = useIsPlaying();
   const headTick = useHeadTick();
   const clickMuted = useClickMuted();
+  const tempo = useTempo();
   const activeIds = useActiveEventIds();
   // Anchored to the note's on-screen box, captured when the popup is opened.
   const [popupFor, setPopupFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
@@ -181,6 +186,14 @@ export function Timeline() {
   const lanesRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [areaHeight, setAreaHeight] = useState(240);
+
+  // The lib treats `suggestedBpm` as the author's intent and expects the editor
+  // to load it into the metronome; without this the transport keeps whatever
+  // tempo the last pattern left behind.
+  const suggestedBpm = pattern?.suggestedBpm ?? null;
+  useEffect(() => {
+    if (suggestedBpm !== null) setTempo(suggestedBpm);
+  }, [suggestedBpm]);
 
   // Keeps the playhead on screen. Runs its own transport-reading loop rather
   // than reacting to head state — see the hook for why.
@@ -291,6 +304,17 @@ export function Timeline() {
     window.addEventListener('pointerup', onUp);
   };
 
+  /**
+   * Tempo lives in two places on purpose: the metronome drives playback now, and
+   * the pattern remembers the choice for next time. Writing only the metronome
+   * would lose the tempo on reload; only the pattern wouldn't change what you hear.
+   */
+  const changeTempo = (delta: number) => {
+    const next = Math.max(20, Math.min(300, tempo + delta));
+    setTempo(next);
+    setPatternBpm(next);
+  };
+
   /** Clicking empty lane space places a note there. */
   const onLaneDown = (stringIndex: number) => (e: React.PointerEvent) => {
     if (e.target !== e.currentTarget) return;
@@ -361,6 +385,39 @@ export function Timeline() {
         >
           {isPlaying ? '■' : '▶'}
         </button>
+        <button
+          type="button"
+          aria-label={pattern.loop ? 'Turn looping off' : 'Turn looping on'}
+          aria-pressed={pattern.loop}
+          onClick={() => setPatternLoop(!pattern.loop)}
+          className={`pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold ${
+            pattern.loop ? 'control-accent' : ''
+          }`}
+        >
+          ⟲ loop
+        </button>
+        <span className="mx-1 h-4 w-px bg-line" />
+        <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">bpm</span>
+        <button
+          type="button"
+          aria-label="Decrease tempo"
+          onClick={() => changeTempo(-1)}
+          className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
+        >
+          –
+        </button>
+        <span className="min-w-7 text-center font-mono text-[11px] font-bold text-ink-hi">
+          {tempo}
+        </span>
+        <button
+          type="button"
+          aria-label="Increase tempo"
+          onClick={() => changeTempo(1)}
+          className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
+        >
+          +
+        </button>
+        <span className="mx-1 h-4 w-px bg-line" />
         <button
           type="button"
           aria-label={clickMuted ? 'Unmute metronome click' : 'Mute metronome click'}
