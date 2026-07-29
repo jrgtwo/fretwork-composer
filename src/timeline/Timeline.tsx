@@ -18,12 +18,14 @@ import {
   beginEditGesture,
   deleteNotes,
   endEditGesture,
-  moveNote,
   redo,
-  resizeNote,
   selectNotes,
+  moveNotesBy,
+  resizeNotesBy,
   setPatternBpm,
   setPatternLoop,
+  snapshotForDrag,
+  snapshotForResize,
   stampNote,
   undo,
   useEditingPattern,
@@ -180,11 +182,20 @@ export function Timeline() {
   const activeIds = useActiveEventIds();
   // Anchored to the note's on-screen box, captured when the popup is opened.
   const [popupFor, setPopupFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
+  // Viewport coordinates — the band is drawn fixed, over everything.
+  const [marquee, setMarquee] = useState<{
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+  } | null>(null);
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
   const pxPerBeat = ZOOM_LEVELS[zoomIndex];
   const areaRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
+  /** Tears down whichever pointer gesture is in flight. Null when none is. */
+  const abortGesture = useRef<(() => void) | null>(null);
   const [areaHeight, setAreaHeight] = useState(240);
 
   // The lib treats `suggestedBpm` as the author's intent and expects the editor
@@ -233,6 +244,12 @@ export function Timeline() {
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedIds]);
 
+  // A pointer gesture parks its listeners on `window` so it keeps tracking once
+  // the pointer leaves the lane — which also means nothing else would tear them
+  // down if this unmounts mid-drag, leaving the undo stack stuck inside an
+  // open gesture and every later edit unrecorded.
+  useEffect(() => () => abortGesture.current?.(), []);
+
   if (!pattern) return null;
 
   const ts = pattern.timeSignature;
@@ -265,12 +282,27 @@ export function Timeline() {
   const startDrag = (event: PatternEvent, mode: DragMode) => (e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    selectNotes([event.id]);
+
+    // Shift is the selection modifier wherever a note can be grabbed — including
+    // the resize edge, which overhangs the note and is easy to hit by accident.
+    if (e.shiftKey) {
+      selectNotes([event.id], 'toggle');
+      return;
+    }
+
+    // Grabbing a note outside the selection replaces it; grabbing one inside
+    // keeps the group, so a multi-selection can be dragged as a unit.
+    const group = selectedIds.includes(event.id) ? selectedIds : [event.id];
+    if (!selectedIds.includes(event.id)) selectNotes([event.id]);
 
     const startX = e.clientX;
     const startY = e.clientY;
     // Ticks between the pointer and the note's start, so it doesn't jump on grab.
     const grabOffset = tickAt(startX) - event.startTick;
+    // Captured once: the lib clamps deltas against these, so repeated moves
+    // don't compound into an accelerating drag.
+    const dragFrom = snapshotForDrag(group);
+    const resizeFrom = snapshotForResize(group);
     let moved = false;
     // One undo step for the whole drag, not one per pointermove.
     beginEditGesture();
@@ -281,7 +313,13 @@ export function Timeline() {
 
       if (mode === 'resize') {
         const end = snapTick(tickAt(ev.clientX), SNAP);
-        resizeNote(event.id, Math.max(SNAP, end - event.startTick));
+        // The lib's floor is one tick, so a shared delta dragged past the left
+        // edge would collapse the group into invisible slivers. Clamping the
+        // delta against the shortest member keeps every note at least a
+        // sixteenth *and* preserves the relative lengths within the group.
+        const shortest = Math.min(...resizeFrom.map((s) => s.durationTicks));
+        const delta = end - (event.startTick + event.durationTicks);
+        resizeNotesBy(resizeFrom, Math.max(SNAP - shortest, delta));
         return;
       }
 
@@ -289,19 +327,21 @@ export function Timeline() {
       // Rows descend the screen but string indices ascend with pitch, so
       // dragging down moves to a lower-numbered string.
       const rows = Math.round((ev.clientY - startY) / rowHeight);
-      const stringIndex = Math.max(
-        0,
-        Math.min(STRING_LABELS.length - 1, event.stringIndex - rows),
-      );
-      moveNote(event.id, tick, stringIndex);
+      moveNotesBy(dragFrom, tick - event.startTick, -rows, STRING_LABELS.length);
     };
-    const onUp = () => {
+    // pointercancel closes the gesture too — the browser can take the pointer
+    // away (touch scroll, an OS gesture) and no pointerup ever arrives.
+    const finish = () => {
       window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      abortGesture.current = null;
       endEditGesture(moved); // a click that never moved isn't an edit
     };
     window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+    abortGesture.current = finish;
   };
 
   /**
@@ -315,15 +355,104 @@ export function Timeline() {
     setPatternBpm(next);
   };
 
-  /** Clicking empty lane space places a note there. */
+  /**
+   * Empty lane space does double duty: a click stamps a note, a drag rubber-bands
+   * a selection. They're told apart by movement, so neither needs a modifier —
+   * the same trick guitar-tutor uses.
+   */
   const onLaneDown = (stringIndex: number) => (e: React.PointerEvent) => {
     if (e.target !== e.currentTarget) return;
-    const tick = snapTick(tickAt(e.clientX), SNAP);
-    // Reuse the last-used fret so repeated stamping doesn't reset to 0.
-    const fret = selectedIds.length
-      ? (pattern.events.find((ev) => ev.id === selectedIds[0])?.fret ?? 0)
-      : 0;
-    stampNote({ stringIndex, fret, tick, durationTicks: DEFAULT_DURATION });
+    const originX = e.clientX;
+    const originY = e.clientY;
+    const additive = e.shiftKey;
+    const before = additive ? selectedIds : [];
+    let marqueeing = false;
+
+    const onMove = (ev: PointerEvent) => {
+      if (
+        !marqueeing &&
+        Math.abs(ev.clientX - originX) < DRAG_THRESHOLD &&
+        Math.abs(ev.clientY - originY) < DRAG_THRESHOLD
+      ) {
+        return;
+      }
+      marqueeing = true;
+      const rect = {
+        left: Math.min(originX, ev.clientX),
+        right: Math.max(originX, ev.clientX),
+        top: Math.min(originY, ev.clientY),
+        bottom: Math.max(originY, ev.clientY),
+      };
+      setMarquee(rect);
+
+      // Notes scrolled out of the well keep their laid-out boxes, which can land
+      // under the string labels or the surrounding chrome — hit-testing the raw
+      // band there would select notes the user can't see. Clip to what the well
+      // is actually showing.
+      const well = scrollerRef.current?.getBoundingClientRect();
+      const hit = well
+        ? {
+            left: Math.max(rect.left, well.left),
+            right: Math.min(rect.right, well.right),
+            top: Math.max(rect.top, well.top),
+            bottom: Math.min(rect.bottom, well.bottom),
+          }
+        : rect;
+
+      // Clipping can empty the band entirely (dragged off into the chrome); an
+      // inverted rect must select nothing rather than whatever straddles it.
+      const overlapsWell = hit.left <= hit.right && hit.top <= hit.bottom;
+
+      // Hit-test against what's actually on screen rather than recomputing
+      // geometry — the notes already know where they are.
+      const hits = !overlapsWell
+        ? []
+        : [...document.querySelectorAll<HTMLElement>('[data-note]')]
+            .filter((el) => {
+              const box = el.getBoundingClientRect();
+              return (
+                box.right >= hit.left &&
+                box.left <= hit.right &&
+                box.bottom >= hit.top &&
+                box.top <= hit.bottom
+              );
+            })
+            .map((el) => el.dataset.note!);
+
+      selectNotes([...new Set([...before, ...hits])]);
+    };
+
+    // Only a real pointerup stamps or keeps a selection; pointercancel and an
+    // unmount just have to leave nothing behind.
+    const stopTracking = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', stopTracking);
+      abortGesture.current = null;
+      setMarquee(null);
+    };
+
+    const onUp = (ev: PointerEvent) => {
+      stopTracking();
+      if (marqueeing) return;
+
+      // A plain click on empty space: clear the selection, or stamp a note.
+      if (selectedIds.length > 1) {
+        selectNotes([]);
+        return;
+      }
+      const tick = snapTick(tickAt(ev.clientX), SNAP);
+      // Reuse the last-used fret so repeated stamping doesn't reset to 0.
+      const fret = selectedIds.length
+        ? (pattern.events.find((ev2) => ev2.id === selectedIds[0])?.fret ?? 0)
+        : 0;
+      stampNote({ stringIndex, fret, tick, durationTicks: DEFAULT_DURATION });
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', stopTracking);
+    abortGesture.current = stopTracking;
   };
 
   return (
@@ -554,6 +683,19 @@ export function Timeline() {
           </div>
         </div>
       </div>
+
+      {marquee && (
+        <div
+          data-testid="marquee"
+          className="pointer-events-none fixed z-40 rounded-xs border border-brass bg-brass/10"
+          style={{
+            left: marquee.left,
+            top: marquee.top,
+            width: marquee.right - marquee.left,
+            height: marquee.bottom - marquee.top,
+          }}
+        />
+      )}
 
       {popupNote && popupFor && (
         <div className="fixed inset-0 z-50" onPointerDown={() => setPopupFor(null)}>

@@ -23,7 +23,25 @@ function seedTwoNotes() {
 }
 
 const noteEl = (id: string) => document.querySelector<HTMLElement>(`[data-note="${id}"]`)!;
+/** The drag strip on a note's right edge. It has no role or name of its own —
+ *  it's a grab target, not a control — so it's found by its data hook. */
+const resizeEl = (id: string) => document.querySelector<HTMLElement>(`[data-resize="${id}"]`)!;
 const events = () => getEditingPattern()!.events;
+
+/**
+ * jsdom has no layout, so `tickAt` measures against a lane rect of 0 — which
+ * makes clientX map straight onto ticks at the default zoom of 48px/beat: a
+ * beat (PPQ ticks) is 48px in. Row height bottoms out at its 22px floor.
+ */
+const BEAT_PX = 48;
+const ROW_PX = 22;
+
+async function selectBoth(user: ReturnType<typeof userEvent.setup>, ids: string[]) {
+  await user.pointer({ target: noteEl(ids[0]), keys: '[MouseLeft]' });
+  await user.keyboard('{Shift>}');
+  await user.pointer({ target: noteEl(ids[1]), keys: '[MouseLeft]' });
+  await user.keyboard('{/Shift}');
+}
 
 beforeEach(() => seedTwoNotes());
 
@@ -165,6 +183,223 @@ describe('Timeline', () => {
       render(<Timeline />);
       expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
       expect(screen.getByRole('button', { name: 'Redo' })).toBeDisabled();
+    });
+  });
+
+  describe('multi-select', () => {
+    it('shift-clicking adds a note to the selection', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const [first, second] = events();
+
+      await user.pointer({ target: noteEl(first.id), keys: '[MouseLeft]' });
+      await user.keyboard('{Shift>}');
+      await user.pointer({ target: noteEl(second.id), keys: '[MouseLeft]' });
+      await user.keyboard('{/Shift}');
+
+      expect(getSelectedIds()).toHaveLength(2);
+    });
+
+    it('shift-clicking a selected note removes it again', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const [first, second] = events();
+
+      await user.pointer({ target: noteEl(first.id), keys: '[MouseLeft]' });
+      await user.keyboard('{Shift>}');
+      await user.pointer({ target: noteEl(second.id), keys: '[MouseLeft]' });
+      await user.pointer({ target: noteEl(second.id), keys: '[MouseLeft]' });
+      await user.keyboard('{/Shift}');
+
+      expect(getSelectedIds()).toEqual([first.id]);
+    });
+
+    it('deletes the whole selection at once', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const [first, second] = events();
+
+      await user.pointer({ target: noteEl(first.id), keys: '[MouseLeft]' });
+      await user.keyboard('{Shift>}');
+      await user.pointer({ target: noteEl(second.id), keys: '[MouseLeft]' });
+      await user.keyboard('{/Shift}');
+      await user.keyboard('{Delete}');
+
+      expect(events()).toHaveLength(0);
+    });
+
+    it('clicking empty space clears a multi-selection instead of stamping', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const [first, second] = events();
+      const count = events().length;
+
+      await user.pointer({ target: noteEl(first.id), keys: '[MouseLeft]' });
+      await user.keyboard('{Shift>}');
+      await user.pointer({ target: noteEl(second.id), keys: '[MouseLeft]' });
+      await user.keyboard('{/Shift}');
+
+      const emptyLane = document.querySelector<HTMLElement>('[data-lane="E"]')!;
+      await user.pointer({ target: emptyLane, keys: '[MouseLeft]' });
+
+      expect(getSelectedIds()).toEqual([]);
+      expect(events()).toHaveLength(count); // nothing stamped
+    });
+
+    // ⚠ The marquee's own hit-testing can't be covered here: it reads
+    // getBoundingClientRect, and jsdom reports every element as 0x0 at the
+    // origin. These two cover the gesture (band shown, no accidental stamp);
+    // which notes a band actually catches needs a real layout engine.
+    it('shows a selection band while dragging across empty space', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const lane = document.querySelector<HTMLElement>('[data-lane="E"]')!;
+
+      await user.pointer([
+        { target: lane, keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 10 } },
+        { target: lane, coords: { clientX: 120, clientY: 90 } },
+      ]);
+
+      expect(screen.getByTestId('marquee')).toBeInTheDocument();
+
+      await user.pointer({ keys: '[/MouseLeft]' });
+      expect(screen.queryByTestId('marquee')).not.toBeInTheDocument();
+    });
+
+    it('does not stamp a note when the drag was a marquee', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const lane = document.querySelector<HTMLElement>('[data-lane="E"]')!;
+      const before = events().length;
+
+      await user.pointer([
+        { target: lane, keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 10 } },
+        { target: lane, coords: { clientX: 200, clientY: 100 } },
+        { keys: '[/MouseLeft]' },
+      ]);
+
+      expect(events()).toHaveLength(before);
+    });
+
+    it('leaves nothing to undo — a marquee changes no notes', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const lane = document.querySelector<HTMLElement>('[data-lane="E"]')!;
+
+      await user.pointer([
+        { target: lane, keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 10 } },
+        { target: lane, coords: { clientX: 200, clientY: 100 } },
+        { keys: '[/MouseLeft]' },
+      ]);
+
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+    });
+  });
+
+  describe('group drag', () => {
+    it('moves every selected note by the grabbed note\'s delta', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      const before = events().map((e) => e.startTick);
+      await selectBoth(user, ids);
+
+      // Grab the *second* note — the one that doesn't start at tick 0 — so a
+      // delta confused with an absolute tick can't accidentally look right.
+      await user.pointer([
+        { target: noteEl(ids[1]), keys: '[MouseLeft>]', coords: { clientX: BEAT_PX, clientY: 0 } },
+        { coords: { clientX: BEAT_PX * 2, clientY: 0 } },
+        { keys: '[/MouseLeft]' },
+      ]);
+
+      // Both shift by one beat — the group keeps its shape rather than collapsing
+      // onto the grabbed note's tick.
+      expect(events().map((e) => e.startTick)).toEqual(before.map((t) => t + PPQ));
+    });
+
+    it('carries the whole group across strings', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      const before = events().map((e) => e.stringIndex);
+      await selectBoth(user, ids);
+
+      // One row *down* the screen is one string *down* in pitch, i.e. index - 1.
+      await user.pointer([
+        { target: noteEl(ids[0]), keys: '[MouseLeft>]', coords: { clientX: 0, clientY: 0 } },
+        { coords: { clientX: 0, clientY: ROW_PX } },
+        { keys: '[/MouseLeft]' },
+      ]);
+
+      expect(events().map((e) => e.stringIndex)).toEqual(before.map((s) => s - 1));
+    });
+
+    it('collapses a group drag into one undo step', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      const before = events().map((e) => e.startTick);
+      await selectBoth(user, ids);
+
+      await user.pointer([
+        { target: noteEl(ids[0]), keys: '[MouseLeft>]', coords: { clientX: 0, clientY: 0 } },
+        { coords: { clientX: BEAT_PX / 2, clientY: 0 } },
+        { coords: { clientX: BEAT_PX, clientY: 0 } },
+        { coords: { clientX: BEAT_PX * 2, clientY: 0 } },
+        { keys: '[/MouseLeft]' },
+      ]);
+      expect(events().map((e) => e.startTick)).not.toEqual(before);
+
+      await user.click(screen.getByRole('button', { name: 'Undo' }));
+
+      expect(events().map((e) => e.startTick)).toEqual(before);
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+    });
+
+    it('resizes every selected note by the same amount', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      await selectBoth(user, ids);
+
+      // Drag the first note's right edge out to the two-beat mark: +1.5 beats.
+      await user.pointer([
+        { target: resizeEl(ids[0]), keys: '[MouseLeft>]', coords: { clientX: 24, clientY: 0 } },
+        { coords: { clientX: BEAT_PX * 2, clientY: 0 } },
+        { keys: '[/MouseLeft]' },
+      ]);
+
+      expect(events().map((e) => e.durationTicks)).toEqual([PPQ * 2, PPQ * 2]);
+    });
+
+    // The lib's own floor is a single tick, which would leave slivers behind.
+    it('never shrinks a resized group below a sixteenth', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      await selectBoth(user, ids);
+
+      // Drag the right edge far past the note's own start.
+      await user.pointer([
+        { target: resizeEl(ids[0]), keys: '[MouseLeft>]', coords: { clientX: 24, clientY: 0 } },
+        { coords: { clientX: -400, clientY: 0 } },
+        { keys: '[/MouseLeft]' },
+      ]);
+
+      expect(events().map((e) => e.durationTicks)).toEqual([PPQ / 4, PPQ / 4]);
+    });
+
+    it('toggles selection when the resize edge is shift-clicked', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+
+      await user.pointer({ target: noteEl(ids[0]), keys: '[MouseLeft]' });
+      await user.keyboard('{Shift>}');
+      await user.pointer({ target: resizeEl(ids[1]), keys: '[MouseLeft]' });
+      await user.keyboard('{/Shift}');
+
+      expect(getSelectedIds()).toHaveLength(2);
     });
   });
 });

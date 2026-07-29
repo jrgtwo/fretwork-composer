@@ -7,6 +7,10 @@ import {
   getEditingPattern,
   getSelectedIds,
   moveNote,
+  moveNotesBy,
+  resizeNotesBy,
+  snapshotForDrag,
+  snapshotForResize,
   openBlankPattern,
   redo,
   resizeNote,
@@ -216,5 +220,101 @@ describe('undo / redo', () => {
 
     expect(getEditingPattern()!.name).toBe('Another');
     expect(getEditingPattern()!.events).toHaveLength(0);
+  });
+});
+
+describe('group editing', () => {
+  /** Three notes a beat apart, ascending strings. */
+  function seedThree() {
+    stampNote({ stringIndex: 1, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+    stampNote({ stringIndex: 2, fret: 5, tick: PPQ, durationTicks: PPQ / 2 });
+    stampNote({ stringIndex: 3, fret: 5, tick: PPQ * 2, durationTicks: PPQ / 2 });
+    return getEditingPattern()!.events.map((e) => e.id);
+  }
+
+  it('moves every selected note by the same delta', () => {
+    const ids = seedThree();
+    const before = getEditingPattern()!.events.map((e) => e.startTick);
+
+    moveNotesBy(snapshotForDrag(ids), PPQ, 0, 6);
+
+    const after = getEditingPattern()!.events.map((e) => e.startTick);
+    expect(after).toEqual(before.map((t) => t + PPQ));
+  });
+
+  it('moves a group across strings', () => {
+    const ids = seedThree();
+
+    moveNotesBy(snapshotForDrag(ids), 0, 1, 6);
+
+    expect(getEditingPattern()!.events.map((e) => e.stringIndex)).toEqual([2, 3, 4]);
+  });
+
+  it('leaves unselected notes alone', () => {
+    const ids = seedThree();
+    const [first] = ids;
+    const others = getEditingPattern()!.events.filter((e) => e.id !== first);
+
+    moveNotesBy(snapshotForDrag([first]), PPQ * 4, 0, 6);
+
+    others.forEach((before) => {
+      const now = getEditingPattern()!.events.find((e) => e.id === before.id)!;
+      expect(now.startTick).toBe(before.startTick);
+    });
+  });
+
+  // The lib clamps a group move instead of rejecting it, so a group pushed past
+  // the edge slides up against it rather than refusing to budge.
+  it('clamps a move that would run off the strings', () => {
+    const ids = seedThree();
+
+    moveNotesBy(snapshotForDrag(ids), 0, 99, 6);
+
+    const strings = getEditingPattern()!.events.map((e) => e.stringIndex);
+    expect(Math.max(...strings)).toBeLessThanOrEqual(5);
+    expect(new Set(strings).size).toBe(3); // still three distinct rows — the shape held
+  });
+
+  it('never moves a group to a negative tick', () => {
+    const ids = seedThree();
+
+    moveNotesBy(snapshotForDrag(ids), -PPQ * 10, 0, 6);
+
+    expect(Math.min(...getEditingPattern()!.events.map((e) => e.startTick))).toBe(0);
+  });
+
+  it('resizes every selected note', () => {
+    const ids = seedThree();
+
+    resizeNotesBy(snapshotForResize(ids), PPQ / 4);
+
+    // the last note has nothing after it, so it definitely grew
+    const last = getEditingPattern()!.events.find((e) => e.startTick === PPQ * 2)!;
+    expect(last.durationTicks).toBe(PPQ / 2 + PPQ / 4);
+  });
+
+  // Snapshots are taken at grab time; without them each pointermove would
+  // compound on the previous result and the drag would accelerate.
+  it('applies deltas against the snapshot, not the live position', () => {
+    const ids = seedThree();
+    const snapshots = snapshotForDrag(ids);
+
+    moveNotesBy(snapshots, PPQ, 0, 6);
+    moveNotesBy(snapshots, PPQ, 0, 6); // same delta, same snapshots
+
+    expect(getEditingPattern()!.events.map((e) => e.startTick)).toEqual([PPQ, PPQ * 2, PPQ * 3]);
+  });
+
+  it('undoes a group move as one step', () => {
+    const ids = seedThree();
+    const before = getEditingPattern()!.events.map((e) => e.startTick);
+
+    beginEditGesture();
+    moveNotesBy(snapshotForDrag(ids), PPQ, 0, 6);
+    moveNotesBy(snapshotForDrag(ids), PPQ * 2, 0, 6);
+    endEditGesture();
+    undo();
+
+    expect(getEditingPattern()!.events.map((e) => e.startTick)).toEqual(before);
   });
 });

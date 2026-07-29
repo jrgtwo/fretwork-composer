@@ -19,6 +19,7 @@ import { useSyncExternalStore } from 'react';
 import {
   usePatternsStore,
   selectEditingPattern,
+  type EventDragSnapshot,
   type Pattern,
   type PatternEvent,
   type Tick,
@@ -27,6 +28,13 @@ import { createHistory } from './history';
 import { toPitchPatch, type NotePitch } from './articulations';
 
 type SelectionMode = 'replace' | 'add' | 'toggle';
+
+/** The lib exports `EventDragSnapshot` but not its resize counterpart, so the
+ *  shape is mirrored here. Structural typing makes it interchangeable. */
+interface EventResizeSnapshot {
+  readonly id: string;
+  readonly durationTicks: Tick;
+}
 
 const store = () => usePatternsStore.getState();
 
@@ -209,6 +217,52 @@ export function setPatternBpm(bpm: number | null): void {
 
 export function selectNotes(ids: readonly string[], mode: SelectionMode = 'replace'): void {
   store().selectEvents(ids, mode);
+}
+
+/** Drag-start state for a group move — the lib clamps against these, not against
+ *  the live positions, so repeated pointer moves don't compound. */
+export function snapshotForDrag(ids: readonly string[]): EventDragSnapshot[] {
+  const pattern = getEditingPattern();
+  if (!pattern) return [];
+  return pattern.events
+    .filter((event) => ids.includes(event.id))
+    .map(({ id, startTick, stringIndex, durationTicks }) => ({
+      id,
+      startTick,
+      stringIndex,
+      durationTicks,
+    }));
+}
+
+export function snapshotForResize(ids: readonly string[]): EventResizeSnapshot[] {
+  const pattern = getEditingPattern();
+  if (!pattern) return [];
+  return pattern.events
+    .filter((event) => ids.includes(event.id))
+    .map(({ id, durationTicks }) => ({ id, durationTicks }));
+}
+
+/**
+ * Move a group. Unlike `moveNote`, the lib *clamps* this rather than rejecting
+ * it — the group slides up against obstacles instead of refusing to budge, which
+ * is what makes dragging a multi-selection feel right.
+ */
+export function moveNotesBy(
+  snapshots: readonly EventDragSnapshot[],
+  deltaTicks: Tick,
+  deltaStrings: number,
+  stringCount: number,
+): void {
+  capture();
+  store().moveEventsBy(snapshots, deltaTicks, deltaStrings, stringCount);
+}
+
+export function resizeNotesBy(
+  snapshots: readonly EventResizeSnapshot[],
+  deltaTicks: Tick,
+): void {
+  capture();
+  store().resizeEventsBy(snapshots, deltaTicks);
 }
 
 /**
