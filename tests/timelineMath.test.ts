@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { PPQ } from '@fretwork/lib';
-import { barBeatLines, laneMetrics, pxToTick, tickToPx } from '../src/timeline/timelineMath';
+import {
+  DEFAULT_SNAP_ID,
+  barBeatLines,
+  laneMetrics,
+  pxToTick,
+  snapOptions,
+  tickToPx,
+} from '../src/timeline/timelineMath';
 
 const FOUR_FOUR = { numerator: 4, denominator: 4 };
 
@@ -59,5 +66,42 @@ describe('laneMetrics', () => {
 
   it('caps note height so tall rows do not produce giant slabs', () => {
     expect(laneMetrics(2000, 6, 20).noteHeight).toBeLessThanOrEqual(52);
+  });
+});
+
+describe('snapOptions', () => {
+  it('resolves a bar from the time signature', () => {
+    const inFour = snapOptions(FOUR_FOUR).find((o) => o.id === 'bar')!;
+    const inThree = snapOptions({ numerator: 3, denominator: 4 }).find((o) => o.id === 'bar')!;
+
+    expect(inFour.ticks).toBe(PPQ * 4);
+    expect(inThree.ticks).toBe(PPQ * 3);
+  });
+
+  it('divides the beat in two for straight values', () => {
+    const byId = Object.fromEntries(snapOptions(FOUR_FOUR).map((o) => [o.id, o.ticks]));
+
+    expect(byId['4']).toBe(PPQ);
+    expect(byId['8']).toBe(PPQ / 2);
+    expect(byId['16']).toBe(PPQ / 4);
+    expect(byId['32']).toBe(PPQ / 8);
+  });
+
+  // Triplets are the reason we don't use the lib's StepLength, which has none.
+  it('divides the beat in three for triplets', () => {
+    const byId = Object.fromEntries(snapOptions(FOUR_FOUR).map((o) => [o.id, o.ticks]));
+
+    expect(byId['8t']).toBe(PPQ / 3);
+    expect(byId['16t']).toBe(PPQ / 6);
+    // three eighth-triplets fill exactly one beat
+    expect(byId['8t']! * 3).toBe(PPQ);
+  });
+
+  it('offers an unsnapped option', () => {
+    expect(snapOptions(FOUR_FOUR).find((o) => o.id === 'off')!.ticks).toBeNull();
+  });
+
+  it('defaults to a sixteenth', () => {
+    expect(snapOptions(FOUR_FOUR).some((o) => o.id === DEFAULT_SNAP_ID)).toBe(true);
   });
 });

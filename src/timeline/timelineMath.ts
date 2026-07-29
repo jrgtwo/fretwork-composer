@@ -55,6 +55,38 @@ export function barBeatLines(
   return lines;
 }
 
+/**
+ * Grid resolutions for snapping and for the length of a newly stamped note.
+ *
+ * Richer than the lib's `StepLength` (quarter/eighth/sixteenth only) because
+ * `snapTick` takes arbitrary tick values, and triplets are table stakes for a
+ * guitar editor. `null` ticks means no snapping at all.
+ */
+export interface SnapOption {
+  id: string;
+  label: string;
+  ticks: number | null;
+}
+
+export function snapOptions(ts: PatternTimeSignature): SnapOption[] {
+  return [
+    { id: 'bar', label: 'Bar', ticks: ticksPerBar(ts) },
+    { id: '4', label: '1/4', ticks: PPQ },
+    { id: '8', label: '1/8', ticks: PPQ / 2 },
+    { id: '16', label: '1/16', ticks: PPQ / 4 },
+    { id: '32', label: '1/32', ticks: PPQ / 8 },
+    // Triplets divide the beat into three rather than two.
+    { id: '8t', label: '1/8T', ticks: PPQ / 3 },
+    { id: '16t', label: '1/16T', ticks: PPQ / 6 },
+    { id: 'off', label: 'Off', ticks: null },
+  ];
+}
+
+export const DEFAULT_SNAP_ID = '16';
+
+/** Fallback note length when snapping is off — an eighth reads as "a note". */
+export const FREE_NOTE_TICKS = PPQ / 2;
+
 export interface LaneMetrics {
   rowHeight: number;
   noteHeight: number;

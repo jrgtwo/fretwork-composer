@@ -37,9 +37,12 @@ import {
   barBeatLines,
   laneMetrics,
   pxToTick,
+  snapOptions,
   tickToPx,
-  ZOOM_LEVELS,
+  DEFAULT_SNAP_ID,
   DEFAULT_ZOOM_INDEX,
+  FREE_NOTE_TICKS,
+  ZOOM_LEVELS,
 } from './timelineMath';
 
 /**
@@ -55,8 +58,6 @@ const OPEN_MIDI = [40, 45, 50, 55, 59, 64];
 const ROW_ORDER = [...STRING_LABELS.keys()].reverse();
 const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
 const RULER_H = 20;
-const SNAP = PPQ / 4; // sixteenth-note grid
-const DEFAULT_DURATION = PPQ / 2;
 const DRAG_THRESHOLD = 3;
 
 const pitchName = (stringIndex: number, fret: number) =>
@@ -190,6 +191,7 @@ export function Timeline() {
     bottom: number;
   } | null>(null);
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
+  const [snapId, setSnapId] = useState(DEFAULT_SNAP_ID);
   const pxPerBeat = ZOOM_LEVELS[zoomIndex];
   const areaRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
@@ -261,6 +263,12 @@ export function Timeline() {
     STRING_LABELS.length,
     RULER_H,
   );
+  const grid = snapOptions(ts).find((o) => o.id === snapId) ?? snapOptions(ts)[3];
+  /** Quantise, unless the grid is off — then take the raw tick. */
+  const snapToGrid = (tick: number) => (grid.ticks ? snapTick(tick, grid.ticks) : tick);
+  /** A stamped note is one grid step long, so the grid sets the note length too. */
+  const stampLength = grid.ticks ?? FREE_NOTE_TICKS;
+
   // Read fresh each render so the popup reflects edits made through it.
   const popupNote = popupFor ? pattern.events.find((e) => e.id === popupFor.id) : undefined;
 
@@ -268,7 +276,9 @@ export function Timeline() {
     `repeating-linear-gradient(90deg,transparent 0 ${w - 2}px,` +
     `rgb(0 0 0/${dark}) ${w - 2}px ${w - 1}px,rgb(255 255 255/${light}) ${w - 1}px ${w}px)`;
   const gridImage = [
-    carve(tickToPx(SNAP, pxPerBeat), 0.3, 0.022),
+    // The finest grid line follows the snap setting, so the visual grid and the
+    // positions notes can actually take always agree.
+    carve(tickToPx(grid.ticks ?? PPQ / 4, pxPerBeat), 0.3, 0.022),
     carve(pxPerBeat, 0.5, 0.045),
     carve(tickToPx(ticksPerBar(ts), pxPerBeat), 0.72, 0.085),
   ].join(',');
@@ -312,18 +322,18 @@ export function Timeline() {
       moved = true;
 
       if (mode === 'resize') {
-        const end = snapTick(tickAt(ev.clientX), SNAP);
+        const end = snapToGrid(tickAt(ev.clientX));
         // The lib's floor is one tick, so a shared delta dragged past the left
         // edge would collapse the group into invisible slivers. Clamping the
         // delta against the shortest member keeps every note at least a
         // sixteenth *and* preserves the relative lengths within the group.
         const shortest = Math.min(...resizeFrom.map((s) => s.durationTicks));
         const delta = end - (event.startTick + event.durationTicks);
-        resizeNotesBy(resizeFrom, Math.max(SNAP - shortest, delta));
+        resizeNotesBy(resizeFrom, Math.max(stampLength - shortest, delta));
         return;
       }
 
-      const tick = Math.max(0, snapTick(tickAt(ev.clientX) - grabOffset, SNAP));
+      const tick = Math.max(0, snapToGrid(tickAt(ev.clientX) - grabOffset));
       // Rows descend the screen but string indices ascend with pitch, so
       // dragging down moves to a lower-numbered string.
       const rows = Math.round((ev.clientY - startY) / rowHeight);
@@ -441,12 +451,12 @@ export function Timeline() {
         selectNotes([]);
         return;
       }
-      const tick = snapTick(tickAt(ev.clientX), SNAP);
+      const tick = snapToGrid(tickAt(ev.clientX));
       // Reuse the last-used fret so repeated stamping doesn't reset to 0.
       const fret = selectedIds.length
         ? (pattern.events.find((ev2) => ev2.id === selectedIds[0])?.fret ?? 0)
         : 0;
-      stampNote({ stringIndex, fret, tick, durationTicks: DEFAULT_DURATION });
+      stampNote({ stringIndex, fret, tick, durationTicks: stampLength });
     };
 
     window.addEventListener('pointermove', onMove);
@@ -525,6 +535,24 @@ export function Timeline() {
         >
           ⟲ loop
         </button>
+        <span className="mx-1 h-4 w-px bg-line" />
+        <label className="flex items-center gap-1.5">
+          <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
+            Grid
+          </span>
+          <select
+            aria-label="Grid resolution"
+            value={snapId}
+            onChange={(e) => setSnapId(e.target.value)}
+            className="control rounded-lg px-1.5 py-1 font-mono text-[9px] font-bold text-ink"
+          >
+            {snapOptions(ts).map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <span className="mx-1 h-4 w-px bg-line" />
         <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">bpm</span>
         <button

@@ -402,4 +402,68 @@ describe('Timeline', () => {
       expect(getSelectedIds()).toHaveLength(2);
     });
   });
+
+  describe('grid resolution', () => {
+    const setGrid = async (user: ReturnType<typeof userEvent.setup>, label: string) =>
+      user.selectOptions(screen.getByRole('combobox', { name: 'Grid resolution' }), label);
+
+    const stampAt = async (user: ReturnType<typeof userEvent.setup>, clientX: number) => {
+      const lane = document.querySelector<HTMLElement>('[data-lane="E"]')!;
+      await user.pointer({ target: lane, keys: '[MouseLeft]', coords: { clientX, clientY: 0 } });
+      return events().find((e) => e.stringIndex === 0)!;
+    };
+
+    // jsdom gives every element a zero-origin rect, so clientX maps straight
+    // onto ticks at the default 48px per beat: 48px === one quarter note.
+    it('quantises a stamp to a sixteenth by default', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+
+      const note = await stampAt(user, 20); // between the 1st and 2nd sixteenth
+
+      expect(note.startTick % (PPQ / 4)).toBe(0);
+    });
+
+    it('quantises to a quarter when the grid is coarser', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      await setGrid(user, '1/4');
+
+      const note = await stampAt(user, 60); // past the first beat
+
+      expect(note.startTick).toBe(PPQ);
+    });
+
+    // The whole reason we don't use the lib's StepLength, which has no triplets.
+    it('quantises to a triplet grid', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      await setGrid(user, '1/8T');
+
+      const note = await stampAt(user, 20);
+
+      expect(note.startTick % (PPQ / 3)).toBe(0);
+    });
+
+    it('places a note wherever you put it when the grid is off', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      await setGrid(user, 'Off');
+
+      const note = await stampAt(user, 37); // deliberately off-grid
+
+      expect(note.startTick % (PPQ / 4)).not.toBe(0);
+    });
+
+    // A stamped note fills one grid step, so the grid sets length as well.
+    it('makes a stamped note one grid step long', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      await setGrid(user, '1/4');
+
+      const note = await stampAt(user, 0);
+
+      expect(note.durationTicks).toBe(PPQ);
+    });
+  });
 });
