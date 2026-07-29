@@ -18,12 +18,15 @@ import {
   beginEditGesture,
   deleteNotes,
   endEditGesture,
+  getEditingPattern,
+  nudgeSelectedFret,
   redo,
   selectNotes,
   moveNotesBy,
   resizeNotesBy,
   setPatternBpm,
   setPatternLoop,
+  setSelectedFret,
   snapshotForDrag,
   snapshotForResize,
   stampNote,
@@ -33,6 +36,7 @@ import {
   useSelectedIds,
 } from '../patterns/patternService';
 import { useTimelineAutoScroll } from './useTimelineAutoScroll';
+import { useEdgeAutoScroll } from './useEdgeAutoScroll';
 import {
   barBeatLines,
   laneMetrics,
@@ -59,6 +63,17 @@ const ROW_ORDER = [...STRING_LABELS.keys()].reverse();
 const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
 const RULER_H = 20;
 const DRAG_THRESHOLD = 3;
+
+/**
+ * How long a typed fret stays open to a second digit.
+ *
+ * Long enough that "1" then "2" is comfortably 12 for anyone not touch-typing,
+ * short enough that a deliberate second number doesn't land on the first one —
+ * roughly the gap DAWs use for the same "type a number at a thing" idiom.
+ * Anything under ~500ms punishes hesitation; much over a second and consecutive
+ * single-digit frets feel stuck together.
+ */
+const FRET_TYPING_MS = 800;
 
 const pitchName = (stringIndex: number, fret: number) =>
   NOTE_NAMES[(OPEN_MIDI[stringIndex] + fret) % 12];
@@ -111,6 +126,25 @@ function NoteMarks({ event }: { event: PatternEvent }) {
           className="absolute -top-1.5 right-0.5 font-mono text-[8px] leading-none text-brass-hi"
         >
           {event.vibrato === 'wide' ? '≈' : '~'}
+        </span>
+      )}
+      {/* Loudness as a fill along the note's foot: readable in passing, and it
+          costs no space a fret number or a flag was using. A note with no
+          velocity draws nothing at all, so untouched notes are unchanged. */}
+      {event.velocity !== undefined && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-x-[3px] bottom-[2px] h-[2px] overflow-hidden rounded-full bg-ink-mut/25"
+        >
+          {/* `data-velocity` is a test seam, not app state: the bar is aria-hidden
+              and decorative, so jsdom has no other handle on it. Clamped because a
+              negative width is invalid CSS and gets dropped — which would draw a
+              full-looking bar for the quietest possible note. */}
+          <i
+            data-velocity={event.velocity}
+            className="block h-full rounded-full bg-brass-hi"
+            style={{ width: `${Math.round(Math.min(1, Math.max(0, event.velocity)) * 100)}%` }}
+          />
         </span>
       )}
       {flags.length > 0 && (
@@ -198,6 +232,12 @@ export function Timeline() {
   const scrollerRef = useRef<HTMLDivElement>(null);
   /** Tears down whichever pointer gesture is in flight. Null when none is. */
   const abortGesture = useRef<(() => void) | null>(null);
+  /** Digits typed so far for a fret, the timer that will commit them, and
+   *  whether any of them actually moved a note. Null when nothing is typed. */
+  const fretRun = useRef<{ digits: string; timer: number; changed: boolean } | null>(null);
+  /** True while an arrow key's auto-repeat is being folded into the undo step
+   *  its first press already recorded. */
+  const nudgeRun = useRef(false);
   const [areaHeight, setAreaHeight] = useState(240);
 
   // The lib treats `suggestedBpm` as the author's intent and expects the editor
@@ -208,9 +248,27 @@ export function Timeline() {
     if (suggestedBpm !== null) setTempo(suggestedBpm);
   }, [suggestedBpm]);
 
+  // Drives the view while a drag is held near the well's edge, so a note can be
+  // taken somewhere that wasn't on screen when the drag started.
+  const edgeScroll = useEdgeAutoScroll(scrollerRef);
+
   // Keeps the playhead on screen. Runs its own transport-reading loop rather
   // than reacting to head state — see the hook for why.
-  useTimelineAutoScroll(scrollerRef, pxPerBeat, isPlaying, pattern?.durationTicks ?? 0, true);
+  //
+  // Suspended for the length of a drag: both this and the edge scroll write
+  // `scrollLeft`, and with playback running they would trade the view back and
+  // forth every few frames — the note landing wherever the tug-of-war left it.
+  // The hand on the pointer wins, for the whole gesture rather than only at the
+  // edges: having the view yank itself away mid-drag is the same bug in a less
+  // obvious place. Playback keeps sounding throughout, and the follow resumes
+  // (and catches up, jumping if the head has run off) on pointerup.
+  useTimelineAutoScroll(
+    scrollerRef,
+    pxPerBeat,
+    isPlaying && !edgeScroll.engaged,
+    pattern?.durationTicks ?? 0,
+    true,
+  );
 
   // Rows follow the pane height, which the user can drag — measure, don't assume.
   useLayoutEffect(() => {
@@ -222,13 +280,63 @@ export function Timeline() {
     return () => observer.disconnect();
   }, []);
 
-  // Editing shortcuts. All ignored while typing into a field.
+  // Editing shortcuts — one listener for all of them, so nothing has to race a
+  // second handler for the same key. All ignored while typing into a field: a
+  // `select` counts, since arrows are how you change one.
   useEffect(() => {
+    /** End the number being typed: the next digit starts a fresh one, and the
+     *  undo gesture holding the whole number closes. */
+    const commitFretRun = () => {
+      const run = fretRun.current;
+      if (!run) return;
+      clearTimeout(run.timer);
+      fretRun.current = null;
+      // Retyping the fret a note is already on is not an edit.
+      endEditGesture(run.changed);
+    };
+
+    /**
+     * Close the gesture that swallows a held arrow's repeats. Its snapshot is
+     * discarded rather than pushed: the key's *first* press already recorded the
+     * pre-nudge state, so the whole held run undoes as that one step.
+     */
+    const endNudgeRun = () => {
+      if (!nudgeRun.current) return;
+      nudgeRun.current = false;
+      endEditGesture(false);
+    };
+
+    /**
+     * Any pointer edit landing mid-run would otherwise begin a gesture inside
+     * the keyboard one, and `history` keeps only a single snapshot — so one of
+     * the two edits would vanish from the undo stack entirely. Capture phase, so
+     * this runs before the note's own pointerdown handler.
+     */
+    const endKeyRuns = () => {
+      commitFretRun();
+      endNudgeRun();
+    };
+
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (target?.matches('input, textarea, [contenteditable]')) return;
+      if (target?.matches('input, textarea, select, [contenteditable]')) {
+        // The keystroke isn't ours, but it still ends a run — otherwise tabbing
+        // into a field mid-number leaves the gesture open, and every edit made
+        // through that field goes unrecorded.
+        endKeyRuns();
+        return;
+      }
 
       const mod = e.metaKey || e.ctrlKey;
+      // Auto-repeat is excluded: holding "1" would otherwise cycle 1 → 11 → 1.
+      const isDigit =
+        !mod && !e.altKey && !e.repeat && e.key.length === 1 && e.key >= '0' && e.key <= '9';
+      // Any other key ends a number in progress, so a fret can't accumulate
+      // across an unrelated edit. Repeating a key is the only thing that
+      // continues a run rather than ending one.
+      if (!isDigit) commitFretRun();
+      if (!e.repeat) endNudgeRun();
+
       if (mod && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) redo();
@@ -240,17 +348,94 @@ export function Timeline() {
         if (selectedIds.length === 0) return;
         e.preventDefault();
         deleteNotes(selectedIds);
+        return;
+      }
+
+      // Everything below edits the selection, so there has to be one.
+      if (selectedIds.length === 0) return;
+
+      if (isDigit) {
+        e.preventDefault();
+        const run = fretRun.current;
+        // The whole typed number is one undo step, however many digits it took.
+        if (!run) beginEditGesture();
+        else clearTimeout(run.timer);
+        const digits = (run?.digits ?? '') + e.key;
+        const before = getEditingPattern();
+        // Out-of-range numbers clamp rather than being rejected, so "9" then "9"
+        // lands on the top fret instead of silently doing nothing. The trade is
+        // that "3" then "0" is fret 24, not fret 3 followed by fret 0 — waiting
+        // out the window is how you type two single-digit frets in a row.
+        setSelectedFret(Number(digits));
+        // The lib returns the pattern untouched when an op changes nothing, so
+        // identity is enough to tell a real edit from a retyped fret.
+        const changed = (run?.changed ?? false) || getEditingPattern() !== before;
+        if (digits.length === 2) {
+          // The top fret is two digits, so a second one completes the number —
+          // commit now rather than making the user wait out the window.
+          fretRun.current = null;
+          endEditGesture(changed);
+          return;
+        }
+        fretRun.current = {
+          digits,
+          changed,
+          timer: window.setTimeout(commitFretRun, FRET_TYPING_MS),
+        };
+        return;
+      }
+
+      // Shift is ours (the octave modifier); Cmd/Ctrl/Alt+arrow belong to the OS
+      // and the browser — scroll-to-top, history navigation — so they fall
+      // through uncancelled.
+      if (!mod && !e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        // Without this the well scrolls and focus walks off to the next control.
+        e.preventDefault();
+        // A held key repeats ~30 times a second. Bracketing the repeats keeps
+        // the whole hold to the one undo step the first press pushed.
+        if (e.repeat && !nudgeRun.current) {
+          nudgeRun.current = true;
+          beginEditGesture();
+        }
+        // Shift is an octave — 12 frets is the same pitch on the same string.
+        nudgeSelectedFret((e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 12 : 1));
       }
     };
+    // Releasing the key is the normal end of a repeat run; `endKeyRuns` covers
+    // the cases where no keyup ever arrives.
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') endNudgeRun();
+    };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('pointerdown', endKeyRuns, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('pointerdown', endKeyRuns, true);
+    };
   }, [selectedIds]);
 
   // A pointer gesture parks its listeners on `window` so it keeps tracking once
   // the pointer leaves the lane — which also means nothing else would tear them
   // down if this unmounts mid-drag, leaving the undo stack stuck inside an
-  // open gesture and every later edit unrecorded.
-  useEffect(() => () => abortGesture.current?.(), []);
+  // open gesture and every later edit unrecorded. A half-typed fret or a held
+  // arrow leaves the same gesture open, so those close here too.
+  useEffect(
+    () => () => {
+      abortGesture.current?.();
+      if (nudgeRun.current) {
+        nudgeRun.current = false;
+        endEditGesture(false);
+      }
+      const run = fretRun.current;
+      if (!run) return;
+      clearTimeout(run.timer);
+      fretRun.current = null;
+      endEditGesture(run.changed);
+    },
+    [],
+  );
 
   if (!pattern) return null;
 
@@ -317,12 +502,19 @@ export function Timeline() {
     // One undo step for the whole drag, not one per pointermove.
     beginEditGesture();
 
-    const onMove = (ev: PointerEvent) => {
-      if (!moved && Math.abs(ev.clientX - startX) < DRAG_THRESHOLD && Math.abs(ev.clientY - startY) < DRAG_THRESHOLD) return;
-      moved = true;
+    /**
+     * The drag, re-derived from the last pointer position. Everything here
+     * reads the pointer's place in *content* space via `tickAt`, never a delta,
+     * which is what lets edge auto-scroll call this again on a pointer that
+     * hasn't moved: the lanes have slid under it, so the same clientX is a
+     * later tick. A delta-based version would compute zero and stick.
+     */
+    let last: { x: number; y: number } | null = null;
+    const apply = () => {
+      if (!last) return;
 
       if (mode === 'resize') {
-        const end = snapToGrid(tickAt(ev.clientX));
+        const end = snapToGrid(tickAt(last.x));
         // The lib's floor is one tick, so a shared delta dragged past the left
         // edge would collapse the group into invisible slivers. Clamping the
         // delta against the shortest member keeps every note at least a
@@ -333,11 +525,21 @@ export function Timeline() {
         return;
       }
 
-      const tick = Math.max(0, snapToGrid(tickAt(ev.clientX) - grabOffset));
+      const tick = Math.max(0, snapToGrid(tickAt(last.x) - grabOffset));
       // Rows descend the screen but string indices ascend with pitch, so
       // dragging down moves to a lower-numbered string.
-      const rows = Math.round((ev.clientY - startY) / rowHeight);
+      const rows = Math.round((last.y - startY) / rowHeight);
       moveNotesBy(dragFrom, tick - event.startTick, -rows, STRING_LABELS.length);
+    };
+
+    const onMove = (ev: PointerEvent) => {
+      if (!moved && Math.abs(ev.clientX - startX) < DRAG_THRESHOLD && Math.abs(ev.clientY - startY) < DRAG_THRESHOLD) return;
+      moved = true;
+      last = { x: ev.clientX, y: ev.clientY };
+      apply();
+      // Only once the press has become a drag: a click held over the edge is
+      // not a request to go anywhere.
+      edgeScroll.track(ev.clientX, apply);
     };
     // pointercancel closes the gesture too — the browser can take the pointer
     // away (touch scroll, an OS gesture) and no pointerup ever arrives.
@@ -345,6 +547,7 @@ export function Timeline() {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', finish);
       window.removeEventListener('pointercancel', finish);
+      edgeScroll.end();
       abortGesture.current = null;
       endEditGesture(moved); // a click that never moved isn't an edit
     };
@@ -374,9 +577,79 @@ export function Timeline() {
     if (e.target !== e.currentTarget) return;
     const originX = e.clientX;
     const originY = e.clientY;
+    // The band's anchor is kept in content space, for the same reason `tickAt`
+    // works that way: under an edge auto-scroll the lanes slide but the corner
+    // the user started from stays on the note they started from, so the band
+    // grows instead of sliding along with the view.
+    const originContentX = originX - (lanesRef.current?.getBoundingClientRect().left ?? 0);
     const additive = e.shiftKey;
     const before = additive ? selectedIds : [];
     let marqueeing = false;
+
+    /** The band and its selection, re-derived from the last pointer position. */
+    let last: { x: number; y: number } | null = null;
+    /** The previous frame's hits, to tell a changed selection from a repeat.
+     *  Null until the first pass, which always has to run. */
+    let lastHits: string | null = null;
+    const apply = () => {
+      if (!last) return;
+      const laneLeft = lanesRef.current?.getBoundingClientRect().left ?? 0;
+      const pointerContentX = last.x - laneLeft;
+      const bandLeft = Math.min(originContentX, pointerContentX);
+      const bandRight = Math.max(originContentX, pointerContentX);
+      const top = Math.min(originY, last.y);
+      const bottom = Math.max(originY, last.y);
+
+      // Vertically the well never scrolls, so a band dragged up into the toolbar
+      // or down past the lanes would otherwise catch notes the user can't see.
+      // Horizontally the *hit test* is deliberately not clipped: content
+      // scrolled out of view is exactly what a band stretched by auto-scroll is
+      // reaching for.
+      const well = scrollerRef.current?.getBoundingClientRect();
+      const hitTop = Math.max(top, well?.top ?? top);
+      const hitBottom = Math.min(bottom, well?.bottom ?? bottom);
+
+      // The drawn band is another matter: it lives in viewport coordinates, and
+      // once auto-scroll has run a few thousand pixels the content-space band
+      // starts far off-screen left — painting a slab across the string labels
+      // and everything else beside the well. Clipping the paint alone keeps the
+      // band over the region it is actually selecting.
+      const drawLeft = Math.max(laneLeft + bandLeft, well?.left ?? -Infinity);
+      const drawRight = Math.max(
+        drawLeft,
+        Math.min(laneLeft + bandRight, well?.right ?? Infinity),
+      );
+      setMarquee({ left: drawLeft, right: drawRight, top, bottom });
+
+      // Hit-test against what the notes report rather than recomputing geometry
+      // — they already know where they are — but compare horizontally in
+      // content space, which is the one frame both ends of the band share once
+      // the view has moved under it.
+      const hits =
+        hitTop > hitBottom
+          ? []
+          : [...document.querySelectorAll<HTMLElement>('[data-note]')]
+              .filter((el) => {
+                const box = el.getBoundingClientRect();
+                return (
+                  box.right - laneLeft >= bandLeft &&
+                  box.left - laneLeft <= bandRight &&
+                  box.bottom >= hitTop &&
+                  box.top <= hitBottom
+                );
+              })
+              .map((el) => el.dataset.note!);
+
+      // Auto-scroll calls this every frame, and the lib's `selectEvents` returns
+      // a fresh array whether or not the ids changed — which re-renders the
+      // whole timeline, which makes the next frame re-measure every note. A
+      // pointer parked in the edge zone over empty space would pay that 60x a
+      // second for a selection nobody touched.
+      const key = hits.join(' ');
+      if (key === lastHits) return;
+      lastHits = key;
+      selectNotes([...new Set([...before, ...hits])]);
+    };
 
     const onMove = (ev: PointerEvent) => {
       if (
@@ -387,49 +660,9 @@ export function Timeline() {
         return;
       }
       marqueeing = true;
-      const rect = {
-        left: Math.min(originX, ev.clientX),
-        right: Math.max(originX, ev.clientX),
-        top: Math.min(originY, ev.clientY),
-        bottom: Math.max(originY, ev.clientY),
-      };
-      setMarquee(rect);
-
-      // Notes scrolled out of the well keep their laid-out boxes, which can land
-      // under the string labels or the surrounding chrome — hit-testing the raw
-      // band there would select notes the user can't see. Clip to what the well
-      // is actually showing.
-      const well = scrollerRef.current?.getBoundingClientRect();
-      const hit = well
-        ? {
-            left: Math.max(rect.left, well.left),
-            right: Math.min(rect.right, well.right),
-            top: Math.max(rect.top, well.top),
-            bottom: Math.min(rect.bottom, well.bottom),
-          }
-        : rect;
-
-      // Clipping can empty the band entirely (dragged off into the chrome); an
-      // inverted rect must select nothing rather than whatever straddles it.
-      const overlapsWell = hit.left <= hit.right && hit.top <= hit.bottom;
-
-      // Hit-test against what's actually on screen rather than recomputing
-      // geometry — the notes already know where they are.
-      const hits = !overlapsWell
-        ? []
-        : [...document.querySelectorAll<HTMLElement>('[data-note]')]
-            .filter((el) => {
-              const box = el.getBoundingClientRect();
-              return (
-                box.right >= hit.left &&
-                box.left <= hit.right &&
-                box.bottom >= hit.top &&
-                box.top <= hit.bottom
-              );
-            })
-            .map((el) => el.dataset.note!);
-
-      selectNotes([...new Set([...before, ...hits])]);
+      last = { x: ev.clientX, y: ev.clientY };
+      apply();
+      edgeScroll.track(ev.clientX, apply);
     };
 
     // Only a real pointerup stamps or keeps a selection; pointercancel and an
@@ -438,6 +671,7 @@ export function Timeline() {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', stopTracking);
+      edgeScroll.end();
       abortGesture.current = null;
       setMarquee(null);
     };
@@ -606,7 +840,14 @@ export function Timeline() {
           ))}
         </div>
 
-        <div ref={scrollerRef} className="well overflow-x-auto overflow-y-hidden">
+        {/* `data-testid` is a test seam: the scroller has no role or name, and
+            handing it a real geometry is the only way jsdom can exercise the
+            edge auto-scroll at all. */}
+        <div
+          ref={scrollerRef}
+          data-testid="well"
+          className="well overflow-x-auto overflow-y-hidden"
+        >
           <div className="relative" style={{ width }}>
             <div className="relative" style={{ height: RULER_H }}>
               {lines.map((line) => (
@@ -646,7 +887,10 @@ export function Timeline() {
                           data-note={event.id}
                           data-selected={selected || undefined}
                           data-active={active || undefined}
-                          title={`Fret ${event.fret} · ${pitchName(stringIndex, event.fret)}`}
+                          title={
+                            `Fret ${event.fret} · ${pitchName(stringIndex, event.fret)}` +
+                            (event.dynamic ? ` · ${event.dynamic}` : '')
+                          }
                           onPointerDown={startDrag(event, 'move')}
                           style={{
                             left: tickToPx(event.startTick, pxPerBeat),
@@ -654,7 +898,14 @@ export function Timeline() {
                             top: noteTop,
                             height: noteHeight,
                           }}
-                          className={`pressable absolute flex cursor-grab flex-col items-center justify-center gap-px rounded-[5px] font-mono text-[10.5px] font-bold select-none ${
+                          // `touch-none` because a horizontal drag on a note
+                          // would otherwise be claimed by the well's native pan,
+                          // which fires pointercancel and kills the gesture
+                          // before it ever reaches an edge — preventDefault on
+                          // pointerdown cannot stop that, only the CSS can. Empty
+                          // lane space keeps its pan: that is how a touch user
+                          // scrolls (at the cost of a touch marquee).
+                          className={`pressable touch-none absolute flex cursor-grab flex-col items-center justify-center gap-px rounded-[5px] font-mono text-[10.5px] font-bold select-none ${
                             selected
                               ? 'border border-brass bg-linear-to-b from-[#4a4433] to-[#3a3529] text-brass-hi shadow-[0_0_0_1px_var(--color-brass)]'
                               : 'control'

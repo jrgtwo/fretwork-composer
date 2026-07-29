@@ -18,7 +18,16 @@ vi.mock('../src/audio/playbackService', () => ({
   setTempo: vi.fn(),
 }));
 
+// The follow-scroll loop's only observable act under jsdom is this read, so it
+// is replaced with a countable one. Everything else in the module is kept.
+vi.mock('../src/audio/transportClock', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/audio/transportClock')>()),
+  readTransportTicks: vi.fn(() => 0),
+}));
+
 import { Timeline } from '../src/timeline/Timeline';
+import { readTransportTicks } from '../src/audio/transportClock';
+import { installFrameClock } from './frameClock';
 import {
   play,
   stop,
@@ -219,5 +228,66 @@ describe('Timeline active notes', () => {
 
       expect(getEditingPattern()!.loop).toBe(!before);
     });
+  });
+});
+
+/**
+ * Two rAF loops want the same `scrollLeft`: the playhead follow and the drag's
+ * edge auto-scroll. Left to fight, they trade the view back and forth every few
+ * frames and the note lands wherever the tug-of-war left it — so the hand on the
+ * pointer wins, for the whole gesture rather than only at the edges.
+ *
+ * The follow loop reads the transport once a frame and does nothing else that
+ * jsdom can see (its writes go to a 0x0 element), so that read stands in for
+ * "the loop is running".
+ */
+describe('Timeline follow-scroll versus a drag', () => {
+  const reads = () => vi.mocked(readTransportTicks).mock.calls.length;
+
+  it('hands the view to a drag and takes it back on release', async () => {
+    const user = userEvent.setup();
+    // Installed before the render that starts the loop: a frame armed by the
+    // real rAF would fire on its own timer, outside the test's control.
+    const frames = installFrameClock();
+    vi.mocked(useIsPlaying).mockReturnValue(true);
+    render(<Timeline />);
+    const id = events()[0].id;
+
+    frames.step();
+    const following = reads();
+    expect(following).toBeGreaterThan(0);
+
+    await user.pointer([
+      { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 0 } },
+      { coords: { clientX: 60, clientY: 0 } },
+    ]);
+    frames.step();
+    frames.step();
+
+    expect(reads()).toBe(following);
+
+    await user.pointer({ keys: '[/MouseLeft]' });
+    frames.step();
+
+    // And it catches up rather than resuming where it left off — the follow
+    // jumps whenever the head is behind the view.
+    expect(reads()).toBeGreaterThan(following);
+  });
+
+  it('keeps following through a click that never became a drag', async () => {
+    const user = userEvent.setup();
+    const frames = installFrameClock();
+    vi.mocked(useIsPlaying).mockReturnValue(true);
+    render(<Timeline />);
+    const id = events()[0].id;
+
+    frames.step();
+    const following = reads();
+
+    // Selecting a note during playback is not a request to stop the view.
+    await user.pointer({ target: noteEl(id), keys: '[MouseLeft]' });
+    frames.step();
+
+    expect(reads()).toBeGreaterThan(following);
   });
 });

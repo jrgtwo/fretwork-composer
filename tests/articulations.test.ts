@@ -140,6 +140,12 @@ describe('ties', () => {
     ]);
   });
 
+  // A dynamic on the follower is discarded with everything else, so the popup
+  // has to warn about it rather than let the user set a mark that never sounds.
+  it('reports a dynamic the follower would lose', () => {
+    expect(articulationsLostToTie({ dynamic: 'ppp' })).toEqual(['dynamic']);
+  });
+
   it('reports nothing for a plain follower', () => {
     expect(articulationsLostToTie({})).toEqual([]);
     expect(articulationsLostToTie(undefined)).toEqual([]);

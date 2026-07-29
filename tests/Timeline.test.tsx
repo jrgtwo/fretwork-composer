@@ -1,14 +1,17 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PPQ } from '@fretwork/lib';
 import { Timeline } from '../src/timeline/Timeline';
+import { edgeScrollSpeed, stepFor, MIN_SPEED } from '../src/timeline/useEdgeAutoScroll';
+import { installFrameClock } from './frameClock';
 import {
   clearHistory,
   getEditingPattern,
   getSelectedIds,
   openBlankPattern,
   stampNote,
+  undo,
 } from '../src/patterns/patternService';
 
 /**
@@ -36,12 +39,51 @@ const events = () => getEditingPattern()!.events;
 const BEAT_PX = 48;
 const ROW_PX = 22;
 
+/** The rigged well: a 400px window onto 1200px of content. */
+const WELL_W = 400;
+const CONTENT_W = 1200;
+const MAX_SCROLL = CONTENT_W - WELL_W;
+
+/**
+ * Give the timeline a geometry, since jsdom measures everything as 0x0 and the
+ * edge auto-scroll has nothing to be near without one. Call after `render`.
+ *
+ * `scrollLeft` is a plain stored property in jsdom, so it only needs clamping to
+ * behave like a scroller; the lanes and the notes then report themselves shifted
+ * by it, exactly as the real ones would.
+ */
+function rigScroller() {
+  const scroller = screen.getByTestId('well');
+  const lanes = document.querySelector<HTMLElement>('.lanes')!;
+  let scrollLeft = 0;
+  Object.defineProperty(scroller, 'scrollLeft', {
+    configurable: true,
+    get: () => scrollLeft,
+    // The browser stops at the end of the content; jsdom would happily store
+    // 10_000, and the loop's end-of-travel branch would never be reached.
+    set: (v: number) => {
+      scrollLeft = Math.max(0, Math.min(MAX_SCROLL, v));
+    },
+  });
+  scroller.getBoundingClientRect = () => new DOMRect(0, 0, WELL_W, 120);
+  lanes.getBoundingClientRect = () => new DOMRect(-scrollLeft, 0, CONTENT_W, 120);
+  for (const el of document.querySelectorAll<HTMLElement>('[data-note]')) {
+    // Read at call time: a dragged note's `left` changes under it.
+    el.getBoundingClientRect = () => new DOMRect(parseFloat(el.style.left) - scrollLeft, 0, 14, 20);
+  }
+  return { ...installFrameClock(), scrollLeft: () => scrollLeft };
+}
+
 async function selectBoth(user: ReturnType<typeof userEvent.setup>, ids: string[]) {
   await user.pointer({ target: noteEl(ids[0]), keys: '[MouseLeft]' });
   await user.keyboard('{Shift>}');
   await user.pointer({ target: noteEl(ids[1]), keys: '[MouseLeft]' });
   await user.keyboard('{/Shift}');
 }
+
+const fretOf = (id: string) => events().find((e) => e.id === id)!.fret;
+/** Comfortably past the 800ms fret-typing window in Timeline.tsx. */
+const PAST_WINDOW_MS = 900;
 
 beforeEach(() => seedTwoNotes());
 
@@ -465,5 +507,802 @@ describe('Timeline', () => {
 
       expect(note.durationTicks).toBe(PPQ);
     });
+  });
+
+  describe('keyboard fret entry', () => {
+    const selectFirst = async (user: ReturnType<typeof userEvent.setup>) => {
+      const target = events()[0];
+      await user.pointer({ target: noteEl(target.id), keys: '[MouseLeft]' });
+      return target.id;
+    };
+
+    it('sets the fret from a single typed digit', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+
+      await user.keyboard('7');
+
+      expect(fretOf(id)).toBe(7);
+    });
+
+    it('accumulates two digits typed in quick succession', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+
+      await user.keyboard('12');
+
+      expect(fretOf(id)).toBe(12);
+    });
+
+    // The whole point of the window: without it every fret above 9 would be
+    // unreachable, and with no end to it consecutive frets would run together.
+    it('starts a new number once the commit window has passed', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+
+      const before = fretOf(id);
+      await user.keyboard('1');
+      expect(fretOf(id)).toBe(1);
+
+      // A real wait, not a fake clock: the timeline's playback engine keeps its
+      // own timers running and stalls under a faked one. It is the only sleep in
+      // the file, and only this behaviour needs one.
+      await act(() => new Promise((resolve) => setTimeout(resolve, PAST_WINDOW_MS)));
+      await user.keyboard('2');
+
+      expect(fretOf(id)).toBe(2);
+
+      // The other half of what the window is for: two numbers, two undo steps.
+      await user.click(screen.getByRole('button', { name: 'Undo' }));
+      expect(fretOf(id)).toBe(1);
+      await user.click(screen.getByRole('button', { name: 'Undo' }));
+      expect(fretOf(id)).toBe(before);
+    });
+
+    it('starts a fresh number once two digits complete one', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+
+      // "12" is a whole fret number, so the third digit can only be a new one —
+      // no waiting out the window in between.
+      await user.keyboard('123');
+
+      expect(fretOf(id)).toBe(3);
+    });
+
+    it('clamps a typed fret to the top of the neck', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+
+      await user.keyboard('99');
+
+      expect(fretOf(id)).toBe(24);
+    });
+
+    it('types the open string', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+
+      await user.keyboard('0');
+
+      expect(fretOf(id)).toBe(0);
+    });
+
+    // Any non-digit closes the number, or a fret would go on accumulating
+    // across the edits made between digits.
+    it('ends a number in progress when another key is pressed', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+      const before = fretOf(id);
+
+      await user.keyboard('1');
+      await user.keyboard('{ArrowUp}'); // 1 → 2
+      await user.keyboard('3');
+
+      // 3, not 13: the arrow ended the number rather than being typed through.
+      expect(fretOf(id)).toBe(3);
+
+      // Three keystrokes, three undo steps — the nudge is not swallowed by the
+      // gesture the first digit opened.
+      const undoButton = screen.getByRole('button', { name: 'Undo' });
+      await user.click(undoButton);
+      expect(fretOf(id)).toBe(2);
+      await user.click(undoButton);
+      expect(fretOf(id)).toBe(1);
+      await user.click(undoButton);
+      expect(fretOf(id)).toBe(before);
+    });
+
+    // The lib returns the pattern untouched when an op changes nothing, which is
+    // how the run tells a real edit from a retyped fret. Escape just ends the
+    // number — nothing else handles it — so this needs no wait.
+    it('records nothing when the typed fret is the one already there', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+
+      await user.keyboard(`${fretOf(id)}{Escape}`);
+
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+    });
+
+    it('records a step when the typed fret is a different one', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+
+      await user.keyboard(`${fretOf(id) + 1}{Escape}`);
+
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeEnabled();
+    });
+
+    // A pointer edit landing inside the typing window used to begin a gesture
+    // inside the typing one, and history keeps a single snapshot — so one of the
+    // two edits disappeared from the undo stack.
+    it('keeps a drag started mid-number as its own undo step', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+      const before = fretOf(id);
+      const tick = events().find((e) => e.id === id)!.startTick;
+
+      await user.keyboard('1');
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 0, clientY: 0 } },
+        { coords: { clientX: BEAT_PX, clientY: 0 } },
+        { keys: '[/MouseLeft]' },
+      ]);
+      expect(events().find((e) => e.id === id)!.startTick).toBe(tick + PPQ);
+
+      const undoButton = screen.getByRole('button', { name: 'Undo' });
+      await user.click(undoButton);
+      expect(events().find((e) => e.id === id)!.startTick).toBe(tick);
+      expect(fretOf(id)).toBe(1);
+
+      await user.click(undoButton);
+      expect(fretOf(id)).toBe(before);
+    });
+
+    // The nastier half of the same bug: a number that changed nothing pushes no
+    // snapshot of its own, so an edit made through the popup while it was open
+    // went completely unrecorded.
+    it('keeps a popup edit made mid-number as its own undo step', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+      const before = fretOf(id);
+
+      await user.keyboard(`${before}`); // retyped: changes nothing
+      await user.click(screen.getByRole('button', { name: 'Note options' }));
+      await user.click(screen.getByRole('button', { name: 'Increase fret' }));
+      expect(fretOf(id)).toBe(before + 1);
+
+      await user.click(screen.getByRole('button', { name: 'Undo' }));
+      expect(fretOf(id)).toBe(before);
+    });
+
+    it('does not carry digits across to a newly selected note', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const [first, second] = events();
+
+      await user.pointer({ target: noteEl(first.id), keys: '[MouseLeft]' });
+      await user.keyboard('1');
+      await user.pointer({ target: noteEl(second.id), keys: '[MouseLeft]' });
+      await user.keyboard('2');
+
+      // 2, not 12 — and the first note keeps what was typed at it.
+      expect(fretOf(second.id)).toBe(2);
+      expect(fretOf(first.id)).toBe(1);
+    });
+
+    // The gesture a half-typed number holds open would otherwise outlive the
+    // component, suppressing the undo snapshot of every later edit.
+    it('closes a half-typed number when the timeline unmounts', async () => {
+      const user = userEvent.setup();
+      const { unmount } = render(<Timeline />);
+      const id = await selectFirst(user);
+      const before = fretOf(id);
+
+      await user.keyboard('1');
+      unmount();
+
+      undo();
+      expect(fretOf(id)).toBe(before);
+
+      // ...and history still records, which it would not if the gesture were
+      // still open.
+      const count = events().length;
+      stampNote({ stringIndex: 0, fret: 0, tick: 0 });
+      expect(events()).toHaveLength(count + 1);
+      undo();
+      expect(events()).toHaveLength(count);
+    });
+
+    it('leaves the pattern alone when a digit arrives with nothing selected', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const before = events().map((e) => e.fret);
+
+      await user.keyboard('7{ArrowUp}');
+
+      expect(events().map((e) => e.fret)).toEqual(before);
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+    });
+
+    // ⚠ Same jsdom limit as the arrow test below: type-ahead is unobservable
+    // here, so what's asserted is that the event was cancelled.
+    it('cancels a digit so it can not reach the browser', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      await selectFirst(user);
+
+      expect(fireEvent.keyDown(document.body, { key: '1' })).toBe(false);
+    });
+
+    it('types onto every note in a multi-selection', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      await selectBoth(user, ids);
+
+      await user.keyboard('10');
+
+      expect(events().map((e) => e.fret)).toEqual([10, 10]);
+    });
+
+    it('collapses a typed number into one undo step', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      const before = events().map((e) => e.fret);
+      await selectBoth(user, ids);
+
+      await user.keyboard('12');
+      expect(events().map((e) => e.fret)).toEqual([12, 12]);
+
+      // One click, not one per digit or one per selected note.
+      await user.click(screen.getByRole('button', { name: 'Undo' }));
+
+      expect(events().map((e) => e.fret)).toEqual(before);
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+    });
+
+    // Focus moving into a field is not a pointer press, so nothing else would
+    // close the run — and while it is open every other edit's undo snapshot is
+    // suppressed.
+    it('ends a number when a keystroke goes into a field instead', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+      const before = fretOf(id);
+
+      await user.keyboard('1');
+      act(() => screen.getByRole('combobox', { name: 'Grid resolution' }).focus());
+      await user.keyboard('{ArrowDown}');
+
+      // Called directly: a click on the Undo button would close the run itself.
+      undo();
+      expect(fretOf(id)).toBe(before);
+    });
+
+    it('ignores digits typed into a field', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const id = await selectFirst(user);
+      const before = fretOf(id);
+
+      await user.click(screen.getByRole('combobox', { name: 'Grid resolution' }));
+      await user.keyboard('7{ArrowUp}');
+
+      expect(fretOf(id)).toBe(before);
+    });
+  });
+
+  describe('arrow-key nudge', () => {
+    it('moves the selected note a semitone', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const target = events()[0];
+      await user.pointer({ target: noteEl(target.id), keys: '[MouseLeft]' });
+
+      await user.keyboard('{ArrowUp}');
+      expect(fretOf(target.id)).toBe(target.fret + 1);
+
+      await user.keyboard('{ArrowDown}{ArrowDown}');
+      expect(fretOf(target.id)).toBe(target.fret - 1);
+    });
+
+    it('moves an octave with shift held', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      const before = events().map((e) => e.fret);
+      await selectBoth(user, ids);
+
+      await user.keyboard('{Shift>}{ArrowUp}{/Shift}');
+
+      expect(events().map((e) => e.fret)).toEqual(before.map((f) => f + 12));
+    });
+
+    it('nudges every note in a multi-selection', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      const before = events().map((e) => e.fret);
+      await selectBoth(user, ids);
+
+      await user.keyboard('{ArrowUp}');
+
+      expect(events().map((e) => e.fret)).toEqual(before.map((f) => f + 1));
+    });
+
+    // The lib floors each note at 0 on its own, which would squash a spread
+    // selection onto the nut. The group has to keep its shape.
+    it('stops the whole selection at the nut without flattening it', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      await selectBoth(user, ids);
+
+      // Seeded at frets 5 and 7, so an octave down is off the bottom.
+      await user.keyboard('{Shift>}{ArrowDown}{/Shift}');
+
+      expect(events().map((e) => e.fret)).toEqual([0, 2]);
+    });
+
+    // The mirror of the nut clamp. MAX_FRET is the app's rule, not the lib's —
+    // the lib would happily push these to fret 29 and 31.
+    it('stops the whole selection at the top of the neck without flattening it', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      await selectBoth(user, ids);
+
+      // Seeded at 5 and 7: one octave up is 17 and 19, two is off the top.
+      await user.keyboard('{Shift>}{ArrowUp}{ArrowUp}{/Shift}');
+
+      expect(events().map((e) => e.fret)).toEqual([22, 24]);
+    });
+
+    it('collapses a nudge across a multi-selection into one undo step', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const ids = events().map((e) => e.id);
+      const before = events().map((e) => e.fret);
+      await selectBoth(user, ids);
+
+      await user.keyboard('{ArrowUp}');
+      await user.click(screen.getByRole('button', { name: 'Undo' }));
+
+      expect(events().map((e) => e.fret)).toEqual(before);
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+    });
+
+    // ⚠ jsdom neither scrolls nor moves focus on an arrow key, so "the pane
+    // didn't scroll" is unobservable here. Cancelling the event is what
+    // prevents both in a real browser, so that is what's asserted —
+    // `fireEvent` returns false when the handler called preventDefault.
+    it('cancels the arrow key so it can not scroll the pane', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      await user.pointer({ target: noteEl(events()[0].id), keys: '[MouseLeft]' });
+
+      expect(fireEvent.keyDown(document.body, { key: 'ArrowUp' })).toBe(false);
+    });
+
+    // Cmd/Ctrl+arrow is scroll-to-top and history navigation; nudging on it
+    // would steal the shortcut *and* cancel it.
+    it('leaves a modified arrow to the browser', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const target = events()[0];
+      await user.pointer({ target: noteEl(target.id), keys: '[MouseLeft]' });
+
+      expect(fireEvent.keyDown(document.body, { key: 'ArrowUp', ctrlKey: true })).toBe(true);
+      expect(fretOf(target.id)).toBe(target.fret);
+    });
+
+    // The OS fires a keydown every few milliseconds while a key is held. One
+    // undo step per repeat would bury the state the run started from.
+    it('folds a held arrow key into a single undo step', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const target = events()[0];
+      await user.pointer({ target: noteEl(target.id), keys: '[MouseLeft]' });
+
+      // userEvent has no notion of auto-repeat, and `repeat` is exactly what
+      // this collapses, so the run is dispatched directly.
+      fireEvent.keyDown(document.body, { key: 'ArrowUp' });
+      for (let i = 0; i < 4; i += 1) {
+        fireEvent.keyDown(document.body, { key: 'ArrowUp', repeat: true });
+      }
+      fireEvent.keyUp(document.body, { key: 'ArrowUp' });
+      expect(fretOf(target.id)).toBe(target.fret + 5);
+
+      await user.click(screen.getByRole('button', { name: 'Undo' }));
+
+      expect(fretOf(target.id)).toBe(target.fret);
+      expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+    });
+
+    it('ignores arrows while a field has focus', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const target = events()[0];
+      await user.pointer({ target: noteEl(target.id), keys: '[MouseLeft]' });
+
+      await user.click(screen.getByRole('combobox', { name: 'Grid resolution' }));
+      await user.keyboard('{ArrowUp}');
+
+      expect(fretOf(target.id)).toBe(target.fret);
+    });
+  });
+
+  /**
+   * jsdom has no layout, so the auto-scroll has nothing to be near: every box is
+   * 0x0 and `edgeScrollSpeed` correctly refuses to move. `rigScroller` hands the
+   * loop a geometry instead — a 400px window onto 1200px of content — which is
+   * enough to observe all of it: `scrollLeft` is a plain stored property here,
+   * and the lanes' box is what `tickAt` measures against, so sliding that box
+   * left by `scrollLeft` is precisely what a real scroll does to it.
+   *
+   * ⚠ Browser-only, and deliberately not faked: the real engine deciding those
+   * numbers — actual layout, the browser's own scroll clamping, and native touch
+   * panning (which `touch-none` on a note exists to prevent).
+   */
+  describe('drag-edge auto-scroll', () => {
+    const tickOf = (id: string) => events().find((e) => e.id === id)!.startTick;
+    /** Just inside the right-hand edge zone of the rigged well. */
+    const AT_EDGE = WELL_W - 5;
+
+    it('scrolls the view while the pointer holds the edge', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const rig = rigScroller();
+      const id = events()[0].id;
+
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 0 } },
+        { coords: { clientX: AT_EDGE, clientY: 0 } },
+      ]);
+      // The pointer never moves again: everything below is the loop's doing.
+      rig.step(50);
+      rig.step(50);
+
+      expect(rig.scrollLeft()).toBeGreaterThan(0);
+
+      await user.pointer({ keys: '[/MouseLeft]' });
+    });
+
+    it('keeps the dragged note under a pointer that is standing still', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const rig = rigScroller();
+      const id = events()[0].id;
+
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 0 } },
+        { coords: { clientX: AT_EDGE, clientY: 0 } },
+      ]);
+      const held = tickOf(id);
+      rig.step(50);
+      rig.step(50);
+
+      // The drag re-derives itself from the pointer's position in *content*
+      // space, so the lanes sliding underneath a stationary pointer is a later
+      // tick. A delta-based drag would compute zero here and stick.
+      expect(tickOf(id)).toBeGreaterThan(held);
+
+      await user.pointer({ keys: '[/MouseLeft]' });
+    });
+
+    it('grows the marquee onto notes the view had not reached', async () => {
+      const user = userEvent.setup();
+      // Twelve beats in — 576px at the default zoom, well past the 400px well.
+      stampNote({ stringIndex: 0, fret: 3, tick: PPQ * 12, durationTicks: PPQ / 2 });
+      clearHistory();
+      const far = events().find((e) => e.startTick === PPQ * 12)!.id;
+      render(<Timeline />);
+      const rig = rigScroller();
+      const lane = document.querySelector<HTMLElement>('[data-lane="E"]')!;
+
+      await user.pointer([
+        { target: lane, keys: '[MouseLeft>]', coords: { clientX: 5, clientY: 10 } },
+        { target: lane, coords: { clientX: AT_EDGE, clientY: 50 } },
+      ]);
+      expect(getSelectedIds()).not.toContain(far);
+
+      for (let i = 0; i < 6; i += 1) rig.step(50);
+
+      // The band is anchored in content space, so it keeps growing rather than
+      // sliding along with the view — and it hit-tests what it has grown over.
+      expect(rig.scrollLeft()).toBeGreaterThan(0);
+      expect(getSelectedIds()).toContain(far);
+
+      await user.pointer({ keys: '[/MouseLeft]' });
+    });
+
+    it('stops when the pointer comes back inside', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const rig = rigScroller();
+      const id = events()[0].id;
+
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 0 } },
+        { coords: { clientX: AT_EDGE, clientY: 0 } },
+      ]);
+      rig.step(50);
+      await user.pointer({ coords: { clientX: 200, clientY: 0 } });
+
+      const at = rig.scrollLeft();
+      rig.step(50);
+      rig.step(50);
+
+      expect(at).toBeGreaterThan(0); // it really had been moving
+      expect(rig.scrollLeft()).toBe(at);
+      expect(rig.scheduled()).toBe(0); // and the loop isn't idling either
+
+      await user.pointer({ keys: '[/MouseLeft]' });
+    });
+
+    it('stops when the pointer is released', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const rig = rigScroller();
+      const id = events()[0].id;
+
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 0 } },
+        { coords: { clientX: AT_EDGE, clientY: 0 } },
+      ]);
+      rig.step(50);
+      await user.pointer({ keys: '[/MouseLeft]' });
+
+      const at = rig.scrollLeft();
+      rig.step(50);
+
+      expect(rig.scheduled()).toBe(0);
+      expect(rig.scrollLeft()).toBe(at);
+    });
+
+    // The browser can take the pointer away without ever sending pointerup — a
+    // touch handed to a native scroll, an OS gesture — and the view would
+    // otherwise keep travelling with nothing driving it.
+    it('stops when the pointer is taken away', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const rig = rigScroller();
+      const id = events()[0].id;
+
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 0 } },
+        { coords: { clientX: AT_EDGE, clientY: 0 } },
+      ]);
+      rig.step(50);
+      fireEvent(window, new Event('pointercancel'));
+
+      const at = rig.scrollLeft();
+      rig.step(50);
+
+      expect(rig.scheduled()).toBe(0);
+      expect(rig.scrollLeft()).toBe(at);
+    });
+
+    it('leaves the view alone for a press that never became a drag', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const rig = rigScroller();
+      const id = events()[0].id;
+
+      // Held inside the edge zone the whole time, but never moved past the slop.
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: AT_EDGE, clientY: 0 } },
+        { coords: { clientX: AT_EDGE + 1, clientY: 0 } },
+      ]);
+      rig.step(50);
+      rig.step(50);
+
+      expect(rig.scrollLeft()).toBe(0);
+      expect(rig.scheduled()).toBe(0);
+
+      await user.pointer({ keys: '[/MouseLeft]' });
+    });
+
+    // A drag through the middle of the well pays a forced layout every frame for
+    // a speed that is always zero, on top of whatever the drag itself costs.
+    it('runs no loop at all while the pointer is clear of both edges', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const rig = rigScroller();
+      const id = events()[0].id;
+
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 100, clientY: 0 } },
+        { coords: { clientX: 200, clientY: 0 } },
+      ]);
+
+      expect(rig.scheduled()).toBe(0);
+
+      await user.pointer({ keys: '[/MouseLeft]' });
+    });
+
+    // Content ends where the pattern does — it is bar-rounded to fit its notes —
+    // so a drag held at the edge runs to the last bar and settles there. Growing
+    // the pattern by dragging past its end is a separate feature; see
+    // docs/FOLLOW-UPS.md.
+    it('comes to rest at the end of the content', async () => {
+      const user = userEvent.setup();
+      render(<Timeline />);
+      const rig = rigScroller();
+      const id = events()[0].id;
+
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 0 } },
+        { coords: { clientX: AT_EDGE, clientY: 0 } },
+      ]);
+      for (let i = 0; i < 30; i += 1) rig.step(50);
+
+      expect(rig.scrollLeft()).toBe(MAX_SCROLL);
+      // And no remainder piled up while it sat there, which would lurch the
+      // moment the drag turned around.
+      rig.step(50);
+      expect(rig.scrollLeft()).toBe(MAX_SCROLL);
+
+      await user.pointer({ keys: '[/MouseLeft]' });
+    });
+
+    // ⚠ The hook's own unmount cleanup can't be told apart from the gesture
+    // teardown from out here: unmounting runs both, and either one alone stops
+    // the loop. It is there for the case neither test nor browser can stage —
+    // the component going away while the gesture's window listeners live on.
+    it('stops its loop when the timeline unmounts mid-drag', async () => {
+      const user = userEvent.setup();
+      const { unmount } = render(<Timeline />);
+      const rig = rigScroller();
+      const id = events()[0].id;
+
+      await user.pointer([
+        { target: noteEl(id), keys: '[MouseLeft>]', coords: { clientX: 10, clientY: 0 } },
+        { coords: { clientX: AT_EDGE, clientY: 0 } },
+      ]);
+      expect(rig.scheduled()).toBeGreaterThan(0);
+
+      unmount();
+
+      expect(rig.scheduled()).toBe(0);
+    });
+  });
+});
+
+/**
+ * The whole decision — "given the pointer, the well and a threshold, how fast?"
+ * — lives here precisely because jsdom can't observe the scrolling itself.
+ *
+ * A 400px-wide well at x=100..500 with a 50px edge zone, so the left zone is
+ * 100..150 and the right one 450..500.
+ */
+describe('edgeScrollSpeed', () => {
+  const WELL = { left: 100, right: 500 };
+  const ZONE = 50;
+  const speed = (x: number, box = WELL) => edgeScrollSpeed(x, box, ZONE);
+
+  it('leaves the view alone while the pointer is clear of both edges', () => {
+    expect(speed(300)).toBe(0);
+    // The threshold itself is not yet inside the zone, at either end.
+    expect(speed(150)).toBe(0);
+    expect(speed(450)).toBe(0);
+  });
+
+  it('scrolls towards whichever edge the pointer is near', () => {
+    expect(speed(140)).toBeLessThan(0);
+    expect(speed(460)).toBeGreaterThan(0);
+  });
+
+  // A dead zone at the threshold would be indistinguishable from not scrolling
+  // at all: at the bottom of the quadratic ramp the speed is 0.48px/s, which
+  // takes two seconds to move a single pixel. The floor is what makes crossing
+  // the threshold visible, so it's the floor that gets asserted.
+  it('starts moving the moment the threshold is crossed', () => {
+    expect(Math.abs(speed(149))).toBeGreaterThanOrEqual(MIN_SPEED);
+    expect(stepFor(MIN_SPEED, 1 / 60, 0).step).toBeGreaterThanOrEqual(1);
+  });
+
+  // Every case above names its own zone; this is the one the app actually runs
+  // with, so a change to the default doesn't slip through unnoticed.
+  it('defaults to a 48px zone', () => {
+    expect(edgeScrollSpeed(452, WELL)).toBe(0);
+    expect(edgeScrollSpeed(453, WELL)).toBeGreaterThan(0);
+  });
+
+  it('accelerates the deeper into the zone the pointer goes', () => {
+    const depths = [149, 140, 125, 110, 100].map((x) => Math.abs(speed(x)));
+    for (let i = 1; i < depths.length; i += 1) {
+      expect(depths[i]).toBeGreaterThan(depths[i - 1]);
+    }
+  });
+
+  // Dragging to the edge of the *window* is already as fast as it goes; without
+  // the clamp a pointer dragged outside it would accelerate without limit.
+  it('tops out at the viewport edge rather than running away off-screen', () => {
+    expect(speed(-900)).toBe(speed(100));
+    expect(speed(5000)).toBe(speed(500));
+  });
+
+  it('treats the two edges as mirror images', () => {
+    for (const depth of [1, 10, 49, 50, 200]) {
+      expect(speed(150 - depth)).toBe(-speed(450 + depth));
+    }
+  });
+
+  // Two 50px zones don't fit in a 60px well. Left half and right half, then —
+  // rather than a pointer in the middle counting as "near" both at once.
+  it('splits a well too narrow for two zones down the middle', () => {
+    const narrow = { left: 100, right: 160 };
+    expect(speed(130, narrow)).toBe(0);
+    expect(speed(129, narrow)).toBeLessThan(0);
+    expect(speed(131, narrow)).toBeGreaterThan(0);
+  });
+
+  // Which is exactly what jsdom reports for every element, so the hook's loop
+  // spins harmlessly rather than dividing by a zero-width well.
+  it('never scrolls a well that has no measured width', () => {
+    expect(edgeScrollSpeed(0, { left: 0, right: 0 }, ZONE)).toBe(0);
+    expect(edgeScrollSpeed(-50, { left: 0, right: 0 }, ZONE)).toBe(0);
+  });
+
+  // No production caller passes this, but the parameter is public and a zero
+  // zone divides by zero — which reads as "infinitely deep", i.e. full speed
+  // everywhere rather than nowhere.
+  it('never scrolls when the zone has no depth', () => {
+    expect(edgeScrollSpeed(300, WELL, 0)).toBe(0);
+    expect(edgeScrollSpeed(100, WELL, 0)).toBe(0);
+    expect(edgeScrollSpeed(-900, WELL, 0)).toBe(0);
+  });
+});
+
+/**
+ * The other half of the decision: a speed only becomes travel once a frame has
+ * a length. Also pure, for the same reason — the loop that calls it can only be
+ * watched in a browser.
+ */
+describe('stepFor', () => {
+  const FRAME = 1 / 60;
+
+  it('travels the distance the speed asks for', () => {
+    expect(stepFor(1200, 0.05, 0).step).toBe(60);
+    expect(stepFor(-1200, 0.05, 0).step).toBe(-60);
+  });
+
+  // scrollLeft is integral in some engines, so a fractional step rounds away to
+  // nothing — and the slowest speeds would sit perfectly still forever.
+  it('carries sub-pixel travel forward instead of dropping it', () => {
+    const first = stepFor(30, FRAME, 0);
+    expect(first.step).toBe(0);
+    expect(first.carry).toBeCloseTo(0.5);
+
+    const second = stepFor(30, FRAME, first.carry);
+    expect(second.step).toBe(1);
+    expect(Math.abs(second.carry)).toBeLessThan(1);
+  });
+
+  // A frame that took ten seconds means the tab was backgrounded, not that the
+  // user dragged for ten seconds — coming back must not fling the view.
+  it('clamps a frame that was really the tab being away', () => {
+    expect(stepFor(1000, 10, 0).step).toBe(50);
+    expect(stepFor(1000, 10, 0)).toEqual(stepFor(1000, 0.05, 0));
+  });
+
+  it('treats a frame that took no time — or negative time — as no travel', () => {
+    expect(stepFor(1000, 0, 0)).toEqual({ step: 0, carry: 0 });
+    expect(stepFor(1000, -1, 0)).toEqual({ step: 0, carry: 0 });
   });
 });

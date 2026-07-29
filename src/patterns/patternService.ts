@@ -19,6 +19,7 @@ import { useSyncExternalStore } from 'react';
 import {
   usePatternsStore,
   selectEditingPattern,
+  type DynamicMark,
   type EventDragSnapshot,
   type Pattern,
   type PatternEvent,
@@ -193,6 +194,61 @@ export function setNoteFret(id: string, fret: number): void {
   store().setEventFret(id, fret);
 }
 
+/**
+ * The top of the neck. The lib floors a fret at 0 but has no ceiling of its own
+ * (`setEventFret` only does `Math.max(0, …)`), so the upper bound is the app's
+ * rule and has to be applied on the way in. Exported so the popup's stepper and
+ * keyboard entry can't drift apart.
+ */
+export const MAX_FRET = 24;
+
+/**
+ * Put every selected note on an explicit fret — keyboard fret entry.
+ *
+ * One store write per note: the lib has a bulk *relative* action
+ * (`nudgeSelectedFret`) but no absolute one, so the loop is unavoidable. Undo is
+ * unaffected — the single `capture()` covers the whole selection.
+ */
+export function setSelectedFret(fret: number): void {
+  const ids = getSelectedIds();
+  // Capture only once there is something to change, so an empty selection can't
+  // push a no-op undo step — matching `nudgeSelectedFret` below.
+  if (ids.length === 0) return;
+  capture();
+  const clamped = Math.max(0, Math.min(MAX_FRET, Math.floor(fret)));
+  const s = store();
+  for (const id of ids) s.setEventFret(id, clamped);
+}
+
+/**
+ * Nudge the whole selection by `delta` frets, in one store write.
+ *
+ * The delta is clamped against the extremes of the selection rather than note
+ * by note: the lib floors each event at 0 independently, so a chord nudged past
+ * the nut would flatten onto it instead of stopping there. Clamping the shared
+ * delta keeps the selection's shape when it hits either end — the same
+ * reasoning as the group-resize clamp in Timeline.
+ */
+export function nudgeSelectedFret(delta: number): void {
+  const pattern = getEditingPattern();
+  if (!pattern) return;
+  const ids = getSelectedIds();
+  const frets = pattern.events.filter((e) => ids.includes(e.id)).map((e) => e.fret);
+  if (frets.length === 0) return;
+  // Room measured only in the direction being asked for. `MAX_FRET` is our rule,
+  // not the lib's — a pattern imported or restored with a note above it has
+  // negative headroom, and folding both bounds into one min/max chain would turn
+  // that into a nudge *down* when the user pressed up.
+  const room =
+    delta > 0
+      ? Math.max(0, MAX_FRET - Math.max(...frets))
+      : Math.min(0, -Math.min(...frets));
+  const clamped = delta > 0 ? Math.min(room, delta) : Math.max(room, delta);
+  if (clamped === 0) return;
+  capture();
+  store().nudgeSelectedFret(clamped);
+}
+
 export function deleteNotes(ids: readonly string[]): void {
   capture();
   store().deleteEvents(ids);
@@ -281,4 +337,53 @@ export function setArticulations(
 export function setNotePitch(id: string, pitch: NotePitch): void {
   capture();
   store().updateEventArticulations(id, toPitchPatch(pitch) as never);
+}
+
+/**
+ * LIB-GAP(5): the numbers below are the lib's own dynamic → velocity curve,
+ * copied. The model documents that authoring a dynamic must back-fill
+ * `velocity` "via the same curve the mapper uses", but that function
+ * (`dynamicToVelocity`, import/mapper.js) is private to the importer, so a
+ * pattern typed here and one imported from a file would otherwise disagree
+ * about what mf sounds like. Delete when the lib exports it.
+ *
+ * Sub-linear at the soft end, compressed at the loud end — the curve is tuned
+ * by ear, not derived, so it must be mirrored rather than re-invented.
+ *
+ * `dynamicToVelocity` itself can't be called, but the importer that uses it is
+ * public, so the drift test in tests/NotePopup.test.tsx pins these numbers by
+ * running each mark through `mapImportToLibrary`. Keep that test alive until
+ * this block dies.
+ */
+const DYNAMIC_VELOCITY: Record<DynamicMark, number> = {
+  ppp: 0.08,
+  pp: 0.18,
+  p: 0.32,
+  mp: 0.5,
+  mf: 0.65,
+  f: 0.8,
+  ff: 0.92,
+  fff: 1.0,
+};
+
+/** Softest → loudest, ordered by the curve itself rather than by how the literal
+ *  above happens to be written, so a picker can't drift from it. */
+export const DYNAMICS = Object.entries(DYNAMIC_VELOCITY)
+  .sort(([, a], [, b]) => a - b)
+  .map(([mark]) => mark as DynamicMark);
+
+/**
+ * Set (or clear, with `undefined`) a note's dynamic.
+ *
+ * The two fields are always written together: `dynamic` is display-only and
+ * `velocity` is the only one playback reads, so letting them drift would give a
+ * note labelled *pp* that plays at full force. Clearing has to clear both for
+ * the same reason.
+ */
+export function setNoteDynamic(id: string, dynamic: DynamicMark | undefined): void {
+  capture();
+  store().updateEventArticulations(id, {
+    dynamic,
+    velocity: dynamic === undefined ? undefined : DYNAMIC_VELOCITY[dynamic],
+  });
 }

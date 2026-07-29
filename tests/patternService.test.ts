@@ -8,6 +8,7 @@ import {
   getSelectedIds,
   moveNote,
   moveNotesBy,
+  nudgeSelectedFret,
   resizeNotesBy,
   snapshotForDrag,
   snapshotForResize,
@@ -16,6 +17,7 @@ import {
   resizeNote,
   selectNotes,
   setNoteFret,
+  setSelectedFret,
   stampNote,
   undo,
 } from '../src/patterns/patternService';
@@ -316,5 +318,51 @@ describe('group editing', () => {
     undo();
 
     expect(getEditingPattern()!.events.map((e) => e.startTick)).toEqual(before);
+  });
+});
+
+describe('fret entry', () => {
+  const seedOne = (fret: number) => {
+    stampNote({ stringIndex: 1, fret, tick: 0, durationTicks: PPQ / 2 });
+    const { id } = getEditingPattern()!.events[0];
+    selectNotes([id]);
+    return id;
+  };
+
+  it('puts the whole selection on an explicit fret', () => {
+    stampNote({ stringIndex: 1, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+    stampNote({ stringIndex: 3, fret: 7, tick: PPQ, durationTicks: PPQ / 2 });
+    selectNotes(getEditingPattern()!.events.map((e) => e.id));
+
+    setSelectedFret(9);
+
+    expect(getEditingPattern()!.events.map((e) => e.fret)).toEqual([9, 9]);
+  });
+
+  it('records nothing when there is no selection to put a fret on', () => {
+    seedOne(5);
+    selectNotes([]);
+
+    setSelectedFret(9);
+
+    // One step back is the stamp, not a snapshot of a no-op.
+    undo();
+    expect(getEditingPattern()!.events).toHaveLength(0);
+  });
+
+  /**
+   * The lib enforces no ceiling of its own, so a pattern can legitimately hold a
+   * fret above ours — an import, or a restored session. The clamp has to read as
+   * "no room in that direction", not flip the nudge around.
+   */
+  it('does not drag a note above the ceiling back down when nudged up', () => {
+    const id = seedOne(5);
+    setNoteFret(id, 30);
+
+    nudgeSelectedFret(1);
+    expect(getEditingPattern()!.events[0].fret).toBe(30);
+
+    nudgeSelectedFret(-1);
+    expect(getEditingPattern()!.events[0].fret).toBe(29);
   });
 });

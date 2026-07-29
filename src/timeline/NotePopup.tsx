@@ -1,5 +1,13 @@
-import type { PatternEvent } from '@fretwork/lib';
-import { deleteNotes, setArticulations, setNoteFret, setNotePitch } from '../patterns/patternService';
+import type { DynamicMark, PatternEvent } from '@fretwork/lib';
+import {
+  deleteNotes,
+  setArticulations,
+  setNoteDynamic,
+  setNoteFret,
+  setNotePitch,
+  DYNAMICS,
+  MAX_FRET,
+} from '../patterns/patternService';
 import {
   articulationsLostToTie,
   readNotePitch,
@@ -23,6 +31,19 @@ const DEPTHS = [
   { semitones: 3, label: '1½' },
   { semitones: 4, label: '2' },
 ] as const;
+
+/** What the marks are called out loud — the abbreviations alone are ambiguous
+ *  to anyone who doesn't already read them. */
+const DYNAMIC_NAMES: Record<DynamicMark, string> = {
+  ppp: 'pianississimo — barely audible',
+  pp: 'pianissimo — very soft',
+  p: 'piano — soft',
+  mp: 'mezzo-piano — moderately soft',
+  mf: 'mezzo-forte — moderately loud',
+  f: 'forte — loud',
+  ff: 'fortissimo — very loud',
+  fff: 'fortississimo — as loud as it goes',
+};
 
 const FLAGS = [
   { key: 'hammerOn', label: 'H-on' },
@@ -118,7 +139,7 @@ export function NotePopup({
         <button
           type="button"
           aria-label="Increase fret"
-          onClick={() => setNoteFret(event.id, Math.min(24, event.fret + 1))}
+          onClick={() => setNoteFret(event.id, Math.min(MAX_FRET, event.fret + 1))}
           className="pressable control rounded-md px-1.5 py-0.5 font-mono text-[10px] font-bold"
         >
           +
@@ -256,6 +277,36 @@ export function NotePopup({
           The tied note's {lostToTie.join(', ')} won't sound — tied notes merge into one.
         </p>
       )}
+
+      {/* Loudness is offered as dynamics rather than a number because that is
+          how it's read and played. `dynamic` is display-only in the lib, so the
+          service writes the matching `velocity` — the field playback actually
+          reads — at the same time. */}
+      <div className="mt-2.5 border-t border-line pt-2.5">
+        <Row label="Dynamic">
+          {/* A note can carry `velocity` with no mark — nothing here writes that,
+              but an imported or persisted pattern can. Reporting it as unset would
+              contradict both the timeline's bar and what playback does. */}
+          <span className="font-mono text-[9px] text-ink-mut">
+            {event.dynamic
+              ? DYNAMIC_NAMES[event.dynamic]
+              : event.velocity !== undefined
+                ? `${Math.round(event.velocity * 100)}% — no mark`
+                : 'unset — plays at full'}
+          </span>
+        </Row>
+        <div role="group" aria-label="Dynamic" className="grid grid-cols-4 gap-1.5">
+          {DYNAMICS.map((mark) => (
+            <Choice
+              key={mark}
+              on={event.dynamic === mark}
+              label={mark}
+              title={DYNAMIC_NAMES[mark]}
+              onClick={() => setNoteDynamic(event.id, event.dynamic === mark ? undefined : mark)}
+            />
+          ))}
+        </div>
+      </div>
 
       <div className="mt-2.5 mb-2.5 grid grid-cols-3 gap-1.5 border-t border-line pt-2.5">
         {FLAGS.map(({ key, label }) => (

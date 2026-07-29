@@ -188,8 +188,10 @@ export function readPitchSpec(event: {
 
 // --------------------------------------------------------------------- ties ---
 
-/** The fields a tied follower would lose when it's folded into its leader. */
-const MERGED_AWAY = ['vibrato', 'bend', 'slide', 'hammerOn', 'pullOff', 'palmMute', 'ghost', 'tap'] as const;
+/** The fields a tied follower would lose when it's folded into its leader.
+ *  `velocity` is deliberately absent even though it is lost too: it is only ever
+ *  written alongside `dynamic`, so listing both would report the same loss twice. */
+const MERGED_AWAY = ['vibrato', 'bend', 'slide', 'hammerOn', 'pullOff', 'palmMute', 'ghost', 'tap', 'dynamic'] as const;
 
 interface TieCandidate {
   id: string;
