@@ -17,10 +17,13 @@
  */
 import { useSyncExternalStore } from 'react';
 import {
+  DEFAULT_INSTRUMENT_ID,
+  getInstrument,
   usePatternsStore,
   selectEditingPattern,
   type DynamicMark,
   type EventDragSnapshot,
+  type FretInstrumentId,
   type Pattern,
   type PatternEvent,
   type Tick,
@@ -62,6 +65,26 @@ export function getSelectedIds(): string[] {
 
 export function findEvent(id: string): PatternEvent | undefined {
   return getEditingPattern()?.events.find((e) => e.id === id);
+}
+
+/**
+ * `Pattern.instrumentId` is a free-form string; everything downstream of it —
+ * the voice builder, the tuning list, the fretboard's `InstrumentDef` — is not.
+ *
+ * One resolver for the whole app on purpose: the audio engine and any view that
+ * draws a neck have to agree on how many strings the pattern has, or notes on
+ * the strings the other one doesn't believe in vanish without a trace.
+ *
+ * Membership is asked of the lib's catalog rather than listed here. The list would
+ * match today, but `FretInstrumentId` and `INSTRUMENTS` are grown together on the
+ * lib side ("add an entry here … the renderer + UI pick up the new instrument
+ * automatically"), so a fourth instrument would otherwise be silently coerced to
+ * guitar — which then reads as the pattern being on the wrong neck.
+ */
+export function patternInstrumentId(pattern: Pattern): FretInstrumentId {
+  return getInstrument(pattern.instrumentId) !== undefined
+    ? (pattern.instrumentId as FretInstrumentId)
+    : DEFAULT_INSTRUMENT_ID;
 }
 
 // ------------------------------------------------------------------ undo ---

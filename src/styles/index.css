@@ -1,6 +1,31 @@
 @import 'tailwindcss';
 
 /* ---------------------------------------------------------------------------
+ * @fretwork/lib's own styling, which comes in two halves — both required, and
+ * neither optional if a lib component is rendered anywhere in the app.
+ *
+ * 1. Its variables. Every colour in `<Fretboard>` is `hsl(var(--rosewood))` /
+ *    `hsl(var(--degree-*))`, so without this the board is black circles on an
+ *    invisible neck. Checked name by name for collisions: tokens.css defines only
+ *    bare names (`--charcoal*`, `--rosewood*`, `--nickel`, `--pearl`,
+ *    `--degree-*`, and the shadcn set `--background`, `--border`, `--radius`, …)
+ *    while every token in the `@theme` below is `--color-*` / `--font-*` /
+ *    `--shadow-*` / `--ease-*` prefixed. The two sets are disjoint and nothing in
+ *    `src/` reads a bare name, so load order carries no meaning. Note that its
+ *    rules are unlayered, so its `.fb-*` styling outranks any Tailwind utility.
+ *
+ * 2. Its Tailwind classes. The lib's components are built with utilities
+ *    (`w-full min-w-[820px] h-auto` on the board's svg, `scrollbar-thin` on its
+ *    scroller, `animate-marker-pop` on every marker) and v4's automatic source
+ *    detection skips `node_modules` — so without the `@source` below those rules
+ *    are never generated and the board renders with no width, height or minimum
+ *    at all. guitar-tutor's `tailwind.config.ts` scans the same path for the same
+ *    reason. jsdom applies no CSS, so no test can catch its absence.
+ * ------------------------------------------------------------------------- */
+@import '@fretwork/lib/styles/tokens.css';
+@source '../../node_modules/@fretwork/lib/dist';
+
+/* ---------------------------------------------------------------------------
  * Fraunces — display/title face. Variable (weight 100–900 + optical size),
  * self-hosted latin subset so there's no network dependency at runtime.
  * ------------------------------------------------------------------------- */
@@ -97,6 +122,22 @@
 
   /* -- motion — short and mechanical; these are physical controls ---------- */
   --ease-press: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* The lib's `NoteMarker` puts `animate-marker-pop` on every marker but ships
+     no keyframes for it — guitar-tutor defines the animation in its own config
+     for the same reason. Ours has to exist or every marker appears un-animated. */
+  --animate-marker-pop: marker-pop 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  @keyframes marker-pop {
+    0% {
+      transform: scale(0.7);
+      opacity: 0;
+    }
+    100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
 }
 
 /* ---------------------------------------------------------------------------

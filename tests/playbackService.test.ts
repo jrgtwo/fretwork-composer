@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
-import { PPQ, usePatternsStore } from '@fretwork/lib';
+import { PPQ, usePatternsStore, usePlaybackStore } from '@fretwork/lib';
 import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/patternService';
 import {
   play,
@@ -197,6 +197,18 @@ beforeEach(() => {
   renders.active = 0;
   openBlankPattern('Playback test');
   stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ / 2 });
+});
+
+describe('module load', () => {
+  it("disarms the lib's own walk playback", () => {
+    // LIB-GAP(6). No render involved on purpose: this pins a *module-load* contract.
+    // Anything that calls the lib's `usePlayback()` — `useFretboardModel` does, so any
+    // fretboard on screen — constructs its Practice-page `Playback` singleton, which
+    // plays a scale walk on every tick of the same metronome our transport runs, and
+    // reads `enabled` at construction. Importing this module has to have already
+    // turned it off, or the first ticks come with an A-major run over them.
+    expect(usePlaybackStore.getState().enabled).toBe(false);
+  });
 });
 
 describe('play', () => {

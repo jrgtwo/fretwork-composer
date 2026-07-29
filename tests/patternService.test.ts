@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { PPQ } from '@fretwork/lib';
+import { INSTRUMENTS, PPQ, type Pattern } from '@fretwork/lib';
 import {
   beginEditGesture,
+  patternInstrumentId,
   deleteNotes,
   endEditGesture,
   getEditingPattern,
@@ -26,6 +27,26 @@ const noteAt = (index = 0) => getEditingPattern()!.events[index];
 
 beforeEach(() => {
   openBlankPattern('Test pattern');
+});
+
+describe('patternInstrumentId', () => {
+  const on = (instrumentId: string) => patternInstrumentId({ instrumentId } as Pattern);
+
+  it('passes through every instrument the lib has a neck for', () => {
+    // Read off the lib's catalog rather than listed here: `FretInstrumentId` and
+    // `INSTRUMENTS` grow together on the lib side, and a hardcoded list would keep
+    // resolving a newly-added instrument to guitar — which then surfaces as the pattern
+    // being drawn on the wrong neck rather than as an unknown id.
+    for (const instrument of INSTRUMENTS) expect(on(instrument.id)).toBe(instrument.id);
+    expect(INSTRUMENTS.length).toBeGreaterThan(1);
+  });
+
+  it('falls back to guitar for an id the catalog does not know', () => {
+    // A pattern from an import or a future lib version can name anything, and every
+    // consumer downstream (voice builder, tuning list, `InstrumentDef`) needs a real id.
+    expect(on('theremin')).toBe('guitar');
+    expect(on('')).toBe('guitar');
+  });
 });
 
 describe('patternService', () => {

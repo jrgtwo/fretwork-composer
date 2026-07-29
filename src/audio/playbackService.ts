@@ -27,17 +27,40 @@ import {
   startAudio,
   useMetronome,
   useMetronomeStore,
-  type FretInstrumentId,
+  usePlaybackStore,
   type Metronome,
   type Pattern,
   type VariantRef,
   type Voice,
 } from '@fretwork/lib';
-import { getEditingPattern } from '../patterns/patternService';
+import { getEditingPattern, patternInstrumentId } from '../patterns/patternService';
 import { readTransportTicks, wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
 const CAPO = 0;
+
+/**
+ * LIB-GAP(6): the lib ships a second, unrelated audio path that arms itself.
+ *
+ * Its Practice-page `Playback` singleton subscribes to the *shared* metronome —
+ * the one this service's transport runs — and plays a scale walk through its own
+ * synth on every tick and subdivision. Its store defaults `enabled: true`, and
+ * anything that calls `usePlayback()` builds it; `useFretboardModel` does, so
+ * merely rendering a fretboard would layer an A-major run over the composer's
+ * own playback.
+ *
+ * Disabled here, at module load, for two reasons: this file is the seam that
+ * owns the lib's audio lifecycle, and `ensureSharedPlaybackWithMetronome` reads
+ * this store for the singleton's *initial* state — so an effect would leave a
+ * window in which the walk is armed. Note this only silences it: the singleton,
+ * its `PluckSynthInstrument`, its `Voice` and its three metronome subscriptions
+ * are still built on first render of any fretboard and are never released. No
+ * audio graph comes with them — `PluckSynthInstrument` builds its synth lazily in
+ * `_ensureSynth` on first `play`, and `Metronome`'s constructor deliberately
+ * touches no AudioContext — so what leaks is objects and subscriptions, not nodes.
+ * Delete when the lib's fretboard model stops reaching into Practice's playback.
+ */
+usePlaybackStore.getState().setEnabled(false);
 
 // ------------------------------------------------------------------ store ---
 // Head ticks land here ~60×/s. Components read slices through
@@ -94,23 +117,14 @@ let engine: Engine | null = null;
  */
 let sharedMetronome: Metronome | null = null;
 
-const FRET_INSTRUMENTS: readonly string[] = ['guitar', 'bass', 'ukulele'];
-
-/** `Pattern.instrumentId` is a free-form string; the voice builder is not. */
-function instrumentOf(pattern: Pattern): FretInstrumentId {
-  return FRET_INSTRUMENTS.includes(pattern.instrumentId)
-    ? (pattern.instrumentId as FretInstrumentId)
-    : 'guitar';
-}
-
 const voiceKeyOf = (pattern: Pattern) =>
-  `${instrumentOf(pattern)}|${JSON.stringify(pattern.voiceRef ?? null)}`;
+  `${patternInstrumentId(pattern)}|${JSON.stringify(pattern.voiceRef ?? null)}`;
 
 function buildVoice(pattern: Pattern): Voice {
   // `Pattern.voiceRef` is deliberately `unknown` in the lib so its pattern model
   // doesn't depend on the voices module — the lib documents casting at use.
   const voiceRef = (pattern.voiceRef ?? null) as VariantRef | null;
-  return buildEffectiveVoice(instrumentOf(pattern), { voiceRef }).voice;
+  return buildEffectiveVoice(patternInstrumentId(pattern), { voiceRef }).voice;
 }
 
 /**
@@ -136,7 +150,8 @@ function ensureEngine(pattern: Pattern): Engine | null {
     }
 
     // Tuning and capo are fixed until their UI slice lands.
-    const tuning = getTuningsForInstrument(instrumentOf(pattern))[0] ?? getTuning(DEFAULT_TUNING_ID);
+    const tuning =
+      getTuningsForInstrument(patternInstrumentId(pattern))[0] ?? getTuning(DEFAULT_TUNING_ID);
     if (!tuning) return null;
 
     const voice = buildVoice(pattern);
