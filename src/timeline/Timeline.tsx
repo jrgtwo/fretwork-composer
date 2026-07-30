@@ -700,7 +700,7 @@ export function Timeline() {
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex flex-col">
       <div className="mb-1.5 flex flex-none items-center gap-1.5">
         <span className="font-mono text-[9px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
           Zoom
@@ -827,7 +827,9 @@ export function Timeline() {
         </span>
       </div>
 
-      <div ref={areaRef} className="grid min-h-0 flex-1 grid-cols-[24px_1fr]">
+      {/* Height is ruler + one row per string, all explicit — so the grid needs no
+          share of a supplied height. Only the horizontal axis scrolls, for time. */}
+      <div ref={areaRef} className="grid grid-cols-[24px_1fr]">
         <div className="flex flex-col" style={{ paddingTop: RULER_H }}>
           {ROW_ORDER.map((stringIndex) => (
             <span

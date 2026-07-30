@@ -96,7 +96,11 @@ export function TablatureView() {
       // stack taller than the pane. Only the vertical axis overflows — `layoutTab` caps
       // bar width to the measured width, so the staff never runs off the side.
       tabIndex={0}
-      className="well flex min-h-0 flex-1 flex-col overflow-y-auto px-2 py-1.5"
+      // No vertical scroller: a long pattern in a narrow pane wraps into more systems
+      // and the view simply gets taller, pushing the panes below it down. That is the
+      // agreed behaviour for now — every pane is as tall as its content — and it is
+      // the one view here with no natural ceiling, so it is where it shows most.
+      className="well flex flex-col px-2 py-1.5"
     >
       <div
         ref={staffRef}

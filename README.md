@@ -17,9 +17,12 @@ pnpm dev
 
 ## Docs (local, gitignored)
 
-- `docs/PLAN.md` — the design & phased plan
-- `docs/HANDOFF.md` — current state + how to resume
+- `docs/HANDOFF.md` — **start here.** Current state, architecture, and how to resume cold.
+- `docs/FOLLOW-UPS.md` — known debt. Opens with "the two buckets": permanent adapter work vs
+  lib gaps we're masking (each tagged `LIB-GAP(n)` in the source).
+- `docs/PLAN.md` — the original design and phased plan.
 
 ## Status
 
-Scaffold only. See `docs/HANDOFF.md` for the next steps.
+A working **pattern editor**: timeline editing with articulations, undo, playback, and a
+fretboard/tablature reference pane. The **agent isn't built yet** — see `docs/HANDOFF.md`.

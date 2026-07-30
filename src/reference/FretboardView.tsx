@@ -103,9 +103,10 @@ export function FretboardView() {
       // would not be inside the `aria-hidden` wrapper: this figure is in the
       // accessibility tree and named by its caption.
       tabIndex={0}
-      // Deliberately not `justify-center`: centred content in a scroller makes the
-      // top unreachable once it overflows.
-      className="well flex min-h-0 flex-1 flex-col overflow-auto px-2 py-1.5"
+      // Only the horizontal axis scrolls. The pane is as tall as its content now, so
+      // there is no vertical overflow to reach — but the board keeps a `min-w-[820px]`,
+      // so a narrow pane still has to be scrollable sideways.
+      className="well flex flex-col overflow-x-auto px-2 py-1.5"
     >
       {/*
        * LIB-GAP(7), second half: `<Fretboard>` hardcodes its own `aria-label` from
@@ -168,7 +169,7 @@ function Notice({ children }: { children: string }) {
   return (
     <div
       data-testid="reference-notice"
-      className="well flex min-h-0 flex-1 items-center justify-center px-2 text-center"
+      className="well flex items-center justify-center px-2 py-6 text-center"
     >
       <span className="font-mono text-[10px] tracking-[0.12em] text-ink-mut uppercase">
         {children}

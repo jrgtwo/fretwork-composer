@@ -18,6 +18,7 @@
 import { useSyncExternalStore } from 'react';
 import {
   DEFAULT_INSTRUMENT_ID,
+  INSTRUMENTS,
   getInstrument,
   usePatternsStore,
   selectEditingPattern,
@@ -85,6 +86,21 @@ export function patternInstrumentId(pattern: Pattern): FretInstrumentId {
   return getInstrument(pattern.instrumentId) !== undefined
     ? (pattern.instrumentId as FretInstrumentId)
     : DEFAULT_INSTRUMENT_ID;
+}
+
+/**
+ * The instruments a pattern can be on, for a picker.
+ *
+ * Read from the lib's catalog rather than listed here for the same reason
+ * `patternInstrumentId` asks the catalog about membership: `INSTRUMENTS` and
+ * `FretInstrumentId` are grown together on the lib side, and a hardcoded list would
+ * silently omit a fourth instrument the moment one lands.
+ */
+export function listInstruments(): readonly { id: FretInstrumentId; name: string }[] {
+  return INSTRUMENTS.map((instrument) => ({
+    id: instrument.id as FretInstrumentId,
+    name: instrument.name,
+  }));
 }
 
 // ------------------------------------------------------------------ undo ---
@@ -292,6 +308,46 @@ export function setPatternLoop(loop: boolean): void {
  */
 export function setPatternBpm(bpm: number | null): void {
   store().setEditingPatternSuggestedBpm(bpm);
+}
+
+/**
+ * Which voice the pattern plays through — a `VariantRef` from the lib's voices
+ * module, or null to fall back to the instrument's active voice.
+ *
+ * Typed `unknown` because it is `unknown` on `Pattern`: the lib keeps its pattern
+ * model independent of the voices module and documents casting at use.
+ * `src/voice/voiceService.ts` owns that cast and its validation — this is only the
+ * store write, which has to live on this side of the seam.
+ *
+ * Not *captured* for undo, matching loop and tempo above: it is a preference about how
+ * the pattern sounds, not an edit to its notes, so choosing a voice doesn't push an undo
+ * step. It is still *restored* by one — `writePatternBack` swaps in a whole `Pattern`
+ * snapshot — so undoing past the point where the voice was chosen reverts it as a side
+ * effect. Fix that for all three at once by carrying them forward in `writePatternBack`.
+ */
+export function setEditingPatternVoiceRef(voiceRef: unknown): void {
+  store().setEditingPatternVoiceRef(voiceRef);
+}
+
+/**
+ * Which instrument the pattern is on — how many strings it has, which tunings apply,
+ * and which voices the voice pane may offer.
+ *
+ * The lib's op writes the field and nothing else, so events on strings the new
+ * instrument doesn't have (a guitar's index 4–5 on a four-string bass) stay on the
+ * pattern and simply stop being drawn. Left that way deliberately: it is lossless and
+ * reverses by switching back, where dropping them would not. A guard belongs with the
+ * slice that owns instrument switching as an *editing* operation rather than as the
+ * voice pane's prerequisite.
+ *
+ * Not captured for undo, matching loop, tempo and voice above.
+ */
+export function setEditingPatternInstrument(instrumentId: FretInstrumentId): void {
+  const pattern = getEditingPattern();
+  if (!pattern) return;
+  // The store's action addresses a pattern by id — there is no editing-pattern
+  // shorthand for this one, unlike loop/tempo/voiceRef.
+  store().setPatternInstrument(pattern.id, instrumentId);
 }
 
 export function selectNotes(ids: readonly string[], mode: SelectionMode = 'replace'): void {

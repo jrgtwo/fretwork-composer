@@ -4,9 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { PaneStack, type Pane } from '../src/shell/PaneStack';
 
 const PANES: Pane[] = [
-  { id: 'reference', title: 'Reference', min: 60, max: 220, children: <p>fretboard</p> },
-  { id: 'amp', title: 'Instrument & Amp', canFill: true, children: <p>amp rack</p> },
-  { id: 'timeline', title: 'Timeline', min: 150, max: 700, children: <p>beat grid</p> },
+  { id: 'reference', title: 'Reference', children: <p>fretboard</p> },
+  { id: 'amp', title: 'Instrument & Amp', children: <p>amp rack</p> },
+  { id: 'timeline', title: 'Timeline', children: <p>beat grid</p> },
 ];
 
 const setup = () => ({ user: userEvent.setup(), ...render(<PaneStack panes={PANES} />) });
@@ -45,35 +45,39 @@ describe('PaneStack', () => {
     expect(screen.getByRole('button', { name: 'Expand Reference' })).toBeInTheDocument();
   });
 
-  it('offers a way out once every pane is collapsed', async () => {
+  // The whole point of the rewrite: a pane is as tall as its content, so nothing
+  // may write a height (or a flex grow/basis) onto a section. If one creeps back
+  // in, a pane starts being sized by the stack again instead of by what it holds.
+  it('never sizes a pane — no inline height, no flex, on any section', () => {
+    setup();
+    for (const id of ['reference', 'amp', 'timeline']) {
+      const el = document.querySelector<HTMLElement>(`[data-pane="${id}"]`)!;
+      expect(el.style.height).toBe('');
+      expect(el.style.minHeight).toBe('');
+      expect(el.style.maxHeight).toBe('');
+      expect(el.style.flexGrow).toBe('');
+    }
+  });
+
+  it('has no resize handles at all', () => {
+    setup();
+    expect(screen.queryAllByRole('separator')).toHaveLength(0);
+    expect(document.querySelector('[data-testid^="splitter-"]')).toBeNull();
+  });
+
+  // "If they are all collapsed there should just be empty space below." No filler
+  // pane, no empty-state panel offering a way out — every header keeps its own
+  // expand toggle, so the way out is already on screen.
+  it('leaves empty space when every pane is collapsed', async () => {
     const { user } = setup();
 
     for (const pane of PANES) await user.click(collapseBtn(pane.title));
 
-    expect(screen.getByText('All panels collapsed')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Expand all' }));
-
-    expect(screen.queryByText('All panels collapsed')).not.toBeInTheDocument();
-    expect(screen.getByText('beat grid')).toBeInTheDocument();
-  });
-
-  it('marks a splitter unavailable when neither neighbour can be resized', async () => {
-    const { user } = setup();
-
-    // Collapsing Reference leaves splitter 0 between it and the fill pane —
-    // nothing there is resizable, so the handle must read as inactive rather
-    // than looking live and doing nothing.
-    await user.click(collapseBtn('Reference'));
-
-    expect(screen.getByTestId('splitter-0')).toHaveAttribute(
-      'aria-label',
-      'Resize (unavailable)',
-    );
-  });
-
-  it('gives the bottom pane a trailing splitter so it can claim free space', () => {
-    setup();
-    expect(screen.getByTestId('splitter-2')).toHaveAttribute('aria-label', 'Resize Timeline');
+    expect(screen.queryByText('beat grid')).not.toBeInTheDocument();
+    expect(paneOrder()).toEqual(['reference', 'amp', 'timeline']);
+    for (const pane of PANES) {
+      expect(screen.getByRole('button', { name: `Expand ${pane.title}` })).toBeInTheDocument();
+    }
   });
 
   it('keeps each pane titled within its own section', () => {

@@ -1,96 +1,43 @@
 /**
- * Pure layout rules for the resizable pane stack.
+ * Pure layout rules for the pane stack.
  *
- * Kept free of React and the DOM because these are the rules that are easy to get
- * subtly wrong — a collapsed pane that still absorbs space, a splitter that looks
- * live but drives a collapsed pane, a bottom pane with no way to claim the empty
- * area beneath it. They're much easier to pin down as functions than as pointer
- * handlers, so PaneStack owns only the gestures and defers every decision here.
+ * There is almost nothing left here, and that is the point. This module used to own
+ * drag-resize: per-pane `min`/`max`, a `clampHeight`, a `splitTarget` resolver, and a
+ * `canFill` pane that absorbed whatever the others didn't claim. All of it is gone.
+ *
+ * Why: `canFill` and "resizable" were mutually exclusive by construction — the fill
+ * pane could never be a splitter target, so it had no handle of its own and changed
+ * size only as leftovers. With three panes that meant two handles both driving the
+ * Timeline in opposite directions and none driving the Instrument & Amp pane at all.
+ *
+ * The replacement is that **every pane is as tall as its content needs**, and the only
+ * control is collapse. Heights are therefore not a layout concern any more: no pane is
+ * measured, clamped or given a size, and the stack simply scrolls when the panes
+ * together outgrow it. This is deliberately a stopgap — a better layout is planned —
+ * but it is a stopgap with no arithmetic in it, which is why it can't go subtly wrong
+ * the way the resize rules did.
  */
 
 export interface PaneSpec {
   id: string;
   title: string;
-  /** Smallest height in px. Ignored when `canFill` is set. */
-  min?: number;
-  /** Largest height in px — panes are capped so they can't stretch into dead space. */
-  max?: number;
-  /** This pane soaks up whatever height the others don't claim. At most one. */
-  canFill?: boolean;
 }
 
 export interface PaneState {
-  height: number;
   collapsed: boolean;
 }
 
-/** Which pane a splitter drives, and which way a downward drag moves it. */
-export interface SplitTarget {
-  id: string;
-  /** +1 = dragging down grows it (it sits above the splitter); -1 = the reverse. */
-  dir: 1 | -1;
-}
-
-const isResizable = (spec: PaneSpec | undefined): spec is PaneSpec =>
-  !!spec && !spec.canFill;
-
-export function clampHeight(spec: PaneSpec, height: number): number {
-  if (spec.canFill) return height; // a fill pane's height is decided by flex, not us
-  const min = spec.min ?? 0;
-  const max = spec.max ?? Number.POSITIVE_INFINITY;
-  return Math.max(min, Math.min(max, height));
-}
-
+/**
+ * Move `id` to `toIndex` in the visible order.
+ *
+ * `toIndex` is an index into the list *without* `id` in it, which is what a drop
+ * indicator between the remaining panes actually means. Out-of-range indices clamp
+ * rather than dropping the pane, so a drop past the end lands last.
+ */
 export function reorder(order: readonly string[], id: string, toIndex: number): string[] {
   const without = order.filter((paneId) => paneId !== id);
   if (without.length === order.length) return [...order]; // unknown id
   const index = Math.max(0, Math.min(without.length, toIndex));
   without.splice(index, 0, id);
   return without;
-}
-
-/**
- * Resolve the splitter at `index`, which sits *below* `order[index]`.
- *
- * The last splitter is the trailing one under the bottom pane; it exists so that
- * pane can grow into free space, which it otherwise has no handle for. A splitter
- * prefers the pane above, but skips it when collapsed or unresizable and falls
- * back to the pane below, so a collapsed neighbour never leaves a dead handle.
- */
-export function splitTarget(
-  order: readonly string[],
-  index: number,
-  specs: readonly PaneSpec[],
-  states: Readonly<Record<string, PaneState>>,
-): SplitTarget | null {
-  const usable = (id: string | undefined): id is string => {
-    if (!id) return false;
-    const spec = specs.find((s) => s.id === id);
-    return isResizable(spec) && !states[id]?.collapsed;
-  };
-
-  const above = order[index];
-  const below = order[index + 1];
-
-  if (usable(above)) return { id: above, dir: 1 };
-  if (usable(below)) return { id: below, dir: -1 };
-  return null;
-}
-
-/** The pane currently allowed to absorb slack — never a collapsed one. */
-export function fillerId(
-  order: readonly string[],
-  specs: readonly PaneSpec[],
-  states: Readonly<Record<string, PaneState>>,
-): string | null {
-  const id = order.find((paneId) => specs.find((s) => s.id === paneId)?.canFill);
-  if (!id || states[id]?.collapsed) return null;
-  return id;
-}
-
-export function allCollapsed(
-  order: readonly string[],
-  states: Readonly<Record<string, PaneState>>,
-): boolean {
-  return order.length > 0 && order.every((id) => states[id]?.collapsed);
 }

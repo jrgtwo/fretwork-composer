@@ -20,7 +20,10 @@ import { useEffect, useSyncExternalStore } from 'react';
 import {
   DEFAULT_TUNING_ID,
   EventScheduler,
+  MasterBus,
   PatternSource,
+  Voice,
+  audioNow,
   buildEffectiveVoice,
   getTuning,
   getTuningsForInstrument,
@@ -30,10 +33,11 @@ import {
   usePlaybackStore,
   type Metronome,
   type Pattern,
-  type VariantRef,
-  type Voice,
+  type VoicePreset,
+  type VoiceSource,
 } from '@fretwork/lib';
 import { getEditingPattern, patternInstrumentId } from '../patterns/patternService';
+import { readVoiceRef, resolveVoicePreset } from '../voice/voiceService';
 import { readTransportTicks, wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
@@ -117,14 +121,107 @@ let engine: Engine | null = null;
  */
 let sharedMetronome: Metronome | null = null;
 
+// ------------------------------------------------------------------ voice ---
+// Which preset the engine builds from, and the classification that decides whether
+// an edit can be pushed onto a live voice or needs a new one. A mistake in that
+// classification is SILENT — see `sourceFingerprint`.
+
+/**
+ * The voice editor's unsaved working preset, tagged with the voice it belongs to.
+ *
+ * While the editor is open its working copy is the source of truth: it is not in the
+ * voice store, so nothing the lib resolves can see it. Tagged rather than held bare
+ * so it cannot outlive its subject — pick a different voice, change instrument or
+ * open another pattern and the tag stops matching, and the stored preset takes over.
+ *
+ * Never written back from `voice.preset`: `swapPreset` reassigns the voice's own copy
+ * from what it managed to apply, and for a sampler that copy's banks are not the ones
+ * sounding (LIB-GAP(9b)). The caller's copy is the only trustworthy one.
+ */
+let workingPreset: { tag: string; preset: VoicePreset } | null = null;
+
+/**
+ * Identity of the *choice* — instrument plus ref, with no preset content in it.
+ *
+ * Built from the ref's discriminant rather than `JSON.stringify`, which would make
+ * property order load-bearing: a ref rehydrated from storage as `{id, kind}` must key
+ * the same as the `{kind, id}` literal a picker writes, or every reload spuriously
+ * rebuilds the voice.
+ */
+function refKeyOf(pattern: Pattern): string {
+  const ref = readVoiceRef(pattern);
+  const key = ref === null ? 'none' : ref.kind === 'user' ? `u:${ref.id}` : `d:${ref.slotId}`;
+  return `${patternInstrumentId(pattern)}|${key}`;
+}
+
+/**
+ * What the working copy is tagged with. The pattern id is in it but deliberately NOT in
+ * `refKeyOf`: two patterns can legitimately share a voice and must share the built
+ * voice too, but an *unsaved* edit belongs to the pattern whose editor is open — without
+ * the id it would follow the user onto the next pattern with the same instrument and ref.
+ */
+const workingTagOf = (pattern: Pattern) => `${pattern.id}|${refKeyOf(pattern)}`;
+
+/**
+ * Self-clearing: a tag that has stopped matching can never matter again, and leaving it
+ * live means an abandoned edit resurrects the moment the pattern points back at the ref
+ * it was taken from — the pane's own working copy having long since been reset.
+ */
+function workingPresetFor(pattern: Pattern): VoicePreset | null {
+  if (workingPreset === null) return null;
+  if (workingPreset.tag === workingTagOf(pattern)) return workingPreset.preset;
+  workingPreset = null;
+  return null;
+}
+
+/** What the engine should build for this pattern: the editor's working copy when one
+ *  is in flight, otherwise whatever the lib resolves the pattern's ref to. */
+const presetFor = (pattern: Pattern): VoicePreset =>
+  workingPresetFor(pattern) ?? resolveVoicePreset(pattern);
+
+/**
+ * Everything about a preset that CANNOT be changed on a live `Voice`, as a string.
+ *
+ * LIB-GAP(9a): on a source-**kind** change `Voice.swapPreset` calls `this.dispose()`
+ * and returns without rebuilding, leaving the caller holding a dead voice.
+ * LIB-GAP(9b): for a **sampler** it never reconstructs the banks — they are only
+ * built in `_ensureBuilt` — so a `samples` or `release` change through it is
+ * silently inaudible.
+ *
+ * So those fields go into the voice key and force a rebuild, and everything else
+ * (level, input gain, body filter, compressor, and all of `effects` including the
+ * amp, cabinet and EQs) is retuned in place — `_rebuildChain` keeps the synth, so even
+ * adding or removing a chain stage is in-place-safe. Synth `params` are deliberately
+ * absent: `updateSynthParams` handles pluck and FM parameters correctly, and only the
+ * kind decides which synth exists.
+ *
+ * The whole bank array is stringified, not just bank 0 — `detectSamplePack`'s bank-0
+ * shortcut is sound for *recognising a registered pack* but not for telling two
+ * arbitrary maps apart, and a collision here is an inaudible edit. Sample maps are a
+ * few KB, which is cheap enough to recompute while a slider is moving.
+ * `detectSamplePack` itself is the wrong tool: it returns null for anything
+ * unregistered, collapsing every custom map onto one key.
+ */
+function sourceFingerprint(source: VoiceSource): string {
+  if (source.kind !== 'sampler') return source.kind;
+  return `sampler|${source.release ?? ''}|${JSON.stringify(source.samples)}`;
+}
+
+/** The identity of the built voice. Anything outside it is an in-place edit. */
 const voiceKeyOf = (pattern: Pattern) =>
-  `${patternInstrumentId(pattern)}|${JSON.stringify(pattern.voiceRef ?? null)}`;
+  `${refKeyOf(pattern)}|${sourceFingerprint(presetFor(pattern).source)}`;
 
 function buildVoice(pattern: Pattern): Voice {
-  // `Pattern.voiceRef` is deliberately `unknown` in the lib so its pattern model
-  // doesn't depend on the voices module — the lib documents casting at use.
-  const voiceRef = (pattern.voiceRef ?? null) as VariantRef | null;
-  return buildEffectiveVoice(patternInstrumentId(pattern), { voiceRef }).voice;
+  const working = workingPresetFor(pattern);
+  // Two paths, one operation — `buildEffectiveVoice` is exactly
+  // `new Voice(resolveActiveVoice(instrumentId, ref))`, and it reads none of the options
+  // we pass. The lib's builder stays the path for a stored voice so the resolution order
+  // remains the lib's and stays the seam the audio tests mock; a working copy has no ref
+  // to resolve, so it is constructed directly. Both go through `workingPresetFor`, so the
+  // voice cannot disagree with the key `voiceKeyOf` computed from the same pattern.
+  if (working) return new Voice(working);
+  return buildEffectiveVoice(patternInstrumentId(pattern), { voiceRef: readVoiceRef(pattern) })
+    .voice;
 }
 
 /**
@@ -240,6 +337,7 @@ function disposeEngine(): void {
   if (!current) return;
 
   stopHeadLoop();
+  cancelPendingRebuild();
   current.unsubscribes.forEach((unsubscribe) => unsubscribe());
   // The metronome owns the transport and `scheduler.dispose()` only cancels the
   // scheduler's own events, so tearing down mid-playback without this leaves the
@@ -342,6 +440,202 @@ export function previewNote(stringIndex: number, fret: number): void {
     // No `startAudio()` here — `previewCell` awaits it internally before it
     // triggers, so the unlocking click is also the first audible one.
     active.scheduler.previewCell(stringIndex, fret);
+  } catch {
+    // Auditioning is best-effort; it must never break the click that asked.
+  }
+}
+
+/**
+ * Push the voice editor's working preset onto the live voice.
+ *
+ * The classification is the heart of this function and a mistake in it is SILENT:
+ *
+ *   - **source identity** — the source `kind`, or a sampler's banks and `release` —
+ *     needs a NEW `Voice`. `swapPreset` disposes itself on a kind change and never
+ *     reconstructs sampler banks (LIB-GAP(9a), LIB-GAP(9b)), so pushing one of those
+ *     through it leaves either a dead voice or an edit nobody can hear.
+ *   - **everything else** — level, input gain, body filter, compressor, and the whole
+ *     effects chain including the amp, cabinet and EQs — is retuned in place, with no
+ *     teardown and no sampler re-download. That is what makes dragging a slider on a
+ *     live voice viable at all.
+ *
+ * The rebuild is not a second mechanism: `voiceKeyOf` fingerprints the source, so a
+ * source-identity change simply makes the key differ and `ensureEngine`'s existing
+ * branch disposes the old voice and re-points the scheduler. It is coalesced — see
+ * `REBUILD_COALESCE_MS`.
+ *
+ * Pass `null` when the editor closes or the user discards: the working copy is
+ * dropped and the live voice goes back to whatever the pattern's ref resolves to.
+ *
+ * For a voice *selection* rather than an edit, call `refreshVoice` — pushing the newly
+ * resolved preset through here would pin it as a working copy and shadow the store.
+ */
+export function applyVoicePreset(preset: VoicePreset | null): void {
+  // Before the pattern guard: a discard has to land even if the pattern was closed
+  // first, or the abandoned edit is still what plays when it is reopened.
+  if (preset === null) {
+    workingPreset = null;
+    cancelPendingRebuild();
+  }
+
+  const pattern = getEditingPattern();
+  if (!pattern) return;
+
+  // Recorded even with no engine up, so the next play or audition builds from the
+  // working copy rather than from the stored variant it was taken from.
+  if (preset !== null) workingPreset = { tag: workingTagOf(pattern), preset };
+
+  reconcile(pattern);
+}
+
+/**
+ * Bring the live voice back in line with `presetFor` — without touching the working
+ * copy.
+ *
+ * This is how a *selection* becomes audible mid-playback. `applyVoicePreset` cannot do
+ * that job: pushing the newly resolved preset through it would pin it as a working copy,
+ * and from then on a `saveVoice` or `renameVoice` against the same shared variant —
+ * from this pane or any other holder of the ref — would never reach the engine.
+ */
+export function refreshVoice(): void {
+  const pattern = getEditingPattern();
+  if (pattern) reconcile(pattern);
+}
+
+function reconcile(pattern: Pattern): void {
+  try {
+    // Computed before the engine check, and unconditionally: reading the working copy is
+    // also what *drops* one whose tag has stopped matching, and that has to happen
+    // whether or not there is an engine to retune. This is why a selection goes through
+    // `refreshVoice` — that call is what retires the edit the user walked away from, so
+    // it cannot come back when they return to the voice it was taken from.
+    const key = voiceKeyOf(pattern);
+
+    const active = engine;
+    // Deliberately not `ensureEngine`: dragging a slider must not construct an audio
+    // graph on a page that has never been asked to make a sound.
+    if (!active) return;
+
+    if (key !== active.voiceKey) {
+      scheduleRebuild();
+      return;
+    }
+    // `presetFor`, not an argument: on a discard there is nothing to push, and the
+    // abandoned edit must not be left sounding.
+    active.voice.swapPreset(presetFor(pattern));
+  } catch {
+    // A preset the audio graph refuses must not take the editor down with it.
+  }
+}
+
+/**
+ * How long a source-identity change waits before the voice is rebuilt.
+ *
+ * A rebuild is not a cheap operation to repeat: it constructs a `Tone.Sampler` per bank
+ * and starts their HTTP loads, and `scheduler.setInstrument` disposes the outgoing voice
+ * while its own loads are still in flight. `source.release` is a *slider*, so a naive
+ * per-change rebuild turns one drag into sixty fetch storms. Trailing rather than
+ * leading, so a continuous drag collapses into exactly one build, of the last value.
+ *
+ * A pane may still prefer to hold rebuild-class controls until pointer-up
+ * (`rebuildsVoice` in `voice/paramSchema.ts` marks them); this makes that an
+ * optimisation rather than the only thing standing between a slider and the network.
+ */
+const REBUILD_COALESCE_MS = 120;
+
+let pendingRebuild: ReturnType<typeof setTimeout> | null = null;
+
+function cancelPendingRebuild(): void {
+  if (pendingRebuild === null) return;
+  clearTimeout(pendingRebuild);
+  pendingRebuild = null;
+}
+
+function scheduleRebuild(): void {
+  cancelPendingRebuild();
+  pendingRebuild = setTimeout(() => {
+    pendingRebuild = null;
+    const pattern = getEditingPattern();
+    // Re-read rather than close over anything: whatever the working copy says *now* is
+    // what should be built, which is what makes the coalescing correct rather than just
+    // cheaper. A key that matches again (the user dragged back, or a `play()` already
+    // rebuilt) means there is nothing left to do.
+    if (!pattern || !engine || voiceKeyOf(pattern) === engine.voiceKey) return;
+    try {
+      // LIB-GAP(3c) again: sampler banks are only fetched by `ensureBuilt`, so a pack
+      // change made mid-playback would otherwise run silent until the next `play()`.
+      ensureEngine(pattern)?.voice.ensureBuilt();
+    } catch {
+      // As above — a preset the audio graph refuses stays inaudible, not fatal.
+    }
+  }, REBUILD_COALESCE_MS);
+}
+
+/** Sound Lab's default audition note — mid-neck on a guitar, still audible on a
+ *  bass, so it needs no per-instrument table. */
+const AUDITION_NOTE = 'A3';
+
+/** ~50 ms. `audioNow()` is the AudioContext clock, and scheduling exactly at it
+ *  immediately after the context resumes lands in the past, where the note is
+ *  dropped without a word. */
+const AUDITION_PREROLL_SEC = 0.05;
+
+/**
+ * Get the current voice's samples in flight, before anything asks to hear them.
+ *
+ * LIB-GAP(3d): `Voice` exposes no load-completion promise — only `Metronome.start()`
+ * awaits `Tone.loaded()`, which is why `play()` is safe and `auditionVoice()` is not.
+ * Ten of the eleven guitar slots are sampler-sourced, so on a cold page the *first*
+ * audition click is otherwise the click that starts the download, and a 50 ms pre-roll
+ * does not cover a network round trip: the note fires into an unloaded `Sampler` and
+ * plays silently, with nothing to await and no error.
+ *
+ * So the pane calls this when it opens or expands, the way guitar-tutor's Sound Lab
+ * warms its voice in a mount effect. Best-effort by design — it makes the first
+ * audition audible, it is not a precondition for one.
+ */
+export async function warmVoice(): Promise<void> {
+  const pattern = getEditingPattern();
+  if (!pattern) return;
+
+  try {
+    await startAudio();
+    await MasterBus.warmup();
+    ensureEngine(pattern)?.voice.ensureBuilt();
+  } catch {
+    // No audio graph available; the audition path degrades the same way.
+  }
+}
+
+/**
+ * Play one note through the current voice with the transport stopped — what the
+ * voice editor auditions a tweak with.
+ *
+ * Call `warmVoice` first if the samples may not be loaded — see LIB-GAP(3d) there.
+ *
+ * Scheduled straight onto the audio clock rather than through the metronome (which
+ * owns start/stop, so using it would *be* starting playback) or through
+ * `scheduler.previewCell`, which resolves a string/fret cell against a tuning and
+ * capo that still have no owner (FOLLOW-UPS §3). A note name sidesteps both.
+ */
+export async function auditionVoice(note: string = AUDITION_NOTE): Promise<void> {
+  const pattern = getEditingPattern();
+  if (!pattern) return;
+
+  try {
+    await startAudio();
+    // The master bus renders its reverb impulse response lazily and every voice
+    // outputs through it; auditioning before it is ready is how the first note after
+    // a cold load comes out dry.
+    await MasterBus.warmup();
+
+    const active = ensureEngine(pattern);
+    if (!active) return;
+
+    // LIB-GAP(3c), as in `play()`: the sampler downloads and the cabinet IR render
+    // start here, not in the constructor.
+    active.voice.ensureBuilt();
+    active.voice.play(note, '4n', audioNow() + AUDITION_PREROLL_SEC);
   } catch {
     // Auditioning is best-effort; it must never break the click that asked.
   }

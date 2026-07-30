@@ -100,11 +100,15 @@ describe('FretboardView', () => {
     // this fails the moment it stops being hidden from the accessibility tree.
     expect(screen.queryByRole('img')).toBeNull();
     // Hiding the board costs the lib's own horizontal scroller its only route to the
-    // keyboard, so the figure takes both scrollers and the focus that reaches them. Not a
+    // keyboard, so the figure takes that scroller and the focus that reaches it. Not a
     // cosmetic attribute: without it the upper frets are pointer-only at a narrow pane.
     // What it *scrolls* is unassertable — jsdom lays nothing out and scrolls nothing.
+    //
+    // Horizontal only. The pane is as tall as its content, so there is no vertical
+    // overflow to reach — but the board keeps its `min-w-[820px]`, so the sideways
+    // scroller is still the only way to the upper frets in a narrow pane.
     expect(figure).toHaveAttribute('tabindex', '0');
-    expect(figure.className).toContain('overflow-auto');
+    expect(figure.className).toContain('overflow-x-auto');
   });
 
   it('ghosts every distinct cell the pattern visits, and only those', () => {

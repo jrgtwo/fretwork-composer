@@ -1,13 +1,5 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react';
-import {
-  allCollapsed,
-  clampHeight,
-  fillerId,
-  reorder,
-  splitTarget,
-  type PaneSpec,
-  type PaneState,
-} from './paneLayout';
+import { reorder, type PaneSpec, type PaneState } from './paneLayout';
 
 export interface Pane extends PaneSpec {
   /** Right-aligned controls in the pane header. */
@@ -15,30 +7,31 @@ export interface Pane extends PaneSpec {
   children?: ReactNode;
 }
 
-const HEADER_H = 31;
 const DRAG_THRESHOLD = 5;
 
 /**
- * A vertical stack of collapsible, reorderable, resizable panes.
+ * A vertical stack of collapsible, reorderable panes.
  *
- * All the layout decisions live in ./paneLayout — this component only turns
- * pointer gestures into calls on those rules.
+ * Each pane is exactly as tall as its content. Nothing here sizes a pane — no heights,
+ * no flex grow, no min/max — so a pane's height is decided entirely by what it holds.
+ * When the panes together outgrow the viewport, *this* element scrolls; panes no longer
+ * scroll individually, which is the visible trade for losing the resize handles.
+ *
+ * Collapsing is the only size control. With every pane collapsed you get three headers
+ * and empty space below them, and each header keeps its own expand toggle, so there is
+ * no separate empty-state affordance to get back.
  */
 export function PaneStack({ panes }: { panes: Pane[] }) {
   const specs = panes;
   const [order, setOrder] = useState<string[]>(() => panes.map((p) => p.id));
   const [states, setStates] = useState<Record<string, PaneState>>(() =>
-    Object.fromEntries(
-      panes.map((p) => [p.id, { height: p.min ?? 200, collapsed: false }]),
-    ),
+    Object.fromEntries(panes.map((p) => [p.id, { collapsed: false }])),
   );
   const [dragging, setDragging] = useState<string | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const stackRef = useRef<HTMLDivElement>(null);
 
   const paneById = (id: string) => specs.find((p) => p.id === id)!;
-  const filler = fillerId(order, specs, states);
-  const empty = allCollapsed(order, states);
   // Panes the dragged one could land between. A drop index equal to this length
   // means "after the last pane", which needs its own indicator below the stack.
   const others = dragging ? order.filter((id) => id !== dragging) : [];
@@ -50,49 +43,9 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
     />
   );
 
-  const setHeight = useCallback((id: string, height: number) => {
-    setStates((prev) => ({ ...prev, [id]: { ...prev[id], height } }));
-  }, []);
-
   const toggleCollapse = useCallback((id: string) => {
-    setStates((prev) => ({
-      ...prev,
-      [id]: { ...prev[id], collapsed: !prev[id].collapsed },
-    }));
+    setStates((prev) => ({ ...prev, [id]: { collapsed: !prev[id].collapsed } }));
   }, []);
-
-  const expandAll = useCallback(() => {
-    setStates((prev) =>
-      Object.fromEntries(
-        Object.entries(prev).map(([id, s]) => [id, { ...s, collapsed: false }]),
-      ),
-    );
-  }, []);
-
-  // ---- splitter drag ------------------------------------------------------
-  const onSplitterDown = (index: number) => (e: React.MouseEvent) => {
-    const target = splitTarget(order, index, specs, states);
-    if (!target) return;
-    e.preventDefault();
-    const spec = paneById(target.id);
-    const startY = e.clientY;
-    const startH = states[target.id].height;
-    document.body.style.cursor = 'ns-resize';
-    document.body.style.userSelect = 'none';
-
-    const move = (ev: MouseEvent) => {
-      const delta = (ev.clientY - startY) * target.dir;
-      setHeight(target.id, clampHeight(spec, startH + delta));
-    };
-    const up = () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-  };
 
   // ---- header drag to reorder ---------------------------------------------
   const onHeaderDown = (id: string) => (e: React.MouseEvent) => {
@@ -134,12 +87,13 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
   };
 
   return (
-    <div ref={stackRef} className="flex min-h-0 min-w-0 flex-col px-3 pt-2.5 pb-3">
-      {order.map((id, i) => {
+    <div
+      ref={stackRef}
+      className="flex min-h-0 min-w-0 flex-col gap-2.5 overflow-y-auto px-3 pt-2.5 pb-3"
+    >
+      {order.map((id) => {
         const pane = paneById(id);
         const state = states[id];
-        const isFiller = filler === id && !state.collapsed;
-        const target = splitTarget(order, i, specs, states);
         const othersIndex = others.indexOf(id);
 
         return (
@@ -148,11 +102,7 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
 
             <section
               data-pane={id}
-              style={{
-                height: state.collapsed ? HEADER_H : isFiller ? undefined : state.height,
-                flex: state.collapsed ? '0 0 auto' : isFiller ? '1 1 0' : '0 0 auto',
-              }}
-              className={`tray flex min-h-0 flex-col overflow-hidden ${
+              className={`tray flex flex-none flex-col overflow-hidden ${
                 dragging === id ? 'opacity-45 outline outline-dashed outline-brass' : ''
               }`}
             >
@@ -179,44 +129,14 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
                 {pane.actions}
               </header>
 
-              {!state.collapsed && (
-                <div className="flex min-h-0 flex-1 flex-col p-1.5">{pane.children}</div>
-              )}
+              {!state.collapsed && <div className="flex flex-col p-1.5">{pane.children}</div>}
             </section>
-
-            <div
-              role="separator"
-              aria-orientation="horizontal"
-              aria-label={target ? `Resize ${paneById(target.id).title}` : 'Resize (unavailable)'}
-              data-testid={`splitter-${i}`}
-              onMouseDown={onSplitterDown(i)}
-              className={`flex h-2.5 flex-none items-center justify-center ${
-                target ? 'cursor-ns-resize' : 'cursor-default'
-              }`}
-            >
-              <i
-                className={`block h-1 w-10 rounded-sm bg-linear-to-b from-[#50555f] to-[#3a3e47] shadow-[0_1px_0_rgb(255_255_255/0.1)_inset,0_1px_3px_rgb(0_0_0/0.5)] ${
-                  target ? 'hover:from-brass-hi hover:to-brass' : 'opacity-35'
-                }`}
-              />
-            </div>
           </div>
         );
       })}
 
       {/* dropping past the last pane — the loop above can only draw *before* a pane */}
       {dropIndex !== null && dropIndex >= others.length && dropline}
-
-      {empty && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2.5 rounded-xl border border-dashed border-line bg-black/10">
-          <p className="font-mono text-[9.5px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
-            All panels collapsed
-          </p>
-          <button type="button" onClick={expandAll} className="pressable control rounded-lg px-3 py-1.5 font-mono text-[9.5px] font-bold tracking-[0.09em] uppercase">
-            Expand all
-          </button>
-        </div>
-      )}
     </div>
   );
 }
