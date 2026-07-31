@@ -26,6 +26,7 @@ import {
   getAmpModel,
   getCabinetIR,
   getSamplePack,
+  prefetchSampleBanks,
   type FretInstrumentId,
   type Pattern,
   type VoicePreset,
@@ -107,50 +108,34 @@ const labelClass = 'flex-none font-mono text-[9px] tracking-[0.1em] text-ink-mut
 const selectClass = 'control pressable min-w-0 rounded-lg px-1.5 py-1 font-mono text-[10px]';
 
 /**
- * LIB-GAP(10): the lib's `prefetchSampleBanks` is not exported.
+ * Debounce in front of the lib's `prefetchSampleBanks`.
  *
- * It exists (`playback/voices/sample-packs.ts`) and the voice store calls it when the
- * GLOBAL active voice changes, but it is absent from every barrel and the package's
- * `exports` map blocks deep imports — so the one path a pattern-scoped picker has is to
- * repeat it. Verified against the lib's implementation, which is a bare fire-and-forget
- * `fetch` per URL with errors swallowed.
+ * The prefetch itself is the lib's — picking a pack does NOT download, because
+ * `reconcile` won't build an audio graph on a page that has never made a sound, so
+ * without a warm the first Play after a pack change stalls on the whole bank.
  *
- * It earns its keep because picking a pack does NOT download: `reconcile` deliberately
- * won't build an audio graph on a page that has never made a sound, so without this the
- * first Play after a pack change stalls on the whole bank.
+ * What stays ours is the *rate*, and it is ours permanently rather than a masked gap: a
+ * native `<select>` fires `change` once per arrow key while closed, so a keyboard user
+ * stepping through the eight packs passes through every one of them, and the
+ * Philharmonia pack alone is ~45 MP3s. The lib has no idea it is behind a `<select>`.
+ * The window borrows `playbackService`'s rebuild window, so walking the list warms only
+ * where it stops.
  *
- * Two guards the lib's own version does not need and this one does. A native `<select>`
- * fires `change` per arrow key while closed, so a keyboard user stepping through the
- * eight packs walks every one of them — and the Philharmonia pack alone is ~45 MP3s:
- *   - trailing coalesce, borrowing `playbackService`'s rebuild window, so a walk through
- *     the list warms only where it stops;
- *   - a module-level set of URLs already asked for, so stepping back is free. Requested,
- *     not *loaded* — the point is to be in the browser's HTTP cache by the time
- *     `Tone.Sampler` asks, and a second `fetch` of a URL already in flight buys nothing.
- *
- * Delete the whole block when the lib exports `prefetchSampleBanks`.
+ * No dedupe set here: `prefetchSampleBanks` is documented idempotent and the browser's
+ * HTTP cache absorbs a repeat, so re-selecting a pack costs a cache hit, not a download.
  */
 const WARM_COALESCE_MS = 120;
-const requestedSampleUrls = new Set<string>();
 let pendingWarm: ReturnType<typeof setTimeout> | null = null;
 let pendingBanks: ReadonlyArray<Readonly<Record<string, string>>> | null = null;
 
 function warmSampleBanks(banks: ReadonlyArray<Readonly<Record<string, string>>>): void {
-  if (typeof fetch === 'undefined') return;
   pendingBanks = banks;
   if (pendingWarm !== null) clearTimeout(pendingWarm);
   pendingWarm = setTimeout(() => {
     pendingWarm = null;
     const target = pendingBanks;
     pendingBanks = null;
-    if (!target) return;
-    for (const bank of target) {
-      for (const url of Object.values(bank)) {
-        if (requestedSampleUrls.has(url)) continue;
-        requestedSampleUrls.add(url);
-        fetch(url).catch(() => {});
-      }
-    }
+    if (target) prefetchSampleBanks(target);
   }, WARM_COALESCE_MS);
 }
 

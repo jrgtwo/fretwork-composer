@@ -41,6 +41,10 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "@fretwork/lib"
-    ]
+    ],
+    "//overrides": "MIGRATION SCAFFOLDING — remove before merging. Points @fretwork/lib at the sibling checkout so lib changes land here on save (run `tsc -w -p tsconfig.build.json` there) instead of costing a commit-tag-push-bump round trip. Restore the pinned tag in `dependencies` when the migration branch lands.",
+    "overrides": {
+      "@fretwork/lib": "link:../fretwork-lib"
+    }
   }
 }
