@@ -15,7 +15,9 @@
   "dependencies": {
     "@fretwork/lib": "github:jrgtwo/fretwork-lib#v0.2.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "tone": "^15.1.22",
+    "zustand": "^5.0.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

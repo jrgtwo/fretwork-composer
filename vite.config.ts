@@ -23,6 +23,16 @@ export default defineConfig({
     // lib's directory before dedupe can collapse them. Forcing the path does work.
     //
     // Harmless once the link goes: these paths are where React already resolves from.
+    //
+    // `tone` and `zustand` are here for the same reason and are now genuine PEERS of the
+    // lib — the consumer supplies them, so forcing our copy is what production does
+    // anyway. Under the link they'd otherwise resolve to the lib's own devDependency
+    // copies. Two Tones is the expensive one: it owns a global AudioContext and
+    // transport, so a second instance means notes scheduled on a transport nobody is
+    // listening to — indistinguishable from the LIB-GAP(3a/3b/3c) symptoms.
+    //
+    // NB `tone` vs `tonal`: a string alias would prefix-match both. Another reason these
+    // are exact-and-subpath regexes.
     alias: [
       { find: '@', replacement: path.resolve(__dirname, './src') },
       { find: /^react$/, replacement: path.resolve(__dirname, 'node_modules/react') },
@@ -32,6 +42,10 @@ export default defineConfig({
         find: /^react-dom\//,
         replacement: path.resolve(__dirname, 'node_modules/react-dom') + '/',
       },
+      { find: /^tone$/, replacement: path.resolve(__dirname, 'node_modules/tone') },
+      { find: /^tone\//, replacement: path.resolve(__dirname, 'node_modules/tone') + '/' },
+      { find: /^zustand$/, replacement: path.resolve(__dirname, 'node_modules/zustand') },
+      { find: /^zustand\//, replacement: path.resolve(__dirname, 'node_modules/zustand') + '/' },
     ],
   },
   test: {
