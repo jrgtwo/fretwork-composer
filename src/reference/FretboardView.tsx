@@ -19,11 +19,15 @@ import { patternInstrumentId, useEditingPattern } from '../patterns/patternServi
 import { activeCellsFor, cellsAboveFret, footprintCellsFor } from './patternCells';
 
 /**
- * LIB-GAP(7): with no `highlights` prop, the board falls back to `useFretworkStore`'s
- * scale — key A / major by default — and draws it in full degree colour. That's a
- * theory claim the pattern never made, on a global this app never sets. An explicit
- * empty set is what keeps the neck bare behind the pattern's own footprint.
- * Delete when `<Fretboard>` treats "no highlights" as "none".
+ * An explicit empty set, because ABSENT and EMPTY mean different things to the board:
+ * omit `highlights` and it falls back to `useFretworkStore`'s scale — key A / major by
+ * default — and draws it in full degree colour. That's a theory claim the pattern never
+ * made, on a global this app never sets.
+ *
+ * Not a workaround. This was tagged as one (a gap that "no highlights" didn't mean
+ * none), but passing `[]` always did mean none — the fallback applies to an omitted
+ * prop, not an empty one. This is the intended API, and the constant exists only to
+ * keep the array identity stable across renders.
  */
 const NO_HIGHLIGHTS: readonly Highlight[] = [];
 
@@ -87,7 +91,7 @@ export function FretboardView() {
       data-testid="fretboard-view"
       // Explicit rather than relying on the caption naming the figure implicitly:
       // that mapping is spec'd but unevenly implemented, and this is the only
-      // accessible description of the board (see the LIB-GAP(7) note below).
+      // accessible description of the board (see the note below).
       aria-labelledby={captionId}
       // Both scrollers, and both ours. Vertical because the board's height follows its
       // width (viewBox 1202×280 at `h-auto`), so at a wide pane it wants ~280px and the
@@ -109,11 +113,17 @@ export function FretboardView() {
       className="well flex flex-col overflow-x-auto px-2 py-1.5"
     >
       {/*
-       * LIB-GAP(7), second half: `<Fretboard>` hardcodes its own `aria-label` from
-       * the global scale state ("Fretboard showing A major in Standard") and accepts
-       * no override, which describes something this board deliberately isn't drawing.
-       * Hidden from the accessibility tree and described by the caption instead; the
-       * note data itself is reachable in the timeline, not here.
+       * Hidden from the accessibility tree and described by the caption instead. The
+       * note data itself is reachable in the timeline, not here, so a second reading of
+       * the same content on the board would be noise.
+       *
+       * This started as a workaround — `<Fretboard>` hardcoded its `aria-label` from
+       * the global scale state ("Fretboard showing A major in Standard") with no
+       * override, describing something this board deliberately isn't drawing. The lib
+       * now takes an `ariaLabel` prop, so this is a CHOICE rather than a constraint:
+       * visible caption text beats an invisible label, and keeping the board out of the
+       * tree avoids announcing it twice. Switch to `ariaLabel` if that trade ever
+       * changes.
        */}
       {/* `min-w` mirrors the lib svg's own `min-w-[820px]`, so the board is never
           squeezed and the lib's inner `overflow-x-auto` never has anything to scroll —
@@ -122,17 +132,20 @@ export function FretboardView() {
           being scrolled to is the thing that shrank away. */}
       <div aria-hidden className="w-full min-w-[820px] flex-none">
         {/*
-         * LIB-GAP(8): no scale layer, even when the pattern has a key — a deliberate
-         * departure from guitar-tutor's `FretboardInput`.
+         * No scale layer, even though the lib can now draw one properly.
          *
-         * `useFretboardModel` skips any footprint cell the render set already drew,
-         * and `dimNonHighlighted` never touches the render set (it only gates the
-         * editor's hover-preview marker). Passing the pattern's scale would therefore
-         * draw ~57 full-colour degree markers and make every in-scale cell of the
-         * pattern indistinguishable from them — the pattern would vanish from the view
-         * whose whole job is showing it. `FretboardInput` gets away with it because
-         * it's an editor: the dimming exists to support stamping, and nothing is
-         * stamped here.
+         * It used to be impossible: `dimNonHighlighted` didn't touch the render set (it
+         * only gated the editor's hover-preview marker), so a scale layer drew ~57
+         * full-colour degree markers and made every in-scale cell of the pattern
+         * indistinguishable from them — the pattern vanished from the view whose whole
+         * job is showing it. That is fixed upstream: the dim filler now covers the
+         * render set and deliberately skips the activity and footprint cells, so the
+         * pattern stays legible on top of a dimmed scale.
+         *
+         * What blocks it now is ours, not the lib's: a scale layer has to be keyed off
+         * `pattern.key` / `pattern.scaleType`, and key/scale is not built yet
+         * (`setEditingPatternKeyScale`, docs/FOLLOW-UPS.md §5). Add the layer when the
+         * pattern can actually say what key it is in.
          *
          * `inlayGrid` isn't passed either, despite `FretboardInput` setting it: the lib
          * uses it only to gate a hover-preview marker, and `hoverCell` is set solely by
@@ -140,8 +153,6 @@ export function FretboardView() {
          * read-only board it is inert, and the inlay dots and fret numbers it sounds
          * like it controls come from `FretLines` unconditionally.
          *
-         * Delete when `dimNonHighlighted` dims the render set, at which point the
-         * scale layer can come back keyed off `pattern.key` / `pattern.scaleType`.
          */}
         <Fretboard
           neutralGrid={false}

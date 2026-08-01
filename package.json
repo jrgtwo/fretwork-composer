@@ -13,7 +13,7 @@
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {
-    "@fretwork/lib": "github:jrgtwo/fretwork-lib#v0.2.0",
+    "@fretwork/lib": "github:jrgtwo/fretwork-lib#v0.3.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "tone": "^15.1.22",
@@ -43,10 +43,6 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "@fretwork/lib"
-    ],
-    "//overrides": "MIGRATION SCAFFOLDING — remove before merging. Points @fretwork/lib at the sibling checkout so lib changes land here on save (run `tsc -w -p tsconfig.build.json` there) instead of costing a commit-tag-push-bump round trip. Restore the pinned tag in `dependencies` when the migration branch lands.",
-    "overrides": {
-      "@fretwork/lib": "link:../fretwork-lib"
-    }
+    ]
   }
 }
