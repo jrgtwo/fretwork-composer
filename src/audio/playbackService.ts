@@ -21,13 +21,11 @@ import {
   DEFAULT_TUNING_ID,
   EventScheduler,
   MasterBus,
-  PPQ,
   PatternSource,
   Voice,
   audioNow,
   buildEffectiveVoice,
   getTuning,
-  getTransportTicks,
   getTuningsForInstrument,
   startAudio,
   useMetronome,
@@ -40,7 +38,6 @@ import {
 } from '@fretwork/lib';
 import { getEditingPattern, patternInstrumentId } from '../patterns/patternService';
 import { readVoiceRef, resolveVoicePreset } from '../voice/voiceService';
-import { wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
 const CAPO = 0;
@@ -277,9 +274,11 @@ function ensureEngine(pattern: Pattern): Engine | null {
       voice,
       voiceKey,
       unsubscribes: [
-        // Only fires at transport start and stop in this build, so it seeds the
-        // head rather than sweeping it. Guarded so the stop-time emit can't put
-        // the playhead back on screen after `stop()` cleared it.
+        // Sweeps during playback: the scheduler emits the head from the same poll
+        // that computes the highlights, already folded into the loop region — so the
+        // playhead and the lit notes can never disagree. Still guarded, because the
+        // stop-time emit must not put the playhead back on screen after `stop()`
+        // cleared it.
         scheduler.onHead((headTick) => {
           if (snapshot.isPlaying) emit({ headTick });
         }),
@@ -298,38 +297,6 @@ function ensureEngine(pattern: Pattern): Engine | null {
   }
 }
 
-// ------------------------------------------------------------- head loop ---
-// LIB-GAP(3b): delete this loop and subscribe to `scheduler.onHead` once the
-// scheduler starts its visual loop. See docs/FOLLOW-UPS.md.
-//
-// `EventScheduler.onHead` cannot drive a moving playhead in this build of the
-// lib: it has a `_stopVisualLoop` but no matching start, so head positions are
-// only emitted twice — once at transport start and once at stop. Reading the
-// transport ourselves is what the lib's own docs point at ("the sync path
-// should use getTransportTicks for the playhead").
-
-let headRafId: number | null = null;
-
-function startHeadLoop(): void {
-  if (headRafId !== null) return;
-  const frame = () => {
-    if (!snapshot.isPlaying) {
-      headRafId = null;
-      return;
-    }
-    const duration = getEditingPattern()?.durationTicks ?? 0;
-    emit({ headTick: wrapToDuration(getTransportTicks(PPQ), duration) });
-    headRafId = requestAnimationFrame(frame);
-  };
-  headRafId = requestAnimationFrame(frame);
-}
-
-function stopHeadLoop(): void {
-  if (headRafId === null) return;
-  cancelAnimationFrame(headRafId);
-  headRafId = null;
-}
-
 /** Teardown is best-effort — a half-built audio graph still has to let go. */
 function attempt(fn: () => void): void {
   try {
@@ -344,7 +311,6 @@ function disposeEngine(): void {
   engine = null;
   if (!current) return;
 
-  stopHeadLoop();
   cancelPendingRebuild();
   current.unsubscribes.forEach((unsubscribe) => unsubscribe());
   // The metronome owns the transport and `scheduler.dispose()` only cancels the
@@ -404,7 +370,6 @@ export async function play(): Promise<void> {
     active.scheduler.setStream(new PatternSource(pattern));
     active.scheduler.setLoop(pattern.loop);
     emit({ isPlaying: true, headTick: 0, activeIds: NO_IDS });
-    startHeadLoop();
     await active.metronome.start();
   } catch {
     // `metronome.start()` can reject after it has already claimed the
@@ -418,7 +383,6 @@ export function stop(): void {
   const current = engine;
   // Cleared first so any in-flight head frame is dropped by the guard above.
   emit(IDLE);
-  stopHeadLoop();
   if (!current) return;
 
   try {

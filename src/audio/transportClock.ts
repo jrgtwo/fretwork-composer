@@ -1,11 +1,12 @@
-// LIB-GAP(3b): what's left of this module exists because `EventScheduler` emits
-// `onActive` and `onPlacementChange` from its rAF loop but never `onHead`, so the
-// playhead has to read the transport itself. Delete `wrapToDuration` and its callers
-// once `onHead` sweeps during playback. See docs/FOLLOW-UPS.md § "Lib gaps we are masking".
+// Permanent adapter, not a lib gap. Both of this module's reasons for existing are
+// gone: `getTransportTicks` no longer throws without an AudioContext (was 3a), and
+// `EventScheduler.onHead` now sweeps during playback (was 3b), so the playhead is a
+// subscription rather than a loop of our own.
 //
-// The 3a half is gone: `getTransportTicks` no longer throws without an AudioContext
-// (it returns 0 and guards against non-finite results), so the try/catch wrapper that
-// used to live here is deleted and callers use the lib directly.
+// What remains is for `useTimelineAutoScroll`, which deliberately does NOT subscribe:
+// a head position pushed through React state at 60Hz re-renders every consumer, so it
+// reads the transport in its own rAF and never touches React. That read is raw, so it
+// still has to be folded into the loop itself.
 import { wrapTick } from '@fretwork/lib';
 
 /**
