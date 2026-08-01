@@ -67,17 +67,17 @@ interface ParamCommon {
    */
   readonly optional?: true;
   /**
-   * Set when applying this edit must construct a NEW `Voice` instead of calling
-   * `swapPreset`. The flag exists only because `swapPreset` is broken two ways:
+   * Set when applying this edit forces the `Voice` to rebuild its source rather than
+   * retune in place.
    *
-   * LIB-GAP(9a): on a source-KIND change `Voice.swapPreset` calls `this.dispose()`
-   * and returns without rebuilding, leaving the voice dead and the caller holding a
-   * corpse. Delete when `swapPreset` rebuilds instead of disposing.
+   * This used to mark a correctness hazard — `swapPreset` disposed without rebuilding
+   * on a kind change (gap 9a) and never reconstructed sampler banks (gap 9b), so these
+   * edits had to bypass it entirely. Both are fixed upstream.
    *
-   * LIB-GAP(9b): for a SAMPLER source `swapPreset` never reconstructs the banks,
-   * which are only ever built in `_ensureBuilt`. A `samples` or `release` change made
-   * through it is therefore silently inaudible. Delete when `swapPreset` reconstructs
-   * sampler banks.
+   * It now marks *cost*: rebuilding a sampler constructs one `Tone.Sampler` per bank
+   * and starts an HTTP load each. A pane can use this to hold such a control until
+   * pointer-up rather than firing per pointermove — an optimisation on top of
+   * `playbackService`'s coalescing, not the thing that makes the edit work.
    */
   readonly rebuildsVoice?: true;
 }

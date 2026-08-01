@@ -640,7 +640,8 @@ describe('deleteVoice', () => {
 
 // ----------------------------------------------------- edit classification ---
 // `Voice.swapPreset` retunes in place, except that it disposes itself on a source-KIND
-// change (LIB-GAP(9a)) and never reconstructs sampler banks (LIB-GAP(9b)). So source
+// change (gap 9a) and never reconstructed sampler banks (gap 9b) — both fixed upstream,
+// but the classification still routes rebuild-class edits so they can be coalesced. Source
 // identity has to rebuild and everything else must not — and neither failure announces
 // itself.
 

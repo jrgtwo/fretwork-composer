@@ -21,11 +21,13 @@ import {
   DEFAULT_TUNING_ID,
   EventScheduler,
   MasterBus,
+  PPQ,
   PatternSource,
   Voice,
   audioNow,
   buildEffectiveVoice,
   getTuning,
+  getTransportTicks,
   getTuningsForInstrument,
   startAudio,
   useMetronome,
@@ -38,7 +40,7 @@ import {
 } from '@fretwork/lib';
 import { getEditingPattern, patternInstrumentId } from '../patterns/patternService';
 import { readVoiceRef, resolveVoicePreset } from '../voice/voiceService';
-import { readTransportTicks, wrapToDuration } from './transportClock';
+import { wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
 const CAPO = 0;
@@ -134,9 +136,10 @@ let sharedMetronome: Metronome | null = null;
  * so it cannot outlive its subject — pick a different voice, change instrument or
  * open another pattern and the tag stops matching, and the stored preset takes over.
  *
- * Never written back from `voice.preset`: `swapPreset` reassigns the voice's own copy
- * from what it managed to apply, and for a sampler that copy's banks are not the ones
- * sounding (LIB-GAP(9b)). The caller's copy is the only trustworthy one.
+ * Never written back from `voice.preset`. `swapPreset` reassigns the voice's own copy
+ * from what it managed to apply — which was outright wrong for a sampler before gap 9b
+ * was fixed upstream, and is still the wrong direction of travel: the working copy is
+ * what the user is editing, and the voice is downstream of it.
  */
 let workingPreset: { tag: string; preset: VoicePreset } | null = null;
 
@@ -180,20 +183,25 @@ const presetFor = (pattern: Pattern): VoicePreset =>
   workingPresetFor(pattern) ?? resolveVoicePreset(pattern);
 
 /**
- * Everything about a preset that CANNOT be changed on a live `Voice`, as a string.
+ * Everything about a preset that a live `Voice` has to be REBUILT for, as a string.
  *
- * LIB-GAP(9a): on a source-**kind** change `Voice.swapPreset` calls `this.dispose()`
- * and returns without rebuilding, leaving the caller holding a dead voice.
- * LIB-GAP(9b): for a **sampler** it never reconstructs the banks — they are only
- * built in `_ensureBuilt` — so a `samples` or `release` change through it is
- * silently inaudible.
+ * This was gaps 9a and 9b — `swapPreset` used to dispose without
+ * rebuilding on a source-kind change, and never reconstructed a sampler's banks. Both
+ * are fixed upstream, so it is no longer here for correctness: `swapPreset` would now
+ * handle a source change on its own.
  *
- * So those fields go into the voice key and force a rebuild, and everything else
- * (level, input gain, body filter, compressor, and all of `effects` including the
- * amp, cabinet and EQs) is retuned in place — `_rebuildChain` keeps the synth, so even
- * adding or removing a chain stage is in-place-safe. Synth `params` are deliberately
- * absent: `updateSynthParams` handles pluck and FM parameters correctly, and only the
- * kind decides which synth exists.
+ * It stays because a rebuild is *expensive*, and that is ours to manage. Reconstructing
+ * a sampler means one `Tone.Sampler` per bank and an HTTP load each, and `release` is a
+ * **slider** — so an unthrottled path turns one drag into sixty fetch storms. Knowing
+ * which edits are rebuild-class is what lets `reconcile` coalesce them (see
+ * `REBUILD_COALESCE_MS`) while retuning everything else immediately. Rate limiting a
+ * network-touching rebuild is permanent adapter work, not a masked gap.
+ *
+ * Everything outside this key — level, input gain, body filter, compressor, and all of
+ * `effects` including amp, cabinet and EQs — is retuned in place; `_rebuildChain` keeps
+ * the synth, so even adding or removing a chain stage is in-place-safe. Synth `params`
+ * are deliberately absent: `updateSynthParams` handles pluck and FM correctly, and only
+ * the kind decides which synth exists.
  *
  * The whole bank array is stringified, not just bank 0 — `detectSamplePack`'s bank-0
  * shortcut is sound for *recognising a registered pack* but not for telling two
@@ -310,7 +318,7 @@ function startHeadLoop(): void {
       return;
     }
     const duration = getEditingPattern()?.durationTicks ?? 0;
-    emit({ headTick: wrapToDuration(readTransportTicks(), duration) });
+    emit({ headTick: wrapToDuration(getTransportTicks(PPQ), duration) });
     headRafId = requestAnimationFrame(frame);
   };
   headRafId = requestAnimationFrame(frame);
@@ -451,9 +459,11 @@ export function previewNote(stringIndex: number, fret: number): void {
  * The classification is the heart of this function and a mistake in it is SILENT:
  *
  *   - **source identity** — the source `kind`, or a sampler's banks and `release` —
- *     needs a NEW `Voice`. `swapPreset` disposes itself on a kind change and never
- *     reconstructs sampler banks (LIB-GAP(9a), LIB-GAP(9b)), so pushing one of those
- *     through it leaves either a dead voice or an edit nobody can hear.
+ *     rebuilds the voice's source. `swapPreset` now does that itself (gaps 9a and 9b,
+ *     fixed upstream), so this is no longer about correctness — it is about cost: a
+ *     rebuild constructs one `Tone.Sampler` per bank and starts an HTTP load each, and
+ *     `release` is a slider. Knowing which edits are rebuild-class is what lets them be
+ *     coalesced.
  *   - **everything else** — level, input gain, body filter, compressor, and the whole
  *     effects chain including the amp, cabinet and EQs — is retuned in place, with no
  *     teardown and no sampler re-download. That is what makes dragging a slider on a

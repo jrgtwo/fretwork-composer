@@ -386,7 +386,7 @@ describe('scope', () => {
   });
 
   it('marks exactly the source-identity edits as needing a Voice rebuild', () => {
-    // LIB-GAP(9a, 9b): `Voice.swapPreset` never rebuilds sampler banks, so a
+    // Gaps 9a/9b (fixed upstream): `swapPreset` used not to rebuild sampler banks, so a
     // `samples` or `release` change made through it is silently inaudible — those two
     // are the rebuild set, and nothing else in this slice is.
     const rebuilding = ALL_PARAMS.filter((p) => p.rebuildsVoice).map((p) => p.path);

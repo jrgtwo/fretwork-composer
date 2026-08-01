@@ -18,6 +18,7 @@
 import { useSyncExternalStore } from 'react';
 import {
   DEFAULT_INSTRUMENT_ID,
+  DYNAMIC_VELOCITY,
   INSTRUMENTS,
   getInstrument,
   usePatternsStore,
@@ -418,35 +419,8 @@ export function setNotePitch(id: string, pitch: NotePitch): void {
   store().updateEventArticulations(id, toPitchPatch(pitch) as never);
 }
 
-/**
- * LIB-GAP(5): the numbers below are the lib's own dynamic → velocity curve,
- * copied. The model documents that authoring a dynamic must back-fill
- * `velocity` "via the same curve the mapper uses", but that function
- * (`dynamicToVelocity`, import/mapper.js) is private to the importer, so a
- * pattern typed here and one imported from a file would otherwise disagree
- * about what mf sounds like. Delete when the lib exports it.
- *
- * Sub-linear at the soft end, compressed at the loud end — the curve is tuned
- * by ear, not derived, so it must be mirrored rather than re-invented.
- *
- * `dynamicToVelocity` itself can't be called, but the importer that uses it is
- * public, so the drift test in tests/NotePopup.test.tsx pins these numbers by
- * running each mark through `mapImportToLibrary`. Keep that test alive until
- * this block dies.
- */
-const DYNAMIC_VELOCITY: Record<DynamicMark, number> = {
-  ppp: 0.08,
-  pp: 0.18,
-  p: 0.32,
-  mp: 0.5,
-  mf: 0.65,
-  f: 0.8,
-  ff: 0.92,
-  fff: 1.0,
-};
-
-/** Softest → loudest, ordered by the curve itself rather than by how the literal
- *  above happens to be written, so a picker can't drift from it. */
+/** Softest → loudest, ordered by the curve itself rather than by how the lib's literal
+ *  happens to be written, so a picker can't drift from it. */
 export const DYNAMICS = Object.entries(DYNAMIC_VELOCITY)
   .sort(([, a], [, b]) => a - b)
   .map(([mark]) => mark as DynamicMark);

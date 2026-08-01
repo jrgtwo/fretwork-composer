@@ -19,14 +19,18 @@ vi.mock('../src/audio/playbackService', () => ({
 }));
 
 // The follow-scroll loop's only observable act under jsdom is this read, so it
-// is replaced with a countable one. Everything else in the module is kept.
-vi.mock('../src/audio/transportClock', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/audio/transportClock')>()),
-  readTransportTicks: vi.fn(() => 0),
+// is replaced with a countable one. Everything else in the lib is kept.
+//
+// Mocks the lib directly now: `getTransportTicks` stopped throwing without an
+// AudioContext (LIB-GAP(3a)), so the local `readTransportTicks` wrapper that used to
+// guard it is gone and callers read the lib.
+vi.mock('@fretwork/lib', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@fretwork/lib')>()),
+  getTransportTicks: vi.fn(() => 0),
 }));
 
 import { Timeline } from '../src/timeline/Timeline';
-import { readTransportTicks } from '../src/audio/transportClock';
+import { getTransportTicks } from '@fretwork/lib';
 import { installFrameClock } from './frameClock';
 import {
   play,
@@ -242,7 +246,7 @@ describe('Timeline active notes', () => {
  * "the loop is running".
  */
 describe('Timeline follow-scroll versus a drag', () => {
-  const reads = () => vi.mocked(readTransportTicks).mock.calls.length;
+  const reads = () => vi.mocked(getTransportTicks).mock.calls.length;
 
   it('hands the view to a drag and takes it back on release', async () => {
     const user = userEvent.setup();
