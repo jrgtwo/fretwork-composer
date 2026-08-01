@@ -401,13 +401,6 @@ export async function play(): Promise<void> {
     const active = ensureEngine(pattern);
     if (!active) return;
 
-    // LIB-GAP(3c): the engine should warm itself. Until it does, this ordering
-    // is load-bearing — see the comment below.
-    // Building the voice kicks off the sampler downloads and the cabinet IR
-    // render; `metronome.start()` then awaits `Tone.loaded()`. Start the
-    // transport first and the first note fires into an empty buffer — silently.
-    active.voice.ensureBuilt();
-
     active.scheduler.setStream(new PatternSource(pattern));
     active.scheduler.setLoop(pattern.loop);
     emit({ isPlaying: true, headTick: 0, activeIds: NO_IDS });
@@ -572,8 +565,8 @@ function scheduleRebuild(): void {
     // rebuilt) means there is nothing left to do.
     if (!pattern || !engine || voiceKeyOf(pattern) === engine.voiceKey) return;
     try {
-      // LIB-GAP(3c) again: sampler banks are only fetched by `ensureBuilt`, so a pack
-      // change made mid-playback would otherwise run silent until the next `play()`.
+      // A pack change made mid-playback has to fetch now — the metronome's pre-start
+      // warm only runs at start, and we are already playing.
       ensureEngine(pattern)?.voice.ensureBuilt();
     } catch {
       // As above — a preset the audio graph refuses stays inaudible, not fatal.
@@ -591,18 +584,17 @@ const AUDITION_NOTE = 'A3';
 const AUDITION_PREROLL_SEC = 0.05;
 
 /**
- * Get the current voice's samples in flight, before anything asks to hear them.
+ * Get the current voice's samples loaded, before anything asks to hear them.
  *
- * LIB-GAP(3d): `Voice` exposes no load-completion promise — only `Metronome.start()`
- * awaits `Tone.loaded()`, which is why `play()` is safe and `auditionVoice()` is not.
- * Ten of the eleven guitar slots are sampler-sourced, so on a cold page the *first*
- * audition click is otherwise the click that starts the download, and a 50 ms pre-roll
- * does not cover a network round trip: the note fires into an unloaded `Sampler` and
- * plays silently, with nothing to await and no error.
+ * Ten of the eleven guitar slots are sampler-sourced, so on a cold page the first
+ * audition click would otherwise be the click that starts the download — and the 50 ms
+ * pre-roll does not cover a network round trip, so the note fires into an unloaded
+ * `Sampler` and plays silently.
  *
- * So the pane calls this when it opens or expands, the way guitar-tutor's Sound Lab
- * warms its voice in a mount effect. Best-effort by design — it makes the first
- * audition audible, it is not a precondition for one.
+ * `Voice.ready()` is what makes this waitable: it builds the graph and resolves once
+ * the buffers are decoded. The pane calls this when it opens or expands, the way
+ * guitar-tutor's Sound Lab warms its voice in a mount effect. Still best-effort — it
+ * makes the first audition audible, it is not a precondition for one.
  */
 export async function warmVoice(): Promise<void> {
   const pattern = getEditingPattern();
@@ -611,7 +603,7 @@ export async function warmVoice(): Promise<void> {
   try {
     await startAudio();
     await MasterBus.warmup();
-    ensureEngine(pattern)?.voice.ensureBuilt();
+    await ensureEngine(pattern)?.voice.ready();
   } catch {
     // No audio graph available; the audition path degrades the same way.
   }
@@ -621,7 +613,7 @@ export async function warmVoice(): Promise<void> {
  * Play one note through the current voice with the transport stopped — what the
  * voice editor auditions a tweak with.
  *
- * Call `warmVoice` first if the samples may not be loaded — see LIB-GAP(3d) there.
+ * Call `warmVoice` first if the samples may not be loaded.
  *
  * Scheduled straight onto the audio clock rather than through the metronome (which
  * owns start/stop, so using it would *be* starting playback) or through
@@ -642,8 +634,8 @@ export async function auditionVoice(note: string = AUDITION_NOTE): Promise<void>
     const active = ensureEngine(pattern);
     if (!active) return;
 
-    // LIB-GAP(3c), as in `play()`: the sampler downloads and the cabinet IR render
-    // start here, not in the constructor.
+    // Synchronous: an audition must fire on the click that asked for it. `warmVoice`
+    // is what awaits the load — this only guarantees the graph exists.
     active.voice.ensureBuilt();
     active.voice.play(note, '4n', audioNow() + AUDITION_PREROLL_SEC);
   } catch {

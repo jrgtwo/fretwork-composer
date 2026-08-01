@@ -212,14 +212,19 @@ describe('module load', () => {
 });
 
 describe('play', () => {
-  it('unlocks audio and builds the voice before starting the transport', async () => {
+  it('unlocks audio and streams the pattern before starting the transport', async () => {
     mount();
 
     await start();
 
-    // The ordering *is* the contract: a transport started before the voice is
-    // built plays its first note into an unloaded sampler.
-    expect(lib.order).toEqual(['startAudio', 'ensureBuilt', 'setStream', 'metronome.start']);
+    // No `ensureBuilt` here any more, and that is the fix rather than a regression:
+    // warming the instrument moved into `EventScheduler`, which registers on the
+    // metronome's pre-start hook so the load is in flight before it awaits
+    // `Tone.loaded()`. The lib owns that ordering now and tests it there
+    // ("EventScheduler — instrument warm-up"); this asserts only what this seam still
+    // sequences. It used to be the caller's job, and getting it wrong was a silent
+    // first note.
+    expect(lib.order).toEqual(['startAudio', 'setStream', 'metronome.start']);
   });
 
   it('streams the pattern currently being edited', async () => {

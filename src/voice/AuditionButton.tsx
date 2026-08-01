@@ -8,10 +8,12 @@ import { auditionVoice, warmVoice } from '../audio/playbackService';
  * scheduled straight onto the audio clock by `auditionVoice` — not through the
  * metronome, which owns start/stop and would *be* starting playback.
  *
- * LIB-GAP(3d): `Voice` exposes no load-completion promise, so nothing here can await the
- * sampler. `warmVoice()` is fired on every hover or focus instead, which buys the
- * download the time it takes to move a mouse to the button — otherwise the first
- * audition after a cold load triggers an unloaded `Sampler` and is silent.
+ * The audition itself is synchronous — it has to fire on the click that asked for it —
+ * so it cannot await the sampler. `warmVoice()` is fired on every hover or focus
+ * instead, which buys the download the time it takes to move a mouse to the button;
+ * otherwise the first audition after a cold load triggers an unloaded `Sampler` and is
+ * silent. (`warmVoice` awaits `Voice.ready()`, so the wait happens there, off the
+ * click path.)
  *
  * Every hover, not once per mount, and that is the point: this button outlives the voice
  * under it. Pick another slot, change the sample pack or switch instrument and the engine

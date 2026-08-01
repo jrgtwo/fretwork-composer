@@ -62,6 +62,10 @@ const audio = vi.hoisted(() => {
   class FakeVoice {
     static instances: FakeVoice[] = [];
     readonly ensureBuilt = vi.fn();
+    /** Mirrors `Voice.ready()` — builds, then resolves once the buffers are decoded. */
+    readonly ready = vi.fn(async () => {
+      this.ensureBuilt();
+    });
     readonly dispose = vi.fn();
     readonly swapPreset = vi.fn();
     readonly play = vi.fn();
@@ -956,11 +960,11 @@ describe('warmVoice', () => {
       await warmVoice();
     });
 
-    // LIB-GAP(3d): there is no load-completion promise to await inside `auditionVoice`,
-    // so the first audition on a cold page is silent unless the build already happened.
-    // Nothing is played — this only starts the fetch.
+    // `auditionVoice` is synchronous, so the first audition on a cold page is silent
+    // unless the build already happened — which is what `warmVoice` is for. Nothing is
+    // played here; this only builds and awaits the load.
     expect(builtVoices()).toHaveLength(1);
-    expect(lastVoice().ensureBuilt).toHaveBeenCalled();
+    expect(lastVoice().ready).toHaveBeenCalled();
     expect(lastVoice().play).not.toHaveBeenCalled();
     expect(audio.metronome.start).not.toHaveBeenCalled();
   });
