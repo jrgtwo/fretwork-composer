@@ -1,10 +1,12 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   ARRANGEMENT_ZOOM_LEVELS,
+  DEFAULT_ARRANGEMENT_SNAP_ID,
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   RULER_HEIGHT,
   TRACK_HEADER_WIDTH,
   arrangementBars,
+  arrangementSnap,
   arrangementWidth,
   laneRects,
   lanesHeight,
@@ -13,12 +15,23 @@ import {
   type ArrangementMode,
 } from './arrangementMath';
 import {
+  redo,
   selectTrack,
+  undo,
   useEditingComposition,
+  useHistoryState,
   useSelectedPlacementIds,
   useSelectedTrackId,
   useTracks,
 } from './compositionService';
+import { snapOptions } from '../timeline/timelineMath';
+import {
+  deleteSelectedPlacements,
+  duplicateSelectedPlacements,
+  transposeSelectedPlacements,
+  useArrangementGestures,
+  type GestureGeometry,
+} from './useArrangementGestures';
 import { PlacementBlock } from './PlacementBlock';
 import { TrackHeader } from './TrackHeader';
 
@@ -36,9 +49,12 @@ const TRAILING_BARS = 2;
  * The arrangement: a time ruler across the top, a fixed track-header column down
  * the left, and the lane area between them.
  *
- * READ-ONLY in this ticket. Selecting a track is the only wired gesture;
- * everything a block can do is CP-06's, the rail is CP-05's, the playhead is
- * CP-08's.
+ * Every pointer gesture the lane area understands lives in
+ * `useArrangementGestures` — this component supplies the GEOMETRY those gestures
+ * work against and draws whatever preview they ask for, and holds no gesture
+ * state of its own. Still missing: the playhead and follow-scroll (CP-08), the
+ * track controls under the header stack (CP-07), and the mini note previews
+ * inside a block (CP-09).
  *
  * ── Two things that look like details and are not ────────────────────────────
  *
@@ -81,19 +97,65 @@ const TRAILING_BARS = 2;
  * against. If a later ticket needs the view restored across a page visit, it is
  * the same lift `mode` already models — see `App.tsx`.
  */
-export function ArrangementGrid({ mode }: { mode: ArrangementMode }) {
+export type PatternDragStarter = (patternId: string, e: React.PointerEvent) => void;
+
+export function ArrangementGrid({
+  mode,
+  patternDragRef,
+}: {
+  mode: ArrangementMode;
+  /**
+   * Filled with the grid's drag-to-place entry point while this is mounted, so
+   * the rail — a sibling, not a child — can hand it a press.
+   *
+   * A ref rather than a context because the direction is wrong for one: the
+   * geometry a pattern drag needs (lane rects, zoom, snap, the scroller) exists
+   * only here, below the page that also owns the rail. Lifting that state to
+   * make a provider possible is exactly the "scroll position in state" the
+   * header of this file argues against.
+   */
+  patternDragRef?: React.RefObject<PatternDragStarter | null>;
+}) {
   const composition = useEditingComposition();
   const tracks = useTracks();
   const selectedTrackId = useSelectedTrackId();
   const selectedPlacementIds = useSelectedPlacementIds();
+  const { canUndo, canRedo } = useHistoryState();
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ARRANGEMENT_ZOOM_INDEX);
+  const [snapId, setSnapId] = useState<string>(DEFAULT_ARRANGEMENT_SNAP_ID);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const rulerContentRef = useRef<HTMLDivElement>(null);
   const headerStackRef = useRef<HTMLDivElement>(null);
+  const lanesRef = useRef<HTMLDivElement>(null);
   /** Set only by `zoomTo`, consumed once by the layout effect below. Non-null
    *  means "the COMPONENT wants the view moved" — the effect never imposes a
    *  position the user's own scrolling produced. */
   const pendingScrollLeftRef = useRef<number | null>(null);
+  /**
+   * The view as the gestures see it, refreshed on every render.
+   *
+   * A ref because a gesture's window listeners outlive the render that
+   * installed them and must read the CURRENT zoom, snap and lane stack — a zoom
+   * mid-drag has to be picked up, not frozen. Null until the first render with
+   * a composition, which is why every handler tolerates null.
+   */
+  const geometryRef = useRef<GestureGeometry | null>(null);
+
+  const gestures = useArrangementGestures({
+    geometry: useCallback(() => geometryRef.current, []),
+    scrollerRef,
+  });
+
+  useEffect(() => {
+    if (!patternDragRef) return;
+    patternDragRef.current = gestures.startPatternDrag;
+    // Cleared on unmount: the rail outlives this component (the page keeps
+    // rendering it while the grid reports a failure to open), and a stale
+    // starter would drag against a geometry that no longer exists.
+    return () => {
+      patternDragRef.current = null;
+    };
+  }, [patternDragRef, gestures.startPatternDrag]);
 
   const pxPerBeat = ARRANGEMENT_ZOOM_LEVELS[zoomIndex];
 
@@ -142,6 +204,9 @@ export function ArrangementGrid({ mode }: { mode: ArrangementMode }) {
   };
 
   if (!composition) {
+    // Nothing to gesture against, and a stale geometry would hit-test against
+    // lanes that are no longer drawn.
+    geometryRef.current = null;
     return (
       <div className="well flex min-h-0 flex-1 flex-col items-center justify-center gap-1.5 text-center">
         <p className="font-mono text-[10px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
@@ -165,9 +230,55 @@ export function ArrangementGrid({ mode }: { mode: ArrangementMode }) {
   const marks = rulerMarks(bars, ts, pxPerBeat);
   const lanes = laneRects(tracks, mode);
   const height = lanesHeight(lanes);
+  const snap = arrangementSnap(ts, snapId);
   // Emptiness is "no blocks", not "no duration": a snapshot that measures zero
   // still put a block on screen, and a hint printed over one is a lie.
   const nothingPlaced = tracks.every((track) => track.placements.length === 0);
+  const hasSelection = selectedPlacementIds.length > 0;
+
+  // Assigned during render rather than from an effect: a gesture can begin on
+  // the very first pointerdown after a zoom, which is before any effect for that
+  // render has run. Everything here is already computed above, so this is a
+  // handoff, not work.
+  geometryRef.current = {
+    lanes,
+    tracks,
+    pxPerBeat,
+    snap,
+    /**
+     * Client → lane-area CONTENT coordinates.
+     *
+     * Measured off the `.lanes` element, whose box IS the content origin: it is
+     * `absolute inset-0` inside the sized content div, so its top-left is tick
+     * 0 of the first lane with the scroll already applied by the browser.
+     * Taking the SCROLLER's box instead would be off by exactly `scrollLeft` —
+     * a difference of zero until the user scrolls, which is the worst kind.
+     */
+    toContent(clientX: number, clientY: number) {
+      const rect = lanesRef.current?.getBoundingClientRect();
+      return { x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) };
+    },
+    /**
+     * The SCROLLER's box, not `.lanes`': the scroller is what the user can see,
+     * where `.lanes` is the full content and extends past the right edge by
+     * however many bars are scrolled out of view. A drop has to be inside the
+     * window onto the arrangement, not inside the arrangement.
+     *
+     * A degenerate box counts as INSIDE. jsdom reports every rect as 0×0, so
+     * the strict reading would refuse every drop in every test and the suite
+     * would pass vacuously while the app did nothing.
+     */
+    inViewport(clientX: number, clientY: number) {
+      const rect = scrollerRef.current?.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return true;
+      return (
+        clientX >= rect.left &&
+        clientX < rect.right &&
+        clientY >= rect.top &&
+        clientY < rect.bottom
+      );
+    },
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -193,12 +304,138 @@ export function ArrangementGrid({ mode }: { mode: ArrangementMode }) {
         >
           +
         </button>
+        <span className="mx-1 h-4 w-px bg-line" />
+        <button
+          type="button"
+          aria-label="Undo"
+          disabled={!canUndo}
+          onClick={undo}
+          className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold disabled:opacity-40"
+        >
+          ↶
+        </button>
+        <button
+          type="button"
+          aria-label="Redo"
+          disabled={!canRedo}
+          onClick={redo}
+          className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold disabled:opacity-40"
+        >
+          ↷
+        </button>
+        <span className="mx-1 h-4 w-px bg-line" />
+        <label className="flex items-center gap-1.5">
+          <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
+            Snap
+          </span>
+          {/* The arrangement's default is the BAR where the note grid's is the
+              16th — the one place the two surfaces intentionally disagree
+              (`arrangementMath`). The menu is shared so the labels can't drift. */}
+          <select
+            aria-label="Arrangement snap"
+            value={snapId}
+            onChange={(e) => setSnapId(e.target.value)}
+            className="control rounded-lg px-1.5 py-1 font-mono text-[9px] font-bold text-ink"
+          >
+            {snapOptions(ts).map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {/* The selection's actions. Present only with a selection, because every
+            one of them needs one and a permanently-greyed row of five buttons
+            teaches nothing about what enables them. Each is the keyboard
+            shortcut's twin, calling the same function — no second code path.
+
+            Deliberately NO repeat control: `Placement.repeat` is legacy and the
+            lib's own note says the new arranger hides it. Repeated placements
+            still DRAW their restart divisions (PlacementBlock). */}
+        {hasSelection && (
+          <>
+            <span className="mx-1 h-4 w-px bg-line" />
+            <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
+              {selectedPlacementIds.length} sel
+            </span>
+            <button
+              type="button"
+              aria-label="Split at cursor"
+              title="Split the selection where the pointer last was"
+              onClick={gestures.splitAtCursor}
+              className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
+            >
+              Split
+            </button>
+            <button
+              type="button"
+              aria-label="Transpose down a semitone"
+              title="Transpose down (↓ · shift for an octave)"
+              onClick={() => transposeSelectedPlacements(-1)}
+              className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
+            >
+              ♭
+            </button>
+            <button
+              type="button"
+              aria-label="Transpose up a semitone"
+              title="Transpose up (↑ · shift for an octave)"
+              onClick={() => transposeSelectedPlacements(1)}
+              className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
+            >
+              ♯
+            </button>
+            <button
+              type="button"
+              aria-label="Duplicate selection"
+              title="Duplicate one selection-length to the right (⌘D)"
+              onClick={() => duplicateSelectedPlacements()}
+              className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
+            >
+              ⧉
+            </button>
+            <button
+              type="button"
+              aria-label="Delete selection"
+              title="Delete (⌫)"
+              onClick={() => deleteSelectedPlacements()}
+              className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
+            >
+              ✕
+            </button>
+          </>
+        )}
+
         <span className="flex-1" />
         <span className="font-mono text-[11px] font-bold text-ink-hi">
           {tracks.length} {tracks.length === 1 ? 'track' : 'tracks'} · {bars}{' '}
           {bars === 1 ? 'bar' : 'bars'}
         </span>
       </div>
+
+      {/* A refused drop and a split with nothing under the cursor are the two
+          gestures where the correct outcome is that nothing happens, so they are
+          also the two that are indistinguishable from a broken app unless the
+          reason is said out loud. */}
+      {gestures.refusal && (
+        <div className="mb-1.5 flex flex-none items-center gap-2">
+          <p
+            role="alert"
+            className="flex-1 rounded-md border border-brass/50 px-2 py-1 font-mono text-[9.5px] text-ink"
+          >
+            {gestures.refusal}
+          </p>
+          <button
+            type="button"
+            aria-label="Dismiss message"
+            onClick={gestures.dismissRefusal}
+            className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       <div
         className="grid min-h-0 flex-1"
@@ -301,10 +538,10 @@ export function ArrangementGrid({ mode }: { mode: ArrangementMode }) {
             data-testid="arrangement-lanes-scroller"
             onScroll={syncViewports}
             // Focusable because it is the only way to reach bar 40 without a
-            // pointer: nothing inside is focusable in this ticket (blocks are
-            // deliberately inert), so without this a keyboard user cannot scroll
-            // the arrangement at all. Not an edit gesture — CP-06 still owns
-            // every key that changes something.
+            // pointer: nothing inside is focusable (blocks are inert DOM — the
+            // lane area hit-tests presses instead), so without this a keyboard
+            // user cannot scroll the arrangement at all. The editing keys are
+            // window-level and work wherever focus is; this is only scrolling.
             tabIndex={0}
             role="group"
             aria-label="Arrangement lanes"
@@ -343,8 +580,20 @@ export function ArrangementGrid({ mode }: { mode: ArrangementMode }) {
               {/* `data-lane` is not a test hook: `.lanes > [data-lane]` in
                   src/styles/index.css is what carves the recessed channel, the
                   divider and the zebra. Renaming it silently flattens the grid
-                  into a plain box. */}
-              <div className="lanes absolute inset-0">
+                  into a plain box.
+
+                  ONE pointer handler for every block, every edge and every
+                  patch of empty lane. What was pressed is `hitTest`'s answer,
+                  not the DOM's — which is why the blocks below carry no
+                  handlers, why a trim edge needs no element of its own to work,
+                  and why all of it is testable where every box is 0×0. */}
+              <div
+                ref={lanesRef}
+                data-testid="arrangement-lanes"
+                onPointerDown={gestures.onLanesPointerDown}
+                onPointerMove={gestures.onLanesPointerMove}
+                className="lanes absolute inset-0 cursor-crosshair"
+              >
                 {lanes.map((lane, index) => {
                   const track = tracks[index];
                   return (
@@ -373,13 +622,67 @@ export function ArrangementGrid({ mode }: { mode: ArrangementMode }) {
                   );
                 })}
               </div>
+
+              {/* The gesture overlay. A SIBLING of `.lanes`, never a child:
+                  `.lanes > [data-lane]:nth-child(even)` counts every sibling,
+                  so an extra element in there shifts the zebra by one row and
+                  the grid quietly stops reading as a stack of channels.
+
+                  Drawn in lanes-CONTENT coordinates (lane tops included), which
+                  is the frame the gestures work in — `PlacementBlock` is the
+                  one that draws lane-LOCAL, because its lane element is already
+                  positioned. */}
+              {gestures.preview && (
+                <div aria-hidden className="pointer-events-none absolute inset-0">
+                  {gestures.preview.kind === 'drop' ? (
+                    <div
+                      data-testid="arrangement-drop-preview"
+                      data-drop-track={gestures.preview.trackId}
+                      data-drop-refused={gestures.preview.refusal ?? undefined}
+                      style={{
+                        left: gestures.preview.left,
+                        top: gestures.preview.top,
+                        width: gestures.preview.width,
+                        height: gestures.preview.height,
+                      }}
+                      className={`absolute flex flex-col justify-center overflow-hidden rounded-md border-2 border-dashed px-1.5 ${
+                        gestures.preview.refusal
+                          ? 'border-ink-mut bg-ink-mut/10'
+                          : 'border-brass bg-brass/10'
+                      }`}
+                    >
+                      <span className="truncate font-mono text-[9.5px] font-bold text-ink-hi">
+                        {gestures.preview.label}
+                      </span>
+                      {/* The reason travels WITH the indicator: read after the
+                          drop it explains a mystery, read during it prevents
+                          one. */}
+                      {gestures.preview.refusal && (
+                        <span className="truncate font-mono text-[8px] tracking-[0.1em] text-ink-mut uppercase">
+                          {gestures.preview.refusal}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div
+                      data-testid="arrangement-marquee"
+                      style={{
+                        left: gestures.preview.left,
+                        top: gestures.preview.top,
+                        width: gestures.preview.width,
+                        height: gestures.preview.height,
+                      }}
+                      className="absolute rounded-xs border border-brass bg-brass/10"
+                    />
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
           {nothingPlaced && (
             <p className="pointer-events-none absolute top-2 left-3 font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-              {/* TODO(CP-05): the rail this points at. */}
-              Nothing placed yet — patterns arrive from the rail
+              Nothing placed yet — drag a pattern in from the rail
             </p>
           )}
         </div>

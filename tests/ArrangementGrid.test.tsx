@@ -28,6 +28,7 @@ import {
 import {
   addPlacement,
   addTrack,
+  clearHistory,
   ensureComposition,
   getEditingComposition,
   getSelectedTrackId,
@@ -38,7 +39,12 @@ import {
 import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/patternService';
 
 /**
- * The arrangement grid, read-only (CP-04).
+ * The arrangement grid — its geometry, its scroll sync and its toolbar.
+ *
+ * The GESTURES the lane area dispatches are `tests/ArrangementGestures.test.tsx`'s;
+ * what is checked here is that this component asks `arrangementMath` for every
+ * number it draws, and that each toolbar control reaches the capability its
+ * keyboard twin reaches.
  *
  * jsdom has NO LAYOUT and NO SCROLLING: every box is 0×0 and every `scrollLeft`
  * reads 0 forever. So nothing here asserts that anything LOOKS right — that is
@@ -110,6 +116,11 @@ function seedArrangement(): { patternId: string; trackIds: string[] } {
   place(patternId, trackIds[0], 0);
   place(patternId, trackIds[0], 8 * PPQ);
   place(patternId, trackIds[1], 4 * PPQ);
+  // `addPlacement` selects what it places, and seeding is seam writes like any
+  // other — so without these two every test opens with the last block selected
+  // and a stack of undo steps the toolbar would report as available.
+  selectPlacements([]);
+  clearHistory();
   return { patternId, trackIds };
 }
 
@@ -356,7 +367,7 @@ describe('placement blocks', () => {
     });
   });
 
-  it('renders the selected placement without offering any way to change it', () => {
+  it('marks the selected placement, and stays inert DOM', () => {
     seedArrangement();
     const [first, second] = placementsNow();
     render(<ArrangementGrid mode={MODE} />);
@@ -367,8 +378,95 @@ describe('placement blocks', () => {
 
     expect(blockEl(second.id)?.dataset.selected).toBe('true');
     expect(blockEl(first.id)?.dataset.selected).toBeUndefined();
-    // CP-06 owns every gesture on a block. Nothing in here may be clickable yet.
+    // The lane area hit-tests presses; a block that carried its own controls
+    // would be a second source of truth for where it is.
     expect(blockEl(second.id)?.querySelector('button')).toBeNull();
+  });
+});
+
+/**
+ * Each control is the twin of a keyboard shortcut and calls the same capability
+ * — so what has to be checked here is only the WIRING, which is the part a
+ * shared implementation cannot get right for you: a ♯ hooked to −1 would pass
+ * every test in the gesture file.
+ */
+describe('the selection toolbar', () => {
+  const button = (name: string) => screen.getByRole('button', { name });
+
+  function seedSelected() {
+    seedArrangement();
+    const [first] = placementsNow();
+    render(<ArrangementGrid mode={MODE} />);
+    act(() => selectPlacements([first.id]));
+    return first.id;
+  }
+
+  const transposeOf = (id: string) =>
+    placementsNow().find((p) => p.id === id)?.transposeSemitones;
+
+  it('appears only with a selection, and counts it', () => {
+    seedArrangement();
+    render(<ArrangementGrid mode={MODE} />);
+    expect(screen.queryByRole('button', { name: 'Delete selection' })).toBeNull();
+
+    act(() => selectPlacements(placementsNow().map((p) => p.id)));
+    expect(button('Delete selection')).toBeInTheDocument();
+    expect(screen.getByText(`${placementsNow().length} sel`)).toBeInTheDocument();
+  });
+
+  it('transposes up on ♯ and down on ♭', async () => {
+    const user = userEvent.setup();
+    const id = seedSelected();
+
+    await user.click(button('Transpose up a semitone'));
+    expect(transposeOf(id)).toBe(1);
+
+    await user.click(button('Transpose down a semitone'));
+    await user.click(button('Transpose down a semitone'));
+    expect(transposeOf(id)).toBe(-1);
+  });
+
+  it('duplicates and deletes the selection', async () => {
+    const user = userEvent.setup();
+    seedArrangement();
+    const before = placementsNow().length;
+    render(<ArrangementGrid mode={MODE} />);
+    act(() => selectPlacements([placementsNow()[0].id]));
+
+    await user.click(button('Duplicate selection'));
+    expect(placementsNow()).toHaveLength(before + 1);
+
+    await user.click(button('Delete selection'));
+    expect(placementsNow()).toHaveLength(before);
+  });
+
+  it('undoes and redoes through the toolbar, enabling each only when it can', async () => {
+    const user = userEvent.setup();
+    const id = seedSelected();
+    expect(button('Undo')).toBeDisabled();
+
+    await user.click(button('Transpose up a semitone'));
+    expect(button('Undo')).toBeEnabled();
+    expect(button('Redo')).toBeDisabled();
+
+    await user.click(button('Undo'));
+    expect(transposeOf(id)).toBe(0);
+
+    await user.click(button('Redo'));
+    expect(transposeOf(id)).toBe(1);
+  });
+
+  it('states why a split did nothing, and lets the message be dismissed', async () => {
+    const user = userEvent.setup();
+    seedSelected();
+
+    // Nothing has been pressed on the lanes, so there is no cut point — the one
+    // outcome that is indistinguishable from a broken button in silence.
+    await user.click(button('Split at cursor'));
+    expect(screen.getByRole('alert')).toHaveTextContent(/cursor/i);
+
+    await user.click(button('Dismiss message'));
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });
 
@@ -604,6 +702,20 @@ describe('reaching the lanes without a pointer', () => {
     expect(lanes).toBe(scroller());
     lanes.focus();
     expect(lanes).toHaveFocus();
+  });
+
+  it('takes focus when the lane area is pressed', async () => {
+    const user = userEvent.setup();
+    seedArrangement();
+    render(<ArrangementGrid mode={MODE} />);
+
+    // The lane handler calls `preventDefault` to stop the browser selecting
+    // block labels the drag passes over — which also suppresses the focus the
+    // press would have moved. Without putting it back by hand, clicking the
+    // arrangement leaves focus wherever it was and the view cannot then be
+    // scrolled by keyboard.
+    await user.pointer({ target: screen.getByTestId('arrangement-lanes'), keys: '[MouseLeft]' });
+    expect(scroller()).toHaveFocus();
   });
 });
 

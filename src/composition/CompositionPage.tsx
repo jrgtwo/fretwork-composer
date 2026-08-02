@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
-import { ArrangementGrid } from './ArrangementGrid';
+import { useEffect, useRef, useState } from 'react';
+import { ArrangementGrid, type PatternDragStarter } from './ArrangementGrid';
 import type { ArrangementMode } from './arrangementMath';
 import { ensureComposition } from './compositionService';
+import { PatternLibraryRail } from './PatternLibraryRail';
 
 /**
  * The three modes are one surface, not three pages: the ruler, the track headers
@@ -43,6 +44,15 @@ export function CompositionPage({
   onModeChange: (mode: ArrangementMode) => void;
 }) {
   const [openFailure, setOpenFailure] = useState<string | null>(null);
+  /**
+   * The grid's drag-to-place entry point, published while the grid is mounted.
+   *
+   * The rail and the grid are siblings, and only the grid knows where the lanes
+   * are, what the zoom is and which element scrolls. Passing the starter down a
+   * ref keeps that geometry where it is computed instead of lifting it into
+   * this page purely so a context could hand it back.
+   */
+  const patternDragRef = useRef<PatternDragStarter | null>(null);
 
   // The lib's `ensureEditingComposition` runs a subscription gate and returns
   // WITHOUT CREATING and WITHOUT ERROR when it is refused, so the seam's
@@ -100,19 +110,35 @@ export function CompositionPage({
                 </p>
               </div>
             ) : (
-              <ArrangementGrid mode={mode} />
+              <ArrangementGrid mode={mode} patternDragRef={patternDragRef} />
             )}
           </div>
         </section>
 
+        {/* The rail is what CHANGES between the three modes, along with what a
+            lane draws — the ruler, the headers and the scroll position never do
+            (tickets/composition-page/README.md). Pattern mode gets the library;
+            the note inspector and the voice list are slices 2 and 3. */}
         <aside
-          aria-label="Pattern library"
-          className="rail flex min-h-0 flex-col items-center justify-center"
+          aria-label={mode === 'pattern' ? 'Pattern library' : 'Inspector'}
+          className="rail flex min-h-0 flex-col"
         >
-          {/* TODO(CP-05): the pattern library rail — drag a pattern into a lane. */}
-          <span className="font-mono text-[10px] font-semibold tracking-[0.18em] text-ink-mut uppercase">
-            Patterns
-          </span>
+          {mode === 'pattern' ? (
+            <PatternLibraryRail
+              onPatternPointerDown={(patternId, e) =>
+                patternDragRef.current?.(patternId, e)
+              }
+            />
+          ) : (
+            <div className="flex flex-1 items-center justify-center px-3 text-center">
+              <span className="font-mono text-[9px] leading-relaxed tracking-[0.14em] text-ink-mut uppercase">
+                {/* TODO(CP-12 / CP-15): the note inspector and the voice list. */}
+                {mode === 'edit'
+                  ? 'Note inspector arrives in slice 2'
+                  : 'Voice list arrives in slice 3'}
+              </span>
+            </div>
+          )}
         </aside>
       </div>
     </div>

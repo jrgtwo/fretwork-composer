@@ -19,6 +19,7 @@ import {
   arrangementBars,
   arrangementSnap,
   arrangementWidth,
+  barsSpanned,
   contentEndTick,
   dropTarget,
   hitTest,
@@ -27,13 +28,17 @@ import {
   lanesHeight,
   placementRect,
   placementRepeatRects,
+  placementsInBand,
+  planGroupMove,
   pxToTick,
   rulerMarks,
   snapArrangementTick,
   tickToPx,
+  trimHandleWidth,
   zoomAnchoredScrollLeft,
   type ArrangementMode,
   type PlacedTrack,
+  type PlacementDragItem,
 } from './arrangementMath';
 
 const TS_4_4: PatternTimeSignature = { numerator: 4, denominator: 4 };
@@ -770,5 +775,207 @@ describe('drop target', () => {
       PPQ + 37,
     );
     expect(dropTarget(point, lanes, pxPerBeat, null)?.tick).toBe(PPQ + 37);
+  });
+});
+
+describe('barsSpanned', () => {
+  it('rounds up — a riff a beat into bar 3 occupies three bars', () => {
+    expect(barsSpanned(2 * ticksPerBar(TS_4_4) + PPQ, TS_4_4)).toBe(3);
+  });
+
+  it('counts an exact bar boundary as that many bars, not one more', () => {
+    for (const bars of [1, 2, 4, 17]) {
+      expect(barsSpanned(bars * ticksPerBar(TS_4_4), TS_4_4)).toBe(bars);
+    }
+  });
+
+  it('follows the meter rather than assuming 4/4', () => {
+    expect(barsSpanned(ticksPerBar(TS_3_4), TS_3_4)).toBe(1);
+    // The same span is fewer bars of a longer bar.
+    expect(barsSpanned(12 * PPQ, TS_3_4)).toBe(4);
+    expect(barsSpanned(12 * PPQ, TS_4_4)).toBe(3);
+  });
+
+  it('is 0 for an empty or nonsensical span rather than NaN', () => {
+    expect(barsSpanned(0, TS_4_4)).toBe(0);
+    expect(barsSpanned(-500, TS_4_4)).toBe(0);
+    expect(barsSpanned(Number.NaN, TS_4_4)).toBe(0);
+  });
+});
+
+describe('trimHandleWidth', () => {
+  it('is the full handle on any block at least three handles wide', () => {
+    for (const width of [3 * TRIM_HANDLE_PX, 200, 4000]) {
+      expect(trimHandleWidth(width)).toBe(TRIM_HANDLE_PX);
+    }
+  });
+
+  it('shrinks to a third on a narrow block, so the middle third always drags', () => {
+    const width = TRIM_HANDLE_PX; // one handle wide
+    expect(trimHandleWidth(width)).toBeCloseTo(width / 3);
+    // Which is exactly the rule `hitTest` applies: dead centre is still a body.
+    const lane = laneRects([{ id: 't' }], 'pattern')[0];
+    const tiny = placement({ id: 'p', lengthTicks: PPQ });
+    // A zoom that makes the block one handle wide.
+    const zoom = (TRIM_HANDLE_PX * PPQ) / PPQ;
+    const rect = placementRect(tiny, zoom, lane.top, lane.height);
+    const hit = hitTest(
+      { x: rect.left + rect.width / 2, y: lane.top + 1 },
+      [lane],
+      [track('t', [tiny])],
+      zoom,
+    );
+    expect(hit).toMatchObject({ kind: 'placement', zone: 'body' });
+  });
+
+  it('is 0 for a degenerate width rather than negative', () => {
+    expect(trimHandleWidth(0)).toBe(0);
+    expect(trimHandleWidth(-40)).toBe(0);
+    expect(trimHandleWidth(Number.NaN)).toBe(0);
+  });
+});
+
+describe('placementsInBand', () => {
+  const pxPerBeat = ARRANGEMENT_ZOOM_LEVELS[DEFAULT_ARRANGEMENT_ZOOM_INDEX];
+  const bar = ticksPerBar(TS_4_4);
+  const a = placement({ id: 'a', startTick: 0 });
+  const b = placement({ id: 'b', startTick: 2 * bar });
+  const c = placement({ id: 'c', startTick: 0 });
+  const tracks = [track('t1', [a, b]), track('t2', [c])];
+  const lanes = laneRects(tracks, 'pattern');
+
+  const bandOver = (
+    fromTick: number,
+    toTick: number,
+    top: number,
+    bottom: number,
+  ) => ({
+    left: tickToPx(fromTick, pxPerBeat),
+    right: tickToPx(toTick, pxPerBeat),
+    top,
+    bottom,
+  });
+
+  it('catches every block the band overlaps, across lanes', () => {
+    const band = bandOver(0, 3 * bar, 0, lanes[1].top + lanes[1].height);
+    expect(placementsInBand(band, lanes, tracks, pxPerBeat).sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('leaves out lanes the band never reaches', () => {
+    const band = bandOver(0, 3 * bar, lanes[0].top, lanes[0].top + lanes[0].height - 1);
+    expect(placementsInBand(band, lanes, tracks, pxPerBeat).sort()).toEqual(['a', 'b']);
+  });
+
+  it('leaves out blocks the band stops short of', () => {
+    const band = bandOver(0, bar, 0, lanes[0].height);
+    expect(placementsInBand(band, lanes, tracks, pxPerBeat)).toEqual(['a']);
+  });
+
+  it('normalizes a band dragged up and to the left', () => {
+    const forward = bandOver(0, 3 * bar, 0, lanes[1].top + 1);
+    const backward = {
+      left: forward.right,
+      right: forward.left,
+      top: forward.bottom,
+      bottom: forward.top,
+    };
+    expect(placementsInBand(backward, lanes, tracks, pxPerBeat)).toEqual(
+      placementsInBand(forward, lanes, tracks, pxPerBeat),
+    );
+  });
+
+  it('is half-open, so a band drawn along the seam between two blocks takes one', () => {
+    // `a` ends exactly where a block starting at 1 bar would begin.
+    const abutting = placement({ id: 'd', startTick: 4 * PPQ });
+    const oneTrack = [track('t1', [a, abutting])];
+    const oneLane = laneRects(oneTrack, 'pattern');
+    const seam = tickToPx(4 * PPQ, pxPerBeat);
+    expect(
+      placementsInBand(
+        { left: 0, right: seam, top: 0, bottom: oneLane[0].height },
+        oneLane,
+        oneTrack,
+        pxPerBeat,
+      ),
+    ).toEqual(['a']);
+  });
+});
+
+describe('planGroupMove', () => {
+  const bar = ticksPerBar(TS_4_4);
+  const group = [
+    { id: 'a', trackIndex: 0, startTick: 0 },
+    { id: 'b', trackIndex: 0, startTick: 2 * bar },
+    { id: 'c', trackIndex: 1, startTick: bar },
+  ];
+
+  const byId = (moves: readonly PlacementDragItem[]): Record<string, PlacementDragItem> =>
+    Object.fromEntries(moves.map((move) => [move.id, move]));
+
+  it('preserves every relative offset, in time and across lanes', () => {
+    const moved = byId(planGroupMove(group, 3 * bar, 1, 4));
+    expect(moved.a).toMatchObject({ trackIndex: 1, startTick: 3 * bar });
+    expect(moved.b).toMatchObject({ trackIndex: 1, startTick: 5 * bar });
+    expect(moved.c).toMatchObject({ trackIndex: 2, startTick: 4 * bar });
+  });
+
+  it('clamps the DELTA at tick 0, so the group stops instead of collapsing', () => {
+    const moved = byId(planGroupMove(group, -10 * bar, 0, 4));
+    // The earliest member lands on 0 and everything keeps its gap to it.
+    expect(moved.a.startTick).toBe(0);
+    expect(moved.b.startTick).toBe(2 * bar);
+    expect(moved.c.startTick).toBe(bar);
+  });
+
+  it('clamps the lane delta against the extreme member, both ways', () => {
+    expect(byId(planGroupMove(group, 0, -5, 4)).c.trackIndex).toBe(1);
+    expect(byId(planGroupMove(group, 0, 5, 4)).a.trackIndex).toBe(2);
+    // ...and the spread survives the clamp.
+    const up = byId(planGroupMove(group, 0, 5, 4));
+    expect(up.c.trackIndex - up.a.trackIndex).toBe(1);
+  });
+
+  it('moves the far end first, so the group never blocks itself', () => {
+    // Rightward: the rightmost block vacates its slot before its neighbour needs it.
+    expect(planGroupMove(group, bar, 0, 4).map((m) => m.id)).toEqual(['b', 'c', 'a']);
+    // Leftward: the other way round.
+    expect(planGroupMove(group, -bar, 0, 4).map((m) => m.id)).toEqual(['a', 'c', 'b']);
+  });
+
+  /**
+   * A drag straight down has NO tick delta to order by, so ordering on the tick
+   * axis alone leaves the members in whatever order they were collected. The
+   * lib's `movePlacement` then clamps each one against its destination lane's
+   * CURRENT contents — including the group's own members, which have not moved
+   * yet — and deflects the block that arrives first onto the next free slot.
+   * That invents an offset the selection never had, which is exactly what
+   * "group move preserves relative timing" forbids.
+   */
+  it('orders a purely vertical move by lane, farthest-travelled first', () => {
+    const stacked = [
+      { id: 'top', trackIndex: 0, startTick: 0 },
+      { id: 'bottom', trackIndex: 1, startTick: 0 },
+    ];
+    // Downward: the bottom one leaves lane 1 before the top one arrives in it.
+    expect(planGroupMove(stacked, 0, 1, 4).map((m) => m.id)).toEqual(['bottom', 'top']);
+    // Upward: the other way round.
+    expect(planGroupMove(stacked, 0, -1, 4).map((m) => m.id)).toEqual(['top', 'bottom']);
+  });
+
+  it('still orders within a lane by tick when the whole group changes lane', () => {
+    // `a` and `b` land in the same destination lane, so the tick axis decides
+    // between them; `c` is a lane below and goes first on a downward move.
+    expect(planGroupMove(group, bar, 1, 4).map((m) => m.id)).toEqual(['c', 'b', 'a']);
+  });
+
+  it('is empty for an empty group or a stack with no lanes', () => {
+    expect(planGroupMove([], bar, 0, 4)).toEqual([]);
+    expect(planGroupMove(group, bar, 0, 0)).toEqual([]);
+  });
+
+  it('treats a non-finite delta as no movement rather than NaN', () => {
+    const moved = byId(planGroupMove(group, Number.NaN, Number.NaN, 4));
+    expect(moved.a).toMatchObject({ trackIndex: 0, startTick: 0 });
+    expect(moved.b).toMatchObject({ trackIndex: 0, startTick: 2 * bar });
   });
 });

@@ -756,6 +756,64 @@ describe('gesture batching', () => {
     expect(storedPlacements()[0].startTick).toBe(0);
   });
 
+  /**
+   * `history` keeps ONE gesture slot, so a nested `beginGesture` would overwrite
+   * the outer snapshot and the inner `endGesture` would close the outer bracket
+   * — after which every remaining write in the outer gesture captures a step of
+   * its own. That is not hypothetical: every arrangement capability brackets
+   * itself, so any shortcut pressed during a held drag nests one inside the
+   * other, and so does a held arrow whose repeats are folded into one run.
+   */
+  it('collapses NESTED gestures into the outermost one', () => {
+    beginEditGesture();
+    movePlacement(placementId, trackId, 2 * PPQ);
+    // An inner capability, bracketing itself exactly as it would if reached on
+    // its own.
+    beginEditGesture();
+    movePlacement(placementId, trackId, 4 * PPQ);
+    endEditGesture();
+    // ...and the outer gesture carries on writing afterwards.
+    movePlacement(placementId, trackId, 6 * PPQ);
+    endEditGesture();
+
+    expect(storedPlacements()[0].startTick).toBe(6 * PPQ);
+    undo();
+    expect(storedPlacements()[0].startTick).toBe(0);
+    // One step for all three writes, not one plus however many followed the
+    // inner close.
+    undo();
+    expect(storedPlacements()[0].startTick).toBe(0);
+  });
+
+  it('honours an explicit `changed` only on the outermost close', () => {
+    movePlacement(placementId, trackId, PPQ);
+
+    beginEditGesture();
+    beginEditGesture();
+    movePlacement(placementId, trackId, 4 * PPQ);
+    // The inner caller discarding its own step must not discard the outer
+    // gesture's — it does not own that decision.
+    endEditGesture(false);
+    endEditGesture();
+
+    undo();
+    expect(storedPlacements()[0].startTick).toBe(PPQ);
+  });
+
+  it('ignores an unmatched close rather than swallowing the next gesture', () => {
+    // A stray `endEditGesture` with nothing open used to be harmless; with a
+    // depth count it must not push the counter negative, or the next real
+    // gesture's close would be treated as nested and never record a step.
+    endEditGesture();
+
+    beginEditGesture();
+    movePlacement(placementId, trackId, 3 * PPQ);
+    endEditGesture();
+
+    undo();
+    expect(storedPlacements()[0].startTick).toBe(0);
+  });
+
   it('records one step per write outside a gesture', () => {
     movePlacement(placementId, trackId, 2 * PPQ);
     movePlacement(placementId, trackId, 6 * PPQ);

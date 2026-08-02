@@ -12,6 +12,7 @@
  * is 0×0 — so geometry is only testable while it is a plain function.
  */
 import {
+  getInstrument,
   placementEffectiveLength,
   placementEndTick,
   snapTick,
@@ -75,6 +76,24 @@ export function arrangementSnap(ts: PatternTimeSignature, snapId: string): SnapO
 export function snapArrangementTick(tick: Tick, snap: SnapOption | null): Tick {
   if (snap === null || snap.ticks === null) return Math.max(0, Math.round(tick));
   return Math.max(0, snapTick(Math.max(0, tick), snap.ticks));
+}
+
+/**
+ * How many bars a span of ticks occupies, rounded up.
+ *
+ * The pattern library rail's "4 bars" is this and nothing else — DERIVED, never
+ * stored. `fitPatternDuration` re-fits a pattern's length to its content on
+ * every edit (docs/HANDOFF.md, hard-won facts), so a bar count cached anywhere
+ * is a bar count that goes stale the next time a note is dragged.
+ *
+ * Rounded up because a riff that runs a beat into bar 3 occupies three bars of
+ * the arrangement, not two and a bit. A non-positive or non-finite span is 0
+ * bars rather than NaN — an empty pattern has no length to print.
+ */
+export function barsSpanned(ticks: Tick, ts: PatternTimeSignature): number {
+  const perBar = ticksPerBar(ts);
+  if (!(perBar > 0) || !Number.isFinite(ticks) || ticks <= 0) return 0;
+  return Math.ceil(ticks / perBar);
 }
 
 // ------------------------------------------------------------------ ruler ---
@@ -467,12 +486,25 @@ export function hitTest(
 }
 
 /**
+ * How wide a block's trim handle actually is, for a block `width` px across.
+ *
  * A block narrower than three handles would be all edge and no body, leaving it
  * undraggable at low zoom; the handles shrink instead so the middle third always
  * drags.
+ *
+ * Exported because `PlacementBlock` draws the two edge affordances that show
+ * where those zones are. Drawing them from a second `Math.min` would let the
+ * cursor say "resize" a pixel either side of where a press actually resizes —
+ * the sort of disagreement that reads as the app being imprecise rather than as
+ * a bug, and so never gets reported.
  */
+export function trimHandleWidth(width: number, handlePx: number = TRIM_HANDLE_PX): number {
+  if (!Number.isFinite(width) || width <= 0) return 0;
+  return Math.min(Math.max(0, handlePx), width / 3);
+}
+
 function trimZone(offsetX: number, width: number, handlePx: number): HitZone {
-  const handle = Math.min(handlePx, width / 3);
+  const handle = trimHandleWidth(width, handlePx);
   if (offsetX < handle) return 'trim-start';
   if (offsetX >= width - handle) return 'trim-end';
   return 'body';
@@ -504,4 +536,191 @@ export function dropTarget(
     trackId: lane.trackId,
     tick: snapArrangementTick(pxToTick(Math.max(0, point.x), pxPerBeat), snap),
   };
+}
+
+// ---------------------------------------------------------------- marquee ---
+
+/** A rubber-band selection rectangle, in lane-area content coordinates. Corners
+ *  in either order — the band is normalized before it is used. */
+export interface MarqueeBand {
+  readonly left: number;
+  readonly right: number;
+  readonly top: number;
+  readonly bottom: number;
+}
+
+/**
+ * Ids of every placement the band touches.
+ *
+ * Geometric rather than DOM-measured, which is the opposite of `Timeline.tsx`'s
+ * marquee — that one hit-tests `getBoundingClientRect` on each `[data-note]`.
+ * The arrangement already HAS every rect as a pure function of the model, so
+ * asking the DOM would be asking a second, slower source that jsdom answers
+ * 0×0 to. Here the band test is exactly as testable as the block positions are.
+ *
+ * Half-open on both axes, matching `hitTest` and `laneRects`: a band whose edge
+ * lands exactly on a block's edge does not catch it, so two abutting blocks
+ * can be separated by a band drawn along the seam between them.
+ */
+export function placementsInBand(
+  band: MarqueeBand,
+  lanes: readonly LaneRect[],
+  tracks: readonly PlacedTrack[],
+  pxPerBeat: number,
+): string[] {
+  const left = Math.min(band.left, band.right);
+  const right = Math.max(band.left, band.right);
+  const top = Math.min(band.top, band.bottom);
+  const bottom = Math.max(band.top, band.bottom);
+
+  const ids: string[] = [];
+  for (const lane of lanes) {
+    if (lane.top >= bottom || lane.top + lane.height <= top) continue;
+    const track = tracks.find((candidate) => candidate.id === lane.trackId);
+    if (track === undefined) continue;
+    for (const placement of track.placements) {
+      const rect = placementRect(placement, pxPerBeat, lane.top, lane.height);
+      if (rect.left >= right || rect.left + rect.width <= left) continue;
+      ids.push(placement.id);
+    }
+  }
+  return ids;
+}
+
+// ------------------------------------------------------------- group move ---
+
+/** One placement's position at the moment a drag began: which lane it was in,
+ *  and where it started. Captured once, so repeated pointer moves resolve
+ *  against the gesture's origin instead of compounding. */
+export interface PlacementDragItem {
+  readonly id: string;
+  /** Index into the lane stack, not a track id — a cross-lane drag is a delta
+   *  of ROWS, and only the index makes "one lane down" expressible. */
+  readonly trackIndex: number;
+  readonly startTick: Tick;
+}
+
+/**
+ * Where each member of a dragged group should land, and in what order to move
+ * them there.
+ *
+ * Two decisions, both of which look like details and are not:
+ *
+ * 1. THE CLAMPS ARE SHARED, not per item. Clamping each block against tick 0
+ *    and against the ends of the lane stack independently piles the group up
+ *    against the wall — the leading block stops and the trailing ones keep
+ *    coming, so a drag to the left edge silently collapses a four-bar spread
+ *    into a stack. Clamping the DELTA against the extreme member keeps every
+ *    relative offset exactly, and the group simply stops moving. Same reasoning
+ *    as the group-fret clamp in `patternService.nudgeSelectedFret`.
+ *
+ * 2. THE ORDER IS BY DESTINATION, farthest-travelled first, ON BOTH AXES. The
+ *    lib's `movePlacement` BLOCKS/CLAMPS against whatever is already in the
+ *    destination lane — including the group's own members, which are still
+ *    sitting at their old positions. Moving a group one bar right leftmost-first
+ *    parks block 1 on top of where block 2 still is, and the lib deflects it.
+ *    Moving the rightmost first vacates each slot before the next block needs
+ *    it. The lib's own `duplicatePlacements` sorts for the same reason.
+ *
+ *    THE LANE AXIS COMES FIRST, because a purely vertical drag has no tick
+ *    delta to order by: dragging two stacked blocks down one lane top-first
+ *    lands the upper one on the lower one's old slot and the lib deflects it a
+ *    bar sideways — an offset that did not exist before the drag, which is
+ *    exactly what "group move preserves relative timing" forbids. Moving the
+ *    bottom-most first vacates each lane before the block above it arrives.
+ */
+export function planGroupMove(
+  items: readonly PlacementDragItem[],
+  deltaTicks: Tick,
+  deltaLanes: number,
+  laneCount: number,
+): PlacementDragItem[] {
+  if (items.length === 0 || laneCount <= 0) return [];
+
+  const ticksWanted = Number.isFinite(deltaTicks) ? Math.round(deltaTicks) : 0;
+  const lanesWanted = Number.isFinite(deltaLanes) ? Math.round(deltaLanes) : 0;
+
+  let minStart = Infinity;
+  let minLane = Infinity;
+  let maxLane = -Infinity;
+  for (const item of items) {
+    minStart = Math.min(minStart, item.startTick);
+    minLane = Math.min(minLane, item.trackIndex);
+    maxLane = Math.max(maxLane, item.trackIndex);
+  }
+
+  const ticks = Math.max(ticksWanted, -minStart);
+  // Upper bound before lower: with a group taller than the stack the lower
+  // bound has to win, or the top member would be pushed off the top.
+  const lanes = Math.max(-minLane, Math.min(lanesWanted, laneCount - 1 - maxLane));
+
+  return items
+    .map((item) => ({
+      id: item.id,
+      trackIndex: item.trackIndex + lanes,
+      startTick: item.startTick + ticks,
+    }))
+    .sort((a, b) => {
+      // Only when the group actually changes lane: with no lane delta nothing
+      // vacates a lane for anything else, and ordering by an axis that isn't
+      // moving would override the axis that is.
+      if (lanes !== 0) {
+        const byLane = lanes > 0 ? b.trackIndex - a.trackIndex : a.trackIndex - b.trackIndex;
+        if (byLane !== 0) return byLane;
+      }
+      return ticks > 0 ? b.startTick - a.startTick : a.startTick - b.startTick;
+    });
+}
+
+// ----------------------------------------------------------- diagnostics ---
+// What a placement COSTS at play time, so the surface can say so before the
+// user finds out by ear. Pure, like everything else here — it reads the lib's
+// instrument catalog and the placement's own snapshot, nothing else.
+
+/**
+ * The lib's own fallback when a placement's snapshot names an instrument the
+ * catalog doesn't have (`composition-ops.ts`, `DEFAULT_FRETBOARD_FRET_COUNT`).
+ * Not exported by the lib, so it is restated — see the LIB-GAP note below.
+ */
+const FALLBACK_FRET_COUNT = 22;
+
+/**
+ * How many of the placement's notes a transposition pushes off the neck.
+ *
+ * `flattenComposition` DROPS any event whose transposed fret leaves
+ * `0..fretCount` — silently, at play time, with no trace on screen. A block
+ * transposed +7 can therefore go quiet in its top voice and look untouched, and
+ * the first sign is a mix that has lost a part.
+ *
+ * Counted per PATTERN note, not per repetition: "3 notes won't sound" is the
+ * fact the user can act on, where a legacy `repeat: 4` block would otherwise
+ * report 12 of the same three.
+ *
+ * The fret range is measured against the SNAPSHOT's instrument rather than the
+ * track's, exactly as `flattenTrack` measures it — those can differ, and using
+ * the track's would flag the wrong notes on a mismatched placement.
+ *
+ * LIB-GAP(12): this restates a rule the lib already implements and does not
+ * expose. `flattenTrack` applies it but is not on the root barrel, and nothing
+ * reports which events a placement would lose, so the only alternative is
+ * running `flattenComposition` over the whole arrangement on every render and
+ * attributing its ids back to placements. Delete when the lib exposes the
+ * diagnostic (or exports `flattenTrack`). See docs/FOLLOW-UPS.md.
+ */
+export function droppedByTranspose(placement: Placement): number {
+  const transpose = placement.transposeSemitones ?? 0;
+  if (transpose === 0) return 0;
+  const fretCount =
+    getInstrument(placement.patternSnapshot.instrumentId)?.fretCount ?? FALLBACK_FRET_COUNT;
+  const length = placementEffectiveLength(placement);
+
+  let dropped = 0;
+  for (const event of placement.patternSnapshot.events) {
+    // Events past the truncation point are already not played, so they are not
+    // notes the transposition costs.
+    if (event.startTick >= length) continue;
+    const fret = event.fret + transpose;
+    if (fret < 0 || fret > fretCount) dropped++;
+  }
+  return dropped;
 }

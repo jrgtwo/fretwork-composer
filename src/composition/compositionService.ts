@@ -346,10 +346,24 @@ function commit<T>(write: () => T): T {
 }
 
 let gestureSnapshot: Composition | null = null;
+/**
+ * How many brackets are open. `history` keeps ONE gesture slot, so a nested
+ * `beginGesture` overwrites the outer snapshot and the inner `endGesture` closes
+ * the outer bracket — after which the outer gesture's remaining writes each push
+ * their own step. That is not hypothetical: every capability in
+ * `useArrangementGestures` brackets itself, and a keyboard shortcut fired during
+ * a held drag nests one inside the other. Counting here is what keeps "one
+ * gesture, one step" true regardless of the order callers reach the seam in,
+ * which the agent's tools need as much as the UI does.
+ */
+let gestureDepth = 0;
 
 /** Bracket a multi-step edit — a drag fires dozens of mutations but must undo as
- *  one step. Safe to call with no composition open. */
+ *  one step. Safe to call with no composition open, and safe to nest. */
 export function beginEditGesture(): void {
+  // Nested: the outermost bracket's snapshot already covers everything inside
+  // it, so this one records nothing and only deepens the count.
+  if (gestureDepth++ > 0) return;
   gestureSnapshot = getEditingComposition();
   if (gestureSnapshot) history.beginGesture(gestureSnapshot);
 }
@@ -357,13 +371,17 @@ export function beginEditGesture(): void {
 /**
  * `changed` defaults to the same reference test `commit` uses, so a gesture that
  * wrote nothing — a click that never became a drag — pushes no step. Passing it
- * explicitly is for a caller that has already put the composition back itself.
+ * explicitly is for a caller that has already put the composition back itself;
+ * it is honoured only on the OUTERMOST close, because only that one decides
+ * whether a step is pushed.
  */
-export function endEditGesture(
-  changed = gestureSnapshot !== null && getEditingComposition() !== gestureSnapshot,
-): void {
+export function endEditGesture(changed?: boolean): void {
+  if (gestureDepth === 0) return;
+  if (--gestureDepth > 0) return;
+  const didChange =
+    changed ?? (gestureSnapshot !== null && getEditingComposition() !== gestureSnapshot);
   gestureSnapshot = null;
-  history.endGesture({ changed });
+  history.endGesture({ changed: didChange });
 }
 
 export function undo(): void {
@@ -388,6 +406,7 @@ export function redo(): void {
 
 export function clearHistory(): void {
   gestureSnapshot = null;
+  gestureDepth = 0;
   history.clear();
 }
 

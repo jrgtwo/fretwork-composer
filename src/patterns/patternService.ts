@@ -70,6 +70,36 @@ export function findEvent(id: string): PatternEvent | undefined {
 }
 
 /**
+ * Every pattern in the library — the source the composition page's rail places
+ * from (CP-05).
+ *
+ * It lives HERE and not in `compositionService` even though only the arranger
+ * reads it: `library.patterns` is the pattern store, and a second module
+ * reaching into it is how a seam stops being one. The arranger asks the pattern
+ * seam for patterns and the composition seam for placements, which is also the
+ * split the agent's tools will want.
+ *
+ * Returned as the store's own array, so the reference is stable until the
+ * library actually changes and a subscriber only re-renders when it does.
+ *
+ * `BUILTIN_PATTERNS` is deliberately not merged in. The rail is a view of what
+ * the user has written; the built-ins are a catalog, and listing a catalog
+ * needs the folder tree that `library.collections` is for — explicitly deferred
+ * by CP-05's "out of scope".
+ */
+export function useLibraryPatterns(): readonly Pattern[] {
+  return usePatternsStore((s) => s.library.patterns);
+}
+
+export function getLibraryPatterns(): readonly Pattern[] {
+  return store().library.patterns;
+}
+
+export function findLibraryPattern(id: string): Pattern | undefined {
+  return getLibraryPatterns().find((pattern) => pattern.id === id);
+}
+
+/**
  * `Pattern.instrumentId` is a free-form string; everything downstream of it —
  * the voice builder, the tuning list, the fretboard's `InstrumentDef` — is not.
  *
