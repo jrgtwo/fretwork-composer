@@ -81,6 +81,12 @@
   --color-block: #31343c;
   --color-block-hi: #3d414b;
 
+  /* A selected block's body: brass warmth held down to a fill that a bold
+   * brass-hi label still reads on. Not `--color-brass-*` — those are the accent
+   * itself, and a block filled with them is a button, not a selection. */
+  --color-select-hi: #4a4433;
+  --color-select-lo: #3a3529;
+
   /* -- accent: brushed brass. Marks roots, playhead, primary actions. ------ */
   --color-brass: #b0894e;
   --color-brass-hi: #d0a866;

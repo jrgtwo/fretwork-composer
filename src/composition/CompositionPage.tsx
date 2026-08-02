@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
+import { ArrangementGrid } from './ArrangementGrid';
 import type { ArrangementMode } from './arrangementMath';
-import { ensureComposition, useEditingComposition } from './compositionService';
+import { ensureComposition } from './compositionService';
 
 /**
  * The three modes are one surface, not three pages: the ruler, the track headers
@@ -41,7 +42,6 @@ export function CompositionPage({
   mode: ArrangementMode;
   onModeChange: (mode: ArrangementMode) => void;
 }) {
-  const composition = useEditingComposition();
   const [openFailure, setOpenFailure] = useState<string | null>(null);
 
   // The lib's `ensureEditingComposition` runs a subscription gate and returns
@@ -89,28 +89,19 @@ export function CompositionPage({
           className="flex min-h-0 min-w-0 flex-col p-3"
         >
           <div className="tray flex min-h-0 flex-1 flex-col overflow-hidden p-1.5">
-            {/* TODO(CP-04): the arrangement grid — ruler, track headers, lanes. */}
-            <div className="well flex min-h-0 flex-1 flex-col items-center justify-center gap-1.5 text-center">
-              {openFailure ? (
+            {openFailure ? (
+              // A refusal is reported here rather than inside the grid: the grid
+              // renders whatever composition is open and has no way to know that
+              // opening one was ATTEMPTED and declined — only that there isn't
+              // one, which is a different thing to tell the user.
+              <div className="well flex min-h-0 flex-1 flex-col items-center justify-center gap-1.5 text-center">
                 <p role="alert" className="max-w-[36ch] font-mono text-[10px] text-ink">
                   {openFailure}
                 </p>
-              ) : (
-                <>
-                  <p className="font-mono text-[10px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
-                    Arrangement
-                  </p>
-                  <p className="font-mono text-[9px] tracking-[0.12em] text-ink-mut/70 uppercase">
-                    {/* Not "Opening…": the open runs once on mount, so a
-                        composition that goes away later (CP-05 deletes one)
-                        would leave a progress message that never resolves. */}
-                    {composition
-                      ? `${composition.tracks.length} ${composition.tracks.length === 1 ? 'track' : 'tracks'}`
-                      : 'No composition open'}
-                  </p>
-                </>
-              )}
-            </div>
+              </div>
+            ) : (
+              <ArrangementGrid mode={mode} />
+            )}
           </div>
         </section>
 

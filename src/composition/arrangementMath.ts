@@ -353,6 +353,45 @@ export function arrangementBars(
   return Math.max(minBars, filled + trailingBars);
 }
 
+// --------------------------------------------------------------- viewport ---
+
+/**
+ * Width of the scrollable content, in px. The ruler's and the lane area's are
+ * the same number by construction — they share one time axis, and a ruler even a
+ * bar wider than the lanes puts bar 40's label past where bar 40 can be drawn.
+ *
+ * Bars rather than ticks, so the axis always ends on a bar line.
+ */
+export function arrangementWidth(
+  bars: number,
+  ts: PatternTimeSignature,
+  pxPerBeat: number,
+): number {
+  return tickToPx(Math.max(0, bars) * ticksPerBar(ts), pxPerBeat);
+}
+
+/**
+ * Where to scroll to after a zoom so the leftmost visible tick stays put.
+ *
+ * Zoom that leaves `scrollLeft` alone teleports the view: 960 px in is bar 6 at
+ * 48 px/beat and bar 21 at 12. The ratio is exact and deliberately NOT a round
+ * trip through `pxToTick`/`tickToPx` — `pxToTick` rounds to whole ticks, and at
+ * 3 px/beat one pixel is 160 ticks, so a there-and-back zoom would walk the view
+ * a bar to the left every few presses.
+ *
+ * A non-positive `from` has no anchor to preserve — there is no tick at "0 px per
+ * beat" — so the view goes home rather than to NaN or Infinity.
+ */
+export function zoomAnchoredScrollLeft(
+  scrollLeft: number,
+  fromPxPerBeat: number,
+  toPxPerBeat: number,
+): number {
+  if (!(fromPxPerBeat > 0) || !Number.isFinite(toPxPerBeat)) return 0;
+  if (!Number.isFinite(scrollLeft)) return 0;
+  return Math.max(0, scrollLeft) * (toPxPerBeat / fromPxPerBeat);
+}
+
 // ------------------------------------------------------------ hit testing ---
 
 export interface Point {

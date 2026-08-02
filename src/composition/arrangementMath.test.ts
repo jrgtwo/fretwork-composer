@@ -18,6 +18,7 @@ import {
   TRIM_HANDLE_PX,
   arrangementBars,
   arrangementSnap,
+  arrangementWidth,
   contentEndTick,
   dropTarget,
   hitTest,
@@ -30,6 +31,7 @@ import {
   rulerMarks,
   snapArrangementTick,
   tickToPx,
+  zoomAnchoredScrollLeft,
   type ArrangementMode,
   type PlacedTrack,
 } from './arrangementMath';
@@ -452,6 +454,100 @@ describe('content extent', () => {
       const bars = arrangementBars([track('a', [p])], TS_4_4);
       expect(bars * ticksPerBar(TS_4_4)).toBeGreaterThanOrEqual(placementEndTick(p));
     }
+  });
+});
+
+describe('viewport', () => {
+  it('is as wide as the bars it spans, at every zoom', () => {
+    for (const zoom of ARRANGEMENT_ZOOM_LEVELS) {
+      expect(arrangementWidth(12, TS_4_4, zoom)).toBe(
+        tickToPx(12 * ticksPerBar(TS_4_4), zoom),
+      );
+      // Meter-aware, and the two meters disagree — a width that didn't consult
+      // the time signature would pass in 4/4 and be a third short in 3/4.
+      expect(arrangementWidth(12, TS_3_4, zoom)).toBe(
+        tickToPx(12 * ticksPerBar(TS_3_4), zoom),
+      );
+      expect(arrangementWidth(0, TS_4_4, zoom)).toBe(0);
+      expect(arrangementWidth(-4, TS_4_4, zoom)).toBe(0);
+    }
+  });
+
+  // The ruler and the lanes are laid out from the same bar count, so this is
+  // what keeps the two surfaces the same width.
+  it('ends past the last ruler mark, on the bar line after it', () => {
+    const zoom = ARRANGEMENT_ZOOM_LEVELS[DEFAULT_ARRANGEMENT_ZOOM_INDEX];
+    const bars = 9;
+    const marks = rulerMarks(bars, TS_4_4, zoom);
+    const last = marks[marks.length - 1];
+    expect(last.x).toBeLessThan(arrangementWidth(bars, TS_4_4, zoom));
+    expect(arrangementWidth(bars, TS_4_4, zoom)).toBe(
+      tickToPx(bars * ticksPerBar(TS_4_4), zoom),
+    );
+  });
+
+  describe('zoom anchor', () => {
+    // The property that matters, stated as the ticket states it: the tick at the
+    // left edge of the viewport is the same tick before and after the zoom.
+    it('keeps the leftmost visible tick fixed across every pair of zoom levels', () => {
+      const leftTick = 37 * PPQ + PPQ / 2;
+      for (const from of ARRANGEMENT_ZOOM_LEVELS) {
+        for (const to of ARRANGEMENT_ZOOM_LEVELS) {
+          const scrollLeft = tickToPx(leftTick, from);
+          const next = zoomAnchoredScrollLeft(scrollLeft, from, to);
+          expect(next).toBeCloseTo(tickToPx(leftTick, to), 9);
+        }
+      }
+    });
+
+    it('scales with the zoom ratio', () => {
+      expect(zoomAnchoredScrollLeft(960, 48, 96)).toBe(1920);
+      expect(zoomAnchoredScrollLeft(960, 48, 12)).toBe(240);
+      expect(zoomAnchoredScrollLeft(960, 48, 48)).toBe(960);
+    });
+
+    it('leaves the home position at home', () => {
+      for (const to of ARRANGEMENT_ZOOM_LEVELS) {
+        expect(zoomAnchoredScrollLeft(0, 48, to)).toBe(0);
+      }
+    });
+
+    // Overscroll (macOS rubber-banding) reports a negative scrollLeft, and a
+    // zero or absent pxPerBeat has no anchor at all — neither may become NaN, or
+    // the view jumps to the far end of the arrangement and cannot be scrolled
+    // back with the pointer.
+    it.each([
+      [-120, 48, 96],
+      [Number.NaN, 48, 96],
+      [960, 0, 96],
+      [960, -48, 96],
+      [960, Number.NaN, 96],
+      [960, 48, Number.NaN],
+    ])('goes home rather than to NaN for (%s, %s, %s)', (scrollLeft, from, to) => {
+      expect(zoomAnchoredScrollLeft(scrollLeft, from, to)).toBe(0);
+    });
+
+    // Zooming out and back must not walk the view: the naive implementation
+    // (round trip through pxToTick) quantizes to whole ticks and drifts.
+    it('returns to where it started after a round trip', () => {
+      let scrollLeft = tickToPx(64 * PPQ, ARRANGEMENT_ZOOM_LEVELS[0]);
+      const start = scrollLeft;
+      for (let i = 1; i < ARRANGEMENT_ZOOM_LEVELS.length; i++) {
+        scrollLeft = zoomAnchoredScrollLeft(
+          scrollLeft,
+          ARRANGEMENT_ZOOM_LEVELS[i - 1],
+          ARRANGEMENT_ZOOM_LEVELS[i],
+        );
+      }
+      for (let i = ARRANGEMENT_ZOOM_LEVELS.length - 1; i > 0; i--) {
+        scrollLeft = zoomAnchoredScrollLeft(
+          scrollLeft,
+          ARRANGEMENT_ZOOM_LEVELS[i],
+          ARRANGEMENT_ZOOM_LEVELS[i - 1],
+        );
+      }
+      expect(scrollLeft).toBeCloseTo(start, 9);
+    });
   });
 });
 
