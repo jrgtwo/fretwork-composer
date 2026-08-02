@@ -1,10 +1,27 @@
-import { useCallback, useRef, useState, type ReactNode } from 'react';
-import { reorder, type PaneSpec, type PaneState } from './paneLayout';
+import { useRef, useState, type ReactNode } from 'react';
+import { reorder, type PaneSpec } from './paneLayout';
 
 export interface Pane extends PaneSpec {
   /** Right-aligned controls in the pane header. */
   actions?: ReactNode;
   children?: ReactNode;
+}
+
+/**
+ * Which panes are folded and what order they sit in — owned by the caller, not
+ * by this component.
+ *
+ * It used to be local `useState`, which was safe only while nothing could
+ * unmount the stack. The composition page unmounts it on every visit, so held
+ * here a collapse or a reorder would be silently undone by a page round trip.
+ * Same rule, same reason as `referenceView` and `workingVoice` in `App`.
+ */
+export interface PaneLayoutControl {
+  order: readonly string[];
+  onOrderChange: (order: string[]) => void;
+  /** Ids of the collapsed panes; anything absent is open. */
+  collapsed: readonly string[];
+  onCollapsedChange: (collapsed: readonly string[]) => void;
 }
 
 const DRAG_THRESHOLD = 5;
@@ -21,15 +38,26 @@ const DRAG_THRESHOLD = 5;
  * and empty space below them, and each header keeps its own expand toggle, so there is
  * no separate empty-state affordance to get back.
  */
-export function PaneStack({ panes }: { panes: Pane[] }) {
+export function PaneStack({
+  panes,
+  order: requestedOrder,
+  onOrderChange,
+  collapsed,
+  onCollapsedChange,
+}: { panes: Pane[] } & PaneLayoutControl) {
   const specs = panes;
-  const [order, setOrder] = useState<string[]>(() => panes.map((p) => p.id));
-  const [states, setStates] = useState<Record<string, PaneState>>(() =>
-    Object.fromEntries(panes.map((p) => [p.id, { collapsed: false }])),
-  );
   const [dragging, setDragging] = useState<string | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const stackRef = useRef<HTMLDivElement>(null);
+
+  // The order is caller-owned, so it can disagree with the pane list — the two
+  // are edited in different places and a pane added to one is not automatically
+  // in the other. Reconcile rather than trusting it: unknown ids drop out, panes
+  // it never heard of land at the end.
+  const order = [
+    ...requestedOrder.filter((id) => specs.some((p) => p.id === id)),
+    ...specs.filter((p) => !requestedOrder.includes(p.id)).map((p) => p.id),
+  ];
 
   const paneById = (id: string) => specs.find((p) => p.id === id)!;
   // Panes the dragged one could land between. A drop index equal to this length
@@ -43,9 +71,11 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
     />
   );
 
-  const toggleCollapse = useCallback((id: string) => {
-    setStates((prev) => ({ ...prev, [id]: { collapsed: !prev[id].collapsed } }));
-  }, []);
+  const toggleCollapse = (id: string) => {
+    onCollapsedChange(
+      collapsed.includes(id) ? collapsed.filter((paneId) => paneId !== id) : [...collapsed, id],
+    );
+  };
 
   // ---- header drag to reorder ---------------------------------------------
   const onHeaderDown = (id: string) => (e: React.MouseEvent) => {
@@ -78,7 +108,7 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
     const up = () => {
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
-      if (moved) setOrder((prev) => reorder(prev, id, target));
+      if (moved) onOrderChange(reorder(order, id, target));
       setDragging(null);
       setDropIndex(null);
     };
@@ -93,7 +123,7 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
     >
       {order.map((id) => {
         const pane = paneById(id);
-        const state = states[id];
+        const isCollapsed = collapsed.includes(id);
         const othersIndex = others.indexOf(id);
 
         return (
@@ -115,12 +145,12 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
                 </span>
                 <button
                   type="button"
-                  aria-label={state.collapsed ? `Expand ${pane.title}` : `Collapse ${pane.title}`}
-                  aria-expanded={!state.collapsed}
+                  aria-label={isCollapsed ? `Expand ${pane.title}` : `Collapse ${pane.title}`}
+                  aria-expanded={!isCollapsed}
                   onClick={() => toggleCollapse(id)}
                   className="flex h-[19px] w-[19px] items-center justify-center rounded-[5px] font-mono text-[9px] text-ink-mut hover:bg-raise hover:text-brass-hi"
                 >
-                  {state.collapsed ? '▸' : '▾'}
+                  {isCollapsed ? '▸' : '▾'}
                 </button>
                 <h2 className="font-mono text-[9px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
                   {pane.title}
@@ -129,7 +159,7 @@ export function PaneStack({ panes }: { panes: Pane[] }) {
                 {pane.actions}
               </header>
 
-              {!state.collapsed && <div className="flex flex-col p-1.5">{pane.children}</div>}
+              {!isCollapsed && <div className="flex flex-col p-1.5">{pane.children}</div>}
             </section>
           </div>
         );

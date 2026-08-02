@@ -61,6 +61,12 @@
   --color-raise: #34373f;
   --color-raise-hi: #3b3f48;
 
+  /* -- the right rail. Its own surface, a shade below `panel`: it is a fixed
+   *    part of the frame rather than something resting on it. --------------- */
+  --color-rail: #25282e;
+  --color-rail-hi: #2b2e35;
+  --width-rail: 300px;
+
   /* -- the tray: raised bezel around a sunken well ------------------------- */
   --color-bezel: #40434c;
   --color-bezel-lo: #2a2c33;
@@ -228,6 +234,13 @@
   .pressable:active {
     transform: translateY(2px);
     box-shadow: var(--shadow-pressed);
+  }
+
+  /* The right rail. Both pages draw the same physical part, so the chrome lives
+     here rather than being retyped per page and drifting apart. */
+  .rail {
+    background-image: linear-gradient(180deg, var(--color-rail-hi), var(--color-rail));
+    border-left: 1px solid var(--color-rim-dark);
   }
 
   /* A raised control — the neutral button/block body. */

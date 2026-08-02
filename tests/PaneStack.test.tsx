@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { useState } from 'react';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PaneStack, type Pane } from '../src/shell/PaneStack';
@@ -9,7 +10,23 @@ const PANES: Pane[] = [
   { id: 'timeline', title: 'Timeline', children: <p>beat grid</p> },
 ];
 
-const setup = () => ({ user: userEvent.setup(), ...render(<PaneStack panes={PANES} />) });
+/** Order and collapse are the caller's — `App` owns them so a page swap can't
+ *  reset them. This stands in for that owner. */
+function Harness({ panes = PANES, order }: { panes?: Pane[]; order?: readonly string[] }) {
+  const [paneOrder, setPaneOrder] = useState<readonly string[]>(order ?? panes.map((p) => p.id));
+  const [collapsed, setCollapsed] = useState<readonly string[]>([]);
+  return (
+    <PaneStack
+      panes={panes}
+      order={paneOrder}
+      onOrderChange={setPaneOrder}
+      collapsed={collapsed}
+      onCollapsedChange={setCollapsed}
+    />
+  );
+}
+
+const setup = () => ({ user: userEvent.setup(), ...render(<Harness />) });
 const collapseBtn = (title: string) => screen.getByRole('button', { name: `Collapse ${title}` });
 const paneOrder = () =>
   [...document.querySelectorAll('[data-pane]')].map((el) => el.getAttribute('data-pane'));
@@ -78,6 +95,14 @@ describe('PaneStack', () => {
     for (const pane of PANES) {
       expect(screen.getByRole('button', { name: `Expand ${pane.title}` })).toBeInTheDocument();
     }
+  });
+
+  // The order comes from the caller now, so it can name a pane that no longer
+  // exists or miss one that just appeared. Neither may drop a pane off screen.
+  it('reconciles an order that disagrees with the pane list', () => {
+    render(<Harness order={['timeline', 'gone', 'reference']} />);
+
+    expect(paneOrder()).toEqual(['timeline', 'reference', 'amp']);
   });
 
   it('keeps each pane titled within its own section', () => {

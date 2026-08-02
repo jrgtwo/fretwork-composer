@@ -31,15 +31,15 @@ describe('barBeatLines', () => {
     const lines = barBeatLines(2, FOUR_FOUR, 48);
     expect(lines).toHaveLength(8); // 2 bars x 4 beats
 
-    expect(lines[0]).toEqual({ x: 0, bar: 1, beat: 1, isBar: true });
-    expect(lines[1]).toEqual({ x: 48, bar: 1, beat: 2, isBar: false });
-    expect(lines[4]).toEqual({ x: 192, bar: 2, beat: 1, isBar: true });
+    expect(lines[0]).toEqual({ x: 0, tick: 0, bar: 1, beat: 1, isBar: true });
+    expect(lines[1]).toEqual({ x: 48, tick: PPQ, bar: 1, beat: 2, isBar: false });
+    expect(lines[4]).toEqual({ x: 192, tick: 4 * PPQ, bar: 2, beat: 1, isBar: true });
   });
 
   it('follows the time signature', () => {
     const lines = barBeatLines(2, { numerator: 3, denominator: 4 }, 48);
     expect(lines).toHaveLength(6);
-    expect(lines[3]).toEqual({ x: 144, bar: 2, beat: 1, isBar: true });
+    expect(lines[3]).toEqual({ x: 144, tick: 3 * PPQ, bar: 2, beat: 1, isBar: true });
   });
 });
 

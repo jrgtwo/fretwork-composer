@@ -28,6 +28,10 @@ export function pxToTick(px: number, pxPerBeat: number): Tick {
 
 export interface GridLine {
   x: number;
+  /** Absolute tick this line falls on. Carried rather than left to the caller
+   *  to re-derive from `bar`/`beat`: a second copy of that arithmetic is free to
+   *  drift from this one, and the arrangement ruler needs the tick. */
+  tick: Tick;
   bar: number;
   beat: number;
   isBar: boolean;
@@ -46,6 +50,7 @@ export function barBeatLines(
       const tick = bar * ticksPerBar(ts) + beat * perBeat;
       lines.push({
         x: tickToPx(tick, pxPerBeat),
+        tick,
         bar: bar + 1,
         beat: beat + 1,
         isBar: beat === 0,

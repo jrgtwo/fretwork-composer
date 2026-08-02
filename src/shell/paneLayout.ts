@@ -23,10 +23,6 @@ export interface PaneSpec {
   title: string;
 }
 
-export interface PaneState {
-  collapsed: boolean;
-}
-
 /**
  * Move `id` to `toIndex` in the visible order.
  *
