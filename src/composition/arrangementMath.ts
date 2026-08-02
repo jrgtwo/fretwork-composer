@@ -18,6 +18,7 @@ import {
   snapTick,
   ticksPerBar,
   ticksPerBeat,
+  type PatternEvent,
   type PatternTimeSignature,
   type Placement,
   type Tick,
@@ -684,6 +685,43 @@ export function planGroupMove(
  */
 const FALLBACK_FRET_COUNT = 22;
 
+/** Six, because the catalog's default instrument is a guitar. Only reached by a
+ *  snapshot naming an instrument the catalog doesn't have. */
+const FALLBACK_STRING_COUNT = 6;
+
+/**
+ * The neck a placement's notes are measured against: the SNAPSHOT's instrument,
+ * not the track's, exactly as `flattenTrack` measures it. Those can differ, and
+ * using the track's would judge the wrong notes on a mismatched placement.
+ */
+function snapshotNeck(placement: Placement): { strings: number; frets: number } {
+  const instrument = getInstrument(placement.patternSnapshot.instrumentId);
+  return {
+    strings: instrument?.stringCount ?? FALLBACK_STRING_COUNT,
+    frets: instrument?.fretCount ?? FALLBACK_FRET_COUNT,
+  };
+}
+
+/**
+ * The fret an event actually plays at once the placement's transposition is
+ * applied, or `null` when the shift pushes it outside `0..fretCount` and
+ * `flattenTrack` therefore DROPS it.
+ *
+ * One rule, two callers — `droppedByTranspose` counts the nulls and
+ * `previewMarks` refuses to draw them (and shades its marks by the fret this
+ * returns). Stated twice, a preview would eventually show a note the arrangement
+ * no longer plays, which is worse than showing none.
+ *
+ * LIB-GAP(12): this IS the restatement that gap covers — see the full note on
+ * `droppedByTranspose`, which is the entry named in docs/FOLLOW-UPS.md. This
+ * function, both its callers and BOTH fallback constants disappear together when
+ * the lib exposes the diagnostic; the row in docs/FOLLOW-UPS.md names all of them.
+ */
+function soundingFret(fret: number, transpose: number, fretCount: number): number | null {
+  const shifted = fret + transpose;
+  return shifted < 0 || shifted > fretCount ? null : shifted;
+}
+
 /**
  * How many of the placement's notes a transposition pushes off the neck.
  *
@@ -696,9 +734,7 @@ const FALLBACK_FRET_COUNT = 22;
  * fact the user can act on, where a legacy `repeat: 4` block would otherwise
  * report 12 of the same three.
  *
- * The fret range is measured against the SNAPSHOT's instrument rather than the
- * track's, exactly as `flattenTrack` measures it — those can differ, and using
- * the track's would flag the wrong notes on a mismatched placement.
+ * The fret range comes from `snapshotNeck` for the reason given there.
  *
  * LIB-GAP(12): this restates a rule the lib already implements and does not
  * expose. `flattenTrack` applies it but is not on the root barrel, and nothing
@@ -710,8 +746,7 @@ const FALLBACK_FRET_COUNT = 22;
 export function droppedByTranspose(placement: Placement): number {
   const transpose = placement.transposeSemitones ?? 0;
   if (transpose === 0) return 0;
-  const fretCount =
-    getInstrument(placement.patternSnapshot.instrumentId)?.fretCount ?? FALLBACK_FRET_COUNT;
+  const { frets } = snapshotNeck(placement);
   const length = placementEffectiveLength(placement);
 
   let dropped = 0;
@@ -719,8 +754,278 @@ export function droppedByTranspose(placement: Placement): number {
     // Events past the truncation point are already not played, so they are not
     // notes the transposition costs.
     if (event.startTick >= length) continue;
-    const fret = event.fret + transpose;
-    if (fret < 0 || fret > fretCount) dropped++;
+    if (soundingFret(event.fret, transpose, frets) === null) dropped++;
   }
   return dropped;
+}
+
+// -------------------------------------------------------- block preview ---
+// A miniature of a placement's notes, drawn inside its own block so a wall of
+// identically-sized rectangles reads as music. Non-interactive by construction:
+// it returns rects and nothing else, and `hitTest` never consults it.
+
+/**
+ * NOT greenfield: guitar-tutor already shipped this drawing as
+ * `src/patterns/arranger/MiniPatternSignature.tsx`, and its approach is what is
+ * ported here — one `<svg preserveAspectRatio="none">` per block, one row per
+ * string in REVERSE `stringIndex` order, a minimum mark width so a short note
+ * still shows, events at or past the effective length dropped and a straddling
+ * event's duration clipped to it. Three deliberate divergences:
+ *
+ *  - the time axis is the arrangement's `tickToPx`, not the pattern's duration
+ *    normalised to a fixed 100×28 box, so a placement's notes line up with the
+ *    ruler and with every other block at the same zoom;
+ *  - `repeat` is honoured (that component drew one snapshot, always);
+ *  - its six per-string guide `<line>`s are NOT drawn. That is a decision, not
+ *    an oversight: they are 6 more nodes on every block on a page that can carry
+ *    hundreds, and at 88 px lane height the strip is ~32 px — guides at that
+ *    pitch read as a grey wash behind the name rather than as strings. A preview
+ *    with notes on only two strings therefore floats, which is the accepted cost.
+ *
+ * The two in-repo reuse candidates were checked and neither fits:
+ *
+ *  - `src/reference/patternCells.ts` is fretboard-oriented — `footprintCellsFor`
+ *    and friends return cells on a NECK. There is no time axis in them at all.
+ *  - `src/reference/tabLayout.ts` is a full tablature renderer with systems,
+ *    bars, glyphs and stems, and it WRAPS into systems. A preview that wraps
+ *    inside a block is not a preview.
+ *
+ * What is reused is the part that could drift: the tick→px mapping and the
+ * repetition rects are `tickToPx` and `placementRepeatRects`, so a mark can
+ * never land somewhere its block does not cover.
+ */
+export interface PreviewMark extends Rect {
+  /** The snapshot event drawn. Not unique on its own — a repeated placement
+   *  draws the same event once per repetition. */
+  readonly eventId: string;
+  /** Which repetition this mark belongs to, 0-based. */
+  readonly repeat: number;
+  /**
+   * How far up the neck the note SOUNDS, as a fill opacity in
+   * `PREVIEW_OPACITY_MIN..PREVIEW_OPACITY_MAX` — open strings faintest, the last
+   * fret fullest.
+   *
+   * The one non-geometric field here, and it earns its place: the lib transposes
+   * FRETS and leaves `stringIndex` alone, so without it a placement at +5 whose
+   * notes all stay on the neck would draw a pixel-identical preview to the
+   * untransposed one and the drawing would be silent about the single edit most
+   * likely to have changed what it shows. It is resolved here rather than in the
+   * component for the same reason the rects are: the component does no
+   * arithmetic, so the value it applies is the value the tests pin.
+   */
+  readonly opacity: number;
+}
+
+/**
+ * Narrower than this and a repetition is all trim handle and no readable
+ * content — 3 × `TRIM_HANDLE_PX` is exactly the width at which `trimHandleWidth`
+ * stops shrinking the handles and a middle third exists to draw into. Below it
+ * the preview draws NOTHING rather than a smear; the block keeps its label.
+ */
+export const MIN_PREVIEW_WIDTH = 3 * TRIM_HANDLE_PX;
+
+/** A string row thinner than this cannot show a gap between itself and its
+ *  neighbour, so six of them read as one grey bar rather than as six strings.
+ *  The floor is per string, so a four-string bass previews in a shorter strip
+ *  than a six-string guitar does — which is correct, not a coincidence. */
+export const MIN_PREVIEW_ROW_PX = 2;
+
+/**
+ * Vertical room the block's own chrome needs: the name across the top, the
+ * transpose and dropped-note badges across the bottom. The preview is
+ * SUBORDINATE to both — it may not overlap either, so these are subtracted
+ * before anything is drawn rather than trusted to z-order.
+ *
+ * Both are the rendered line boxes of `PlacementBlock`'s two rows plus its
+ * `py-1` (4 px). Neither `text-[9.5px]` nor `text-[8px]` sets a line height, so
+ * both inherit the sheet's `line-height: 1.55` (src/styles/index.css): the name
+ * is 9.5 × 1.55 + 4 ≈ 18.7 and the badge row is 8 × 1.55 + 4 ≈ 16.4, rounded UP
+ * — an under-reserve puts the top string row under the name at the height
+ * threshold, where the strip fills the band exactly.
+ *
+ * They live here rather than in the component because the component is not
+ * allowed to do pixel arithmetic — that rule is why this module exists.
+ */
+const PREVIEW_TOP_PX = 19;
+const PREVIEW_BOTTOM_PX = 17;
+
+/** Past this the preview starts to look like the content rather than a hint at
+ *  it. A pattern lane is 88 px tall; without a cap the strip would be over half
+ *  the block and compete with the name. */
+const MAX_PREVIEW_HEIGHT = 32;
+
+/** Blank space above and below each mark inside its row, so adjacent strings
+ *  stay legible as separate rows. Exported because the row pitch a caller (or a
+ *  test) can observe is `mark.height + 2 × this`, and restating the literal is
+ *  how an assertion quietly stops testing what it names. */
+export const PREVIEW_ROW_GAP_PX = 0.5;
+
+/** A 16th note at the coarsest zoom is under a pixel wide. Marks get a floor so
+ *  a fast passage reads as notes rather than as nothing. */
+const MIN_MARK_PX = 1.5;
+
+/** The horizontal counterpart of `PREVIEW_ROW_GAP_PX`, and the reason it exists
+ *  is `MIN_MARK_PX`: the floor is the one thing here that can draw a mark WIDER
+ *  than the distance to the next onset on its string, i.e. fabricate an overlap
+ *  the music has not got. `previewMarks` refuses to draw at all when the tightest
+ *  onset spacing on any one string falls below `MIN_MARK_PX + this`, so the floor
+ *  can never do that and two consecutive short notes always show daylight. */
+const PREVIEW_MARK_GAP_PX = 0.5;
+
+/** The fill opacity of a mark at fret 0 and at the neck's last fret. The span is
+ *  narrow on purpose: the preview is SUBORDINATE to the block's name and to its
+ *  selected fill, so the shading has to be readable as a gradient across a phrase
+ *  without any single mark reading as a second label. */
+const PREVIEW_OPACITY_MIN = 0.55;
+const PREVIEW_OPACITY_MAX = 1;
+
+/**
+ * Where every note of a placement draws INSIDE its own block, in block-local
+ * pixels — (0, 0) is the block's top-left corner, so the caller applies these
+ * verbatim to one `<svg>` laid over the block.
+ *
+ * The preview shows what will PLAY, which is three separate obligations:
+ *
+ *  - `lengthTicks` TRUNCATION. Events at or past `placementEffectiveLength` are
+ *    not emitted by `flattenComposition`, so they are not drawn; an event
+ *    straddling the cut has its mark clipped exactly as the lib clips its
+ *    duration. A trimmed block therefore draws nothing past its right edge.
+ *  - `transposeSemitones`. The lib shifts FRETS, not strings, so a transposition
+ *    moves no mark vertically — the axis here is the string, and the string is
+ *    what does not change. It changes the marks in two other ways: notes shifted
+ *    off `0..fretCount` are dropped from playback (LIB-GAP(12)) and are dropped
+ *    here by the same `soundingFret` rule `droppedByTranspose` counts them with,
+ *    and every surviving mark's `opacity` is taken from its SOUNDING fret, so a
+ *    transposition that keeps every note on the neck still visibly moves.
+ *  - `repeat`. A repeated legacy placement replays its snapshot, so the marks
+ *    repeat too, once per rect from `placementRepeatRects`.
+ *
+ * ONE exception to "what will play", inherited from `placementRect` so that the
+ * marks cannot leave their block: repetitions are counted with `repeatCount`
+ * (floored, minimum 1) where `flattenTrack` loops on the raw `repeat`. A
+ * malformed `repeat: 0` therefore draws one set of marks and plays none, and
+ * `repeat: 2.5` draws two where three sound. The new UI writes neither.
+ *
+ * Row order is the REVERSE of `stringIndex`: index 0 is the low E, which is the
+ * physically bottom string, and every display in this app draws the high string
+ * on top (`ROW_ORDER` in `Timeline.tsx` is the authority). Inverted, every note
+ * lands on the wrong string and at this scale still looks entirely plausible.
+ *
+ * Returns `[]` — draw nothing at all — when a repetition is too narrow, the strip
+ * too short for the instrument's strings, or the notes too dense at this zoom to
+ * stay apart. Mush that implies notes that aren't there is worse than an
+ * unadorned block.
+ */
+export function previewMarks(
+  placement: Placement,
+  pxPerBeat: number,
+  blockHeight: number,
+): PreviewMark[] {
+  if (!(pxPerBeat > 0) || !Number.isFinite(pxPerBeat) || !Number.isFinite(blockHeight)) return [];
+
+  const { strings, frets } = snapshotNeck(placement);
+  if (!(strings > 0)) return [];
+
+  const band = blockHeight - PREVIEW_TOP_PX - PREVIEW_BOTTOM_PX;
+  const stripHeight = Math.min(band, MAX_PREVIEW_HEIGHT);
+  if (stripHeight < strings * MIN_PREVIEW_ROW_PX) return [];
+  const stripTop = PREVIEW_TOP_PX + (band - stripHeight) / 2;
+  const rowHeight = stripHeight / strings;
+  // Positive by construction: the row floor above is wider than both gaps, so
+  // there is no clamp here and no case where one would silently fire.
+  const markHeight = rowHeight - 2 * PREVIEW_ROW_GAP_PX;
+
+  const length = placementEffectiveLength(placement);
+  if (!(length > 0)) return [];
+
+  // Lane-local rects, one per repetition, taken from the same function the block
+  // draws its restart divisions from. Rebased to the block's own left edge here
+  // and not in the component, which does no arithmetic.
+  const repeats = placementRepeatRects(placement, pxPerBeat, 0, blockHeight);
+  const originX = tickToPx(placement.startTick, pxPerBeat);
+  // Every repetition is the same width, so the first one decides for all of
+  // them. Testing the REPETITION rather than the whole block is what keeps a
+  // legacy `repeat: 16` from drawing sixteen unreadable smears in a wide block —
+  // and it bounds the mark count, since repetitions cannot be narrower than this.
+  if (repeats.length === 0 || repeats[0].width < MIN_PREVIEW_WIDTH) return [];
+
+  const transpose = placement.transposeSemitones ?? 0;
+
+  // Resolved ONCE, not once per repetition: which events survive to be drawn,
+  // and everything about each that does not depend on which repetition it is in.
+  const drawable: { event: PatternEvent; row: number; opacity: number }[] = [];
+  for (const event of placement.patternSnapshot.events) {
+    if (!(event.startTick >= 0) || event.startTick >= length) continue;
+    // Display order, reversed. Out of range means the snapshot carries more
+    // strings than its instrument has — draw nothing rather than a mark clamped
+    // onto a string that isn't the note's.
+    const row = strings - 1 - event.stringIndex;
+    if (row < 0 || row >= strings) continue;
+    const fret = soundingFret(event.fret, transpose, frets);
+    if (fret === null) continue;
+    const upTheNeck = frets > 0 ? Math.min(Math.max(fret / frets, 0), 1) : 0;
+    drawable.push({
+      event,
+      row,
+      opacity: PREVIEW_OPACITY_MIN + upTheNeck * (PREVIEW_OPACITY_MAX - PREVIEW_OPACITY_MIN),
+    });
+  }
+
+  // Trap 3 on the OTHER axis: the width thresholds above bound the block, not the
+  // notes in it, and at 6 px/beat — a real zoom level — a 16th is exactly
+  // `MIN_MARK_PX`, so a 16th line draws as one solid bar and a 32nd run draws
+  // marks wider than the space between their onsets. Measured per STRING because
+  // marks in different rows cannot collide however close their onsets are.
+  if (tickToPx(tightestOnsetGap(drawable), pxPerBeat) < MIN_MARK_PX + PREVIEW_MARK_GAP_PX) {
+    return [];
+  }
+
+  const marks: PreviewMark[] = [];
+  for (let repeat = 0; repeat < repeats.length; repeat++) {
+    const rect = repeats[repeat];
+    const base = rect.left - originX;
+    for (const { event, row, opacity } of drawable) {
+      const left = base + tickToPx(event.startTick, pxPerBeat);
+      const clipped = Math.min(Math.max(event.durationTicks, 0), length - event.startTick);
+      marks.push({
+        eventId: event.id,
+        repeat,
+        opacity,
+        left,
+        top: stripTop + row * rowHeight + PREVIEW_ROW_GAP_PX,
+        // Clamped to THIS repetition's right edge, not the block's: a note held
+        // over the loop point does not sound into the next repetition, so it
+        // must not be drawn there either. Doubles as the guarantee that no mark
+        // escapes the block's rounded corners.
+        width: Math.min(Math.max(tickToPx(clipped, pxPerBeat), MIN_MARK_PX), base + rect.width - left),
+        height: markHeight,
+      });
+    }
+  }
+  return marks;
+}
+
+/**
+ * The smallest tick distance between two DISTINCT onsets sharing a string,
+ * `Infinity` when no string carries two. Simultaneous notes (a chord, or a
+ * doubled event) are a distance of 0 and are excluded: they are one mark drawn
+ * over another, not two marks that read as a smear.
+ */
+function tightestOnsetGap(drawable: readonly { event: PatternEvent; row: number }[]): number {
+  const byRow = new Map<number, number[]>();
+  for (const { event, row } of drawable) {
+    const onsets = byRow.get(row);
+    if (onsets) onsets.push(event.startTick);
+    else byRow.set(row, [event.startTick]);
+  }
+
+  let tightest = Number.POSITIVE_INFINITY;
+  for (const onsets of byRow.values()) {
+    onsets.sort((a, b) => a - b);
+    for (let i = 1; i < onsets.length; i++) {
+      const gap = onsets[i] - onsets[i - 1];
+      if (gap > 0 && gap < tightest) tightest = gap;
+    }
+  }
+  return tightest;
 }

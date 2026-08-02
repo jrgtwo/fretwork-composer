@@ -4,6 +4,7 @@ import {
   placementEffectiveLength,
   placementEndTick,
   ticksPerBar,
+  type PatternEvent,
   type PatternTimeSignature,
   type Placement,
 } from '@fretwork/lib';
@@ -15,12 +16,16 @@ import {
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   DEFAULT_LANE_HEIGHTS,
   MAJOR_DIVISION_BARS,
+  MIN_PREVIEW_ROW_PX,
+  MIN_PREVIEW_WIDTH,
+  PREVIEW_ROW_GAP_PX,
   TRIM_HANDLE_PX,
   arrangementBars,
   arrangementSnap,
   arrangementWidth,
   barsSpanned,
   contentEndTick,
+  droppedByTranspose,
   dropTarget,
   hitTest,
   laneAt,
@@ -30,6 +35,7 @@ import {
   placementRepeatRects,
   placementsInBand,
   planGroupMove,
+  previewMarks,
   pxToTick,
   rulerMarks,
   snapArrangementTick,
@@ -39,6 +45,7 @@ import {
   type ArrangementMode,
   type PlacedTrack,
   type PlacementDragItem,
+  type PreviewMark,
 } from './arrangementMath';
 
 const TS_4_4: PatternTimeSignature = { numerator: 4, denominator: 4 };
@@ -977,5 +984,378 @@ describe('planGroupMove', () => {
     const moved = byId(planGroupMove(group, Number.NaN, Number.NaN, 4));
     expect(moved.a).toMatchObject({ trackIndex: 0, startTick: 0 });
     expect(moved.b).toMatchObject({ trackIndex: 0, startTick: 2 * bar });
+  });
+});
+
+describe('previewMarks', () => {
+  const bar = ticksPerBar(TS_4_4);
+  /** Tall enough for the pattern lane's real block (`DEFAULT_LANE_HEIGHTS.pattern`). */
+  const BLOCK_H = DEFAULT_LANE_HEIGHTS.pattern;
+  /** 4 beats × 48 px = a 192 px block, comfortably over `MIN_PREVIEW_WIDTH`. */
+  const PX = 48;
+  const GUITAR_STRINGS = 6;
+
+  function note(over: Partial<PatternEvent> & { id: string }): PatternEvent {
+    return { stringIndex: 0, fret: 5, startTick: 0, durationTicks: PPQ, ...over };
+  }
+
+  /** A one-bar placement carrying `events`. */
+  function riff(events: PatternEvent[], over: Partial<Placement> = {}): Placement {
+    const base = placement({ id: 'p', ...over });
+    return { ...base, patternSnapshot: { ...base.patternSnapshot, events } };
+  }
+
+  const byEvent = (marks: readonly PreviewMark[]): Record<string, PreviewMark> =>
+    Object.fromEntries(marks.map((mark) => [mark.eventId, mark]));
+
+  /**
+   * THE TRAP. `stringIndex` 0 is the low E — the physically BOTTOM string — and
+   * every display in this app draws the high string on top (`ROW_ORDER` in
+   * `Timeline.tsx`). Reversed, every note lands on the wrong string and at
+   * preview scale still looks entirely plausible, so it is pinned here rather
+   * than left to the eye.
+   */
+  it('draws the low E at the bottom and the high E on top', () => {
+    const marks = byEvent(
+      previewMarks(
+        riff([note({ id: 'low', stringIndex: 0 }), note({ id: 'high', stringIndex: 5 })]),
+        PX,
+        BLOCK_H,
+      ),
+    );
+    expect(marks.high.top).toBeLessThan(marks.low.top);
+
+    // And by exactly five rows, not merely in the right order — a preview that
+    // ordered the strings correctly but spaced them wrongly would still put
+    // notes on strings they are not on.
+    const rowHeight = marks.high.height + 2 * PREVIEW_ROW_GAP_PX;
+    expect(marks.low.top - marks.high.top).toBeCloseTo(5 * rowHeight, 6);
+  });
+
+  it('gives every string its own row and keeps them all inside the block', () => {
+    const events = Array.from({ length: GUITAR_STRINGS }, (_, stringIndex) =>
+      note({ id: `s${stringIndex}`, stringIndex }),
+    );
+    const marks = previewMarks(riff(events), PX, BLOCK_H);
+    expect(marks).toHaveLength(GUITAR_STRINGS);
+
+    const tops = new Set(marks.map((mark) => mark.top));
+    expect(tops.size).toBe(GUITAR_STRINGS);
+    for (const mark of marks) {
+      expect(mark.top).toBeGreaterThanOrEqual(0);
+      expect(mark.top + mark.height).toBeLessThanOrEqual(BLOCK_H);
+    }
+  });
+
+  it('drops a note whose string the snapshot instrument does not have', () => {
+    // A six-string snapshot re-pointed at a four-string instrument: string 5
+    // has nowhere to draw, and clamping it onto string 3 would assert a note
+    // that is not there.
+    const marks = previewMarks(
+      riff([note({ id: 'gone', stringIndex: 5 }), note({ id: 'kept', stringIndex: 0 })], {
+        patternSnapshot: { ...createEmptyPattern('riff', 'bass'), durationTicks: bar },
+      }),
+      PX,
+      BLOCK_H,
+    );
+    expect(marks.map((mark) => mark.eventId)).toEqual(['kept']);
+  });
+
+  describe('what will actually play', () => {
+    it('drops the notes a transposition pushes off the neck, and only those', () => {
+      // Fret 20 + 5 = 25, past a guitar's 22. Fret 1 + 5 = 6, still on it.
+      const events = [note({ id: 'off', fret: 20 }), note({ id: 'on', fret: 1, stringIndex: 1 })];
+      const transposed = riff(events, { transposeSemitones: 5 });
+
+      expect(previewMarks(transposed, PX, BLOCK_H).map((mark) => mark.eventId)).toEqual(['on']);
+      // The same rule the block's ⚠ badge counts with — one answer, not two.
+      expect(droppedByTranspose(transposed)).toBe(1);
+      expect(previewMarks(riff(events), PX, BLOCK_H)).toHaveLength(2);
+    });
+
+    /**
+     * The lib transposes FRETS and copies `stringIndex` unchanged, so the
+     * string/time geometry of a transposed placement is identical to the
+     * untransposed one — which would make the preview silent about the single
+     * edit most likely to have changed what it shows, unless the sounding fret
+     * reaches the drawing some other way. It does, as `opacity`.
+     */
+    it('shades a mark by the fret it will SOUND at, not the fret it was written at', () => {
+      const events = [
+        note({ id: 'open', fret: 0 }),
+        note({ id: 'high', fret: 12, stringIndex: 1 }),
+      ];
+      const plain = byEvent(previewMarks(riff(events), PX, BLOCK_H));
+      const up = byEvent(previewMarks(riff(events, { transposeSemitones: 5 }), PX, BLOCK_H));
+
+      // Up the neck is fuller. Within one placement, and between a placement and
+      // its own transposition.
+      expect(plain.high.opacity).toBeGreaterThan(plain.open.opacity);
+      expect(up.open.opacity).toBeGreaterThan(plain.open.opacity);
+      expect(up.high.opacity).toBeGreaterThan(plain.high.opacity);
+
+      // And the transposition changed NOTHING else — it is the fret that moved.
+      for (const id of ['open', 'high']) {
+        expect({ ...up[id], opacity: 0 }).toEqual({ ...plain[id], opacity: 0 });
+      }
+    });
+
+    it('keeps every mark subordinate: opacity stays inside a usable band', () => {
+      const events = [note({ id: 'open', fret: 0 }), note({ id: 'top', fret: 22, stringIndex: 1 })];
+      for (const mark of previewMarks(riff(events), PX, BLOCK_H)) {
+        // Never invisible, never fuller than the fill the class already sets.
+        expect(mark.opacity).toBeGreaterThan(0.25);
+        expect(mark.opacity).toBeLessThanOrEqual(1);
+      }
+    });
+
+    it('draws nothing past a trim, and clips a note straddling it', () => {
+      const events = [
+        note({ id: 'inside', startTick: 0, durationTicks: bar }),
+        note({ id: 'past', startTick: bar, stringIndex: 1 }),
+      ];
+      // Cut three beats in: 'past' starts after the cut and never sounds, and
+      // 'inside' is a full bar long so its tail straddles it.
+      const trimmed = riff(events, {
+        patternSnapshot: { ...createEmptyPattern('riff'), durationTicks: 2 * bar },
+        lengthTicks: bar - PPQ,
+      });
+
+      const marks = previewMarks(trimmed, PX, BLOCK_H);
+      expect(marks.map((mark) => mark.eventId)).toEqual(['inside']);
+
+      // Clipped to the cut exactly, the way `flattenComposition` clips its
+      // duration — not merely kept inside the block by the overflow.
+      const blockWidth = placementRect(trimmed, PX, 0, BLOCK_H).width;
+      expect(marks[0].left + marks[0].width).toBeCloseTo(blockWidth, 6);
+    });
+
+    it('repeats the snapshot once per repetition, at the repetition boundaries', () => {
+      const repeated = riff([note({ id: 'a' }), note({ id: 'b', startTick: PPQ })], { repeat: 3 });
+      const marks = previewMarks(repeated, PX, BLOCK_H);
+      expect(marks).toHaveLength(6);
+
+      const rects = placementRepeatRects(repeated, PX, 0, BLOCK_H);
+      const origin = tickToPx(repeated.startTick, PX);
+      for (const mark of marks) {
+        // Each mark sits within its own repetition's span, taken from the same
+        // function the block draws its restart divisions from.
+        const rect = rects[mark.repeat];
+        expect(mark.left).toBeGreaterThanOrEqual(rect.left - origin);
+        expect(mark.left + mark.width).toBeLessThanOrEqual(rect.left - origin + rect.width);
+      }
+    });
+
+    it('does not let a held note bleed into the next repetition', () => {
+      // A note longer than the pattern: it is clipped by the effective length in
+      // playback, and must be clipped by the repetition here.
+      const repeated = riff([note({ id: 'held', durationTicks: 4 * bar })], { repeat: 2 });
+      const [first] = previewMarks(repeated, PX, BLOCK_H);
+      const rects = placementRepeatRects(repeated, PX, 0, BLOCK_H);
+      expect(first.left + first.width).toBeCloseTo(rects[0].width, 6);
+    });
+
+    it('never draws outside the block, whatever the placement carries', () => {
+      const random = lcg(97);
+      for (let i = 0; i < 200; i++) {
+        const events = Array.from({ length: 1 + Math.floor(random() * 6) }, (_, n) =>
+          note({
+            id: `e${n}`,
+            stringIndex: Math.floor(random() * 8) - 1,
+            fret: Math.floor(random() * 26),
+            startTick: Math.floor(random() * 2 * bar),
+            durationTicks: Math.floor(random() * 2 * bar),
+          }),
+        );
+        const subject = riff(events, {
+          repeat: 1 + Math.floor(random() * 4),
+          transposeSemitones: Math.floor(random() * 9) - 4,
+          lengthTicks: random() < 0.5 ? null : 1 + Math.floor(random() * 2 * bar),
+        });
+        const rect = placementRect(subject, PX, 0, BLOCK_H);
+        for (const mark of previewMarks(subject, PX, BLOCK_H)) {
+          expect(mark.left).toBeGreaterThanOrEqual(0);
+          expect(mark.left + mark.width).toBeLessThanOrEqual(rect.width + 1e-9);
+          expect(mark.width).toBeGreaterThan(0);
+          expect(mark.top).toBeGreaterThanOrEqual(0);
+          expect(mark.top + mark.height).toBeLessThanOrEqual(BLOCK_H);
+        }
+      }
+    });
+  });
+
+  describe('degrading rather than mushing', () => {
+    /** px/beat at which a one-bar block is exactly `MIN_PREVIEW_WIDTH` across. */
+    const AT_MIN_WIDTH = MIN_PREVIEW_WIDTH / 4;
+
+    it('draws at the width threshold and nothing below it', () => {
+      const subject = riff([note({ id: 'a' })]);
+      expect(placementRect(subject, AT_MIN_WIDTH, 0, BLOCK_H).width).toBe(MIN_PREVIEW_WIDTH);
+      expect(previewMarks(subject, AT_MIN_WIDTH, BLOCK_H)).toHaveLength(1);
+      expect(previewMarks(subject, AT_MIN_WIDTH - 1, BLOCK_H)).toEqual([]);
+    });
+
+    it('measures the width threshold per repetition, not per block', () => {
+      // Four repetitions make the BLOCK four times the threshold while each
+      // repetition is a quarter of it — four unreadable smears, so: nothing.
+      const repeated = riff([note({ id: 'a' })], { repeat: 4 });
+      expect(placementRect(repeated, AT_MIN_WIDTH / 4, 0, BLOCK_H).width).toBe(MIN_PREVIEW_WIDTH);
+      expect(previewMarks(repeated, AT_MIN_WIDTH / 4, BLOCK_H)).toEqual([]);
+    });
+
+    it('draws at the height threshold and nothing below it', () => {
+      const subject = riff([note({ id: 'a' })]);
+      // The shortest block whose strip still gives every guitar string
+      // `MIN_PREVIEW_ROW_PX`. Found by search rather than restated from the
+      // module's private chrome reserve, so the test pins the BEHAVIOUR.
+      let shortest = BLOCK_H;
+      while (shortest > 0 && previewMarks(subject, PX, shortest - 1).length > 0) shortest--;
+
+      expect(previewMarks(subject, PX, shortest)).toHaveLength(1);
+      expect(previewMarks(subject, PX, shortest - 1)).toEqual([]);
+      // Every row is at or above the floor at the threshold — the point of it.
+      const [mark] = previewMarks(subject, PX, shortest);
+      expect(mark.height + 2 * PREVIEW_ROW_GAP_PX).toBeGreaterThanOrEqual(MIN_PREVIEW_ROW_PX);
+    });
+
+    /**
+     * The width thresholds bound the BLOCK; this bounds the notes in it. At
+     * `pxPerBeat` 6 — a real entry in `ARRANGEMENT_ZOOM_LEVELS`, and the one at
+     * which a bar is exactly `MIN_PREVIEW_WIDTH` — a 16th is 1.5 px, which is
+     * the mark floor, so a 16th line on one string would draw as one solid bar
+     * and a 32nd run would draw marks wider than the space between their onsets.
+     */
+    it('draws nothing when the notes on a string are too close to stay apart', () => {
+      const COARSE = 6;
+      /** The tightest onset spacing that still leaves daylight at this zoom. */
+      const SPARSE = 160;
+      const line = (gapTicks: number, stringIndex = 0) =>
+        riff([
+          note({ id: 'a', stringIndex, startTick: 0, durationTicks: gapTicks }),
+          note({ id: 'b', stringIndex, startTick: gapTicks, durationTicks: gapTicks }),
+        ]);
+
+      expect(previewMarks(line(SPARSE), COARSE, BLOCK_H)).toHaveLength(2);
+      expect(previewMarks(line(SPARSE - 1), COARSE, BLOCK_H)).toEqual([]);
+      // A 16th at this zoom — the case that motivated the threshold.
+      expect(previewMarks(line(PPQ / 4), COARSE, BLOCK_H)).toEqual([]);
+      // The same passage drawn wide enough is fine: it is density AT A ZOOM.
+      expect(previewMarks(line(PPQ / 4), PX, BLOCK_H)).toHaveLength(2);
+    });
+
+    it('measures density per string, since marks in different rows cannot collide', () => {
+      const COARSE = 6;
+      const TIGHT = PPQ / 4;
+      // The same two onsets, once stacked on one string and once split across
+      // two. Split, they are two rows apart and read perfectly well.
+      const stacked = riff([
+        note({ id: 'a', stringIndex: 0, startTick: 0 }),
+        note({ id: 'b', stringIndex: 0, startTick: TIGHT }),
+      ]);
+      const split = riff([
+        note({ id: 'a', stringIndex: 0, startTick: 0 }),
+        note({ id: 'b', stringIndex: 3, startTick: TIGHT }),
+      ]);
+      expect(previewMarks(stacked, COARSE, BLOCK_H)).toEqual([]);
+      expect(previewMarks(split, COARSE, BLOCK_H)).toHaveLength(2);
+    });
+
+    it('ignores the spacing of notes it is not going to draw anyway', () => {
+      const COARSE = 6;
+      // Two 16ths on one string, but the second is pushed off the neck by the
+      // transposition and never drawn — so there is no pair to be too close.
+      const subject = riff(
+        [
+          note({ id: 'kept', fret: 0, startTick: 0 }),
+          note({ id: 'dropped', fret: 22, startTick: PPQ / 4 }),
+        ],
+        { transposeSemitones: 3 },
+      );
+      expect(previewMarks(subject, COARSE, BLOCK_H).map((mark) => mark.eventId)).toEqual(['kept']);
+    });
+
+    /**
+     * The strip's chrome reserve, derived here from the CSS rather than from the
+     * module's private constants so the two can disagree: `PlacementBlock`'s
+     * name row is `text-[9.5px]` and its badge row `text-[8px]`, neither sets a
+     * line height so both inherit `line-height: 1.55` (src/styles/index.css),
+     * and the block's padding is `py-1` = 4 px. Under-reserve and the top string
+     * lands under the name at the height threshold, where the strip fills the
+     * band exactly — and z-order will NOT save it, because the SVG is positioned
+     * and paints above the in-flow text whatever the DOM order.
+     */
+    it('clears the block’s own name and badges at every drawable height', () => {
+      const LINE_HEIGHT = 1.55;
+      const PY = 4;
+      const nameRow = 9.5 * LINE_HEIGHT + PY;
+      const badgeRow = 8 * LINE_HEIGHT + PY;
+      const subject = riff(
+        Array.from({ length: GUITAR_STRINGS }, (_, stringIndex) =>
+          note({ id: `s${stringIndex}`, stringIndex }),
+        ),
+      );
+
+      let drew = 0;
+      for (let height = 1; height <= 2 * BLOCK_H; height++) {
+        const marks = previewMarks(subject, PX, height);
+        if (marks.length === 0) continue;
+        drew++;
+        for (const mark of marks) {
+          expect(mark.top).toBeGreaterThanOrEqual(nameRow);
+          expect(mark.top + mark.height).toBeLessThanOrEqual(height - badgeRow);
+        }
+      }
+      expect(drew).toBeGreaterThan(0);
+    });
+
+    it('lets a four-string bass preview in a strip a guitar cannot use', () => {
+      const events = [note({ id: 'a' })];
+      const guitar = riff(events);
+      const bass = riff(events, {
+        patternSnapshot: { ...createEmptyPattern('riff', 'bass'), durationTicks: bar },
+      });
+      let shortest = BLOCK_H;
+      while (shortest > 0 && previewMarks(guitar, PX, shortest - 1).length > 0) shortest--;
+
+      expect(previewMarks(guitar, PX, shortest - 1)).toEqual([]);
+      expect(previewMarks(bass, PX, shortest - 1)).toHaveLength(1);
+    });
+  });
+
+  it('draws nothing for an empty pattern, a zero-length one, or no zoom', () => {
+    expect(previewMarks(riff([]), PX, BLOCK_H)).toEqual([]);
+    expect(
+      previewMarks(riff([note({ id: 'a' })], { lengthTicks: 0 }), PX, BLOCK_H),
+    ).toEqual([]);
+    expect(previewMarks(riff([note({ id: 'a' })]), 0, BLOCK_H)).toEqual([]);
+    expect(previewMarks(riff([note({ id: 'a' })]), Number.NaN, BLOCK_H)).toEqual([]);
+    expect(previewMarks(riff([note({ id: 'a' })]), PX, Number.NaN)).toEqual([]);
+    // Infinite zoom passes `> 0` and would otherwise produce `Infinity −
+    // Infinity` = NaN widths in the right-edge clamp.
+    expect(previewMarks(riff([note({ id: 'a' })]), Number.POSITIVE_INFINITY, BLOCK_H)).toEqual([]);
+    expect(previewMarks(riff([note({ id: 'a' })]), PX, Number.POSITIVE_INFINITY)).toEqual([]);
+  });
+
+  /**
+   * The one place the preview does NOT show what will play, inherited from
+   * `placementRect` so the marks cannot leave their block: `repeatCount` floors
+   * and clamps to 1 where `flattenTrack` loops on the raw `repeat`. Pinned so
+   * the documented exception is the observed one.
+   */
+  it('draws one repetition for a malformed repeat, as the block itself does', () => {
+    for (const repeat of [0, -3, Number.NaN]) {
+      const marks = previewMarks(riff([note({ id: 'a' })], { repeat }), PX, BLOCK_H);
+      expect(marks.map((mark) => mark.repeat)).toEqual([0]);
+    }
+    // A fractional repeat draws the whole repetitions only.
+    expect(
+      previewMarks(riff([note({ id: 'a' })], { repeat: 2.5 }), PX, BLOCK_H).map((m) => m.repeat),
+    ).toEqual([0, 1]);
+  });
+
+  it('gives a note too short to see a visible minimum width', () => {
+    const marks = previewMarks(riff([note({ id: 'a', durationTicks: 1 })]), PX, BLOCK_H);
+    expect(marks[0].width).toBeGreaterThan(tickToPx(1, PX));
+    expect(marks[0].width).toBeGreaterThanOrEqual(1);
   });
 });

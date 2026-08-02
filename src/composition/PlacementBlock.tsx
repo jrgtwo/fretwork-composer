@@ -1,8 +1,10 @@
+import { memo } from 'react';
 import type { Placement } from '@fretwork/lib';
 import {
   droppedByTranspose,
   placementRect,
   placementRepeatRects,
+  previewMarks,
   trimHandleWidth,
 } from './arrangementMath';
 
@@ -24,8 +26,16 @@ import {
  * stack, so the rects are taken with a `laneTop` of 0. `hitTest` works in
  * lanes-content space and is passed the lane's real top — the same function,
  * called in whichever frame the caller is working in.
+ *
+ * MEMOIZED, and it has to be: the grid subscribes to the playback head, which
+ * ticks once per animation frame, so every block re-renders 60 times a second
+ * for the whole of playback. Since CP-09 that means re-running `previewMarks`
+ * and re-reconciling one `<rect>` per note per block per frame — hundreds of
+ * elements across a full arrangement, for a head tick that changes at most one
+ * block's `playing`. Every prop is a primitive or the store's own stable
+ * `placement`, so the default shallow comparison is the right one.
  */
-export function PlacementBlock({
+export const PlacementBlock = memo(function PlacementBlock({
   placement,
   pxPerBeat,
   laneHeight,
@@ -54,6 +64,7 @@ export function PlacementBlock({
   const transpose = placement.transposeSemitones;
   const dropped = droppedByTranspose(placement);
   const handle = trimHandleWidth(rect.width);
+  const marks = previewMarks(placement, pxPerBeat, rect.height);
 
   return (
     <>
@@ -69,6 +80,66 @@ export function PlacementBlock({
             : 'control pressable'
         } ${playing ? 'ring-1 ring-brass-hi' : ''}`}
       >
+        {/* The mini note preview (CP-09). ONE `<svg>` per block, one `<rect>`
+            per mark: eight tracks × many placements × many notes is the one
+            place on this page where node count could matter, and an SVG rect
+            has no CSS box, no layout pass and no stacking context where an
+            absolutely-positioned `<div>` per note would have all three. It is
+            not collapsed further into a single `<path>` because the marks then
+            stop being individually assertable, and jsdom (every rect 0×0)
+            leaves that as the ONLY way this drawing can be verified at all.
+
+            Inert: `aria-hidden` because it restates the block's own content, and
+            `pointer-events-none` so the press still reaches the lane area's
+            hit test. Clicking a block selects it, in the preview or out of it.
+
+            Separation from the chrome is `previewMarks`' job, not z-order's:
+            it reserves the label's and the badges' rows out of the strip before
+            it places anything. It has to be, because DOM order does NOT settle
+            this — a positioned descendant paints above the in-flow inline
+            content of the same stacking context regardless of where it sits in
+            the tree, so an absolute SVG drawn first still paints over the name.
+
+            `inset-0` sizes the SVG to the block's PADDING box — one border
+            narrower and shorter than the rect the marks were measured against —
+            while the viewBox is that full rect, so `preserveAspectRatio="none"`
+            COMPRESSES the strip by one border on each axis (~1 px, ~2% of an
+            88 px block) and shifts it 1 px in. Deliberate: the padding box is
+            the block's visible interior AND the box `overflow-hidden` clips to,
+            so nothing can escape the rounded corners, and the error is smaller
+            than the mark gap. The alternative — subtracting a border width in
+            `arrangementMath` — would put a CSS detail into the geometry. */}
+        {marks.length > 0 && (
+          <svg
+            aria-hidden
+            data-preview={placement.id}
+            viewBox={`0 0 ${rect.width} ${rect.height}`}
+            preserveAspectRatio="none"
+            className="pointer-events-none absolute inset-0"
+          >
+            {marks.map((mark) => (
+              <rect
+                key={`${mark.eventId}:${mark.repeat}`}
+                data-mark={mark.eventId}
+                x={mark.left}
+                y={mark.top}
+                width={mark.width}
+                height={mark.height}
+                // How far up the neck the note SOUNDS — the one thing a
+                // transposition changes that the string/time geometry cannot
+                // show. Resolved in `arrangementMath`, applied verbatim here.
+                fillOpacity={mark.opacity}
+                // Brass, like every accent on this page — slate and plum are
+                // reserved for stage types. Held well under full strength so it
+                // reads as texture behind the name rather than as a second
+                // label; brighter on a selected block only because the selected
+                // fill is itself brass-tinted and would swallow it.
+                className={selected ? 'fill-brass-hi/70' : 'fill-brass/50'}
+              />
+            ))}
+          </svg>
+        )}
+
         <span
           className={`truncate font-mono text-[9.5px] font-bold ${
             selected ? 'text-brass-hi' : 'text-ink'
@@ -97,7 +168,6 @@ export function PlacementBlock({
             </span>
           )}
         </span>
-        {/* TODO(CP-09): the mini note preview goes here, inside the block. */}
       </div>
 
       {/* Cursor affordances for the trim zones. `pointer-events-none` is
@@ -147,4 +217,4 @@ export function PlacementBlock({
       ))}
     </>
   );
-}
+});
