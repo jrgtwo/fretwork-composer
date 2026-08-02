@@ -92,6 +92,24 @@ export const DEFAULT_SNAP_ID = '16';
 /** Fallback note length when snapping is off — an eighth reads as "a note". */
 export const FREE_NOTE_TICKS = PPQ / 2;
 
+/**
+ * The rows, top to bottom, as `stringIndex` values.
+ *
+ * Tab puts the highest string on top and `PatternEvent.stringIndex` counts from
+ * the bottom one — the lib's `standard` tuning is `['E2','A2','D3','G3','B3','E4']`
+ * and the scheduler reads `openStrings[stringIndex]` — so display order is the
+ * REVERSE of index order. Getting it backwards puts every note on the wrong
+ * string and still looks completely plausible.
+ *
+ * One function rather than one per view: the note surface draws the rows and the
+ * chrome draws the labels beside them, and a second copy of the reversal is free
+ * to drift from this one. `reference/tabLayout.rowForString` is the same rule
+ * from the other end — string to row, rather than rows in order.
+ */
+export function rowOrder(stringCount: number): number[] {
+  return [...Array(Math.max(0, stringCount)).keys()].reverse();
+}
+
 export interface LaneMetrics {
   rowHeight: number;
   noteHeight: number;
@@ -103,16 +121,15 @@ export interface LaneMetrics {
  * Rows grow with the pane so a taller timeline means bigger targets, but both the
  * row and the note are clamped: unbounded rows leave a mostly-empty well, and
  * unbounded notes turn into slabs that read as panels rather than events.
+ *
+ * `laneAreaHeight` is the height the ROWS have, with any chrome the host draws
+ * already taken off. Subtracting a ruler here as well would mean two callers
+ * disagreeing about whose job it was, and the note surface has no ruler at all.
  */
-export function laneMetrics(
-  availableHeight: number,
-  stringCount: number,
-  rulerHeight: number,
-): LaneMetrics {
-  const usable = availableHeight - rulerHeight;
+export function laneMetrics(laneAreaHeight: number, stringCount: number): LaneMetrics {
   const rowHeight = Math.max(
     MIN_ROW,
-    Math.min(MAX_ROW, Math.floor(usable / Math.max(1, stringCount))),
+    Math.min(MAX_ROW, Math.floor(laneAreaHeight / Math.max(1, stringCount))),
   );
   const noteHeight = Math.min(Math.round(rowHeight * 0.62), MAX_NOTE);
   return {
@@ -121,4 +138,44 @@ export function laneMetrics(
     noteTop: Math.round((rowHeight - noteHeight) / 2),
     isTall: rowHeight >= TALL_ROW,
   };
+}
+
+/**
+ * The CSS background that carves a string lane into a beat grid — a shadow line
+ * and a light catch at every division, three of them stacked: the snap
+ * resolution, the beat, and the bar.
+ *
+ * A string rather than markup because it is a repeating background: one
+ * declaration per lane instead of an element per gridline, which at 192px per
+ * beat across a long pattern is the difference between three nodes and
+ * thousands. It lives here with the rest of the tick→pixel arithmetic because
+ * that is where the widths it interpolates come from.
+ *
+ * `gridTicks` is null when snapping is off; the finest line then falls back to a
+ * sixteenth, so the well still reads as time rather than as a blank slab.
+ */
+export function laneGridImage(
+  pxPerBeat: number,
+  gridTicks: number | null,
+  ts: PatternTimeSignature,
+): string {
+  const carve = (width: number, dark: number, light: number) => {
+    // A carve spends 2px on its shadow and its light catch, so anything under 3px
+    // interpolates a NEGATIVE length — invalid CSS. The three carves are one
+    // comma-joined `background-image`, so one bad layer drops the beat and bar
+    // lines with it and the lane goes blank. Reachable: a 1/32 grid at the lowest
+    // zoom is 1.5px. Drawn too coarse beats not drawn at all.
+    const w = Math.max(3, width);
+    return (
+      `repeating-linear-gradient(90deg,transparent 0 ${w - 2}px,` +
+      `rgb(0 0 0/${dark}) ${w - 2}px ${w - 1}px,rgb(255 255 255/${light}) ${w - 1}px ${w}px)`
+    );
+  };
+  return [
+    // The finest grid line follows the snap setting, so the visual grid and the
+    // positions notes can actually take always agree.
+    carve(tickToPx(gridTicks ?? PPQ / 4, pxPerBeat), 0.3, 0.022),
+    carve(pxPerBeat, 0.5, 0.045),
+    carve(tickToPx(ticksPerBar(ts), pxPerBeat), 0.72, 0.085),
+  ].join(',');
 }

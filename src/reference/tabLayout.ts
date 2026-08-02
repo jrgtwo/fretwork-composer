@@ -134,9 +134,9 @@ export function noteParts(event: PatternEvent): NoteParts {
 }
 
 /**
- * String labels bottom-to-top, i.e. indexed by `stringIndex` exactly like
- * `PatternEvent.stringIndex` and the lib's `TuningDef.strings`. Octave digits are
- * stripped — tab labels the string, not the pitch.
+ * The open pitch of every string, indexed by `stringIndex` exactly like
+ * `PatternEvent.stringIndex` and the lib's `TuningDef.strings` — full pitches
+ * (`'A2'`), so a caller can transpose off them as well as name them.
  *
  * The tuning is the instrument's declared default rather than whatever happens to
  * come first out of the catalog — `getTuningsForInstrument(id)[0]` agrees today only
@@ -145,22 +145,34 @@ export function noteParts(event: PatternEvent): NoteParts {
  * shortcut, which is the third consumer docs/FOLLOW-UPS.md §3 warns about: nothing
  * owns instrument/tuning/capo yet, so the labels and the notes you hear agree only
  * as long as both keep landing on the same tuning.
+ *
+ * `undefined` for a string the tuning has no entry for, and all of them undefined
+ * for an instrument the catalog doesn't know: no fallback to `DEFAULT_TUNING_ID`,
+ * because labelling a strange neck with the guitar's tuning is a confident wrong
+ * answer where a blank is an honest one.
  */
-export function stringLabels(instrumentId: string, stringCount: number): string[] {
-  // No fallback to `DEFAULT_TUNING_ID` for an unknown instrument: that would label
-  // its lines with the guitar's tuning, which is a confident wrong answer where a
-  // blank label is an honest one.
+export function openStrings(
+  instrumentId: string,
+  stringCount: number,
+): (string | undefined)[] {
   const instrument = getInstrument(instrumentId);
   const strings = (instrument ? getTuning(instrument.defaultTuningId)?.strings : undefined) ?? [];
-  const labels = Array.from(
-    { length: stringCount },
-    (_, index) => strings[index]?.replace(/\d+$/, '') ?? '',
+  return Array.from({ length: Math.max(0, stringCount) }, (_, index) => strings[index]);
+}
+
+/**
+ * String labels bottom-to-top, from {@link openStrings}. Octave digits are
+ * stripped — tab labels the string, not the pitch.
+ */
+export function stringLabels(instrumentId: string, stringCount: number): string[] {
+  const labels = openStrings(instrumentId, stringCount).map(
+    (open) => open?.replace(/-?\d+$/, '') ?? '',
   );
 
   // Standard guitar has an E at both ends, and tab writes the top one lowercase so
-  // the two lines can be told apart — the same convention `STRING_LABELS` follows in
-  // `Timeline.tsx`, which shows the same pattern in the same window. Derived rather
-  // than hardcoded so it also holds for a tuning whose duplicate isn't E.
+  // the two lines can be told apart — the timeline's string gutter reads these same
+  // labels for the same pattern in the same window. Derived rather than hardcoded so
+  // it also holds for a tuning whose duplicate isn't E.
   const top = stringCount - 1;
   if (top > 0 && labels.slice(0, top).includes(labels[top])) {
     labels[top] = labels[top].toLowerCase();
@@ -171,9 +183,9 @@ export function stringLabels(instrumentId: string, stringCount: number): string[
 /**
  * The row a string is drawn on. Tab puts the highest string on top and
  * `stringIndex` counts from the bottom one, so display order is the reverse of
- * index order — the same inversion `ROW_ORDER` makes in `Timeline.tsx`, and
- * getting it backwards puts every note on the wrong string while looking
- * completely plausible.
+ * index order — the same inversion `timelineMath.rowOrder` makes from the other
+ * end, and getting it backwards puts every note on the wrong string while
+ * looking completely plausible.
  */
 export function rowForString(stringIndex: number, stringCount: number): number {
   return stringCount - 1 - stringIndex;

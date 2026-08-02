@@ -10,6 +10,7 @@ import {
   getEditingPattern,
   getSelectedIds,
   openBlankPattern,
+  setEditingPatternInstrument,
   stampNote,
   undo,
 } from '../src/patterns/patternService';
@@ -141,6 +142,30 @@ describe('Timeline', () => {
     await user.click(zoomOut);
     await user.click(zoomOut);
     expect(zoomOut).toBeDisabled();
+  });
+
+  // A note on a string the instrument hasn't got is drawn nowhere at all, so it
+  // cannot be clicked, banded or deleted — while still counting in "N notes" and
+  // still sounding. `setPatternInstrument` swaps the id and prunes nothing, so the
+  // state is one instrument change away; the editor has to admit to it rather than
+  // being the only view in the app that hides notes in silence.
+  describe('notes with no lane to be drawn in', () => {
+    it('says how many the neck cannot show', () => {
+      seedTwoNotes(); // stringIndex 1 and 3
+      stampNote({ stringIndex: 5, fret: 3, tick: 0, durationTicks: PPQ / 2 });
+      setEditingPatternInstrument('bass');
+      render(<Timeline />);
+
+      expect(document.querySelectorAll('[data-lane]')).toHaveLength(4);
+      // Only index 5 is past a four-string neck; 1 and 3 still have lanes.
+      expect(document.querySelectorAll('[data-note]')).toHaveLength(2);
+      expect(screen.getByText('⚠ 1 off-instrument')).toBeInTheDocument();
+    });
+
+    it('stays quiet when every note has a string', () => {
+      render(<Timeline />);
+      expect(screen.queryByText(/off-instrument/)).not.toBeInTheDocument();
+    });
   });
 
   describe('editing', () => {

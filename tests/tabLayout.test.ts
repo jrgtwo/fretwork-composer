@@ -8,6 +8,7 @@ import {
   SYSTEM_PAD,
   layoutTab,
   noteParts,
+  openStrings,
   rowForString,
   stringLabels,
   type TabLayoutInput,
@@ -144,12 +145,30 @@ describe('noteParts', () => {
   });
 });
 
+describe('openStrings', () => {
+  // The labels above are these with the octave dropped; the timeline's note names
+  // need the octave kept, because it transposes off them. Both read one tuning.
+  it('keeps the full pitch, indexed by stringIndex', () => {
+    expect(openStrings('guitar', 6)).toEqual(['E2', 'A2', 'D3', 'G3', 'B3', 'E4']);
+  });
+
+  it('is undefined for a string the tuning has no entry for', () => {
+    expect(openStrings('bass', 6)).toEqual(['E1', 'A1', 'D2', 'G2', undefined, undefined]);
+  });
+
+  // Refusing to guess is the point: falling back to the guitar would name a
+  // strange neck's notes confidently and wrongly.
+  it('names nothing for an instrument the catalog does not know', () => {
+    expect(openStrings('not-an-instrument', 2)).toEqual([undefined, undefined]);
+  });
+});
+
 describe('stringLabels', () => {
   it('labels a guitar bottom-to-top, matching stringIndex', () => {
     // Index 0 is the low E, so the array reads bottom string first — the same order
     // as `TuningDef.strings` and `PatternEvent.stringIndex`. The top E is lowercase,
-    // which is how tab tells the two E lines apart, and what `STRING_LABELS` in
-    // `Timeline.tsx` calls the same string in the same window.
+    // which is how tab tells the two E lines apart, and what the timeline's string
+    // gutter calls the same string in the same window.
     expect(stringLabels('guitar', 6)).toEqual(['E', 'A', 'D', 'G', 'B', 'e']);
   });
 

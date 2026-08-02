@@ -3,8 +3,10 @@ import { PPQ } from '@fretwork/lib';
 import {
   DEFAULT_SNAP_ID,
   barBeatLines,
+  laneGridImage,
   laneMetrics,
   pxToTick,
+  rowOrder,
   snapOptions,
   tickToPx,
 } from '../src/timeline/timelineMath';
@@ -43,29 +45,91 @@ describe('barBeatLines', () => {
   });
 });
 
+describe('rowOrder', () => {
+  // The single fact every string display in this app rests on. `stringIndex` 0
+  // is the bottom string and tab draws the highest string on top, so the rows
+  // run in reverse index order — backwards, every note lands on the wrong
+  // string and still looks entirely plausible.
+  it('runs from the last string index down to zero', () => {
+    expect(rowOrder(6)).toEqual([5, 4, 3, 2, 1, 0]);
+    expect(rowOrder(4)).toEqual([3, 2, 1, 0]);
+  });
+
+  it('has no rows for a neck with no strings', () => {
+    expect(rowOrder(0)).toEqual([]);
+  });
+});
+
 describe('laneMetrics', () => {
+  // The argument is the height the ROWS have — every caller takes its own chrome
+  // off first, so 300px here is a 320px pane less a 20px ruler.
   it('divides available height between the strings', () => {
-    // 6 strings in 300px, minus a 20px ruler => ~46px each
-    const { rowHeight } = laneMetrics(320, 6, 20);
+    const { rowHeight } = laneMetrics(300, 6);
     expect(rowHeight).toBe(50);
   });
 
   it('clamps rows so a tall pane does not leave an empty well', () => {
-    expect(laneMetrics(2000, 6, 20).rowHeight).toBe(96);
+    expect(laneMetrics(1980, 6).rowHeight).toBe(96);
   });
 
   it('clamps rows so a short pane stays usable', () => {
-    expect(laneMetrics(60, 6, 20).rowHeight).toBe(22);
+    expect(laneMetrics(40, 6).rowHeight).toBe(22);
   });
 
   it('centres the note within its row and keeps it a sensible size', () => {
-    const { rowHeight, noteHeight, noteTop } = laneMetrics(320, 6, 20);
+    const { rowHeight, noteHeight, noteTop } = laneMetrics(300, 6);
     expect(noteHeight).toBeLessThan(rowHeight);
     expect(noteTop).toBe(Math.round((rowHeight - noteHeight) / 2));
   });
 
   it('caps note height so tall rows do not produce giant slabs', () => {
-    expect(laneMetrics(2000, 6, 20).noteHeight).toBeLessThanOrEqual(52);
+    expect(laneMetrics(1980, 6).noteHeight).toBeLessThanOrEqual(52);
+  });
+
+  it('divides the same height differently for a shorter neck', () => {
+    expect(laneMetrics(300, 4).rowHeight).toBe(75);
+    expect(laneMetrics(300, 6).rowHeight).toBe(50);
+  });
+});
+
+describe('laneGridImage', () => {
+  // Three stacked carves — snap, beat, bar — each one a 1px shadow and a 1px
+  // light catch at the end of its repeat.
+  it('draws a line at the snap resolution, the beat and the bar', () => {
+    const image = laneGridImage(48, PPQ / 4, FOUR_FOUR);
+    const widths = [...image.matchAll(/transparent 0 (\d+)px/g)].map((m) => Number(m[1]));
+
+    // A sixteenth is 12px at 48px/beat, a beat is 48, a 4/4 bar is 192 — each
+    // stated two pixels short, where its shadow starts.
+    expect(widths).toEqual([12 - 2, 48 - 2, 192 - 2]);
+  });
+
+  it('follows the snap setting, so the grid and the legal positions agree', () => {
+    const eighth = laneGridImage(48, PPQ / 2, FOUR_FOUR);
+    expect(eighth.startsWith('repeating-linear-gradient(90deg,transparent 0 22px')).toBe(true);
+  });
+
+  // Snapping off still needs a readable grid — a blank slab reads as no time at
+  // all — so the finest line falls back to a sixteenth.
+  it('falls back to a sixteenth when snapping is off', () => {
+    expect(laneGridImage(48, null, FOUR_FOUR)).toBe(laneGridImage(48, PPQ / 4, FOUR_FOUR));
+  });
+
+  it('takes the bar line from the time signature', () => {
+    const inThree = laneGridImage(48, PPQ / 4, { numerator: 3, denominator: 4 });
+    expect(inThree).toContain('transparent 0 142px'); // 3 beats x 48px, less 2
+  });
+
+  // A carve spends 2px on its shadow and light catch, so a division narrower than
+  // that interpolates a negative length — invalid CSS, and since all three carves
+  // are one comma-joined value the browser drops the beat and bar lines with it.
+  // A 1/32 grid at the lowest zoom is 1.5px, i.e. two clicks of "Zoom out".
+  it('never emits a negative length, however fine the grid', () => {
+    const widths = [...laneGridImage(12, PPQ / 8, FOUR_FOUR).matchAll(/transparent 0 (\S+?)px/g)]
+      .map((m) => Number(m[1]));
+
+    // A 1.5px snap division floors at 3px; the 12px beat and 48px bar are unaffected.
+    expect(widths).toEqual([1, 10, 46]);
   });
 });
 
