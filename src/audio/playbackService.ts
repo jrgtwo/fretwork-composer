@@ -15,31 +15,59 @@
  * Everything here is guarded: with no metronome mounted (tests, SSR, a browser
  * that refused the AudioContext) the hooks still work and the imperative calls
  * become no-ops rather than throwing into a click handler.
+ *
+ * TWO PATHS, ONE GRAPH (CP-08). The pattern page plays one `EventScheduler`
+ * through one `Voice`; the composition page plays a `MultiTrackPlayback`, which
+ * is one of each PER TRACK. They share the metronome, the AudioContext and the
+ * `MasterBus` — deliberately, and it is the sharpest edge in this module. See
+ * the composition section below before touching either of them.
  */
 import { useEffect, useSyncExternalStore } from 'react';
 import {
   DEFAULT_TUNING_ID,
   EventScheduler,
   MasterBus,
+  MultiTrackPlayback,
+  PPQ,
   PatternSource,
   Voice,
   audioNow,
   buildEffectiveVoice,
+  getTransportTicks,
   getTuning,
   getTuningsForInstrument,
+  placementEndTick,
+  resolveEffectivePlayback,
   startAudio,
+  totalDurationTicks as libTotalDurationTicks,
   useMetronome,
   useMetronomeStore,
+  type Composition,
   type Metronome,
   type Pattern,
+  type Placement,
+  type ScheduledEvent,
+  type Track,
+  type TuningDef,
   type VoicePreset,
   type VoiceSource,
 } from '@fretwork/lib';
 import { getEditingPattern, patternInstrumentId } from '../patterns/patternService';
+import {
+  getEditingComposition,
+  trackInstrumentId,
+  useEditingComposition,
+  type Result,
+} from '../composition/compositionService';
 import { readVoiceRef, resolveVoicePreset } from '../voice/voiceService';
+import { wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
 const CAPO = 0;
+
+/** Same shape the composition seam refuses with — see its `Result` docblock. */
+const ok = (): Result => ({ ok: true, value: undefined });
+const refuse = (reason: string): Result => ({ ok: false, reason });
 
 // ------------------------------------------------------------------ store ---
 // Head ticks land here ~60×/s. Components read slices through
@@ -50,11 +78,33 @@ interface PlaybackSnapshot {
   isPlaying: boolean;
   headTick: number | null;
   activeIds: readonly string[];
+  /**
+   * Ids of the placements the head is inside. Composition path only — the
+   * pattern page has no placements — and deliberately a slice of its own rather
+   * than something derived per render: it changes at placement boundaries, not
+   * at frame rate, so a grid that subscribes to it re-renders a handful of times
+   * a bar instead of sixty times a second.
+   */
+  activePlacementIds: readonly string[];
+  /**
+   * The tick composition playback wraps at, or 0 when nothing is playing.
+   *
+   * Published because it is NOT a number the arrangement can work out for
+   * itself — see `loopBoundaryOf` for why it is the lib's over-long duration
+   * rather than the corrected one the ruler is drawn from.
+   */
+  loopBoundaryTicks: number;
 }
 
 /** Shared empty array so an idle `useActiveEventIds` keeps a stable identity. */
 const NO_IDS: readonly string[] = [];
-const IDLE: PlaybackSnapshot = { isPlaying: false, headTick: null, activeIds: NO_IDS };
+const IDLE: PlaybackSnapshot = {
+  isPlaying: false,
+  headTick: null,
+  activeIds: NO_IDS,
+  activePlacementIds: NO_IDS,
+  loopBoundaryTicks: 0,
+};
 
 let snapshot: PlaybackSnapshot = IDLE;
 const listeners = new Set<() => void>();
@@ -75,6 +125,8 @@ function emit(patch: Partial<PlaybackSnapshot>): void {
 const getIsPlaying = () => snapshot.isPlaying;
 const getHeadTick = () => snapshot.headTick;
 const getActiveIds = () => snapshot.activeIds;
+const getActivePlacementIds = () => snapshot.activePlacementIds;
+const getLoopBoundaryTicks = () => snapshot.loopBoundaryTicks;
 
 // ----------------------------------------------------------------- engine ---
 
@@ -323,6 +375,11 @@ export function usePlaybackEngine(): void {
     return () => {
       sharedMetronome = null;
       disposeEngine();
+      // Both paths, always. They hold the SAME metronome — the lib's singleton —
+      // so a composition engine left standing after this would be holding a
+      // handle nothing on screen can reach, exactly the way the pattern engine
+      // used to.
+      disposeCompositionEngine();
     };
   }, [metronome]);
 }
@@ -355,14 +412,28 @@ export async function play(): Promise<void> {
   }
 }
 
+/**
+ * Stop whichever path is playing.
+ *
+ * ONE function for both, because there is one transport: the metronome is the
+ * lib's singleton and both engines hold the same instance, so `metronome.stop()`
+ * is the same call whichever of them started it. Making the caller pick would
+ * mean `App.tsx`'s page-change effect had to know which page it was leaving —
+ * and the one it forgot would keep the transport rolling behind a hidden
+ * document, which is the bug this exists to prevent.
+ */
 export function stop(): void {
-  const current = engine;
-  // Cleared first so any in-flight head frame is dropped by the guard above.
+  const composition = compositionEngine;
+  // Cleared first so any in-flight head frame — the scheduler's or the
+  // composition path's rAF — is dropped by the guard in each loop.
   emit(IDLE);
-  if (!current) return;
+  if (composition) stopHeadLoop(composition);
+
+  const metronome = engine?.metronome ?? composition?.metronome;
+  if (!metronome) return;
 
   try {
-    current.metronome.stop();
+    metronome.stop();
   } catch {
     // Already stopped, or never really started.
   }
@@ -581,6 +652,529 @@ export async function auditionVoice(note: string = AUDITION_NOTE): Promise<void>
   } catch {
     // Auditioning is best-effort; it must never break the click that asked.
   }
+}
+
+// ------------------------------------------------- composition playback ---
+// The second engine. `MultiTrackPlayback` builds one (Voice → per-track Gain →
+// master Gain) chain and one `EventScheduler` per track and drives them all from
+// the SAME metronome and the SAME `MasterBus` as the pattern path above.
+//
+// ⚠ THE SHARED GRAPH IS THE WHOLE RISK HERE. `tone` is a peer dependency
+// precisely so there is one AudioContext; two copies would be two contexts and
+// nothing would play in time with anything. `MasterBus` is a module singleton on
+// the lib side and NOTHING in this app may dispose it — `NotesBus` caches its
+// gain and short-circuits forever, so a torn-down bus leaves every voice feeding
+// a disposed graph while the metronome click, which bypasses the bus, keeps
+// sounding. SILENT NOTES WITH AN AUDIBLE CLICK MEANS A DISPOSED BUS, not a
+// scheduling bug. `MultiTrackPlayback.dispose` only disconnects its own master
+// gain (`MasterBus.disconnectVoice`), which is why building and tearing this
+// path down repeatedly is safe.
+
+interface CompositionEngine {
+  metronome: Metronome;
+  playback: MultiTrackPlayback;
+  /** Which document it was built for — a switch is a rebuild, not an update. */
+  compositionId: string;
+  /** The snapshot the engine currently holds, kept in step by `syncComposition`. */
+  composition: Composition;
+  /**
+   * The tuning every scheduler currently holds. Kept because the engine takes
+   * one at construction and never recomputes it — see {@link compositionTuning}
+   * and `syncComposition`, where a track's instrument change has to push a new
+   * one in or events on the strings the old tuning lacks are silently dropped.
+   */
+  tuningId: string;
+  /** Where playback wraps. See {@link loopBoundaryOf}. */
+  loopTicks: number;
+  loop: boolean;
+  /** The head rAF, or null when it isn't running. */
+  headFrame: number | null;
+  /** Dedup keys, so an unchanged set keeps its array identity across frames. */
+  placementKey: string;
+  activeKey: string;
+  /** Active event ids per track, merged into one published set. */
+  trackActive: Map<string, readonly string[]>;
+  unsubscribes: Array<() => void>;
+}
+
+let compositionEngine: CompositionEngine | null = null;
+
+/**
+ * The tuning every track is played through.
+ *
+ * LIB-GAP(15): `MultiTrackPlaybackOpts` takes ONE `tuning` and ONE `capo` and
+ * hands the same pair to every per-track `EventScheduler`, so a track's
+ * `instrumentId` selects its VOICE and nothing else. Something has to be chosen,
+ * and the two failure modes are not symmetric: a tuning with FEWER strings than
+ * a track's part silently DROPS every event above its last string, where a
+ * tuning with more strings only mis-pitches — a bass part at guitar pitch is
+ * wrong and obvious, a bass part with its top string missing is wrong and
+ * invisible. So the widest tuning among the tracks' instruments wins.
+ *
+ * Delete when `MultiTrackPlayback` derives a tuning per track from that track's
+ * own instrument. See docs/FOLLOW-UPS.md.
+ */
+function compositionTuning(composition: Composition): TuningDef | null {
+  let widest: TuningDef | null = null;
+  for (const track of composition.tracks) {
+    const candidate = getTuningsForInstrument(trackInstrumentId(track))[0];
+    if (!candidate) continue;
+    if (!widest || candidate.strings.length > widest.strings.length) widest = candidate;
+  }
+  return widest ?? getTuning(DEFAULT_TUNING_ID) ?? null;
+}
+
+/**
+ * Where composition playback wraps.
+ *
+ * LIB-GAP(11) is deliberately NOT corrected here, which is the opposite of what
+ * `compositionService.arrangementEnd` and `arrangementMath.contentEndTick` do —
+ * and the difference is the point. Those two answer "how wide is the
+ * arrangement", which the ruler and the blocks are drawn from, so they have to
+ * measure a truncated placement by its `lengthTicks`. This one answers "where
+ * does the audio come back round", and `MultiTrackPlayback` computes that with
+ * the lib's own (over-long) `totalDurationTicks` for every one of its
+ * `CompositionTrackSource`s. Correcting it here would put the playhead back at
+ * bar 1 while the tracks were still running out the extra bars — a playhead that
+ * disagrees with the ear is worse than one that agrees with a bug.
+ *
+ * Delete the alias, not the call, when the lib's `totalDurationTicks` routes
+ * through `placementEndTick`: at that point both numbers are the same number.
+ */
+const loopBoundaryOf = (composition: Composition): number =>
+  libTotalDurationTicks(composition);
+
+/**
+ * The voice a track plays through.
+ *
+ * `autoConnectToMaster: false` is REQUIRED, not a preference:
+ * `MultiTrackPlayback` inserts a per-track `Tone.Gain` between the voice and the
+ * master, and it can only do that if the voice has not already wired its own
+ * output to `MasterBus`. A voice that connected itself would still be audible —
+ * and would ignore its track's fader, mute and solo entirely.
+ *
+ * TODO(CP-13): per-track voices. `Track.voiceRef` exists and
+ * `compositionService.setTrackVoiceRef` can write it, but nothing picks one yet,
+ * so every track resolves to the global active variant for its instrument —
+ * which is exactly what the lib's resolver does with a null ref.
+ */
+function buildTrackVoice(track: Track): Voice {
+  return buildEffectiveVoice(trackInstrumentId(track), {
+    autoConnectToMaster: false,
+    voiceRef: null,
+  }).voice;
+}
+
+/**
+ * The composition engine, built on first use. Null when there is no transport to
+ * hang it on, which is the normal state under jsdom.
+ */
+function ensureCompositionEngine(composition: Composition): CompositionEngine | null {
+  const metronome = sharedMetronome;
+  if (!metronome) return null;
+
+  const current = compositionEngine;
+  if (current && current.compositionId === composition.id) return current;
+  // A different document: nothing about the old engine's tracks, voices or
+  // schedulers transfers, so it goes rather than being updated into place.
+  if (current) disposeCompositionEngine();
+
+  let playback: MultiTrackPlayback;
+  let tuningId: string;
+  try {
+    const tuning = compositionTuning(composition);
+    if (!tuning) return null;
+    tuningId = tuning.id;
+
+    playback = new MultiTrackPlayback({
+      composition,
+      metronome,
+      tuning,
+      capo: CAPO,
+      buildVoice: buildTrackVoice,
+    });
+  } catch {
+    // No audio graph available — the page stays silent rather than taking the
+    // click that asked down with it.
+    return null;
+  }
+
+  // Its own try, because the constructor has ALREADY connected a master gain to
+  // the shared `MasterBus` and built a voice per track: a throw past this point
+  // with a bare `return null` would strand all of that with no handle left to
+  // dispose it.
+  try {
+    const engineForComposition: CompositionEngine = {
+      metronome,
+      playback,
+      compositionId: composition.id,
+      composition,
+      tuningId,
+      loopTicks: loopBoundaryOf(composition),
+      loop: composition.loop,
+      headFrame: null,
+      placementKey: '',
+      activeKey: '',
+      trackActive: new Map(),
+      unsubscribes: [],
+    };
+
+    for (const track of composition.tracks) {
+      engineForComposition.unsubscribes.push(
+        playback.onTrackActive(track.id, (events) =>
+          onTrackActive(engineForComposition, track.id, events),
+        ),
+      );
+    }
+
+    // With looping off the audio simply ends, and nothing else would notice: the
+    // transport keeps rolling, the button keeps reading Stop and the head keeps
+    // climbing unwrapped, so the playhead sweeps off the grid and follow-scroll
+    // pages after it into empty space. Every scheduler is built from the same
+    // composition-wide boundary and so completes on the same tick; `stop()` is
+    // idempotent, so subscribing all of them costs nothing.
+    for (const scheduler of playback.schedulers) {
+      engineForComposition.unsubscribes.push(scheduler.onComplete(stop));
+    }
+
+    compositionEngine = engineForComposition;
+    return engineForComposition;
+  } catch {
+    attempt(() => playback.dispose());
+    return null;
+  }
+}
+
+function disposeCompositionEngine(): void {
+  const current = compositionEngine;
+  compositionEngine = null;
+  if (!current) return;
+
+  stopHeadLoop(current);
+  current.unsubscribes.forEach((unsubscribe) => unsubscribe());
+  // The metronome owns the transport and `MultiTrackPlayback.dispose()` only
+  // tears down its own schedulers, voices and gains — tearing this down
+  // mid-playback without stopping first leaves the transport rolling and the
+  // click audible with nothing left holding the handle. Same order, and the same
+  // reason, as `disposeEngine` above.
+  attempt(() => current.metronome.stop());
+  attempt(() => current.playback.dispose());
+  emit(IDLE);
+}
+
+/**
+ * Note-level highlighting, per track.
+ *
+ * LIB-GAP(16): this delivers nothing during playback in this build, and is wired
+ * anyway. `MultiTrackPlayback` constructs EVERY one of its schedulers with
+ * `role: 'follower'`, and `EventScheduler` starts the poll that emits `onActive`
+ * (and `onHead`) only when `role === 'primary'` — so the callbacks
+ * `onTrackActive` is documented for ("the arranger UI that wants per-lane
+ * highlighting") fire exactly twice: an empty set on start and an empty set on
+ * stop. The block highlight the arrangement actually draws is derived from the
+ * head instead, in {@link pollHead} — which is also why the head is read from
+ * the transport here rather than subscribed to.
+ *
+ * Delete both workarounds when `MultiTrackPlayback` promotes the scheduler for
+ * `_primaryTrackId` to `role: 'primary'` — it already tracks which track that
+ * is. See docs/FOLLOW-UPS.md.
+ */
+function onTrackActive(
+  active: CompositionEngine,
+  trackId: string,
+  events: readonly ScheduledEvent[],
+): void {
+  if (!snapshot.isPlaying) return;
+  active.trackActive.set(
+    trackId,
+    events.length ? events.map((event) => event.id) : NO_IDS,
+  );
+  const merged: string[] = [];
+  for (const ids of active.trackActive.values()) merged.push(...ids);
+  const key = merged.join(',');
+  if (key === active.activeKey) return;
+  active.activeKey = key;
+  emit({ activeIds: merged.length ? merged : NO_IDS });
+}
+
+/**
+ * One frame of the head: where the transport is, and what it is inside.
+ *
+ * Read from the transport rather than subscribed to, for LIB-GAP(16)'s reason —
+ * no scheduler in this path is a primary, so nothing emits a head at all. The
+ * raw read is folded back into the loop boundary here, because the schedulers
+ * reschedule each iteration at ever-increasing absolute ticks and an unwrapped
+ * head simply runs off the end of the grid.
+ *
+ * The placement set is computed from the same tick in the same frame, so the lit
+ * blocks and the playhead can never disagree about where playback is — the
+ * property the lib gets for free on the pattern page by emitting both from one
+ * poll. It is emitted only when the SET changes, so a subscriber re-renders at
+ * placement boundaries rather than at 60 Hz.
+ */
+function pollHead(active: CompositionEngine): void {
+  // Not merely an optimisation: `stop()` clears the snapshot before it stops the
+  // transport, so without this a frame in flight would put the playhead back on
+  // screen after it had been cleared. That is how a highlight gets stuck lit for
+  // a session.
+  if (!snapshot.isPlaying) return;
+
+  const raw = getTransportTicks(PPQ);
+  if (!Number.isFinite(raw)) return;
+  const headTick = active.loop ? wrapToDuration(raw, active.loopTicks) : raw;
+
+  const ids: string[] = [];
+  for (const track of active.composition.tracks) {
+    for (const placement of track.placements) {
+      if (placement.startTick <= headTick && headTick < placementEndTick(placement)) {
+        ids.push(placement.id);
+      }
+    }
+  }
+  const key = ids.join(',');
+  if (key === active.placementKey) {
+    emit({ headTick });
+    return;
+  }
+  active.placementKey = key;
+  emit({ headTick, activePlacementIds: ids.length ? ids : NO_IDS });
+}
+
+function startHeadLoop(active: CompositionEngine): void {
+  if (active.headFrame !== null) return;
+  if (typeof requestAnimationFrame === 'undefined') return;
+  const frame = () => {
+    // Re-armed first so a throw inside the body cannot silently end the sweep.
+    active.headFrame = requestAnimationFrame(frame);
+    pollHead(active);
+  };
+  active.headFrame = requestAnimationFrame(frame);
+}
+
+function stopHeadLoop(active: CompositionEngine): void {
+  if (active.headFrame === null) return;
+  cancelAnimationFrame(active.headFrame);
+  active.headFrame = null;
+}
+
+/**
+ * Bring the live engine in line with the store.
+ *
+ * `updateComposition`, NOT `applyTrackState` — although the fader, mute and solo
+ * are exactly what this is for. `applyTrackState` reads the engine's OWN
+ * `_composition` snapshot, which nothing but `updateComposition` ever replaces,
+ * so calling it alone after a store write re-applies the values the engine
+ * already had. `updateComposition` swaps the snapshot, diffs the tracks,
+ * restreams only the ones whose content moved and calls `applyTrackState` itself
+ * — which is why a volume drag mid-playback does not cancel the schedule.
+ *
+ * A `true` return means the track SHAPE changed — one added, removed or
+ * reordered — and the engine's per-track entries were built at construction, so
+ * that is a rebuild. A scheduler built while the transport is already running
+ * never gets its `start` event and so schedules nothing, so the honest answer
+ * mid-playback is to stop: the alternative is a track that is silently absent
+ * from the mix until the next press of play.
+ *
+ * This runs on EVERY composition write once an engine exists — including the
+ * dozens a drag fires — which the lib intends ("cheap; safe to call on every
+ * store change") and which is what keeps a stopped engine current so the next
+ * press of play doesn't sound the arrangement as it was. It costs one
+ * `CompositionTrackSource` per track whose placements moved; with the transport
+ * stopped `restream` clears and returns without rescheduling.
+ *
+ * Three things `updateComposition` does NOT do, and this therefore has to: push
+ * the composition's tempo into the metronome, recompute the tuning when a
+ * track's instrument changed, and restream when the loop boundary moved. Each
+ * of them is silent when missed — see the comments on the calls.
+ */
+function syncComposition(composition: Composition | null): void {
+  const active = compositionEngine;
+  if (!active) return;
+  if (!composition || composition.id !== active.compositionId) {
+    disposeCompositionEngine();
+    return;
+  }
+
+  try {
+    if (active.playback.updateComposition(composition)) {
+      stop();
+      disposeCompositionEngine();
+      return;
+    }
+
+    // The mirror is written only once the engine has ACCEPTED the update. Ahead
+    // of it, a throw would leave `pollHead` lighting blocks from a document the
+    // audio never took.
+    const nextLoopTicks = loopBoundaryOf(composition);
+    const boundaryMoved = nextLoopTicks !== active.loopTicks;
+    active.composition = composition;
+    active.loop = composition.loop;
+    active.loopTicks = nextLoopTicks;
+
+    active.playback.setLoop(composition.loop);
+
+    // `updateComposition` classifies an instrumentId change as a VOICE change
+    // and swaps the voice only — the tuning it was constructed with is never
+    // recomputed, and a tuning with fewer strings than the new part silently
+    // drops every event above its last string (LIB-GAP(15)).
+    const nextTuning = compositionTuning(composition);
+    const tuningMoved = nextTuning !== null && nextTuning.id !== active.tuningId;
+    if (nextTuning && tuningMoved) {
+      active.tuningId = nextTuning.id;
+      active.playback.setTuning(nextTuning, CAPO);
+    }
+
+    if (snapshot.isPlaying) {
+      emit({ loopBoundaryTicks: active.loopTicks });
+      // The metronome carries whatever the pattern page last left in it, and
+      // nothing else pushes the composition's tempo in once playback has
+      // started — so without this the readout changes and the tempo does not.
+      // Here rather than in `TransportBar` so the agent's `setCompositionBpm`
+      // gets the same behaviour as the button. No re-entry: `setTempo` writes
+      // the METRONOME store, not the patterns store this is subscribed to.
+      const bpm = compositionTempo(composition);
+      if (bpm !== useMetronomeStore.getState().bpm) setTempo(bpm);
+      // `EventScheduler.setTuning` only writes the field, and `updateComposition`
+      // restreams only the tracks whose placements moved — so unchanged tracks
+      // keep a `CompositionTrackSource` built with the OLD boundary and would
+      // loop at it, drifting further apart on every pass.
+      if (tuningMoved || boundaryMoved) active.playback.restreamAll();
+    }
+  } catch {
+    // An engine that refuses an update must not take the edit down with it; the
+    // arrangement is already written and the next play rebuilds from it.
+  }
+}
+
+/**
+ * Mounts the composition page's audio lifecycle. Call once, from the page.
+ *
+ * `usePlaybackEngine` is called through rather than duplicated: the metronome it
+ * publishes is the lib's singleton and both engines need it. The pattern page's
+ * `Timeline` and this page are never mounted together — `App` swaps one whole
+ * tree for the other — so the two callers cannot fight over it.
+ *
+ * The composition subscription is what makes a mute, a solo or a fader audible
+ * DURING playback: the lib's engine deliberately does not read the store, and
+ * documents that its host is to push changes in.
+ *
+ * LEAVING THE PAGE STOPS PLAYBACK, and this is where that happens — no separate
+ * unmount hook, because `usePlaybackEngine`'s teardown already stops the
+ * transport before it disposes either engine. `App.tsx` covers the other
+ * direction (it calls `stop()` when the page is no longer 'pattern'); together
+ * they are the round trip that must not leave a transport running behind a
+ * hidden document, or leave the pattern page playing into a torn-down graph.
+ */
+export function useCompositionPlayback(): void {
+  usePlaybackEngine();
+  const composition = useEditingComposition();
+
+  useEffect(() => {
+    syncComposition(composition);
+  }, [composition]);
+}
+
+/**
+ * Start the arrangement. Must be called from a user gesture — the AudioContext
+ * unlock demands one.
+ *
+ * The tempo is pushed into the metronome rather than read from it: the
+ * composition owns its BPM, and the metronome is carrying whatever the pattern
+ * page last left there.
+ *
+ * Refusals are RETURNED, not thrown and not swallowed: a Play button that does
+ * nothing and says nothing is indistinguishable from a broken one, and the
+ * agent's transport tool needs the same answer the surface gets.
+ */
+export async function playComposition(): Promise<Result> {
+  // Re-entrant play is worse than a no-op for the reason `play()` gives, and the
+  // flag is shared between the two paths — which is also what stops the pattern
+  // page and this one from both claiming the transport. Not a refusal: the state
+  // the caller asked for already holds.
+  if (snapshot.isPlaying) return ok();
+
+  const composition = getEditingComposition();
+  if (!composition) return refuse('No composition is open.');
+  // A zero-length arrangement gives every scheduler a zero-length region, whose
+  // boundary chain reschedules at a tick BEFORE the one it started from and so
+  // never advances. The transport would run for nothing.
+  if (loopBoundaryOf(composition) <= 0) {
+    return refuse('Nothing to play yet — drag a pattern into a track first.');
+  }
+
+  try {
+    await startAudio();
+
+    let active = ensureCompositionEngine(composition);
+    // Catch a reused engine up on anything written since React last ran the sync
+    // effect — a press in the same tick as an edit, most plausibly. Normally a
+    // no-op; when it isn't and the track SHAPE moved, the sync drops the engine,
+    // so it is rebuilt here rather than costing the user a second press.
+    if (active && active.composition !== composition) {
+      syncComposition(composition);
+      active = compositionEngine ?? ensureCompositionEngine(composition);
+    }
+    if (!active) return refuse('Audio is unavailable in this browser.');
+
+    setTempo(compositionTempo(composition));
+    active.playback.setLoop(composition.loop);
+    active.loop = composition.loop;
+    active.loopTicks = loopBoundaryOf(composition);
+    active.placementKey = '';
+    active.activeKey = '';
+    active.trackActive.clear();
+
+    emit({
+      isPlaying: true,
+      headTick: 0,
+      activeIds: NO_IDS,
+      activePlacementIds: NO_IDS,
+      loopBoundaryTicks: active.loopTicks,
+    });
+    startHeadLoop(active);
+    // Last, and by the metronome: it owns transport start/stop, and every
+    // scheduler in the engine is waiting on its `start` event. It also awaits
+    // `MasterBus.warmup()` on the way, which is why nothing here does — the
+    // reverb IR is rendered before the first note is due.
+    await active.metronome.start();
+    return ok();
+  } catch {
+    // `metronome.start()` can reject after it has already claimed the transport,
+    // so clearing the flags is not enough — go through `stop()`.
+    stop();
+    return refuse('Playback could not start.');
+  }
+}
+
+/**
+ * The tempo the arrangement starts at.
+ *
+ * Through the lib's resolver rather than reading `composition.bpm`, because
+ * `tempoMode: 'inherit'` means the first placement's own `suggestedBpm` wins and
+ * the composition's is only the fallback. Asked of the EARLIEST placement, which
+ * is the one that sounds first; later boundaries are the scheduler's to handle.
+ * A composition with nothing placed has no placement to resolve against and
+ * falls back to its own tempo.
+ */
+function compositionTempo(composition: Composition): number {
+  let first: Placement | null = null;
+  for (const track of composition.tracks) {
+    for (const placement of track.placements) {
+      if (!first || placement.startTick < first.startTick) first = placement;
+    }
+  }
+  return first ? resolveEffectivePlayback(composition, first).bpm : composition.bpm;
+}
+
+/** Ids of the placements the head is inside. Empty when stopped. */
+export function useActivePlacementIds(): readonly string[] {
+  return useSyncExternalStore(subscribe, getActivePlacementIds, getActivePlacementIds);
+}
+
+/** The tick composition playback wraps at — see {@link loopBoundaryOf} for why
+ *  this is not the arrangement's drawn width. 0 when nothing is playing. */
+export function useLoopBoundaryTicks(): number {
+  return useSyncExternalStore(subscribe, getLoopBoundaryTicks, getLoopBoundaryTicks);
 }
 
 export function useIsPlaying(): boolean {

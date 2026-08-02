@@ -206,3 +206,32 @@ describe('state that outlives the page swap', () => {
     expect(screen.getByRole('button', { name: 'Expand Reference' })).toBeInTheDocument();
   });
 });
+
+/**
+ * The demo seed, and the reason it needs a guard.
+ *
+ * The lib persists `library` but NOT `editingPatternId` (see `partialize` in
+ * `usePatternsStore`), so a reload comes back with every saved pattern and no
+ * pointer at one. An unconditional seed therefore appends a fresh copy on every
+ * load — invisible until CP-05 put the library on screen, and by then there
+ * were eight of them.
+ */
+describe('the demo seed', () => {
+  it('adopts the pattern a reload left behind instead of seeding another', () => {
+    const { unmount } = render(<App />);
+    expect(usePatternsStore.getState().library.patterns).toHaveLength(1);
+    unmount();
+
+    // The reload: the library survives, the pointer into it does not.
+    usePatternsStore.setState({ editingPatternId: null });
+
+    render(<App />);
+    expect(usePatternsStore.getState().library.patterns).toHaveLength(1);
+  });
+
+  it('still seeds when the library is genuinely empty', () => {
+    render(<App />);
+    expect(usePatternsStore.getState().library.patterns).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'A major arpeggio' })).toBeInTheDocument();
+  });
+});

@@ -163,6 +163,128 @@ export function listTrackInstruments(): readonly { id: FretInstrumentId; name: s
   }));
 }
 
+// ------------------------------------------------------------------- mix ---
+
+/**
+ * The fader's travel, in dB. 0 is unity, not a midpoint — a volume control that
+ * is a 0–100 percentage of something is the wrong control for this model, since
+ * both the track and the master are dB all the way down to the gain node.
+ *
+ * The numbers are the lib's own clamp (`composition-ops.setTrackVolumeDb` and
+ * `setMasterVolumeDb` both hard-limit to `-60..+6`) and its documented range
+ * (`types.ts`: "Range typically -60..+6"). Restated because a fader needs an
+ * extent and the lib is deliberately pixel-free; NOT a lib gap — the clamp is
+ * documented API, and the seam would refuse nothing by asking for it.
+ */
+export const VOLUME_RANGE_DB = { min: -60, max: 6 } as const;
+
+const clampDb = (db: number) =>
+  Math.max(VOLUME_RANGE_DB.min, Math.min(VOLUME_RANGE_DB.max, db));
+
+/**
+ * Whether this track will actually be HEARD, by the engine's own rule.
+ *
+ * The precedence, decided once here so the screen and the ear cannot disagree
+ * (CP-07):
+ *
+ *   - **Solo is not "mute the others".** Any soloed track anywhere silences
+ *     every UN-soloed track; two tracks soloed means exactly those two sound.
+ *     Nothing is written to the other tracks, so un-soloing restores the mix
+ *     that was there — which is the whole difference from muting them by hand.
+ *   - **Mute wins over solo.** A track that is both muted and soloed is SILENT.
+ *     Mute is a statement about THIS track; solo is a statement about the
+ *     others, and the specific instruction beats the general one. The lib's
+ *     engine already resolves it this way, and a mixer whose buttons imply a
+ *     different order than the audio uses is the classic version of this bug.
+ *
+ * LIB-GAP(14): `MultiTrackPlayback.applyTrackState` computes exactly
+ * `!track.muted && (!anySoloed || track.soloed)` and exposes nothing — there is
+ * no way to ask the engine which tracks it is about to silence, so the rule is
+ * restated. Kept to this one function, so the copy that could drift is one
+ * function and not a condition spread across the header. Delete when the lib
+ * exports the predicate (or a per-track audibility read on the playback object).
+ * See docs/FOLLOW-UPS.md.
+ */
+export function isTrackAudible(track: Track, tracks: readonly Track[]): boolean {
+  if (track.muted) return false;
+  return !tracks.some((t) => t.soloed) || track.soloed;
+}
+
+// ----------------------------------------------------------- diagnostics ---
+// These two live at the SEAM rather than beside `droppedByTranspose` in
+// `arrangementMath` — which is otherwise the right home for pure per-placement
+// counts — because they price a seam WRITE before it is made. `setTrackInstrument`
+// is the only caller's reason to ask, the agent needs the same answer through the
+// same module it will make the write through, and `arrangementMath` is imported by
+// geometry code that has no business knowing about instruments.
+
+/**
+ * How many of a track's notes sit on strings the given instrument has not got.
+ *
+ * A placement carries its OWN `patternSnapshot.instrumentId`, so a six-string
+ * riff dropped onto a track set to bass keeps two strings the bass does not
+ * have. That is a fact about the ARRANGEMENT and is true whatever plays it: the
+ * notes have nowhere on that instrument to be.
+ *
+ * ⚠ It is NOT, today, a prediction about what will be heard — see LIB-GAP(15) on
+ * {@link mismatchedPlacements}, which covers both of these.
+ *
+ * Counted per pattern note rather than per repetition, and skipping notes past
+ * the placement's truncation, for the same reasons `droppedByTranspose` does:
+ * "8 notes have nowhere to go" is the fact a user can act on.
+ */
+export function strandedByInstrument(
+  track: Track,
+  instrumentId: FretInstrumentId,
+): number {
+  const stringCount = getInstrument(instrumentId)?.stringCount;
+  if (stringCount === undefined) return 0;
+  let stranded = 0;
+  for (const placement of track.placements) {
+    const length = placementEffectiveLength(placement);
+    for (const event of placement.patternSnapshot.events) {
+      if (event.startTick >= length) continue;
+      if (event.stringIndex >= stringCount) stranded++;
+    }
+  }
+  return stranded;
+}
+
+/**
+ * How many of a track's blocks were written for a different instrument.
+ *
+ * Not the same question as {@link strandedByInstrument} and both are worth
+ * asking: a bass riff on a guitar track strands nothing (four strings fit in
+ * six) and is still not the part its author wrote, because it was fingered
+ * against a different set of open strings.
+ *
+ * LIB-GAP(15): both of these describe the arrangement rather than the audio,
+ * because the lib gives a track no tuning to describe. `MultiTrackPlaybackOpts`
+ * takes ONE `tuning` and ONE `capo` for the whole composition and hands the same
+ * pair to every per-track `EventScheduler` (`setTuning` is documented as "sync
+ * tuning + capo across every scheduler"); `CompositionTrackSource` emits bare
+ * `stringIndex`/`fret` and carries neither. A track's `instrumentId` therefore
+ * selects its VOICE and nothing else — not its string set, not its pitch.
+ *
+ * Two consequences worth stating rather than discovering:
+ *
+ *  - a stranded note is silenced only if the COMPOSITION's tuning also lacks
+ *    that string, so the count is what the arrangement holds, not a promise
+ *    about what the engine will drop;
+ *  - the inverse is unreportable from here — a four-string composition tuning
+ *    drops string 4/5 events on EVERY track, guitar ones included.
+ *
+ * Delete when a track's tuning is derived from its own `instrumentId`
+ * (`MultiTrackPlayback` building one `EventScheduler` tuning per track). Until
+ * then the surface must describe strings, never audibility. See
+ * docs/FOLLOW-UPS.md.
+ */
+export function mismatchedPlacements(track: Track): number {
+  return track.placements.filter(
+    (placement) => placement.patternSnapshot.instrumentId !== track.instrumentId,
+  ).length;
+}
+
 // -------------------------------------------------------------- selection ---
 // The lib's store holds a SINGLE `selectedPlacementId`. The arranger needs a
 // multi-selection (`duplicatePlacements` takes an array, so the lib anticipates
@@ -309,12 +431,15 @@ function mergeSettingsForward(snapshot: Composition, live: Composition): Composi
   };
 }
 
-/** The one place this module reaches past the lib's public actions — restoring
- *  a snapshot needs a whole-composition write, which the store doesn't offer. */
-function writeCompositionBack(snapshot: Composition): void {
-  const live = getEditingComposition();
-  const composition =
-    live && live.id === snapshot.id ? mergeSettingsForward(snapshot, live) : snapshot;
+/**
+ * Swap one composition in the library for another.
+ *
+ * The one place this module reaches past the lib's public actions: the store
+ * offers granular ops and no whole-document write, which is exactly what
+ * restoring a snapshot — and, since CP-07, reordering tracks — needs. Kept as a
+ * single private function so the reach is one call site to delete, not two.
+ */
+function storeComposition(composition: Composition): void {
   usePatternsStore.setState((state) => ({
     library: {
       ...state.library,
@@ -323,6 +448,13 @@ function writeCompositionBack(snapshot: Composition): void {
       ),
     },
   }));
+}
+
+function writeCompositionBack(snapshot: Composition): void {
+  const live = getEditingComposition();
+  storeComposition(
+    live && live.id === snapshot.id ? mergeSettingsForward(snapshot, live) : snapshot,
+  );
 }
 
 /**
@@ -474,6 +606,34 @@ function forgetPerCompositionState(): void {
 // ------------------------------------------------------------ track writes ---
 
 /**
+ * Why an add past the cap is refused — the ONE authoring of it.
+ *
+ * Exported because the button wants the same sentence for its tooltip before
+ * the press that the seam returns after it. Three paraphrases of one memory
+ * budget is three things to keep in step, and the one that drifts is always the
+ * one the user reads first.
+ */
+export const TRACK_CAP_REASON =
+  `A composition can hold at most ${MAX_COMPOSITION_TRACKS} tracks — each track loads its own sample bank, and ${MAX_COMPOSITION_TRACKS} is already around 50 MB.` as const;
+
+/**
+ * The default name for the next track.
+ *
+ * The lib's own is `Track ${tracks.length + 1}`, which repeats itself the moment
+ * a middle track is removed — add, add, remove #2, add gives two "Track 3"s. Two
+ * tracks with one name is not cosmetic here: every control in the header builds
+ * its accessible name out of it ("Mute Track 3", "Move Track 3 up"), so a
+ * duplicate makes two headers indistinguishable to a screen reader and to any
+ * by-name query. First unused number instead.
+ */
+function nextTrackName(tracks: readonly Track[]): string {
+  const taken = new Set(tracks.map((track) => track.name));
+  let n = tracks.length + 1;
+  while (taken.has(`Track ${n}`)) n++;
+  return `Track ${n}`;
+}
+
+/**
  * Append a track.
  *
  * The cap is refused HERE and not merely greyed out in the UI, matching the
@@ -486,9 +646,14 @@ export function addTrack(name?: string, instrumentId?: FretInstrumentId): Result
   const composition = getEditingComposition();
   if (!composition) return refuse('No composition is open.');
   if (composition.tracks.length >= MAX_COMPOSITION_TRACKS) {
-    return refuse(`A composition can hold at most ${MAX_COMPOSITION_TRACKS} tracks.`);
+    // The reason travels WITH the refusal rather than being printed next to a
+    // greyed-out button, because the agent gets the refusal and not the button.
+    // The number is a MEMORY limit and saying so is the difference between a
+    // rule someone can plan around and one that looks arbitrary.
+    return refuse(TRACK_CAP_REASON);
   }
-  commit(() => store().addCompositionTrack(name, instrumentId));
+  const chosen = name ?? nextTrackName(composition.tracks);
+  commit(() => store().addCompositionTrack(chosen, instrumentId));
   const added = getTracks().at(-1);
   if (!added || added.id === composition.tracks.at(-1)?.id) {
     return refuse("Couldn't add a track.");
@@ -508,6 +673,50 @@ export function removeTrack(trackId: string): Result {
   return ok(undefined);
 }
 
+/**
+ * Move a track to another position in the stack.
+ *
+ * By INDEX and by ID, never only by dragging a header: the agent's tools reach
+ * this module rather than a pointer, and a capability that exists only as a
+ * gesture is one the agent cannot use. `toIndex` is CLAMPED rather than refused
+ * — `moveTrack(id, 99)` means "put it last", which is the same thing the lib's
+ * own `movePlacement` does with a tick past the end — and the index it landed at
+ * is returned so a caller never has to re-read the store to find out.
+ *
+ * Undoable, unlike the mix and the naming below: which tracks exist and what
+ * order they are in is the arrangement's CONTENT. The line drawn once, so the
+ * next person does not have to guess it — an edit that changes what exists or
+ * where it sits pushes an undo step; a setting that changes how it sounds or
+ * what it is called does not, and is carried forward over a restored snapshot
+ * by `mergeSettingsForward`.
+ *
+ * LIB-GAP(13): the lib has no track-reorder op at all — neither a pure
+ * `composition-ops` function nor a store action — so the new order is computed
+ * here and written with the whole-composition write above. The ARRAY WORK is
+ * ours to keep either way (nothing about it is musical); what the gap is masking
+ * is only the write. Delete when the lib ships `moveTrack(comp, trackId, index)`
+ * plus its store action, or gains the `replaceComposition` gap 1 already wants.
+ * See docs/FOLLOW-UPS.md.
+ */
+export function moveTrack(trackId: string, toIndex: number): Result<number> {
+  const composition = getEditingComposition();
+  if (!composition) return refuse('No composition is open.');
+  const from = composition.tracks.findIndex((track) => track.id === trackId);
+  if (from === -1) return refuse('No such track.');
+  if (!Number.isFinite(toIndex)) return refuse('That is not a track position.');
+  const to = Math.max(0, Math.min(composition.tracks.length - 1, Math.trunc(toIndex)));
+  // Already there. Not a refusal — the caller asked for a state, and it holds —
+  // but it must not write, or an undo step appears for a no-op.
+  if (to === from) return ok(to);
+  commit(() => {
+    const tracks = [...composition.tracks];
+    const [moved] = tracks.splice(from, 1);
+    tracks.splice(to, 0, moved);
+    storeComposition({ ...composition, tracks, updatedAt: Date.now() });
+  });
+  return ok(to);
+}
+
 // Naming, mix and routing are settings rather than edits to the arrangement's
 // content, so — matching `patternService`'s treatment of loop, tempo and voice —
 // they push no undo step. Nor are they DESTROYED by one: `writeCompositionBack`
@@ -521,14 +730,50 @@ export function removeTrack(trackId: string): Result {
 // value already there, so a fader dragged across a value it passes through
 // doesn't persist the composition once per pointermove.
 
+/**
+ * Rename a track.
+ *
+ * The empty-name rule is enforced HERE and not only in the rename field, for
+ * `addTrack`'s reason: the agent's tools reach this module rather than a
+ * control, and a rule only a control enforces is a rule the agent walks past. A
+ * blank name is not merely an empty plate — every accessible name in the header
+ * is built from it, so it blanks "Mute ", "Solo ", "Instrument for ". The field
+ * still DROPS an emptied draft rather than showing this refusal, because
+ * clearing a box and tabbing away does not mean "call it nothing".
+ */
 export function setTrackName(trackId: string, name: string): Result {
   const track = findTrack(trackId);
   if (!track) return refuse('No such track.');
-  if (track.name === name) return ok(undefined);
-  store().setCompositionTrackName(trackId, name);
+  const trimmed = name.trim();
+  if (trimmed === '') return refuse('A track needs a name.');
+  if (track.name === trimmed) return ok(undefined);
+  store().setCompositionTrackName(trackId, trimmed);
   return ok(undefined);
 }
 
+/**
+ * Put a track on another instrument.
+ *
+ * **Allowed with a placed arrangement on it, and never silently** — the CP-07
+ * decision, written down here because the alternative reading is reasonable and
+ * somebody will re-litigate it. Refusing would make the picker dead on any track
+ * that has been arranged, and "guitar part, actually wanted an octave down on
+ * bass" is a real intent, not a mistake. But the cost is real too and invisible:
+ * a placement keeps its OWN snapshot instrument, and playback resolves pitch
+ * through the TRACK's tuning, dropping any note whose string the new instrument
+ * hasn't got. So the seam applies the change and {@link strandedByInstrument} /
+ * {@link mismatchedPlacements} exist to let the surface state the cost BEFORE
+ * the write and keep stating it afterwards. Silence is the one wrong answer;
+ * refusal is merely the unhelpful one.
+ *
+ * TODO(CP-13): the lib CLEARS `Track.voiceRef` as part of this write (the chosen
+ * voice may have been for the old instrument), and this write pushes no undo
+ * step — so once CP-13 wires `setTrackVoiceRef` to a control, instrument →A →B
+ * →A loses a per-track voice override with no route back. `mergeSettingsForward`
+ * carries the CLEARED ref forward over a restored snapshot, so undo cannot
+ * recover it either. Whoever wires that picker owns the answer: mention the loss
+ * in the confirmation, or make this one write undoable.
+ */
 export function setTrackInstrument(
   trackId: string,
   instrumentId: FretInstrumentId,
@@ -562,12 +807,26 @@ export function setTrackVoiceRef(trackId: string, voiceRef: unknown): Result {
   return ok(undefined);
 }
 
-export function setTrackVolumeDb(trackId: string, volumeDb: number): Result {
+/**
+ * A track's fader, in dB. Returns the value actually STORED.
+ *
+ * Clamped here rather than only in the lib, and the returned value is the
+ * clamped one, because the lib clamps silently and — unlike `setMasterVolumeDb`
+ * — does not return the same composition when nothing changed. Comparing the
+ * REQUEST against the stored value would then make `setTrackVolumeDb(id, -100)`
+ * write on every call forever, bumping `updatedAt` and re-rendering every
+ * subscriber while reporting plain `ok`. A slider cannot produce an
+ * out-of-range value; the agent can, and it is the caller least able to notice
+ * a silent coercion.
+ */
+export function setTrackVolumeDb(trackId: string, volumeDb: number): Result<number> {
   const track = findTrack(trackId);
   if (!track) return refuse('No such track.');
-  if (track.volumeDb === volumeDb) return ok(undefined);
-  store().setCompositionTrackVolumeDb(trackId, volumeDb);
-  return ok(undefined);
+  if (!Number.isFinite(volumeDb)) return refuse('That is not a volume.');
+  const clamped = clampDb(volumeDb);
+  if (track.volumeDb === clamped) return ok(clamped);
+  store().setCompositionTrackVolumeDb(trackId, clamped);
+  return ok(clamped);
 }
 
 export function setTrackMuted(trackId: string, muted: boolean): Result {
@@ -586,8 +845,16 @@ export function setTrackSoloed(trackId: string, soloed: boolean): Result {
   return ok(undefined);
 }
 
-export function setMasterVolumeDb(masterVolumeDb: number): void {
-  store().setCompositionMasterVolumeDb(masterVolumeDb);
+/** The composition's output fader, in dB — the one gain every track passes
+ *  through. Reports the missing composition rather than no-opping into it, for
+ *  the same reason every other write here does, and returns the value actually
+ *  stored for {@link setTrackVolumeDb}'s. */
+export function setMasterVolumeDb(masterVolumeDb: number): Result<number> {
+  if (!getEditingComposition()) return refuse('No composition is open.');
+  if (!Number.isFinite(masterVolumeDb)) return refuse('That is not a volume.');
+  const clamped = clampDb(masterVolumeDb);
+  store().setCompositionMasterVolumeDb(clamped);
+  return ok(clamped);
 }
 
 // -------------------------------------------------------- placement writes ---

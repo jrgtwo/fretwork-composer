@@ -9,7 +9,7 @@ import { ReferencePane, type ReferenceViewId } from './reference/ReferencePane';
 import { ThemeReference } from './theme/ThemeReference';
 import { Timeline } from './timeline/Timeline';
 import { seedDemoPattern } from './timeline/demoPattern';
-import { useEditingPattern } from './patterns/patternService';
+import { ensurePattern, getLibraryPatterns, useEditingPattern } from './patterns/patternService';
 import { VoicePane, type WorkingVoice } from './voice/VoicePane';
 import type { SectionId } from './voice/paramSchema';
 
@@ -53,10 +53,21 @@ export function App() {
   const [paneOrder, setPaneOrder] = useState<readonly string[]>(DEFAULT_PANE_ORDER);
   const [collapsedPanes, setCollapsedPanes] = useState<readonly string[]>([]);
 
-  // Seed something to edit until saved patterns exist. The store persists to
-  // sessionStorage, so this only fires on a genuinely empty session.
+  // Seed something to edit until saved patterns exist.
+  //
+  // The emptiness check is the whole point, and it is not paranoia: the lib
+  // persists `library` but NOT `editingPatternId` (`partialize` in
+  // `usePatternsStore`), so every reload arrives holding all the saved patterns
+  // and no pointer at one. Seeding on `!pattern` alone therefore appended a
+  // fresh "A major arpeggio" on each load — which nothing displayed until the
+  // library rail landed, by which point there were eight.
+  //
+  // `ensurePattern` adopts the most recently updated pattern, so a returning
+  // session reopens what it was last editing rather than the demo.
   useEffect(() => {
-    if (!pattern) seedDemoPattern();
+    if (pattern) return;
+    if (getLibraryPatterns().length === 0) seedDemoPattern();
+    else ensurePattern();
   }, [pattern]);
 
   // Leaving the pattern page unmounts `Timeline`, and with it the only transport

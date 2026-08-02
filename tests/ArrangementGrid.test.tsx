@@ -756,15 +756,23 @@ describe('track selection', () => {
     ).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('leaves the mix controls inert for CP-07', () => {
+  // CP-07 made these live. What they DO — solo precedence, the track cap, the
+  // reorder, the two confirmations — is `tests/TrackManagement.test.tsx`; all
+  // that is checked here is that the grid mounts a real control per track
+  // rather than the placeholder it used to draw, which is this file's business
+  // because the header stack is what it renders.
+  it('renders a mix control per header', () => {
     seedArrangement();
     const [track] = tracksNow();
     render(<ArrangementGrid mode={MODE} />);
 
     const header = document.querySelector<HTMLElement>(`[data-track-header="${track.id}"]`);
     if (!header) throw new Error('no header rendered');
-    expect(within(header).getByRole('button', { name: `Mute ${track.name}` })).toBeDisabled();
-    expect(within(header).getByRole('button', { name: `Solo ${track.name}` })).toBeDisabled();
+    expect(within(header).getByRole('button', { name: `Mute ${track.name}` })).toBeEnabled();
+    expect(within(header).getByRole('button', { name: `Solo ${track.name}` })).toBeEnabled();
+    expect(
+      within(header).getByRole('slider', { name: `Volume for ${track.name} in decibels` }),
+    ).toBeEnabled();
   });
 });
 

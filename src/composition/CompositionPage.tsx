@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
+import { useCompositionPlayback } from '../audio/playbackService';
 import { ArrangementGrid, type PatternDragStarter } from './ArrangementGrid';
 import type { ArrangementMode } from './arrangementMath';
 import { ensureComposition } from './compositionService';
 import { PatternLibraryRail } from './PatternLibraryRail';
+import { TransportBar } from './TransportBar';
 
 /**
  * The three modes are one surface, not three pages: the ruler, the track headers
@@ -22,6 +24,22 @@ const MODES: readonly {
   { id: 'edit', label: 'Edit', disabled: true, pending: 'Edit mode arrives in slice 2' },
   { id: 'voice', label: 'Voice', disabled: true, pending: 'Voice mode arrives in slice 3' },
 ];
+
+/**
+ * The page's audio lifecycle, mounted as a leaf that renders nothing.
+ *
+ * Not called from `CompositionPage` itself, and that is not a style choice:
+ * `useCompositionPlayback` calls `usePlaybackEngine`, which reads the beat
+ * counters out of the lib's metronome store — so its CALLER re-renders on every
+ * beat and subdivision for as long as the transport runs. From the page that
+ * would reconcile the mode bar, the whole grid (re-running the ruler marks, the
+ * lane rects and every block) and the rail four to eight times a bar, competing
+ * with the 60 Hz playhead. Here the re-render reconciles nothing.
+ */
+function CompositionAudio() {
+  useCompositionPlayback();
+  return null;
+}
 
 /**
  * The composition page.
@@ -66,6 +84,13 @@ export function CompositionPage({
 
   return (
     <div className="grid min-h-0 grid-rows-[auto_1fr]">
+      {/* The audio lifecycle for this page — the shared metronome, the
+          multi-track engine, and the store subscription that makes a mute, a
+          solo or a fader audible mid-playback. A sibling of the grid rather
+          than something inside it for the reason `App` holds `mode`: the grid
+          is replaced by a failure message when a composition can't be opened,
+          and the transport must not be torn down and rebuilt by that. */}
+      <CompositionAudio />
       <div className="flex items-center gap-2 border-b border-rim-dark bg-panel px-3 py-1.5">
         <span className="font-mono text-[9px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
           Mode
@@ -91,6 +116,17 @@ export function CompositionPage({
             </button>
           ))}
         </div>
+
+        <span className="mx-1 h-4 w-px bg-line" />
+
+        {/* In the page chrome rather than the grid's toolbar: the transport is
+            the one control here that is about the WHOLE composition and stays
+            true in all three modes, where everything in the grid's strip (zoom,
+            snap, the selection's actions) is about the surface you are looking
+            at. (It renders nothing when no composition is open, which is also
+            the failed-open state — there is no transport for a document that
+            doesn't exist.) */}
+        <TransportBar />
       </div>
 
       <div className="grid min-h-0 grid-cols-[1fr_var(--width-rail)]">

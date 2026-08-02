@@ -30,11 +30,20 @@ export function PlacementBlock({
   pxPerBeat,
   laneHeight,
   selected,
+  playing = false,
 }: {
   placement: Placement;
   pxPerBeat: number;
   laneHeight: number;
   selected: boolean;
+  /**
+   * The head is inside this block. A SEPARATE state from `selected`, drawn as an
+   * outline rather than a fill, because the two are orthogonal and routinely
+   * both true — a block you are dragging is very often the one you are listening
+   * to, and collapsing them would make the arrangement look like playback kept
+   * changing the selection.
+   */
+  playing?: boolean;
 }) {
   const rect = placementRect(placement, pxPerBeat, 0, laneHeight);
   // `slice(1)`: the divisions mark where the pattern RESTARTS, and the first
@@ -51,13 +60,14 @@ export function PlacementBlock({
       <div
         data-placement={placement.id}
         data-selected={selected || undefined}
+        data-playing={playing || undefined}
         title={placement.patternSnapshot.name}
         style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
         className={`absolute flex cursor-grab touch-none flex-col justify-between overflow-hidden rounded-md px-1.5 py-1 select-none ${
           selected
             ? 'border border-brass bg-linear-to-b from-select-hi to-select-lo shadow-[0_0_0_1px_var(--color-brass)]'
             : 'control pressable'
-        }`}
+        } ${playing ? 'ring-1 ring-brass-hi' : ''}`}
       >
         <span
           className={`truncate font-mono text-[9.5px] font-bold ${

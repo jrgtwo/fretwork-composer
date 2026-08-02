@@ -11,12 +11,26 @@ import {
   laneRects,
   lanesHeight,
   rulerMarks,
+  tickToPx,
   zoomAnchoredScrollLeft,
   type ArrangementMode,
 } from './arrangementMath';
 import {
+  useActivePlacementIds,
+  useHeadTick,
+  useIsPlaying,
+  useLoopBoundaryTicks,
+} from '../audio/playbackService';
+import { useTimelineAutoScroll } from '../timeline/useTimelineAutoScroll';
+import {
+  MAX_COMPOSITION_TRACKS,
+  TRACK_CAP_REASON,
+  VOLUME_RANGE_DB,
+  addTrack,
+  isTrackAudible,
   redo,
   selectTrack,
+  setMasterVolumeDb,
   undo,
   useEditingComposition,
   useHistoryState,
@@ -52,9 +66,8 @@ const TRAILING_BARS = 2;
  * Every pointer gesture the lane area understands lives in
  * `useArrangementGestures` — this component supplies the GEOMETRY those gestures
  * work against and draws whatever preview they ask for, and holds no gesture
- * state of its own. Still missing: the playhead and follow-scroll (CP-08), the
- * track controls under the header stack (CP-07), and the mini note previews
- * inside a block (CP-09).
+ * state of its own. Still missing: the mini note previews inside a block
+ * (CP-09).
  *
  * ── Two things that look like details and are not ────────────────────────────
  *
@@ -99,6 +112,35 @@ const TRAILING_BARS = 2;
  */
 export type PatternDragStarter = (patternId: string, e: React.PointerEvent) => void;
 
+/**
+ * The sweeping playhead.
+ *
+ * Its own component for one reason, and it is the same reason `playbackService`
+ * publishes per-slice getters: the head moves sixty times a second, and
+ * subscribing to it from `ArrangementGrid` would re-render every lane, every
+ * block and the whole ruler on every frame. Here the re-render is one absolutely
+ * positioned line.
+ *
+ * Drawn in lanes-CONTENT coordinates and mounted inside the scrolled content, so
+ * it tracks the arrangement when the view moves rather than needing the scroll
+ * offset subtracted out of it. `null` while stopped, which is what makes
+ * `stop()`'s clear visible rather than leaving a line parked wherever the last
+ * frame put it.
+ */
+function ArrangementPlayhead({ pxPerBeat }: { pxPerBeat: number }) {
+  const headTick = useHeadTick();
+  if (headTick === null) return null;
+  return (
+    <div
+      aria-hidden
+      data-testid="arrangement-playhead"
+      data-head-tick={headTick}
+      style={{ left: tickToPx(headTick, pxPerBeat) }}
+      className="pointer-events-none absolute top-0 bottom-0 z-10 w-0.5 bg-brass-hi shadow-glow-brass"
+    />
+  );
+}
+
 export function ArrangementGrid({
   mode,
   patternDragRef,
@@ -123,6 +165,15 @@ export function ArrangementGrid({
   const { canUndo, canRedo } = useHistoryState();
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ARRANGEMENT_ZOOM_INDEX);
   const [snapId, setSnapId] = useState<string>(DEFAULT_ARRANGEMENT_SNAP_ID);
+  /**
+   * The last refused — or otherwise consequential — track write.
+   *
+   * Separate from `gestures.refusal` although it lands in the same strip: that
+   * one is owned by the gesture machinery and cleared by the next gesture, and
+   * a track refusal must not be wiped by a pointer move over the lanes. Two
+   * pieces of state, one place to read them.
+   */
+  const [trackNotice, setTrackNotice] = useState<string | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const rulerContentRef = useRef<HTMLDivElement>(null);
   const headerStackRef = useRef<HTMLDivElement>(null);
@@ -146,6 +197,49 @@ export function ArrangementGrid({
     scrollerRef,
   });
 
+  const isPlaying = useIsPlaying();
+  // Which blocks are sounding. A snapshot slice rather than something derived
+  // from the head here, so this component re-renders at placement boundaries
+  // instead of at frame rate — see `playbackService.headFrame`.
+  const playingPlacementIds = useActivePlacementIds();
+  const loopBoundaryTicks = useLoopBoundaryTicks();
+
+  const pxPerBeat = ARRANGEMENT_ZOOM_LEVELS[zoomIndex];
+
+  /**
+   * Keeps the playhead on screen. The pattern editor's hook, unchanged: it reads
+   * the transport in its own rAF and writes `scrollLeft` straight onto the
+   * element, which is exactly this component's model of scroll (see the header)
+   * — the element is the source of truth and nothing mirrors it into state.
+   *
+   * It deliberately does NOT go through `pendingScrollLeftRef`. That ref exists
+   * so a scroll position decided during RENDER (the zoom anchor) survives to the
+   * layout effect that can apply it; routing a per-frame rAF write through it
+   * would mean a re-render per frame to consume it. Nothing is fought over
+   * either way: the layout effect only writes when the ref is non-null, and only
+   * `zoomTo` ever sets it. The scroll event these writes raise runs
+   * `syncViewports`, so the ruler follows the head as well.
+   *
+   * The boundary is the ENGINE's loop point, not `useTotalDurationTicks()` — the
+   * two differ for a truncated placement (LIB-GAP(11)), and following the drawn
+   * width would page the view back a bar early on every loop.
+   */
+  useTimelineAutoScroll(
+    scrollerRef,
+    pxPerBeat,
+    isPlaying,
+    loopBoundaryTicks,
+    composition?.loop ?? false,
+  );
+
+  // A track notice names a track — or a cap — in ONE composition. Carried across
+  // a switch it is a refusal from a document that is no longer on screen, with no
+  // way to tell that is what it is.
+  const compositionId = composition?.id ?? null;
+  useEffect(() => {
+    setTrackNotice(null);
+  }, [compositionId]);
+
   useEffect(() => {
     if (!patternDragRef) return;
     patternDragRef.current = gestures.startPatternDrag;
@@ -156,8 +250,6 @@ export function ArrangementGrid({
       patternDragRef.current = null;
     };
   }, [patternDragRef, gestures.startPatternDrag]);
-
-  const pxPerBeat = ARRANGEMENT_ZOOM_LEVELS[zoomIndex];
 
   /** Match the two clipped viewports to wherever the scroller actually is. */
   const syncViewports = useCallback(() => {
@@ -408,9 +500,74 @@ export function ArrangementGrid({
         )}
 
         <span className="flex-1" />
+
+        {/* The composition's own output fader. Here rather than in a header,
+            because it is not a track: everything mixes through it, including
+            tracks that are soloed. dB, like every other volume in this model. */}
+        <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
+          Master
+        </span>
+        <input
+          type="range"
+          aria-label="Master volume in decibels"
+          min={VOLUME_RANGE_DB.min}
+          max={VOLUME_RANGE_DB.max}
+          step={0.5}
+          // `?? 0` for the reason `TrackControls`' fader carries it: the field is
+          // optional on the model and the lib's migration leaves an already-
+          // populated composition untouched, so `undefined` here would flip a
+          // controlled range to uncontrolled and print NaN beside it.
+          value={composition.masterVolumeDb ?? 0}
+          onChange={(e) => {
+            const result = setMasterVolumeDb(e.currentTarget.valueAsNumber);
+            if (!result.ok) setTrackNotice(result.reason);
+          }}
+          className="h-1 w-20 cursor-pointer accent-brass"
+        />
+        <span
+          aria-hidden
+          className="w-[42px] text-right font-mono text-[9px] tabular-nums text-ink"
+        >
+          {(composition.masterVolumeDb ?? 0) > 0 ? '+' : ''}
+          {(composition.masterVolumeDb ?? 0).toFixed(1)} dB
+        </span>
+
+        <span className="mx-1 h-4 w-px bg-line" />
+
+        {/* `aria-disabled`, not `disabled`, at the cap. A disabled button cannot
+            be focused, shows no tooltip in most browsers and answers nothing —
+            and the cap is the one limit here that is NOT self-evident, since it
+            is a memory budget rather than a rule about music. Pressed at the
+            cap this reaches the seam like any other press and renders the reason
+            it gets back, which is also the reason the agent gets. */}
+        <button
+          type="button"
+          aria-label="Add track"
+          aria-disabled={tracks.length >= MAX_COMPOSITION_TRACKS || undefined}
+          // The seam's own sentence, not a paraphrase of it: the tooltip before
+          // the press and the refusal after it are the same memory budget, and
+          // two authorings of it are two things to keep in step.
+          title={
+            tracks.length >= MAX_COMPOSITION_TRACKS ? TRACK_CAP_REASON : 'Add a track'
+          }
+          onClick={() => {
+            const added = addTrack();
+            // A success does NOT clear the strip. Whatever is up there — a
+            // refused drop, "3 blocks were written for another instrument" — is
+            // unrelated to this press and may not have been read yet.
+            if (!added.ok) setTrackNotice(added.reason);
+            else selectTrack(added.value.id);
+          }}
+          className={`pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold ${
+            tracks.length >= MAX_COMPOSITION_TRACKS ? 'opacity-40' : ''
+          }`}
+        >
+          + Track
+        </button>
         <span className="font-mono text-[11px] font-bold text-ink-hi">
-          {tracks.length} {tracks.length === 1 ? 'track' : 'tracks'} · {bars}{' '}
-          {bars === 1 ? 'bar' : 'bars'}
+          {/* The cap is part of the reading, not a surprise waiting at 8. */}
+          {tracks.length}/{MAX_COMPOSITION_TRACKS} {tracks.length === 1 ? 'track' : 'tracks'}{' '}
+          · {bars} {bars === 1 ? 'bar' : 'bars'}
         </span>
       </div>
 
@@ -420,8 +577,13 @@ export function ArrangementGrid({
           reason is said out loud. */}
       {gestures.refusal && (
         <div className="mb-1.5 flex flex-none items-center gap-2">
+          {/* Named because the track strip below is also an alert and the two
+              are designed to be on screen together — unnamed, they are two
+              indistinguishable alerts and no by-role query can tell which is
+              which. */}
           <p
             role="alert"
+            aria-label="Gesture message"
             className="flex-1 rounded-md border border-brass/50 px-2 py-1 font-mono text-[9.5px] text-ink"
           >
             {gestures.refusal}
@@ -430,6 +592,31 @@ export function ArrangementGrid({
             type="button"
             aria-label="Dismiss message"
             onClick={gestures.dismissRefusal}
+            className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Track writes report here for the same reason: adding past the cap and
+          removing the last track both LOOK like a dead button otherwise. Its
+          own row rather than sharing the gesture strip, so a refused drop and a
+          refused add can be on screen at once — they are unrelated events and
+          the second must not overwrite the first. */}
+      {trackNotice && (
+        <div className="mb-1.5 flex flex-none items-center gap-2">
+          <p
+            role="alert"
+            aria-label="Track message"
+            className="flex-1 rounded-md border border-brass/50 px-2 py-1 font-mono text-[9.5px] text-ink"
+          >
+            {trackNotice}
+          </p>
+          <button
+            type="button"
+            aria-label="Dismiss track message"
+            onClick={() => setTrackNotice(null)}
             className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
           >
             ✕
@@ -518,14 +705,23 @@ export function ArrangementGrid({
                 <TrackHeader
                   key={lane.trackId}
                   track={track}
+                  index={index}
+                  trackCount={tracks.length}
                   height={lane.height}
                   selected={selectedTrackId === lane.trackId}
+                  // Computed HERE, once per render, because the answer depends
+                  // on every other track's solo state — a header cannot work it
+                  // out from the track it is given.
+                  audible={isTrackAudible(track, tracks)}
                   onSelect={() => selectTrack(lane.trackId)}
+                  onNotice={setTrackNotice}
                 />
               );
             })}
-            {/* TODO(CP-07): add / remove / reorder track controls belong under
-                the stack, where they scroll with it. */}
+            {/* Add / remove live in the toolbar rather than under this stack:
+                the stack is exactly as tall as the lanes and scrolls with them,
+                so a control appended here sits at the one offset that is never
+                on screen — the bottom edge at maximum scroll. */}
           </div>
         </div>
 
@@ -616,6 +812,7 @@ export function ArrangementGrid({
                           pxPerBeat={pxPerBeat}
                           laneHeight={lane.height}
                           selected={selectedPlacementIds.includes(placement.id)}
+                          playing={playingPlacementIds.includes(placement.id)}
                         />
                       ))}
                     </div>
@@ -677,6 +874,11 @@ export function ArrangementGrid({
                   )}
                 </div>
               )}
+
+              {/* Also a SIBLING of `.lanes`, for the zebra reason above — and
+                  above the gesture preview in the source so the head is never
+                  hidden under a drop indicator. */}
+              <ArrangementPlayhead pxPerBeat={pxPerBeat} />
             </div>
           </div>
 
