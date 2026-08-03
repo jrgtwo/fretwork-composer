@@ -45,11 +45,12 @@ describe('CompositionPage mode bar', () => {
     expect(modeButton('Edit')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('leaves the modes that have not been built inert', () => {
+  it('leaves the mode that has not been built inert, and only that one', () => {
     render(<CompositionPage mode="pattern" onModeChange={() => {}} />);
 
     expect(modeButton('Pattern')).toBeEnabled();
-    expect(modeButton('Edit')).toBeDisabled();
+    // CP-11 built edit mode; voice mode is still slice 3.
+    expect(modeButton('Edit')).toBeEnabled();
     expect(modeButton('Voice')).toBeDisabled();
   });
 });

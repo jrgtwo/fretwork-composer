@@ -179,3 +179,107 @@ export function laneGridImage(
     carve(tickToPx(ticksPerBar(ts), pxPerBeat), 0.72, 0.085),
   ].join(',');
 }
+
+// --------------------------------------------------------- note drag clamps ---
+// Note-tick arithmetic for the two drag gestures `NoteSurface` runs. Here rather
+// than in `arrangementMath` — which is where CP-11 first put them — because they
+// contain no arrangement geometry at all, and the pattern editor's own surface
+// must not depend on the composition page's module for its core drag maths.
+
+/**
+ * `-0` normalised to `0`.
+ *
+ * Reachable: a group already against tick 0 dragged further left clamps to
+ * `-(0)`. It is not what any caller means by "did not move" — `Object.is`
+ * separates the two, which is what `Number` assertions and React's own memo
+ * comparison both use.
+ */
+const zeroed = (value: number): number => (value === 0 ? 0 : value);
+
+/** A note's extent in its pattern's own ticks — what both clamps below reason
+ *  about. `EventDragSnapshot` satisfies it. */
+export interface NoteSpan {
+  readonly startTick: Tick;
+  readonly durationTicks: Tick;
+}
+
+/**
+ * How much room a group has before its farthest-reaching note passes
+ * `windowTicks`, never negative.
+ *
+ * The floor at 0 is load-bearing rather than defensive: a note can already
+ * OVERHANG its window — trim a placement in pattern mode and every event past
+ * the cut still exists in the snapshot — and a negative ceiling would then beat
+ * a zero delta, so merely grabbing such a note would shove the whole group left
+ * by the overhang. Zero lets it be dragged left or shortened and refuses to move
+ * it on its own.
+ */
+function windowCeiling(windowTicks: Tick | null, maxEnd: number): number {
+  if (windowTicks === null || !Number.isFinite(windowTicks)) return Infinity;
+  return Math.max(0, windowTicks - maxEnd);
+}
+
+/**
+ * A shared move delta, clamped so no note leaves `[0, windowTicks]`.
+ *
+ * THE CLAMP IS SHARED, not per note, for `planGroupMove`'s reason: clamping each
+ * note independently piles a chord up against the wall — the leading note stops
+ * and the trailing ones keep coming, so a drag to the boundary silently
+ * collapses a spread phrase into a stack. Clamping the delta keeps every
+ * relative offset and the group simply stops moving.
+ *
+ * The UPPER bound is applied before the lower, so a selection LONGER than the
+ * window ends up against tick 0 rather than pushed negative — the lib would
+ * floor each note at 0 independently and flatten the group, which is the bug
+ * this ordering exists to avoid.
+ *
+ * `windowTicks` is null on the pattern page, where the pattern's length auto-fits
+ * to its content and there is no boundary to stop at.
+ */
+export function clampMoveDelta(
+  spans: readonly NoteSpan[],
+  deltaTicks: Tick,
+  windowTicks: Tick | null,
+): Tick {
+  if (spans.length === 0 || !Number.isFinite(deltaTicks)) return 0;
+  let minStart = Infinity;
+  let maxEnd = -Infinity;
+  for (const span of spans) {
+    minStart = Math.min(minStart, span.startTick);
+    maxEnd = Math.max(maxEnd, span.startTick + Math.max(0, span.durationTicks));
+  }
+  const ceiling = windowCeiling(windowTicks, maxEnd);
+  return zeroed(Math.max(-minStart, Math.min(ceiling, Math.round(deltaTicks))));
+}
+
+/**
+ * A shared resize delta, clamped so the shortest note keeps `minDuration` and
+ * the longest-reaching one ends no later than `windowTicks`.
+ *
+ * Same shared-clamp reasoning as {@link clampMoveDelta}: the lib's floor is one
+ * tick, so a group dragged past its own left edge would collapse into invisible
+ * slivers while a per-note ceiling would flatten every note in the group onto
+ * the boundary.
+ *
+ * The floor is capped at 0 for the mirror of `windowCeiling`'s reason: a note
+ * SHORTER than `minDuration` (the grid step is a stamp default, not a minimum
+ * anything enforces afterwards) would otherwise make the floor positive, and
+ * grabbing its edge to drag it left would LENGTHEN every note in the group.
+ */
+export function clampResizeDelta(
+  spans: readonly NoteSpan[],
+  deltaTicks: Tick,
+  windowTicks: Tick | null,
+  minDuration: Tick,
+): Tick {
+  if (spans.length === 0 || !Number.isFinite(deltaTicks)) return 0;
+  let shortest = Infinity;
+  let maxEnd = -Infinity;
+  for (const span of spans) {
+    shortest = Math.min(shortest, Math.max(0, span.durationTicks));
+    maxEnd = Math.max(maxEnd, span.startTick + Math.max(0, span.durationTicks));
+  }
+  const ceiling = windowCeiling(windowTicks, maxEnd);
+  const floor = Math.min(0, minDuration - shortest);
+  return zeroed(Math.max(floor, Math.min(ceiling, Math.round(deltaTicks))));
+}

@@ -4,6 +4,7 @@ import {
   placementEffectiveLength,
   placementEndTick,
   ticksPerBar,
+  type Pattern,
   type PatternEvent,
   type PatternTimeSignature,
   type Placement,
@@ -16,6 +17,7 @@ import {
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   DEFAULT_LANE_HEIGHTS,
   MAJOR_DIVISION_BARS,
+  EDIT_STRING_ROW_PX,
   MIN_PREVIEW_ROW_PX,
   MIN_PREVIEW_WIDTH,
   PREVIEW_ROW_GAP_PX,
@@ -27,10 +29,15 @@ import {
   contentEndTick,
   droppedByTranspose,
   dropTarget,
+  editLaneHeight,
+  editableSpans,
   hitTest,
   laneAt,
+  laneHeightsFor,
   laneRects,
+  laneStringCount,
   lanesHeight,
+  placementDrifted,
   placementRect,
   placementRepeatRects,
   placementsInBand,
@@ -1357,5 +1364,194 @@ describe('previewMarks', () => {
     const marks = previewMarks(riff([note({ id: 'a', durationTicks: 1 })]), PX, BLOCK_H);
     expect(marks[0].width).toBeGreaterThan(tickToPx(1, PX));
     expect(marks[0].width).toBeGreaterThanOrEqual(1);
+  });
+});
+
+/**
+ * CP-11's geometry: how tall an edit lane is, where each placement's editable
+ * surface goes inside it, how far a note may travel before the boundary stops
+ * it, and whether a block's snapshot has drifted from the pattern it is named
+ * after.
+ *
+ * All of it is here rather than in a component test for the reason the rest of
+ * this module is: jsdom has no layout, so a component that computed its own
+ * rects could not be checked at all — every box it measured would be 0×0.
+ */
+
+/** A one-note pattern, so drift has something to differ about. */
+function sourcePattern(fret: number): Pattern {
+  const base = createEmptyPattern('riff');
+  return {
+    ...base,
+    durationTicks: 4 * PPQ,
+    events: [
+      {
+        id: 'e1',
+        stringIndex: 0,
+        fret,
+        startTick: 0,
+        durationTicks: PPQ,
+      } as PatternEvent,
+    ],
+  };
+}
+
+describe('edit lane heights', () => {
+  it('puts a six-string lane on the figure the mode was sized for', () => {
+    // The table CP-04 wrote and the per-string figure CP-11 derives from it are
+    // the same number by construction, not by two people agreeing.
+    expect(editLaneHeight(6)).toBe(DEFAULT_LANE_HEIGHTS.edit);
+    expect(EDIT_STRING_ROW_PX * 6).toBe(DEFAULT_LANE_HEIGHTS.edit);
+  });
+
+  it('gives a bass lane four rows at the same pitch, not six squeezed rows', () => {
+    expect(editLaneHeight(4)).toBe(EDIT_STRING_ROW_PX * 4);
+    // The point of the whole exercise: the row pitch is the same down the stack,
+    // so lanes read as one rack rather than as several scales.
+    expect(editLaneHeight(4) / 4).toBe(editLaneHeight(6) / 6);
+  });
+
+  it('falls back rather than producing NaN or a zero-height lane', () => {
+    expect(editLaneHeight(Number.NaN)).toBe(DEFAULT_LANE_HEIGHTS.edit);
+    expect(editLaneHeight(0)).toBe(EDIT_STRING_ROW_PX);
+    expect(editLaneHeight(-3)).toBe(EDIT_STRING_ROW_PX);
+  });
+
+  it('reads a string count off the lib catalog and falls back for an unknown id', () => {
+    expect(laneStringCount('guitar')).toBe(6);
+    expect(laneStringCount('bass')).toBe(4);
+    expect(laneStringCount('sitar')).toBe(6);
+  });
+
+  it('sizes only edit lanes per track and leaves the other modes alone', () => {
+    const tracks = [track('bass-track'), track('guitar-track')];
+    const heights = laneHeightsFor((id) => (id === 'bass-track' ? 'bass' : 'guitar'));
+
+    const edit = laneRects(tracks, 'edit', heights);
+    expect(edit.map((lane) => lane.height)).toEqual([editLaneHeight(4), editLaneHeight(6)]);
+    // Stacked, so the guitar lane starts where the bass lane ends.
+    expect(edit[1].top).toBe(editLaneHeight(4));
+
+    for (const mode of ['pattern', 'voice'] as const) {
+      expect(laneRects(tracks, mode, heights).map((lane) => lane.height)).toEqual([
+        DEFAULT_LANE_HEIGHTS[mode],
+        DEFAULT_LANE_HEIGHTS[mode],
+      ]);
+    }
+  });
+});
+
+describe('editableSpans', () => {
+  const PX = 48;
+
+  it('gives one span per placement, at the block’s own left edge and width', () => {
+    const first = placement({ id: 'p1', startTick: 0 });
+    const second = placement({ id: 'p2', startTick: 8 * PPQ });
+    const spans = editableSpans(track('t', [first, second]), PX, 192);
+
+    expect(spans.map((span) => span.placementId)).toEqual(['p1', 'p2']);
+    for (const [index, span] of spans.entries()) {
+      const source = [first, second][index];
+      // Compared against a fresh call rather than a number copied in, so a
+      // changed rect policy fails here instead of splitting the two silently.
+      expect(span.rect).toEqual(placementRect(source, PX, 0, 192));
+      expect(span.windowTicks).toBe(placementEffectiveLength(source));
+    }
+  });
+
+  it('opens the window on the effective length, so a trimmed block edits short', () => {
+    const trimmed = placement({ id: 'p1', lengthTicks: PPQ });
+    const [span] = editableSpans(track('t', [trimmed]), PX, 192);
+
+    expect(span.windowTicks).toBe(PPQ);
+    expect(span.windowTicks).toBe(placementEffectiveLength(trimmed));
+    expect(span.rect.width).toBe(tickToPx(PPQ, PX));
+  });
+
+  it('makes only the FIRST repetition editable', () => {
+    const repeated = placement({ id: 'p1', repeat: 3 });
+    const [span] = editableSpans(track('t', [repeated]), PX, 192);
+
+    // The later repetitions replay the same snapshot, so editing one would be
+    // editing the first at an offset — two ways to write one note.
+    expect(span.rect).toEqual(placementRepeatRects(repeated, PX, 0, 192)[0]);
+    expect(span.rect.width).toBe(placementRect(repeated, PX, 0, 192).width / 3);
+  });
+
+  it('mounts nothing for a placement with no width or no length', () => {
+    const empty = placement({
+      id: 'p1',
+      patternSnapshot: { ...createEmptyPattern('riff'), durationTicks: 0 },
+    });
+    expect(editableSpans(track('t', [empty]), PX, 192)).toEqual([]);
+    expect(editableSpans(track('t', [placement({ id: 'p2' })]), 0, 192)).toEqual([]);
+  });
+});
+
+describe('placementDrifted', () => {
+  it('is false for a snapshot that still says what the library pattern says', () => {
+    const source = sourcePattern(5);
+    const placed = placement({
+      id: 'p1',
+      // The lib deep-copies at placement time, so the arrays are different
+      // objects holding equal notes — which must NOT read as drift.
+      patternSnapshot: { ...source, events: source.events.map((event) => ({ ...event })) },
+    });
+    expect(placementDrifted(placed, source)).toBe(false);
+  });
+
+  it('is true once a note in the snapshot differs', () => {
+    const source = sourcePattern(5);
+    const placed = placement({
+      id: 'p1',
+      patternSnapshot: { ...source, events: [{ ...source.events[0], fret: 7 }] },
+    });
+    expect(placementDrifted(placed, source)).toBe(true);
+  });
+
+  it('ignores event ORDER — a re-sorted array is not an edit', () => {
+    const source = sourcePattern(5);
+    const two: Pattern = {
+      ...source,
+      events: [
+        source.events[0],
+        { ...source.events[0], id: 'e2', startTick: 2 * PPQ, stringIndex: 1 },
+      ],
+    };
+    const placed = placement({
+      id: 'p1',
+      patternSnapshot: { ...two, events: [...two.events].reverse() },
+    });
+    expect(placementDrifted(placed, two)).toBe(false);
+  });
+
+  it('ignores key ORDER — a note rebuilt by a different sequence of spreads', () => {
+    const source = sourcePattern(5);
+    const rebuilt = source.events.map((event) => ({
+      durationTicks: event.durationTicks,
+      startTick: event.startTick,
+      fret: event.fret,
+      stringIndex: event.stringIndex,
+      id: event.id,
+      // Clearing an articulation and never having set one are the same note.
+      palmMute: undefined,
+    })) as PatternEvent[];
+    expect(placementDrifted(placement({ id: 'p1', patternSnapshot: { ...source, events: rebuilt } }), source)).toBe(false);
+  });
+
+  it('is false with no source — a deleted pattern is nothing to differ FROM', () => {
+    expect(placementDrifted(placement({ id: 'p1' }), undefined)).toBe(false);
+  });
+
+  it('notices an articulation that only the placement carries', () => {
+    const source = sourcePattern(5);
+    const placed = placement({
+      id: 'p1',
+      patternSnapshot: {
+        ...source,
+        events: [{ ...source.events[0], palmMute: true } as PatternEvent],
+      },
+    });
+    expect(placementDrifted(placed, source)).toBe(true);
   });
 });

@@ -3,6 +3,8 @@ import { PPQ } from '@fretwork/lib';
 import {
   DEFAULT_SNAP_ID,
   barBeatLines,
+  clampMoveDelta,
+  clampResizeDelta,
   laneGridImage,
   laneMetrics,
   pxToTick,
@@ -167,5 +169,94 @@ describe('snapOptions', () => {
 
   it('defaults to a sixteenth', () => {
     expect(snapOptions(FOUR_FOUR).some((o) => o.id === DEFAULT_SNAP_ID)).toBe(true);
+  });
+});
+
+describe('clampMoveDelta', () => {
+  const span = (startTick: number, durationTicks = PPQ) => ({ startTick, durationTicks });
+
+  it('passes a delta that keeps everything inside the window', () => {
+    expect(clampMoveDelta([span(0)], PPQ, 4 * PPQ)).toBe(PPQ);
+  });
+
+  it('stops the group at the boundary rather than carrying it into the next block', () => {
+    // The last note ends at 4 beats in a 4-beat window: there is nowhere to go.
+    expect(clampMoveDelta([span(3 * PPQ)], 8 * PPQ, 4 * PPQ)).toBe(0);
+    expect(clampMoveDelta([span(2 * PPQ)], 8 * PPQ, 4 * PPQ)).toBe(PPQ);
+  });
+
+  it('clamps the delta across the GROUP, so a spread phrase keeps its shape', () => {
+    const group = [span(0), span(2 * PPQ)];
+    const delta = clampMoveDelta(group, 8 * PPQ, 4 * PPQ);
+    // Clamped by the LAST note; the first travels exactly as far, so the two
+    // are still two beats apart. Clamping each note on its own would have piled
+    // them both onto the boundary.
+    expect(delta).toBe(PPQ);
+    expect(group[1].startTick + delta - (group[0].startTick + delta)).toBe(2 * PPQ);
+  });
+
+  it('never lets a note start before tick 0', () => {
+    expect(clampMoveDelta([span(PPQ), span(2 * PPQ)], -8 * PPQ, 4 * PPQ)).toBe(-PPQ);
+  });
+
+  it('prefers tick 0 when the group is longer than the window', () => {
+    // Upper bound before lower: a group that cannot fit must sit against the
+    // start rather than be pushed negative, which the lib would then flatten.
+    expect(clampMoveDelta([span(0, 8 * PPQ)], 5 * PPQ, 4 * PPQ)).toBe(0);
+  });
+
+  it('is unbounded on the right with no window — the pattern page', () => {
+    expect(clampMoveDelta([span(0)], 500 * PPQ, null)).toBe(500 * PPQ);
+    expect(clampMoveDelta([span(0)], -PPQ, null)).toBe(0);
+  });
+
+  it('answers 0 for nothing to move or a delta that is not a number', () => {
+    expect(clampMoveDelta([], PPQ, null)).toBe(0);
+    expect(clampMoveDelta([span(0)], Number.NaN, null)).toBe(0);
+  });
+
+  it('does not shove a note that already OVERHANGS its window', () => {
+    // Reachable: trim a placement in pattern mode and every event past the cut
+    // survives in the snapshot. Here the note starts inside a 4-beat window and
+    // ends a beat past it, so the raw ceiling is negative — and a negative
+    // ceiling beats a zero delta, which would move the note a beat left the
+    // instant it was grabbed.
+    const overhanging = [span(3 * PPQ, 2 * PPQ)];
+    expect(clampMoveDelta(overhanging, 0, 4 * PPQ)).toBe(0);
+    expect(clampMoveDelta(overhanging, 8 * PPQ, 4 * PPQ)).toBe(0);
+    // It may still be dragged LEFT, which is the one direction that helps.
+    expect(clampMoveDelta(overhanging, -PPQ, 4 * PPQ)).toBe(-PPQ);
+  });
+});
+
+describe('clampResizeDelta', () => {
+  const span = (startTick: number, durationTicks: number) => ({ startTick, durationTicks });
+
+  it('keeps the shortest member at the minimum instead of collapsing the group', () => {
+    const group = [span(0, PPQ), span(2 * PPQ, 2 * PPQ)];
+    // Asked to shrink by two beats, which would leave the first note at -1.
+    expect(clampResizeDelta(group, -2 * PPQ, null, PPQ / 4)).toBe(-(PPQ - PPQ / 4));
+  });
+
+  it('stops growth at the window', () => {
+    expect(clampResizeDelta([span(2 * PPQ, PPQ)], 4 * PPQ, 4 * PPQ, PPQ / 4)).toBe(PPQ);
+    expect(clampResizeDelta([span(3 * PPQ, PPQ)], 4 * PPQ, 4 * PPQ, PPQ / 4)).toBe(0);
+  });
+
+  it('grows without limit when there is no window', () => {
+    expect(clampResizeDelta([span(0, PPQ)], 40 * PPQ, null, PPQ / 4)).toBe(40 * PPQ);
+  });
+
+  it('never LENGTHENS a note that is already shorter than the minimum', () => {
+    // `minDuration` is the grid step, which is a stamp default and not a floor
+    // anything enforces afterwards — so a note can be shorter than it. An
+    // uncapped `minDuration - shortest` floor is then positive, and dragging the
+    // resize edge to the LEFT would grow the whole group instead.
+    expect(clampResizeDelta([span(0, PPQ / 4)], -PPQ, null, PPQ)).toBe(0);
+    expect(clampResizeDelta([span(0, PPQ / 4)], 0, null, PPQ)).toBe(0);
+  });
+
+  it('does not shrink a note that already overhangs its window', () => {
+    expect(clampResizeDelta([span(3 * PPQ, 2 * PPQ)], 0, 4 * PPQ, PPQ / 4)).toBe(0);
   });
 });

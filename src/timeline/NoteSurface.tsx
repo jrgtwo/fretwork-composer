@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { pitchClass, snapTick, type PatternEvent } from '@fretwork/lib';
+import { pitchClass, snapTick, type Pattern, type PatternEvent, type Tick } from '@fretwork/lib';
 import { readNotePitch } from '../patterns/articulations';
 import { openStrings, stringLabels } from '../reference/tabLayout';
 import { NotePopup } from './NotePopup';
@@ -19,11 +19,12 @@ import {
   snapshotForResize,
   stampNote,
   undo,
-  useEditingPattern,
   useSelectedIds,
 } from '../patterns/patternService';
 import type { EdgeAutoScroll } from './useEdgeAutoScroll';
 import {
+  clampMoveDelta,
+  clampResizeDelta,
   laneGridImage,
   laneMetrics,
   pxToTick,
@@ -158,6 +159,39 @@ function NoteMarks({ event }: { event: PatternEvent }) {
 
 type DragMode = 'move' | 'resize';
 
+/** Digits typed so far for a fret, the timer that will commit them, and whether
+ *  any of them actually moved a note. */
+interface FretRun {
+  digits: string;
+  timer: number;
+  changed: boolean;
+}
+
+/**
+ * Close whichever undo bracket a keyboard run left open.
+ *
+ * Module scope so the two effects that need it — losing focus and unmounting —
+ * share one implementation: they are the two ways a run ends with no keyup, and
+ * a bracket left open makes `history.capture` ignore every later edit for the
+ * life of the page. The held arrow's snapshot is DISCARDED (`false`) because the
+ * key's first press already recorded the pre-nudge state; a typed number's is
+ * pushed only if a digit actually moved a note.
+ */
+function closeKeyRuns(
+  fretRun: React.RefObject<FretRun | null>,
+  nudgeRun: React.RefObject<boolean>,
+): void {
+  if (nudgeRun.current) {
+    nudgeRun.current = false;
+    endEditGesture(false);
+  }
+  const run = fretRun.current;
+  if (!run) return;
+  clearTimeout(run.timer);
+  fretRun.current = null;
+  endEditGesture(run.changed);
+}
+
 /**
  * Places its child next to `rect`, preferring below and flipping above when
  * there isn't room. Measures the child after mount rather than assuming a size,
@@ -215,7 +249,78 @@ export interface SurfaceGeometry {
   viewportRect(): DOMRect | null;
 }
 
+/** Shared empty selection, so an unfocused surface keeps a stable identity. */
+const NO_IDS: readonly string[] = [];
+
 export interface NoteSurfaceProps {
+  /**
+   * The pattern to DRAW. A surface draws what it is given and reads no pattern
+   * of its own — which is the whole reason edit mode can mount one per placement
+   * and have each show its own track's notes. Reading the store here (as CP-10
+   * did) gives every mounted surface the ONE global edit target, so eight lanes
+   * would draw eight copies of the same pattern.
+   *
+   * Reading and writing are deliberately split: WRITES still go through
+   * `patternService` to that one global target, which the lib redirects at a
+   * placement's snapshot once `openPlacementForEditing` has pointed it at one.
+   * So only the FOCUSED surface may write — see `focused` and `onFocus`.
+   */
+  pattern: Pattern;
+  /**
+   * Whether this surface owns the global edit target right now.
+   *
+   * It gates two things that would otherwise act on the wrong pattern:
+   *
+   *  - THE WINDOW KEYBOARD SHORTCUTS. They are on `window` and every handler
+   *    acts on the edit target, so two mounted surfaces would run two
+   *    `beginEditGesture`/`setSelectedFret` pairs for one keypress against a
+   *    `history` that keeps a single snapshot — and one of the two edits would
+   *    vanish from the undo stack. Only a focused surface attaches them.
+   *  - THE SELECTION. `selectedEventIds` belongs to the edit target, so an
+   *    unfocused surface has none; without this, two placements of the same
+   *    pattern would draw the same ids selected and a keypress meant for one
+   *    would look like it acted on both.
+   */
+  focused: boolean;
+  /**
+   * Whether THIS surface's notes are the ones currently sounding. Defaults to
+   * true, which is the pattern page: one surface, one pattern, and whatever the
+   * transport reports is its.
+   *
+   * False gates the play highlight off, and it has to: `useActiveEventIds()` is
+   * a flat merged list of EVENT ids across every track, and two placements of
+   * one pattern carry the SAME event ids (`snapshotPatternForPlacement` copies
+   * them verbatim). Without the gate, playing one block lights the notes up in
+   * every other copy of it as well. The host knows which blocks are sounding —
+   * `playbackService.useActivePlacementIds` — and says so here.
+   */
+  sounding?: boolean;
+  /**
+   * Point the global edit target at THIS surface's pattern, and report whether
+   * it may now be edited.
+   *
+   * Called synchronously at the head of every gesture that writes, before
+   * anything reads the target — the store's write is synchronous, so
+   * `getEditingPattern()` after it is already this pattern. Omitted on the
+   * pattern page, where there is only ever one target and one surface.
+   */
+  onFocus?: () => boolean;
+  /**
+   * How long the editable window is, in this pattern's own ticks — a
+   * placement's effective length. Notes CLAMP at it and a stamp past it is
+   * refused, so you cannot write into empty time or drag a note into the
+   * neighbouring block (which would be two snapshot writes and an ambiguous
+   * undo step).
+   *
+   * `null`, the default, is the pattern page: its length auto-fits to its
+   * content, so there is no boundary to stop at.
+   */
+  windowTicks?: Tick | null;
+  /**
+   * Whether a selected note offers the ⋯ options popup. False in an arrangement
+   * lane, where the same controls belong in the rail — see TODO(CP-12) below.
+   */
+  showNoteOptions?: boolean;
   /** Zoom, owned by whatever chrome hosts this. */
   pxPerBeat: number;
   /**
@@ -224,9 +329,12 @@ export interface NoteSurfaceProps {
    */
   laneAreaHeight: number;
   /**
-   * How many rows to draw. Separate from `instrumentId` on purpose: CP-11 puts
-   * a placement's snapshot on a track whose instrument may differ, and the neck
-   * the notes are measured against is the one that decides the row count.
+   * How many rows to draw. Separate from `instrumentId` on purpose, and separate
+   * from the PATTERN's instrument too: an arrangement lane draws the TRACK's
+   * neck, so every placement in it shares one row pitch and the rows line up
+   * across them (`arrangementMath.EditableSpan`). A snapshot written for a wider
+   * instrument keeps its off-neck notes and simply cannot show them — the same
+   * gap `Timeline` reports as "off-instrument".
    */
   stringCount: number;
   /** Which instrument's tuning names the rows and the notes on them. */
@@ -254,10 +362,19 @@ export interface NoteSurfaceProps {
  *
  * Every edit goes through the pattern service, so the lib's invariants (no
  * same-string overlap, clamped durations, auto-fitted length) hold without this
- * component knowing about them. Those calls are all bound to "the pattern being
- * edited", which the lib redirects at a placement's snapshot once
- * `openPlacementForEditing` has pointed the store at one — so the surface needs
- * no data source of its own to edit a block in the arrangement.
+ * component knowing about them.
+ *
+ * ── Reading and writing are split, and that is the whole of CP-11 ────────────
+ *
+ * It DRAWS the `pattern` it is handed. It WRITES to the global edit target,
+ * which the lib redirects at a placement's snapshot once
+ * `openPlacementForEditing` has pointed the store at one — so every existing
+ * pattern-service operation edits a placement unchanged, and the surface needs
+ * no write path of its own. There is exactly one such target, so exactly one
+ * mounted surface may write at a time: `focused` says which, and `onFocus` is
+ * how a press moves it. Mounting eight of these that all READ the store would
+ * have drawn the same pattern eight times, which is what the `pattern` prop
+ * exists to prevent.
  *
  * One deliberate consequence of the shortcuts living here rather than with the
  * chrome: they are dead while no pattern is open, because `Timeline` renders
@@ -265,6 +382,12 @@ export interface NoteSurfaceProps {
  * makes that state last a single render, so it is recorded rather than fixed.
  */
 export function NoteSurface({
+  pattern,
+  focused,
+  sounding = true,
+  onFocus,
+  windowTicks = null,
+  showNoteOptions = true,
   pxPerBeat,
   laneAreaHeight,
   stringCount,
@@ -273,9 +396,14 @@ export function NoteSurface({
   edgeScroll,
   geometry,
 }: NoteSurfaceProps) {
-  const pattern = useEditingPattern();
-  const selectedIds = useSelectedIds();
-  const activeIds = useActiveEventIds();
+  // The store's selection belongs to the EDIT TARGET, so a surface that does not
+  // own the target has none — see `focused`.
+  const globalSelection = useSelectedIds();
+  const selectedIds = focused ? globalSelection : NO_IDS;
+  // Event ids are shared between copies of one pattern, so a surface that is not
+  // the one sounding has no active notes — see `sounding`.
+  const globalActive = useActiveEventIds();
+  const activeIds = sounding ? globalActive : NO_IDS;
   // Anchored to the note's on-screen box, captured when the popup is opened.
   const [popupFor, setPopupFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
   // Viewport coordinates — the band is drawn fixed, over everything.
@@ -288,9 +416,8 @@ export function NoteSurface({
   const lanesRef = useRef<HTMLDivElement>(null);
   /** Tears down whichever pointer gesture is in flight. Null when none is. */
   const abortGesture = useRef<(() => void) | null>(null);
-  /** Digits typed so far for a fret, the timer that will commit them, and
-   *  whether any of them actually moved a note. Null when nothing is typed. */
-  const fretRun = useRef<{ digits: string; timer: number; changed: boolean } | null>(null);
+  /** The number being typed for a fret. Null when nothing is. */
+  const fretRun = useRef<FretRun | null>(null);
   /** True while an arrow key's auto-repeat is being folded into the undo step
    *  its first press already recorded. */
   const nudgeRun = useRef(false);
@@ -299,13 +426,15 @@ export function NoteSurface({
   // second handler for the same key. All ignored while typing into a field: a
   // `select` counts, since arrows are how you change one.
   //
-  // TODO(CP-11): keyboard ownership has to be gated before a SECOND surface can
-  // mount. These listeners are on `window` and every handler acts on the global
-  // edit target, so two surfaces would run two `beginEditGesture`/`setSelectedFret`
-  // pairs for one keypress — and `history` keeps a single snapshot, so one of the
-  // two edits vanishes from the undo stack. Needs an `active`/`focused` prop, or
-  // the listener hoisted to the page that knows which surface has the focus.
+  // GATED ON `focused`, which is not an optimisation: these are on `window` and
+  // every handler acts on the global edit target, so a second attached surface
+  // would run a second `beginEditGesture`/`setSelectedFret` pair for one
+  // keypress against a `history` that keeps a single snapshot — and one of the
+  // two edits would vanish from the undo stack. Exactly one surface may be
+  // focused, so exactly one listener is ever attached.
   useEffect(() => {
+    if (!focused) return;
+
     /** End the number being typed: the next digit starts a fresh one, and the
      *  undo gesture holding the whole number closes. */
     const commitFretRun = () => {
@@ -436,7 +565,19 @@ export function NoteSurface({
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('pointerdown', endKeyRuns, true);
     };
-  }, [selectedIds]);
+  }, [selectedIds, focused]);
+
+  // Losing the edit target abandons a half-typed fret or a held arrow — the next
+  // keystroke goes to another surface entirely — so the bracket it opened has to
+  // close, or `history.capture` ignores every later edit for the life of the
+  // page. Its OWN effect rather than the shortcut effect's cleanup, because that
+  // one also re-runs on every selection change and a number being typed must
+  // survive one; and not the unmount effect's, because that aborts the pointer
+  // gesture too and `focused` flips to true at the START of a drag.
+  useEffect(() => {
+    if (!focused) return;
+    return () => closeKeyRuns(fretRun, nudgeRun);
+  }, [focused]);
 
   // A pointer gesture parks its listeners on `window` so it keeps tracking once
   // the pointer leaves the lane — which also means nothing else would tear them
@@ -446,20 +587,10 @@ export function NoteSurface({
   useEffect(
     () => () => {
       abortGesture.current?.();
-      if (nudgeRun.current) {
-        nudgeRun.current = false;
-        endEditGesture(false);
-      }
-      const run = fretRun.current;
-      if (!run) return;
-      clearTimeout(run.timer);
-      fretRun.current = null;
-      endEditGesture(run.changed);
+      closeKeyRuns(fretRun, nudgeRun);
     },
     [],
   );
-
-  if (!pattern) return null;
 
   const rows = rowOrder(stringCount);
   const labels = stringLabels(instrumentId, stringCount);
@@ -475,15 +606,30 @@ export function NoteSurface({
   // Read fresh each render so the popup reflects edits made through it.
   const popupNote = popupFor ? pattern.events.find((e) => e.id === popupFor.id) : undefined;
 
-  /** Pointer x → tick, measured against the lane's own box so scrolling is free. */
+  /** Pointer x → tick, measured against the lane's own box so scrolling is free.
+   *  In an arrangement lane that box is the PLACEMENT's, so this is already the
+   *  snapshot's own tick frame and no offset has to be threaded through. */
   const tickAt = (clientX: number) => {
     const rect = lanesRef.current?.getBoundingClientRect();
     return pxToTick(clientX - (rect?.left ?? 0), pxPerBeat);
   };
 
+  /**
+   * Take the global edit target before anything reads it.
+   *
+   * Synchronous on purpose: the store's write lands immediately, so every
+   * `getEditingPattern()` below — `snapshotForDrag`, `beginEditGesture`,
+   * `stampNote` — already sees THIS pattern. Called at the head of every gesture
+   * that writes, and returning false is how a host refuses (the block is gone,
+   * no composition is open); the gesture then does nothing at all rather than
+   * editing whichever pattern happened to be open.
+   */
+  const takeFocus = (): boolean => (focused ? true : (onFocus?.() ?? true));
+
   const startDrag = (event: PatternEvent, mode: DragMode) => (e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (!takeFocus()) return;
 
     // Shift is the selection modifier wherever a note can be grabbed — including
     // the resize edge, which overhangs the note and is easy to hit by accident.
@@ -522,13 +668,16 @@ export function NoteSurface({
 
       if (mode === 'resize') {
         const end = snapToGrid(tickAt(last.x));
-        // The lib's floor is one tick, so a shared delta dragged past the left
-        // edge would collapse the group into invisible slivers. Clamping the
-        // delta against the shortest member keeps every note at least a
-        // sixteenth *and* preserves the relative lengths within the group.
-        const shortest = Math.min(...resizeFrom.map((s) => s.durationTicks));
-        const delta = end - (event.startTick + event.durationTicks);
-        resizeNotesBy(resizeFrom, Math.max(stampLength - shortest, delta));
+        // Both ends of the delta are clamped ACROSS THE GROUP rather than per
+        // note — see `clampResizeDelta`. `dragFrom` carries the start ticks the
+        // window bound needs; `resizeFrom` is what the lib clamps against.
+        const delta = clampResizeDelta(
+          dragFrom,
+          end - (event.startTick + event.durationTicks),
+          windowTicks,
+          stampLength,
+        );
+        resizeNotesBy(resizeFrom, delta);
         return;
       }
 
@@ -536,7 +685,11 @@ export function NoteSurface({
       // Rows descend the screen but string indices ascend with pitch, so
       // dragging down moves to a lower-numbered string.
       const rowDelta = Math.round((last.y - startY) / rowHeight);
-      moveNotesBy(dragFrom, tick - event.startTick, -rowDelta, stringCount);
+      // Clamped at the placement boundary rather than carried into the
+      // neighbour: crossing would be two snapshot writes and an ambiguous undo
+      // step. Unbounded on the pattern page, where `windowTicks` is null.
+      const delta = clampMoveDelta(dragFrom, tick - event.startTick, windowTicks);
+      moveNotesBy(dragFrom, delta, -rowDelta, stringCount);
     };
 
     const onMove = (ev: PointerEvent) => {
@@ -571,6 +724,7 @@ export function NoteSurface({
    */
   const onLaneDown = (stringIndex: number) => (e: React.PointerEvent) => {
     if (e.target !== e.currentTarget) return;
+    if (!takeFocus()) return;
     const originX = e.clientX;
     const originY = e.clientY;
     // The band's anchor is kept in content space, for the same reason `tickAt`
@@ -627,11 +781,9 @@ export function NoteSurface({
       // more than one of these on a page, and a document-wide query would drag
       // a neighbouring block's notes into the band.
       //
-      // Not coverable yet, and said so rather than covered by a test that cannot
-      // fail: while there is one `.lanes` on the page a document-wide query is
-      // indistinguishable from this one, and two surfaces over the same editing
-      // pattern would report the same note ids either way. It becomes testable
-      // when CP-11 puts two surfaces over different snapshots.
+      // Covered by tests/EditMode.test.tsx: two surfaces over snapshots of
+      // DIFFERENT library patterns, so the ids a document-wide query would drag
+      // in are ids this surface's pattern has not got.
       const hits =
         hitTop > hitBottom || !lanesEl
           ? []
@@ -692,12 +844,35 @@ export function NoteSurface({
         selectNotes([]);
         return;
       }
-      const tick = snapToGrid(tickAt(ev.clientX));
+      const pressedAt = tickAt(ev.clientX);
+      let tick = snapToGrid(pressedAt);
+      if (windowTicks !== null) {
+        // Nothing may be written into empty time. Inside a placement the window
+        // is its effective length, so a press past the last tick stamps nothing
+        // at all rather than a note the block would have to grow to hold.
+        if (pressedAt >= windowTicks) return;
+        // The press was inside, but `snapToGrid` ROUNDS — so one in the right
+        // half of the FINAL grid cell lands exactly on `windowTicks`. Refusing
+        // those would leave half a cell of silent dead zone at the end of every
+        // block, which reads as the app ignoring presses. Clamp back to the last
+        // grid position that fits instead.
+        const step = grid.ticks ?? FREE_NOTE_TICKS;
+        const lastInWindow = Math.max(0, Math.floor((windowTicks - 1) / step) * step);
+        if (tick > lastInWindow) tick = lastInWindow;
+      }
       // Reuse the last-used fret so repeated stamping doesn't reset to 0.
       const fret = selectedIds.length
         ? (pattern.events.find((ev2) => ev2.id === selectedIds[0])?.fret ?? 0)
         : 0;
-      stampNote({ stringIndex, fret, tick, durationTicks: stampLength });
+      stampNote({
+        stringIndex,
+        fret,
+        tick,
+        // A note stamped against the boundary is SHORTENED to fit rather than
+        // refused: the grid step is a default length, not part of the request.
+        durationTicks:
+          windowTicks === null ? stampLength : Math.min(stampLength, windowTicks - tick),
+      });
     };
 
     window.addEventListener('pointermove', onMove);
@@ -762,7 +937,7 @@ export function NoteSurface({
                         {pitchName(stringIndex, event.fret)}
                       </span>
                     )}
-                    {selected && (
+                    {selected && showNoteOptions && (
                       <button
                         type="button"
                         aria-label="Note options"
@@ -810,9 +985,10 @@ export function NoteSurface({
           outside these lanes can produce either. Handing the chrome a callback
           would mean lifting `{id, DOMRect}` out only to hand it straight back —
           more coupling to NotePopup, not less.
-          TODO(CP-11): a surface hosted in an arrangement lane will want this
-          suppressed, since CP-12 puts the same controls in a rail instead. */}
-      {popupNote && popupFor && (
+          `showNoteOptions` is false in an arrangement lane: a popup anchored to
+          a note inside a clipped, scrolling lane stack has nowhere good to go,
+          and TODO(CP-12) puts the same controls in the rail instead. */}
+      {showNoteOptions && popupNote && popupFor && (
         <div className="fixed inset-0 z-50" onPointerDown={() => setPopupFor(null)}>
           <AnchoredTo rect={popupFor.anchor}>
             <NotePopup

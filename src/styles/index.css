@@ -273,6 +273,19 @@
     background-color: rgb(255 255 255 / 0.026);
   }
 
+  /* Edit mode nests one `.lanes` inside another: the arrangement's TRACK lanes,
+     and inside each block a note surface whose STRING ROWS are lanes too. Both
+     match the rules above, so an even track lane holding even string rows takes
+     the recess and the zebra lift twice and the stack stops reading as one rack.
+     The inner set wins — in edit mode the rows are the lanes — and the divider
+     between tracks (the `+ [data-lane]` rule above) is deliberately kept, since
+     without it there is nothing to say where one track ends. Must come after
+     those rules: it matches at the same specificity. */
+  .lanes > [data-lane].edit-lane {
+    box-shadow: none;
+    background-color: transparent;
+  }
+
   /* The same, in brass — primary actions, root notes, the playhead. */
   .control-accent {
     background-image: linear-gradient(180deg, var(--color-brass-hi), var(--color-brass));

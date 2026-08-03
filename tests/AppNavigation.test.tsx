@@ -155,7 +155,7 @@ describe('page routing', () => {
 });
 
 describe('composition mode bar', () => {
-  it('offers three modes with Pattern active and the rest inert', async () => {
+  it('offers three modes with Pattern active, and only the unbuilt one inert', async () => {
     render(<App />);
     await goTo('Composition');
 
@@ -163,12 +163,12 @@ describe('composition mode bar', () => {
       'aria-pressed',
       'true',
     );
-    for (const label of ['Edit', 'Voice']) {
-      const button = modes().getByRole('button', { name: `${label} mode` });
-      expect(button).toBeDisabled();
-      // The slice it lands in, said on the control rather than nowhere.
-      expect(button).toHaveAttribute('title', expect.stringMatching(/slice [23]/));
-    }
+    // Edit mode landed in CP-11; voice mode is slice 3.
+    expect(modes().getByRole('button', { name: 'Edit mode' })).toBeEnabled();
+    const voice = modes().getByRole('button', { name: 'Voice mode' });
+    expect(voice).toBeDisabled();
+    // The slice it lands in, said on the control rather than nowhere.
+    expect(voice).toHaveAttribute('title', expect.stringMatching(/slice 3/));
   });
 });
 

@@ -38,6 +38,10 @@ import {
   type Track,
 } from '@fretwork/lib';
 import { createHistory } from '../patterns/history';
+// The PATTERN seam's history, cleared whenever the edit target moves — see
+// `openPlacementForEditing`. One-directional: `patternService` imports nothing
+// from here, so there is no cycle to reason about.
+import { clearHistory as clearPatternHistory } from '../patterns/patternService';
 
 export { MAX_COMPOSITION_TRACKS, placementEffectiveLength, placementEndTick };
 
@@ -596,8 +600,11 @@ export function openBlankComposition(name?: string): Result<Composition> {
 }
 
 /** Selection and history are both per-composition; carrying either across a
- *  switch would undo into a composition that is no longer open. */
+ *  switch would undo into a composition that is no longer open. So is an open
+ *  placement — it names a block in the document that just closed, and leaving it
+ *  open would keep the pattern page showing that block's snapshot. */
 function forgetPerCompositionState(): void {
+  closePlacementEditing();
   writeSelection(NO_IDS);
   selectTrack(null);
   clearHistory();
@@ -928,15 +935,132 @@ export function duplicatePlacements(
   commit(() => store().duplicatePlacements([...ids], deltaTicks, destTrackId));
 }
 
-// `setPlacementSnapshot` — writing an edited pattern back into a placement — is
-// deliberately absent. The store exposes no action for it and the lib's root
-// barrel does not export the pure op, so the only route would be a
-// whole-composition write-back of our own. It is not needed until edit mode
-// (slice 2) exists to produce the edited snapshot, and the lib's own route into
-// that mode is `openPlacementForEditing(compositionId, placementId)` — which
-// points the PATTERN editor at the placement, so the write-back is the pattern
-// seam's, not a placement op here. See tickets/composition-page/README.md, which
-// leaves the placement-edit flow explicitly open.
+// ------------------------------------------------------- placement editing ---
+// CP-11. Note there is deliberately NO `setPlacementSnapshot` here: the lib
+// already routes note edits at a placement, so the whole of edit mode is
+// "point the store at the right block" plus the surface that draws it.
+//
+//   openPlacementForEditing(compositionId, placementId)   // the lib's action
+//     → currentEditTarget() resolves to placement.patternSnapshot
+//     → updateTarget() writes back to the placement, not the library
+//
+// Every existing `patternService` note operation therefore works on a placement
+// unchanged. The one write-back that is NOT an ordinary edit — restoring an undo
+// snapshot — routes the same way inside `patternService.writePatternBack`, which
+// is where the corresponding LIB-GAP(17) note lives.
+
+/**
+ * The library pattern that was open when placement editing began.
+ *
+ * ⚠ THE CROSS-PAGE LEAK THIS EXISTS TO CLOSE. `selectEditingPattern` **is**
+ * `currentEditTarget()?.pattern`, and `useEditingPattern()` is what the PATTERN
+ * PAGE and `App` read — so while a placement is open the pattern page would show
+ * that placement's snapshot. Worse, `openPlacementForEditing` sets
+ * `editingPatternId: null` OUTRIGHT: the library pattern is closed, not merely
+ * shadowed, and `App`'s `ensurePattern` effect would adopt whatever pattern was
+ * updated most recently on the way back.
+ *
+ * Same family as the CP-02 defect where `openBlankComposition` nulled the
+ * pointer and `App` answered by creating a junk pattern on every call — and
+ * fixed the same way: remember exactly what was clobbered and put it back.
+ * Captured on the way IN and restored on every way OUT.
+ *
+ * ⚠ Captured on the VALUE, never on "is a placement already open". The obvious
+ * guard — only remember when `editingPlacementId` is null, so switching between
+ * blocks doesn't overwrite this with the null the first switch left — is WRONG,
+ * because the lib clears `editingPlacementId` behind our back: `removePlacement`
+ * nulls it when the open block is the one being removed, and restores nothing.
+ * Open a placement, remove it, open another, and that guard would happily record
+ * `null` and forget the pattern for good. Testing the value covers both: a null
+ * is never worth remembering, and a non-null one is only ever there because
+ * nothing of ours has taken the pointer yet.
+ */
+let patternIdBeforePlacementEdit: string | null = null;
+
+/** Put the pattern pointer back if we are the ones holding it. Idempotent, so
+ *  every exit path can call it without checking whether another already has. */
+function restorePatternPointer(): void {
+  const remembered = patternIdBeforePlacementEdit;
+  patternIdBeforePlacementEdit = null;
+  if (remembered === null) return;
+  // Something else has already opened a pattern (the user switched pages and
+  // picked one); putting the old id back would close it under them.
+  if (usePatternsStore.getState().editingPatternId !== null) return;
+  // The lib's own action, not a raw `setState`: it clears `selectedEventIds`,
+  // `cursorTick` and `pendingChordStamp` along with setting the pointer, and
+  // that is not tidiness. `snapshotPatternForPlacement` copies events VERBATIM,
+  // ids included, so the ids selected inside a placement exist in the library
+  // pattern too — leaving them selected would hand the pattern page a live
+  // selection the user made somewhere else, and the next Backspace would delete
+  // from a document they were not editing.
+  store().openPatternForEditing(remembered);
+}
+
+/** React hook: which placement the note editor is pointed at, or null. */
+export function useEditingPlacementId(): string | null {
+  return usePatternsStore((s) => s.editingPlacementId);
+}
+
+/** Non-reactive read — for event handlers and tests. */
+export function getEditingPlacementId(): string | null {
+  return usePatternsStore.getState().editingPlacementId;
+}
+
+/**
+ * Point the note editor at a placement, BY ID — no pointer required, which is
+ * the standing rule for every capability here.
+ *
+ * Already-open is `ok`, not a refusal: the caller asked for a state and it
+ * holds, and re-opening would clear the selection and the cursor for nothing.
+ *
+ * Pattern history is cleared on every move of the target, and that is not
+ * housekeeping: `history` is per-document, and `writePatternBack` writes to
+ * WHICHEVER target is current — so an undo carried across a switch would stamp
+ * one block's old notes into another block.
+ */
+export function openPlacementForEditing(placementId: string): Result<string> {
+  const composition = getEditingComposition();
+  if (!composition) return refuse('No composition is open.');
+  if (!findPlacement(placementId)) return refuse('No such block in this composition.');
+
+  const state = usePatternsStore.getState();
+  if (state.editingPlacementId === placementId) return ok(placementId);
+  // On the VALUE, not on `editingPlacementId === null` — see the note on the
+  // variable: the lib nulls that pointer itself when the open block is removed.
+  if (state.editingPatternId !== null) {
+    patternIdBeforePlacementEdit = state.editingPatternId;
+  }
+  store().openPlacementForEditing(composition.id, placementId);
+  clearPatternHistory();
+  return ok(placementId);
+}
+
+/**
+ * Close placement editing and put the pattern pointer back.
+ *
+ * Must run on EVERY exit — leaving edit mode, leaving the composition page, and
+ * unmount — because all three leave the pattern page pointed at a snapshot
+ * otherwise. Safe to call when nothing is open, which is what lets the caller
+ * wire it to a mode effect's cleanup and stop thinking about it.
+ *
+ * `openCompositionForArranging` is the lib's own documented way back. It also
+ * nulls the store's `selectedPlacementId`, so this seam's multi-selection —
+ * which is kept pointed at that single id — is emptied with it rather than left
+ * naming a block the store no longer agrees is selected.
+ */
+export function closePlacementEditing(): Result<void> {
+  const state = usePatternsStore.getState();
+  if (state.editingPlacementId !== null) {
+    store().openCompositionForArranging(state.editingCompositionId);
+    writeSelection(NO_IDS);
+    clearPatternHistory();
+  }
+  // Unconditional: the lib clears `editingPlacementId` behind our back when the
+  // placement being edited is removed, so "nothing is open" is not proof that
+  // the pointer was never taken.
+  restorePatternPointer();
+  return ok(undefined);
+}
 
 // ---------------------------------------------------- composition settings ---
 

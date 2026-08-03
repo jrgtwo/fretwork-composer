@@ -347,6 +347,15 @@ export function Timeline() {
                 what lets every pointer position be measured against the lanes
                 rather than against a scroll offset nobody passes it. */}
             <NoteSurface
+              // The one pattern this page has, handed over rather than read
+              // from the store by the surface: it is the same object either way
+              // here, and it is what lets edit mode mount one surface per
+              // placement without every one of them drawing the same notes.
+              pattern={pattern}
+              // Always. There is one surface on this page and it is never
+              // mounted beside the composition page's — `App` swaps the whole
+              // page — so the edit target is always this pattern.
+              focused
               pxPerBeat={pxPerBeat}
               laneAreaHeight={laneAreaHeight}
               stringCount={stringCount}

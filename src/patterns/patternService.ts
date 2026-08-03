@@ -149,14 +149,56 @@ const history = createHistory<Pattern>();
  * the lib grows `replacePattern(id, pattern)`, we swap the entry in `library`
  * ourselves. Keeping it in a single function means the lib migration touches
  * one call site.
+ *
+ * ⚠ IT HAS TO ROUTE THE WAY THE LIB'S OWN WRITES DO. `editingPattern` is
+ * `currentEditTarget()?.pattern`, which is a PLACEMENT's snapshot whenever
+ * `openPlacementForEditing` has pointed the store at one — and a placement's
+ * snapshot keeps the id of the library pattern it was cut from. So a
+ * library-only write-back would undo a placement-local note edit by stamping
+ * that placement's snapshot over the LIBRARY PATTERN while leaving the placement
+ * untouched: the undo appears to do nothing and quietly rewrites a document the
+ * user was not editing. This mirrors the lib's private `updateTarget`, which is
+ * the same two-branch routing for every ordinary edit.
+ *
+ * LIB-GAP(17): the write to a placement is hand-rolled because `composition-ops`
+ * DOES export `setPlacementSnapshot(comp, placementId, next)` — it is just not on
+ * the lib's root barrel and has no store action, so a consumer cannot reach it.
+ * `fitPatternDuration` is not re-applied here on purpose: the snapshot being
+ * restored was already fitted when it was captured. See docs/FOLLOW-UPS.md.
  */
 function writePatternBack(pattern: Pattern): void {
-  usePatternsStore.setState((state) => ({
-    library: {
-      ...state.library,
-      patterns: state.library.patterns.map((p) => (p.id === pattern.id ? pattern : p)),
-    },
-  }));
+  usePatternsStore.setState((state) => {
+    const { editingPlacementId, editingCompositionId } = state;
+    if (editingPlacementId !== null && editingCompositionId !== null) {
+      return {
+        library: {
+          ...state.library,
+          compositions: state.library.compositions.map((composition) =>
+            composition.id !== editingCompositionId
+              ? composition
+              : {
+                  ...composition,
+                  tracks: composition.tracks.map((track) => ({
+                    ...track,
+                    placements: track.placements.map((placement) =>
+                      placement.id === editingPlacementId
+                        ? { ...placement, patternSnapshot: pattern }
+                        : placement,
+                    ),
+                  })),
+                  updatedAt: Date.now(),
+                },
+          ),
+        },
+      };
+    }
+    return {
+      library: {
+        ...state.library,
+        patterns: state.library.patterns.map((p) => (p.id === pattern.id ? pattern : p)),
+      },
+    };
+  });
 }
 
 /** Snapshot the current pattern before a mutation. */

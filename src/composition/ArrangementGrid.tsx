@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { Placement } from '@fretwork/lib';
 import {
   ARRANGEMENT_ZOOM_LEVELS,
   DEFAULT_ARRANGEMENT_SNAP_ID,
@@ -8,13 +9,20 @@ import {
   arrangementBars,
   arrangementSnap,
   arrangementWidth,
+  editableSpans,
+  laneHeightsFor,
   laneRects,
+  laneStringCount,
   lanesHeight,
+  placementDrifted,
   rulerMarks,
   tickToPx,
   zoomAnchoredScrollLeft,
   type ArrangementMode,
+  type EditableSpan,
 } from './arrangementMath';
+import { NoteSurface, type SurfaceGeometry } from '../timeline/NoteSurface';
+import { useEdgeAutoScroll, type EdgeAutoScroll } from '../timeline/useEdgeAutoScroll';
 import {
   useActivePlacementIds,
   useHeadTick,
@@ -28,17 +36,26 @@ import {
   VOLUME_RANGE_DB,
   addTrack,
   isTrackAudible,
+  openPlacementForEditing,
   redo,
   selectTrack,
   setMasterVolumeDb,
+  trackInstrumentId,
   undo,
   useEditingComposition,
+  useEditingPlacementId,
   useHistoryState,
   useSelectedPlacementIds,
   useSelectedTrackId,
   useTracks,
 } from './compositionService';
-import { snapOptions } from '../timeline/timelineMath';
+import {
+  useLibraryPatterns,
+  redo as redoNote,
+  undo as undoNote,
+  useHistoryState as useNoteHistoryState,
+} from '../patterns/patternService';
+import { DEFAULT_SNAP_ID, snapOptions, type SnapOption } from '../timeline/timelineMath';
 import {
   deleteSelectedPlacements,
   duplicateSelectedPlacements,
@@ -141,6 +158,125 @@ function ArrangementPlayhead({ pxPerBeat }: { pxPerBeat: number }) {
   );
 }
 
+/**
+ * One placement's editable notes, in edit mode — the surface positioned and
+ * clipped to that placement's own block.
+ *
+ * ONE SURFACE PER PLACEMENT, not one per lane. The reasoning, and the cost it
+ * accepts, is on `arrangementMath.EditableSpan`; what matters here is the
+ * consequence: the surface's box IS the placement, so every pointer position it
+ * measures against its own lanes element is already a tick in the snapshot's own
+ * frame, and no offset is threaded through any gesture.
+ *
+ * The string rows come from the TRACK's instrument, never the snapshot's, so
+ * every surface in a lane divides the same height into the same rows and the
+ * rows line up across placements instead of double-drawing at two pitches.
+ * LIB-GAP(15) applies: those rows say what neck the part is written on and
+ * nothing about what will be heard.
+ */
+function PlacementSurface({
+  placement,
+  span,
+  focused,
+  sounding,
+  onFocus,
+  drifted,
+  pxPerBeat,
+  laneHeight,
+  stringCount,
+  instrumentId,
+  grid,
+  edgeScroll,
+  geometry,
+}: {
+  placement: Placement;
+  span: EditableSpan;
+  focused: boolean;
+  /** This block is the one the transport is inside. Event ids are shared across
+   *  copies of a pattern, so the play highlight has to be scoped by BLOCK. */
+  sounding: boolean;
+  onFocus: () => boolean;
+  drifted: boolean;
+  pxPerBeat: number;
+  laneHeight: number;
+  stringCount: number;
+  instrumentId: string;
+  grid: SnapOption;
+  edgeScroll: EdgeAutoScroll;
+  geometry: SurfaceGeometry;
+}) {
+  return (
+    <div
+      data-edit-placement={placement.id}
+      data-focused={focused || undefined}
+      style={{
+        left: span.rect.left,
+        top: span.rect.top,
+        width: span.rect.width,
+        height: span.rect.height,
+      }}
+      // The boundary as an INSET RING, not a border. A border would eat a pixel
+      // off each side of the content box — Tailwind's preflight sets
+      // `box-sizing: border-box` — while `NoteSurface` lays its rows out to the
+      // full `laneAreaHeight` and draws every note at `tickToPx(startTick)`,
+      // which would put every note a pixel right of the arrangement's own bar
+      // lines and clip the bottom string row. An inset shadow paints inside the
+      // box without taking any of it. It still paints over the surface's rows,
+      // which a background ring could not.
+      // `overflow-hidden` is what makes the clamp visible — a note dragged
+      // against the boundary stops there rather than spilling into the next
+      // block's time.
+      className={`absolute overflow-hidden rounded-md inset-ring-1 ${
+        focused ? 'inset-ring-brass/60' : 'inset-ring-brass/20'
+      }`}
+    >
+      {/* Which block you are inside, drawn BEFORE the surface so the lane rows
+          paint over it and it reads as a watermark rather than as a label
+          competing with the notes. The drift mark is the block's own — see
+          `PlacementBlock`. */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute top-0 left-1 font-mono text-[8px] font-bold tracking-[0.12em] text-ink-mut uppercase"
+      >
+        {placement.patternSnapshot.name}
+        {drifted && ' *'}
+      </span>
+      <NoteSurface
+        pattern={placement.patternSnapshot}
+        focused={focused}
+        sounding={sounding}
+        onFocus={onFocus}
+        // The editable window is ONE repetition's effective length. Past it is
+        // either another block's time or nothing at all, and neither is
+        // writable.
+        //
+        // ⚠ It is DERIVED, so an edit can move it. `updateTarget` re-fits the
+        // snapshot's length to its content on every write (`fitPatternDuration`,
+        // floor of one bar), and an untrimmed placement's window IS that length
+        // — so deleting the last note of the final bar shortens the block, and
+        // with it the time that can be written into. Deliberate rather than
+        // overlooked: a block is as long as the music in it, which is the same
+        // rule the pattern page has always followed, and the notes are still
+        // there to be re-stamped. Pinning `lengthTicks` on the first
+        // placement-local edit is the alternative, and it trades this for blocks
+        // that silently stop tracking their own content. Revisit with CP-12,
+        // which is where a length control would live if one is wanted.
+        windowTicks={span.windowTicks}
+        // TODO(CP-12): the note inspector takes these controls, so the popup a
+        // selected note would otherwise offer is suppressed here.
+        showNoteOptions={false}
+        pxPerBeat={pxPerBeat}
+        laneAreaHeight={laneHeight}
+        stringCount={stringCount}
+        instrumentId={instrumentId}
+        grid={grid}
+        edgeScroll={edgeScroll}
+        geometry={geometry}
+      />
+    </div>
+  );
+}
+
 export function ArrangementGrid({
   mode,
   patternDragRef,
@@ -162,9 +298,50 @@ export function ArrangementGrid({
   const tracks = useTracks();
   const selectedTrackId = useSelectedTrackId();
   const selectedPlacementIds = useSelectedPlacementIds();
-  const { canUndo, canRedo } = useHistoryState();
+  const editing = mode === 'edit';
+  /**
+   * Undo is per-DOCUMENT, and edit mode edits a different one.
+   *
+   * The two histories are separate stacks — `compositionService`'s holds whole
+   * `Composition` snapshots, `patternService`'s holds `Pattern`s — and ⌘Z is
+   * already routed by mode (the arrangement's key handler is disabled in edit
+   * mode; the focused `NoteSurface`'s is not). These two buttons have to follow
+   * it or they are a second, contradicting code path: pressing ↶ after a note
+   * edit would restore a composition snapshot captured before it and stamp the
+   * pre-edit `patternSnapshot` back over the block — destroying the edit with no
+   * step in either stack to recover it.
+   */
+  const compositionHistory = useHistoryState();
+  const noteHistory = useNoteHistoryState();
+  const { canUndo, canRedo } = editing ? noteHistory : compositionHistory;
+  const undoHere = editing ? undoNote : undo;
+  const redoHere = editing ? redoNote : redo;
+  /** Which block the note editor is pointed at. Null until one is pressed —
+   *  nothing is editable, and no surface owns the keyboard, until then. */
+  const editingPlacementId = useEditingPlacementId();
+  /** The library, to tell an edited placement from an untouched one. A stable
+   *  reference until a PATTERN changes, and a placement edit writes to
+   *  `library.compositions`, so this does not re-render on note entry. */
+  const libraryPatterns = useLibraryPatterns();
+  /** Memoised because it is rebuilt for every block on every render, and a note
+   *  edit re-renders this component on every pointermove of a drag. */
+  const libraryById = useMemo(
+    () => new Map(libraryPatterns.map((pattern) => [pattern.id, pattern])),
+    [libraryPatterns],
+  );
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ARRANGEMENT_ZOOM_INDEX);
   const [snapId, setSnapId] = useState<string>(DEFAULT_ARRANGEMENT_SNAP_ID);
+  /**
+   * Edit mode's note grid, held SEPARATELY from the arrangement's block snap.
+   *
+   * One control on screen, two settings behind it, because they are two
+   * different quantities that happen to share a menu: dropping a four-bar riff a
+   * 16th late is never what was meant (so blocks default to the bar) and a
+   * stamped note a bar long never is either (so notes default to the 16th, the
+   * pattern editor's own default). Sharing one piece of state would make
+   * switching modes silently re-quantise the other surface.
+   */
+  const [noteSnapId, setNoteSnapId] = useState<string>(DEFAULT_SNAP_ID);
   /**
    * The last refused — or otherwise consequential — track write.
    *
@@ -195,7 +372,48 @@ export function ArrangementGrid({
   const gestures = useArrangementGestures({
     geometry: useCallback(() => geometryRef.current, []),
     scrollerRef,
+    // In edit mode the lanes ARE note surfaces and those own the pointer and the
+    // keyboard. Two gesture systems over one surface is how a drag ends up doing
+    // two things — and ⌘Z would pop an arrangement step and a note step for one
+    // press. See `ArrangementGesturesOptions.enabled`.
+    enabled: !editing,
   });
+
+  /**
+   * Edge auto-scroll for the NOTE surfaces, distinct from the one
+   * `useArrangementGestures` keeps for block drags. Two instances over one
+   * scroller, never both running: exactly one of the two gesture systems is
+   * enabled at a time.
+   */
+  const noteEdgeScroll = useEdgeAutoScroll(scrollerRef);
+
+  /**
+   * The one thing a note surface needs to know about this chrome: where the
+   * window onto it is, so a rubber-band can be clipped to the lane area rather
+   * than painted across the track headers. Behind a function, and memoised, for
+   * `Timeline`'s reasons — a box read at render time is stale by the first
+   * pointer move, and this component re-renders on every placement change.
+   */
+  const surfaceGeometry = useMemo<SurfaceGeometry>(
+    () => ({ viewportRect: () => scrollerRef.current?.getBoundingClientRect() ?? null }),
+    [],
+  );
+
+  /**
+   * Point the note editor at a block — the seam call every press in a lane makes
+   * before it writes anything.
+   *
+   * Returns whether the surface may now edit, so a refusal (the block is gone, no
+   * composition is open) stops the gesture instead of letting it write into
+   * whichever pattern happened to be open. Reachable by id without a pointer
+   * through `compositionService.openPlacementForEditing`, which is what the agent
+   * will call.
+   */
+  const focusPlacement = (placementId: string): boolean => {
+    const opened = openPlacementForEditing(placementId);
+    if (!opened.ok) setTrackNotice(opened.reason);
+    return opened.ok;
+  };
 
   const isPlaying = useIsPlaying();
   // Which blocks are sounding. A snapshot slice rather than something derived
@@ -320,13 +538,36 @@ export function ArrangementGrid({
   });
   const width = arrangementWidth(bars, ts, pxPerBeat);
   const marks = rulerMarks(bars, ts, pxPerBeat);
-  const lanes = laneRects(tracks, mode);
+  /** The neck a track's lane draws — LIB-GAP(15): its string set, not its
+   *  pitch, which the composition's single tuning owns. */
+  const instrumentOfTrack = (trackId: string): string => {
+    const track = tracks.find((candidate) => candidate.id === trackId);
+    return track ? trackInstrumentId(track) : '';
+  };
+  // Edit lanes fit their own track's string count — a bass lane is four rows
+  // where a guitar lane is six — which is the case `LaneHeights` grew its
+  // function form for. Pattern and voice mode are unaffected.
+  const lanes = laneRects(tracks, mode, laneHeightsFor(instrumentOfTrack));
   const height = lanesHeight(lanes);
   const snap = arrangementSnap(ts, snapId);
+  const gridOptions = snapOptions(ts);
+  // The pattern editor's own fallback, not the arrangement's bar: an unknown id
+  // here must land on a NOTE grid. Resolved by id rather than by position — the
+  // ordering of that menu is `timelineMath`'s to change, and an index would
+  // silently start meaning a different note value the day it does.
+  const noteGrid =
+    gridOptions.find((option) => option.id === noteSnapId) ??
+    gridOptions.find((option) => option.id === DEFAULT_SNAP_ID) ??
+    gridOptions[0];
   // Emptiness is "no blocks", not "no duration": a snapshot that measures zero
   // still put a block on screen, and a hint printed over one is a lie.
   const nothingPlaced = tracks.every((track) => track.placements.length === 0);
-  const hasSelection = selectedPlacementIds.length > 0;
+  // Hidden in edit mode: every one of these acts on a BLOCK, and in edit mode
+  // the thing you have selected is a note. The block selection is EMPTIED on the
+  // way in, not merely hidden — `closePlacementEditing` clears it, because the
+  // lib nulls its own `selectedPlacementId` when a placement is opened and the
+  // two must not disagree about what is selected.
+  const hasSelection = selectedPlacementIds.length > 0 && !editing;
 
   // Assigned during render rather than from an effect: a gesture can begin on
   // the very first pointerdown after a zoom, which is before any effect for that
@@ -401,7 +642,7 @@ export function ArrangementGrid({
           type="button"
           aria-label="Undo"
           disabled={!canUndo}
-          onClick={undo}
+          onClick={undoHere}
           className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold disabled:opacity-40"
         >
           ↶
@@ -410,7 +651,7 @@ export function ArrangementGrid({
           type="button"
           aria-label="Redo"
           disabled={!canRedo}
-          onClick={redo}
+          onClick={redoHere}
           className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold disabled:opacity-40"
         >
           ↷
@@ -418,18 +659,21 @@ export function ArrangementGrid({
         <span className="mx-1 h-4 w-px bg-line" />
         <label className="flex items-center gap-1.5">
           <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-            Snap
+            {editing ? 'Grid' : 'Snap'}
           </span>
           {/* The arrangement's default is the BAR where the note grid's is the
               16th — the one place the two surfaces intentionally disagree
-              (`arrangementMath`). The menu is shared so the labels can't drift. */}
+              (`arrangementMath`). The menu is shared so the labels can't drift;
+              which of the two settings it drives follows the mode, and the
+              accessible name says which, because a control that means two things
+              under one name is one nobody can address. */}
           <select
-            aria-label="Arrangement snap"
-            value={snapId}
-            onChange={(e) => setSnapId(e.target.value)}
+            aria-label={editing ? 'Note grid' : 'Arrangement snap'}
+            value={editing ? noteSnapId : snapId}
+            onChange={(e) => (editing ? setNoteSnapId : setSnapId)(e.target.value)}
             className="control rounded-lg px-1.5 py-1 font-mono text-[9px] font-bold text-ink"
           >
-            {snapOptions(ts).map((option) => (
+            {gridOptions.map((option) => (
               <option key={option.id} value={option.id}>
                 {option.label}
               </option>
@@ -786,35 +1030,81 @@ export function ArrangementGrid({
               <div
                 ref={lanesRef}
                 data-testid="arrangement-lanes"
-                onPointerDown={gestures.onLanesPointerDown}
-                onPointerMove={gestures.onLanesPointerMove}
-                className="lanes absolute inset-0 cursor-crosshair"
+                // Nothing in edit mode: the note surfaces below own the pointer
+                // there, and a second handler on their container would run a
+                // block gesture under every note gesture.
+                onPointerDown={editing ? undefined : gestures.onLanesPointerDown}
+                onPointerMove={editing ? undefined : gestures.onLanesPointerMove}
+                className={`lanes absolute inset-0 ${editing ? '' : 'cursor-crosshair'}`}
               >
                 {lanes.map((lane, index) => {
                   const track = tracks[index];
+                  const instrumentId = trackInstrumentId(track);
                   return (
                     <div
                       key={lane.trackId}
                       data-lane={track.name}
                       data-lane-track={lane.trackId}
                       style={{ height: lane.height }}
-                      className="relative"
+                      // `edit-lane` turns this lane's own recess and zebra OFF
+                      // (src/styles/index.css). Edit mode nests one `.lanes`
+                      // inside another — the track lanes, and each placement's
+                      // string rows — and `.lanes > [data-lane]` matches both,
+                      // so a track lane and every row inside it would each take
+                      // the channel shadow and the zebra lift. Compounded, the
+                      // stack stops reading as one instrument rack. The INNER
+                      // set wins, because in edit mode the rows ARE the lanes;
+                      // the divider between tracks is kept.
+                      className={`relative ${editing ? 'edit-lane' : ''}`}
                     >
-                      {/* Pattern mode's lane content. CP-11 (string rows) and
-                          CP-14 (voice racks) replace what a lane draws in the
-                          other two modes; until then they draw these at their
-                          own lane height, so an inert mode is never a blank
-                          page. */}
-                      {track.placements.map((placement) => (
-                        <PlacementBlock
-                          key={placement.id}
-                          placement={placement}
-                          pxPerBeat={pxPerBeat}
-                          laneHeight={lane.height}
-                          selected={selectedPlacementIds.includes(placement.id)}
-                          playing={playingPlacementIds.includes(placement.id)}
-                        />
-                      ))}
+                      {/* What a lane draws is the ONLY thing that changes between
+                          modes — the ruler, the headers, the time axis and the
+                          scroll position do not (CP-01). Pattern mode draws one
+                          block per placement; edit mode draws that placement's
+                          notes, on the same ruler, at the same zoom. CP-14's
+                          voice racks are the third. */}
+                      {editing
+                        ? editableSpans(track, pxPerBeat, lane.height).map((span) => {
+                            const placement = track.placements.find(
+                              (candidate) => candidate.id === span.placementId,
+                            );
+                            if (!placement) return null;
+                            return (
+                              <PlacementSurface
+                                key={placement.id}
+                                placement={placement}
+                                span={span}
+                                focused={editingPlacementId === placement.id}
+                                sounding={playingPlacementIds.includes(placement.id)}
+                                onFocus={() => focusPlacement(placement.id)}
+                                drifted={placementDrifted(
+                                  placement,
+                                  libraryById.get(placement.patternSnapshot.id),
+                                )}
+                                pxPerBeat={pxPerBeat}
+                                laneHeight={lane.height}
+                                stringCount={laneStringCount(instrumentId)}
+                                instrumentId={instrumentId}
+                                grid={noteGrid}
+                                edgeScroll={noteEdgeScroll}
+                                geometry={surfaceGeometry}
+                              />
+                            );
+                          })
+                        : track.placements.map((placement) => (
+                            <PlacementBlock
+                              key={placement.id}
+                              placement={placement}
+                              pxPerBeat={pxPerBeat}
+                              laneHeight={lane.height}
+                              selected={selectedPlacementIds.includes(placement.id)}
+                              playing={playingPlacementIds.includes(placement.id)}
+                              drifted={placementDrifted(
+                                placement,
+                                libraryById.get(placement.patternSnapshot.id),
+                              )}
+                            />
+                          ))}
                     </div>
                   );
                 })}
@@ -884,7 +1174,12 @@ export function ArrangementGrid({
 
           {nothingPlaced && (
             <p className="pointer-events-none absolute top-2 left-3 font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-              Nothing placed yet — drag a pattern in from the rail
+              {/* Edit mode's rail holds the inspector, not the library, so
+                  "drag a pattern in from the rail" would name a thing that
+                  isn't there. Notes are only editable inside a block. */}
+              {editing
+                ? 'Nothing to edit yet — place a pattern in Pattern mode first'
+                : 'Nothing placed yet — drag a pattern in from the rail'}
             </p>
           )}
         </div>

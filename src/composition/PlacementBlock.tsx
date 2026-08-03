@@ -41,11 +41,24 @@ export const PlacementBlock = memo(function PlacementBlock({
   laneHeight,
   selected,
   playing = false,
+  drifted = false,
 }: {
   placement: Placement;
   pxPerBeat: number;
   laneHeight: number;
   selected: boolean;
+  /**
+   * This block's snapshot no longer says what the library pattern it is named
+   * after says — someone edited it in place (CP-11).
+   *
+   * Marked because placement editing is placement-LOCAL by design: the snapshot
+   * was deep-copied when the block was placed and rippling an edit back to the
+   * library is explicitly deferred. Unmarked, "Riff A" quietly comes to mean
+   * four different things in one arrangement and there is no way to tell which
+   * copy you are listening to. Computed by the grid, not here: it needs the
+   * library, which a block has no business reading.
+   */
+  drifted?: boolean;
   /**
    * The head is inside this block. A SEPARATE state from `selected`, drawn as an
    * outline rather than a fill, because the two are orthogonal and routinely
@@ -72,7 +85,16 @@ export const PlacementBlock = memo(function PlacementBlock({
         data-placement={placement.id}
         data-selected={selected || undefined}
         data-playing={playing || undefined}
-        title={placement.patternSnapshot.name}
+        data-drifted={drifted || undefined}
+        title={
+          // States the DIFFERENCE and not a cause: the snapshot is compared
+          // against the library pattern as it stands now, so this is equally
+          // true of a block edited in place and of one left alone while the
+          // library pattern moved on. Naming either would be a guess.
+          drifted
+            ? `${placement.patternSnapshot.name} — no longer matches the pattern it was placed from`
+            : placement.patternSnapshot.name
+        }
         style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
         className={`absolute flex cursor-grab touch-none flex-col justify-between overflow-hidden rounded-md px-1.5 py-1 select-none ${
           selected
@@ -145,7 +167,13 @@ export const PlacementBlock = memo(function PlacementBlock({
             selected ? 'text-brass-hi' : 'text-ink'
           }`}
         >
+          {/* The mark rides IN the name rather than in the badge row below,
+              because it qualifies the name: it is this copy of "Riff A" that
+              has moved on, and a badge at the other end of the block reads as a
+              separate fact about it. An asterisk for the reason every editor
+              uses one for an unsaved buffer. */}
           {placement.patternSnapshot.name}
+          {drifted && ' *'}
         </span>
         <span className="flex items-end gap-1">
           {transpose !== 0 && (

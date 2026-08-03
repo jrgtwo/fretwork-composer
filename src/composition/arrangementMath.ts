@@ -16,8 +16,10 @@ import {
   placementEffectiveLength,
   placementEndTick,
   snapTick,
+  sortedEvents,
   ticksPerBar,
   ticksPerBeat,
+  type Pattern,
   type PatternEvent,
   type PatternTimeSignature,
   type Placement,
@@ -168,8 +170,11 @@ export type ArrangementMode = 'pattern' | 'edit' | 'voice';
  * tracks plus a ruler fit a laptop viewport without scrolling; edit mode has to
  * hold a full set of string rows, and voice mode a rack face.
  *
- * The edit and voice figures are placeholders owned by CP-11 and CP-14 — those
- * tickets know their content's real height. Nothing in slice 1 renders them.
+ * The EDIT figure is now a fallback rather than the number in use: CP-11 sizes
+ * each edit lane to its own track's string count (`laneHeightsFor`), and this is
+ * what a six-string lane comes to — see `EDIT_STRING_ROW_PX`, which is derived
+ * from it so the two cannot drift. The voice figure is still a placeholder owned
+ * by CP-14.
  */
 export const DEFAULT_LANE_HEIGHTS: Record<ArrangementMode, number> = {
   pattern: 88,
@@ -254,6 +259,52 @@ export function lanesHeight(lanes: readonly LaneRect[]): number {
 /** The lane containing `y`, or null above the first / below the last. */
 export function laneAt(lanes: readonly LaneRect[], y: number): LaneRect | null {
   return lanes.find((lane) => y >= lane.top && y < lane.top + lane.height) ?? null;
+}
+
+/**
+ * How tall one string row is in an edit-mode lane.
+ *
+ * Chosen so a six-string lane is exactly `DEFAULT_LANE_HEIGHTS.edit`, which is
+ * what CP-04 sized the mode for and what a test pins — a bass lane is then four
+ * of these rather than a guitar lane squashed into fewer rows, so the string
+ * pitch is the same down the whole stack and the lanes read as one instrument
+ * rack instead of as several scales.
+ */
+export const EDIT_STRING_ROW_PX = DEFAULT_LANE_HEIGHTS.edit / 6;
+
+/** Edit-mode lane height for a track drawing `stringCount` strings. */
+export function editLaneHeight(stringCount: number): number {
+  if (!Number.isFinite(stringCount)) return DEFAULT_LANE_HEIGHTS.edit;
+  return Math.max(1, Math.floor(stringCount)) * EDIT_STRING_ROW_PX;
+}
+
+/**
+ * How many string rows a lane draws for an instrument.
+ *
+ * LIB-GAP(15): the string set a lane DRAWS comes from the track's own
+ * instrument, while what SOUNDS comes from the composition's single tuning.
+ * These rows are therefore a statement about the neck the part is written on and
+ * about nothing else — do not read audibility into them.
+ */
+export function laneStringCount(instrumentId: string): number {
+  return getInstrument(instrumentId)?.stringCount ?? FALLBACK_STRING_COUNT;
+}
+
+/**
+ * Lane heights that fit edit mode's rows to each track's own string count, and
+ * leave the other two modes on their fixed figures.
+ *
+ * A function rather than a table because that is the case `LaneHeights` grew its
+ * function form for: a bass lane is four rows where a guitar lane is six, and
+ * `laneRects` is the only thing that may decide where the next lane starts.
+ */
+export function laneHeightsFor(
+  instrumentOf: (trackId: string) => string,
+): LaneHeights {
+  return (track, mode) =>
+    mode === 'edit'
+      ? editLaneHeight(laneStringCount(instrumentOf(track.id)))
+      : DEFAULT_LANE_HEIGHTS[mode];
 }
 
 // ------------------------------------------------------------- placements ---
@@ -671,6 +722,160 @@ export function planGroupMove(
       }
       return ticks > 0 ? b.startTick - a.startTick : a.startTick - b.startTick;
     });
+}
+
+// ------------------------------------------------------------- edit mode ---
+// Where a lane's editable note surfaces sit, how far a note may be dragged
+// inside one, and whether a placement's snapshot has drifted from the library
+// pattern it is named after. Pure, like everything else here — the components
+// place a surface with these numbers and do no arithmetic of their own.
+
+/**
+ * One editable window inside a lane: a placement's own note surface.
+ *
+ * ⚠ THE DESIGN DECISION CP-11 HAD TO MAKE, recorded here because the alternative
+ * is reasonable and somebody will re-litigate it. A lane can hold SEVERAL
+ * placements, each with its own snapshot, at different `startTick`s — so either
+ * (a) one surface per placement, positioned and clipped to that placement's
+ * rect, or (b) one surface per lane taking several patterns with tick offsets.
+ *
+ * **(a), one surface per placement.** A `NoteSurface` measures every pointer
+ * position against its own lanes element and draws every note at
+ * `tickToPx(event.startTick)`, so a surface offset to the placement's left edge
+ * IS the placement-local tick frame — no offset has to be threaded through any
+ * gesture. Under (b) every gesture (stamp, drag, marquee, the typed fret) would
+ * have to decide which of several patterns it is acting on, which is the
+ * boundary problem moved inside the surface rather than solved.
+ *
+ * The cost of (a) is that the string rows are drawn once per placement and have
+ * to align across them. They do, by construction and not by luck: every surface
+ * in a lane is handed the SAME `laneAreaHeight` (the lane's own height) and the
+ * SAME `stringCount` (the TRACK's, not the snapshot's), so `laneMetrics` returns
+ * the same row pitch for all of them. A snapshot written for another instrument
+ * therefore draws on the track's neck and its off-neck strings are not drawn at
+ * all — the same honest gap `Timeline` reports as "off-instrument" and
+ * `TrackHeader` reports as stranded notes.
+ */
+export interface EditableSpan {
+  readonly placementId: string;
+  /** LANE-LOCAL box to draw and clip the surface into — `PlacementBlock`'s
+   *  frame, for `PlacementBlock`'s reason: the lane element is already
+   *  positioned. */
+  readonly rect: Rect;
+  /**
+   * How long the window is, in the SNAPSHOT's ticks — nothing may be written
+   * past it.
+   *
+   * It is `placementEffectiveLength`, so a TRIMMED placement's window is shorter
+   * than its snapshot: events past the cut still exist, are not played, and are
+   * drawn outside the surface's `overflow-hidden` box — invisible, unselectable
+   * and undeletable from here. Correct rather than overlooked (they are exactly
+   * the notes the trim excluded, and widening the block in pattern mode brings
+   * them back), but it is not obvious from the number, so it is written down.
+   */
+  readonly windowTicks: Tick;
+}
+
+/**
+ * The editable windows in one track's lane, left to right.
+ *
+ * Only the FIRST repetition of a legacy repeated placement is editable, and that
+ * is deliberate: the later repetitions replay the same snapshot, so editing one
+ * would be editing the first at an offset — two ways to write one note. The
+ * block still DRAWS its restart divisions in pattern mode.
+ *
+ * The accepted cost is that repetitions 2..n draw nothing at all in edit mode, so
+ * they read as empty lane rather than as "not editable here". Left alone rather
+ * than papered over with inert bounded regions: `Placement.repeat` is legacy, the
+ * lib's own note says the new arranger hides it, and this app writes nothing but
+ * 1 — so the case is reachable only through an imported or hand-edited
+ * composition. Revisit if a repeat control is ever exposed.
+ *
+ * A zero-width span is dropped rather than mounted: a surface with no width has
+ * no row to press and no note that can be told from its neighbour, and it would
+ * still cost a mounted component per placement.
+ */
+export function editableSpans(
+  track: PlacedTrack,
+  pxPerBeat: number,
+  laneHeight: number,
+): EditableSpan[] {
+  const spans: EditableSpan[] = [];
+  for (const placement of track.placements) {
+    const rect = placementRepeatRects(placement, pxPerBeat, 0, laneHeight)[0];
+    if (rect === undefined || !(rect.width > 0)) continue;
+    const windowTicks = placementEffectiveLength(placement);
+    if (!(windowTicks > 0)) continue;
+    spans.push({ placementId: placement.id, rect, windowTicks });
+  }
+  return spans;
+}
+
+/**
+ * A key that is equal for two structurally identical values whatever order their
+ * keys were built in.
+ *
+ * `JSON.stringify` is not enough on its own: key order follows construction
+ * order, and a note stamped fresh inside a placement is built by a different
+ * sequence of spreads than the one it was cloned from — so two identical notes
+ * would compare different and every placement would report drift forever.
+ * `undefined` fields are dropped, because clearing an articulation and never
+ * having set it are the same note.
+ */
+function stableKeyOf(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableKeyOf).join(',')}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .filter(([, field]) => field !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([key, field]) => `${key}:${stableKeyOf(field)}`)
+    .join(',')}}`;
+}
+
+/**
+ * The key for one events array, cached on the array's own identity.
+ *
+ * `placementDrifted` runs once per placement in a render body, and a note edit
+ * writes `library.compositions` — so without this, every pointermove of a note
+ * drag re-serialises every event of every placement AND of every library pattern
+ * it is compared against. The lib's ops return the SAME array when they leave a
+ * pattern's events alone, so identity is exactly the right cache key, and a
+ * `WeakMap` means a discarded snapshot takes its entry with it.
+ */
+const keyCache = new WeakMap<readonly PatternEvent[], string>();
+
+function eventsKey(events: readonly PatternEvent[]): string {
+  const cached = keyCache.get(events);
+  if (cached !== undefined) return cached;
+  const key = stableKeyOf(sortedEvents([...events]));
+  keyCache.set(events, key);
+  return key;
+}
+
+/**
+ * Whether a placement's snapshot still says what the library pattern it is named
+ * after says.
+ *
+ * Placement editing is placement-LOCAL by design — the snapshot is deep-copied at
+ * placement time and rippling an edit back to the library is explicitly deferred
+ * (`tickets/INDEX.md`) — so an edited block keeps a name that is no longer the
+ * whole truth. Marking the difference is what stops "Riff A" meaning four
+ * different things in one arrangement.
+ *
+ * EVENTS only. Length is derived from them (`fitPatternDuration`), and name,
+ * tempo and voice are settings rather than the material. Events are compared in
+ * the lib's own sort order so a re-sorted array is not a difference.
+ *
+ * A missing source is NOT drift: the pattern has been deleted from the library,
+ * and there is nothing left for the block to differ FROM.
+ */
+export function placementDrifted(placement: Placement, source: Pattern | undefined): boolean {
+  if (source === undefined) return false;
+  const mine = placement.patternSnapshot.events;
+  // The cheap discriminator first: a different note count is drift and needs no
+  // serialisation at all, which is the common case on a page full of blocks.
+  if (mine.length !== source.events.length) return true;
+  return eventsKey(mine) !== eventsKey(source.events);
 }
 
 // ----------------------------------------------------------- diagnostics ---

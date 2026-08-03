@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useCompositionPlayback } from '../audio/playbackService';
 import { ArrangementGrid, type PatternDragStarter } from './ArrangementGrid';
 import type { ArrangementMode } from './arrangementMath';
-import { ensureComposition } from './compositionService';
+import { closePlacementEditing, ensureComposition } from './compositionService';
 import { PatternLibraryRail } from './PatternLibraryRail';
 import { TransportBar } from './TransportBar';
 
@@ -21,7 +21,7 @@ const MODES: readonly {
   pending?: string;
 }[] = [
   { id: 'pattern', label: 'Pattern' },
-  { id: 'edit', label: 'Edit', disabled: true, pending: 'Edit mode arrives in slice 2' },
+  { id: 'edit', label: 'Edit' },
   { id: 'voice', label: 'Voice', disabled: true, pending: 'Voice mode arrives in slice 3' },
 ];
 
@@ -81,6 +81,32 @@ export function CompositionPage({
     const opened = ensureComposition();
     setOpenFailure(opened.ok ? null : opened.reason);
   }, []);
+
+  /**
+   * ⚠ THE CROSS-PAGE LEAK. Edit mode points the lib's ONE editing pointer at a
+   * placement, and `selectEditingPattern` **is** that pointer's target — so
+   * while a block is open the PATTERN PAGE would draw that block's snapshot, and
+   * `openPlacementForEditing` nulls `editingPatternId` outright, so the library
+   * pattern is closed rather than merely shadowed. `App`'s `ensurePattern` would
+   * then adopt whatever was updated most recently on the way back.
+   *
+   * All three exits are covered by this one effect: the cleanup runs when `mode`
+   * changes (leaving edit mode) and when this page unmounts (leaving the
+   * composition page, which is also every visit to the pattern page). The
+   * leading call covers arriving in a non-edit mode with a block still open —
+   * which a remembered `mode` in `App` makes reachable. `closePlacementEditing`
+   * is a no-op when nothing is open, which is why it can be wired this bluntly.
+   *
+   * Same family as the CP-02 defect where `openBlankComposition` nulled the same
+   * pointer and `App` answered by creating a junk pattern on every call. Covered
+   * by a regression test, not a manual check — tests/EditMode.test.tsx.
+   */
+  useEffect(() => {
+    if (mode !== 'edit') closePlacementEditing();
+    return () => {
+      closePlacementEditing();
+    };
+  }, [mode]);
 
   return (
     <div className="grid min-h-0 grid-rows-[auto_1fr]">
@@ -168,9 +194,12 @@ export function CompositionPage({
           ) : (
             <div className="flex flex-1 items-center justify-center px-3 text-center">
               <span className="font-mono text-[9px] leading-relaxed tracking-[0.14em] text-ink-mut uppercase">
-                {/* TODO(CP-12 / CP-15): the note inspector and the voice list. */}
+                {/* TODO(CP-12 / CP-15): the note inspector and the voice list.
+                    Edit mode's lanes are live — this is the rail that is not,
+                    which is why the wording says what is missing rather than
+                    what has not been built. */}
                 {mode === 'edit'
-                  ? 'Note inspector arrives in slice 2'
+                  ? 'Note inspector arrives in CP-12'
                   : 'Voice list arrives in slice 3'}
               </span>
             </div>

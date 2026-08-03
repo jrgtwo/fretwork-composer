@@ -41,12 +41,18 @@ const noEdgeScroll: EdgeAutoScroll = { engaged: false, track: () => {}, end: () 
 const LANE_AREA_H = 40;
 const ROW_PX = 22;
 
+/** The pattern under test, read fresh so the surface is handed whatever the
+ *  seam last wrote — the prop is now the surface's only source (CP-11). */
+const editing = () => getEditingPattern()!;
+
 // `string`, not `FretInstrumentId`, because the prop is — the surface names its
 // rows off the catalog and draws blanks for an instrument that isn't in it, which
 // is a case reachable without casting past the lib's union.
 function surface(instrumentId: string, stringCount: number) {
   return (
     <NoteSurface
+      pattern={editing()}
+      focused
       pxPerBeat={48}
       laneAreaHeight={LANE_AREA_H}
       stringCount={stringCount}
@@ -100,6 +106,8 @@ describe('NoteSurface at a string count other than six', () => {
   it('divides the lane area between however many strings there are', () => {
     const { unmount } = render(
       <NoteSurface
+        pattern={editing()}
+        focused
         pxPerBeat={48}
         laneAreaHeight={300}
         stringCount={4}
@@ -114,6 +122,8 @@ describe('NoteSurface at a string count other than six', () => {
 
     render(
       <NoteSurface
+        pattern={editing()}
+        focused
         pxPerBeat={48}
         laneAreaHeight={300}
         stringCount={6}

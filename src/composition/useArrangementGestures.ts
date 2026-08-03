@@ -374,11 +374,24 @@ export interface ArrangementGesturesOptions {
    *  guessing a geometry. */
   geometry(): GestureGeometry | null;
   scrollerRef: React.RefObject<HTMLDivElement | null>;
+  /**
+   * Whether this machinery is the one the lane area is currently driven by.
+   * Defaults to true.
+   *
+   * False in EDIT MODE (CP-11), where the lanes are note surfaces and those own
+   * the pointer. Two gesture systems on one surface is how a drag ends up doing
+   * two things — but the sharper reason is the keyboard: these shortcuts are on
+   * `window` and so are `NoteSurface`'s, so ⌘Z would pop an arrangement step AND
+   * a note step for one press, and Backspace would delete the selected BLOCK
+   * while the user meant the selected note.
+   */
+  enabled?: boolean;
 }
 
 export function useArrangementGestures({
   geometry,
   scrollerRef,
+  enabled = true,
 }: ArrangementGesturesOptions): ArrangementGestures {
   const selectedIds = useSelectedPlacementIds();
   const [preview, setPreview] = useState<GesturePreview | null>(null);
@@ -400,6 +413,10 @@ export function useArrangementGestures({
   selectedRef.current = selectedIds;
   const geometryRef = useRef(geometry);
   geometryRef.current = geometry;
+  // A ref, not a dependency: the keyboard effect installs its listeners once and
+  // must not re-install them on a mode change, which would drop a run in flight.
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
 
   // Drives the view while a drag is held near the lane area's edge, so a block
   // can be taken somewhere that wasn't on screen when the drag started.
@@ -729,6 +746,9 @@ export function useArrangementGestures({
     // `ArrangementGestures`, and a right- or middle-press that reached it would
     // start a drag whose `pointerup` may never arrive.
     if (e.button !== 0) return;
+    // The rail holds the note inspector in edit mode, so nothing there can start
+    // a pattern drag — but the entry point is public and must refuse anyway.
+    if (!enabled) return;
     abortInFlight();
     const pattern = findLibraryPattern(patternId);
     if (!pattern) return;
@@ -799,6 +819,7 @@ export function useArrangementGestures({
 
   const onLanesPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    if (!enabled) return;
     abortInFlight();
     const geo = geometry();
     if (!geo) return;
@@ -834,6 +855,7 @@ export function useArrangementGestures({
   };
 
   const onLanesPointerMove = (e: React.PointerEvent) => {
+    if (!enabled) return;
     const geo = geometry();
     if (!geo) return;
     const point = geo.toContent(e.clientX, e.clientY);
@@ -867,6 +889,13 @@ export function useArrangementGestures({
     };
 
     const onKey = (e: KeyboardEvent) => {
+      // Not ours in edit mode — `NoteSurface` answers the same keys against the
+      // notes. Still ends a run in flight: a mode switch mid-hold must not leave
+      // the bracket open.
+      if (!enabledRef.current) {
+        endTransposeRun();
+        return;
+      }
       const target = e.target as HTMLElement | null;
       // A `select` counts: arrows are how you change one.
       if (target?.matches('input, textarea, select, [contenteditable]')) {
