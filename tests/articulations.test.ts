@@ -5,6 +5,7 @@ import {
   toEventPatch,
   readPitchSpec,
   tieTargetFor,
+  tieLeaderOf,
   articulationsLostToTie,
   EMPTY_PITCH,
   type PitchSpec,
@@ -149,5 +150,45 @@ describe('ties', () => {
   it('reports nothing for a plain follower', () => {
     expect(articulationsLostToTie({})).toEqual([]);
     expect(articulationsLostToTie(undefined)).toEqual([]);
+  });
+
+  // The whole follower EVENT is discarded, so every flag the note controls
+  // offer goes with it — `dead` included, which the list used to omit.
+  it('reports every technique flag the merge discards', () => {
+    expect(
+      articulationsLostToTie({
+        hammerOn: true,
+        pullOff: true,
+        palmMute: true,
+        ghost: true,
+        dead: true,
+        tap: true,
+      }),
+    ).toEqual(['hammerOn', 'pullOff', 'palmMute', 'ghost', 'dead', 'tap']);
+  });
+
+  describe('tieLeaderOf', () => {
+    const follower = { id: 'b', stringIndex: 4, fret: 5, startTick: 240, durationTicks: 240 };
+
+    it('finds the note a follower is tied from', () => {
+      const events = [{ ...lead, tieToNext: true }, follower];
+      expect(tieLeaderOf(events, follower)?.id).toBe('a');
+    });
+
+    it('reports nothing when the leader is not tied', () => {
+      expect(tieLeaderOf([lead, follower], follower)).toBeUndefined();
+    });
+
+    // `mergeTies` ignores a tie whose adjacency doesn't hold and plays both
+    // notes, so a follower the lib will not swallow is not a follower.
+    it('reports nothing when the tie is one the lib will not merge', () => {
+      const stranded = { ...follower, fret: 9 };
+      expect(tieLeaderOf([{ ...lead, tieToNext: true }, stranded], stranded)).toBeUndefined();
+    });
+
+    it('reports nothing for the leader itself', () => {
+      const events = [{ ...lead, tieToNext: true }, follower];
+      expect(tieLeaderOf(events, events[0])).toBeUndefined();
+    });
   });
 });

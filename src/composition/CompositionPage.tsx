@@ -3,6 +3,7 @@ import { useCompositionPlayback } from '../audio/playbackService';
 import { ArrangementGrid, type PatternDragStarter } from './ArrangementGrid';
 import type { ArrangementMode } from './arrangementMath';
 import { closePlacementEditing, ensureComposition } from './compositionService';
+import { NoteInspectorRail } from './NoteInspectorRail';
 import { PatternLibraryRail } from './PatternLibraryRail';
 import { TransportBar } from './TransportBar';
 
@@ -179,8 +180,8 @@ export function CompositionPage({
 
         {/* The rail is what CHANGES between the three modes, along with what a
             lane draws — the ruler, the headers and the scroll position never do
-            (tickets/composition-page/README.md). Pattern mode gets the library;
-            the note inspector and the voice list are slices 2 and 3. */}
+            (tickets/composition-page/README.md). Pattern mode gets the library,
+            edit mode the note inspector; the voice list is slice 3. */}
         <aside
           aria-label={mode === 'pattern' ? 'Pattern library' : 'Inspector'}
           className="rail flex min-h-0 flex-col"
@@ -191,16 +192,19 @@ export function CompositionPage({
                 patternDragRef.current?.(patternId, e)
               }
             />
+          ) : mode === 'edit' ? (
+            // Follows the NOTE selection, not the placement selection — see the
+            // header of NoteInspectorRail. It is always mounted here, empty
+            // state included, because a rail that appeared and vanished with the
+            // selection would move the grid beside it on every click.
+            <NoteInspectorRail />
           ) : (
             <div className="flex flex-1 items-center justify-center px-3 text-center">
               <span className="font-mono text-[9px] leading-relaxed tracking-[0.14em] text-ink-mut uppercase">
-                {/* TODO(CP-12 / CP-15): the note inspector and the voice list.
-                    Edit mode's lanes are live — this is the rail that is not,
-                    which is why the wording says what is missing rather than
-                    what has not been built. */}
-                {mode === 'edit'
-                  ? 'Note inspector arrives in CP-12'
-                  : 'Voice list arrives in slice 3'}
+                {/* TODO(CP-15): the voice list. The lanes it belongs to are not
+                    built either, which is why the wording says what is missing
+                    rather than what has not been built. */}
+                Voice list arrives in slice 3
               </span>
             </div>
           )}

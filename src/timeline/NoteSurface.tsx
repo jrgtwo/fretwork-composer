@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { pitchClass, snapTick, type Pattern, type PatternEvent, type Tick } from '@fretwork/lib';
+import { snapTick, type Pattern, type PatternEvent, type Tick } from '@fretwork/lib';
 import { readNotePitch } from '../patterns/articulations';
-import { openStrings, stringLabels } from '../reference/tabLayout';
+import { pitchNamer } from './noteModel';
+import { stringLabels } from '../reference/tabLayout';
 import { NotePopup } from './NotePopup';
 import { useActiveEventIds } from '../audio/playbackService';
 import {
@@ -34,15 +35,6 @@ import {
   type SnapOption,
 } from './timelineMath';
 
-/**
- * Sharp spellings, because a fretboard has no key to spell against — and the lib's
- * `noteAt` cannot supply them: Tonal's `Note.fromMidi` returns FLATS (`noteAt('C4',1)`
- * is `'Db4'`), so routing this through the lib would respell every accidental in the
- * editor. `spellInKey` is the lib's answer to spelling and it needs a tonic nothing
- * here has. The typographic `♯` is deliberate: it is what an 8px glyph inside a note
- * block should be, not a hash.
- */
-const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
 const DRAG_THRESHOLD = 3;
 
 /**
@@ -55,29 +47,6 @@ const DRAG_THRESHOLD = 3;
  * single-digit frets feel stuck together.
  */
 const FRET_TYPING_MS = 800;
-
-/**
- * What a fret on a given string is called, off the instrument's own open strings
- * — a bass or a ukulele names its notes from its own tuning, read through the one
- * resolver `stringLabels` uses so the gutter and the notes beside it can't come
- * from two different tunings.
- *
- * No octave: a note block labels the pitch, not the register.
- *
- * `''` for a string the tuning has no entry for — a blank name is honest where
- * the guitar's would be a confident wrong answer. The tuning is the instrument's
- * declared default, the same choice and the same caveat as `stringLabels`:
- * nothing owns instrument/tuning/capo yet, so these names and the notes you hear
- * agree only as long as both keep landing on the same tuning (FOLLOW-UPS §3).
- */
-function pitchNamer(instrumentId: string, stringCount: number) {
-  const opens = openStrings(instrumentId, stringCount);
-  return (stringIndex: number, fret: number): string => {
-    const open = opens[stringIndex];
-    if (open === undefined) return '';
-    return NOTE_NAMES[(pitchClass(open) + fret) % 12];
-  };
-}
 
 /**
  * Marks drawn on a note, positioned where the articulation actually happens:
@@ -317,8 +286,10 @@ export interface NoteSurfaceProps {
    */
   windowTicks?: Tick | null;
   /**
-   * Whether a selected note offers the ⋯ options popup. False in an arrangement
-   * lane, where the same controls belong in the rail — see TODO(CP-12) below.
+   * Whether a selected note offers the ⋯ options popup. The popup belongs to
+   * the PATTERN PAGE only: an arrangement lane passes false, because CP-12's
+   * `NoteInspectorRail` is already showing the same controls for the same
+   * selection in the rail beside it.
    */
   showNoteOptions?: boolean;
   /** Zoom, owned by whatever chrome hosts this. */
@@ -987,7 +958,8 @@ export function NoteSurface({
           more coupling to NotePopup, not less.
           `showNoteOptions` is false in an arrangement lane: a popup anchored to
           a note inside a clipped, scrolling lane stack has nowhere good to go,
-          and TODO(CP-12) puts the same controls in the rail instead. */}
+          and `NoteInspectorRail` puts the same controls — literally the same
+          components, from ./NoteControls — in the rail instead. */}
       {showNoteOptions && popupNote && popupFor && (
         <div className="fixed inset-0 z-50" onPointerDown={() => setPopupFor(null)}>
           <AnchoredTo rect={popupFor.anchor}>

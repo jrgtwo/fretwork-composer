@@ -191,7 +191,7 @@ export function readPitchSpec(event: {
 /** The fields a tied follower would lose when it's folded into its leader.
  *  `velocity` is deliberately absent even though it is lost too: it is only ever
  *  written alongside `dynamic`, so listing both would report the same loss twice. */
-const MERGED_AWAY = ['vibrato', 'bend', 'slide', 'hammerOn', 'pullOff', 'palmMute', 'ghost', 'tap', 'dynamic'] as const;
+const MERGED_AWAY = ['vibrato', 'bend', 'slide', 'hammerOn', 'pullOff', 'palmMute', 'ghost', 'dead', 'tap', 'dynamic'] as const;
 
 interface TieCandidate {
   id: string;
@@ -229,6 +229,24 @@ export function tieTargetFor<T extends TieCandidate>(
  * the second note is lost — including the "tie a second note to add vibrato at
  * the end" trick, which looks reasonable but does nothing.
  */
+/**
+ * The note this one is tied FROM — i.e. the leader that will swallow it.
+ *
+ * The other half of the same gap: `articulationsLostToTie` asks "what does the
+ * follower lose", this asks "am I the follower". Only a tie the lib will
+ * actually merge counts, because `mergeTies` ignores a `tieToNext` whose
+ * adjacency doesn't hold and lets both notes play normally — a warning there
+ * would be a lie.
+ */
+export function tieLeaderOf<T extends TieCandidate & { tieToNext?: boolean }>(
+  events: readonly T[],
+  event: TieCandidate,
+): T | undefined {
+  return events.find(
+    (candidate) => candidate.tieToNext && tieTargetFor(events, candidate)?.id === event.id,
+  );
+}
+
 export function articulationsLostToTie(
   follower: Partial<Record<(typeof MERGED_AWAY)[number], unknown>> | undefined,
 ): string[] {

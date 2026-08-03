@@ -1,96 +1,41 @@
-import type { DynamicMark, PatternEvent } from '@fretwork/lib';
+import type { PatternEvent } from '@fretwork/lib';
 import {
   deleteNotes,
   setArticulations,
   setNoteDynamic,
   setNoteFret,
   setNotePitch,
-  DYNAMICS,
   MAX_FRET,
 } from '../patterns/patternService';
 import {
   articulationsLostToTie,
   readNotePitch,
+  tieLeaderOf,
   tieTargetFor,
-  type NotePitch,
 } from '../patterns/articulations';
+import {
+  DynamicControls,
+  FlagControls,
+  PitchControls,
+  TieRow,
+  VibratoRow,
+} from './NoteControls';
+import { applyPitchEdit } from './noteModel';
 
 /**
- * Per-note editing, in tab vocabulary.
+ * Per-note editing, in tab vocabulary — anchored to the note on the PATTERN
+ * PAGE.
  *
- * Articulations are independent fields in the lib, so these are toggles rather
- * than one choice — a note can be a palm-muted ghost hammer-on that bends and
- * has vibrato. The pitch controls name what a guitarist would say ("slide in
- * from below", "bend a full step"), not curve positions.
+ * The controls themselves live in `./NoteControls` and are shared verbatim with
+ * `src/composition/NoteInspectorRail.tsx`, which offers the same set in the
+ * composition page's right rail (CP-12). What is local to this file is the
+ * popup's own frame: the header with the fret stepper, the close button and the
+ * footer — the parts that only make sense for ONE note anchored to ONE box.
+ *
+ * An arrangement lane suppresses this popup entirely (`showNoteOptions`): it
+ * would be anchored to a note inside a clipped, scrolling lane stack, and the
+ * rail is already showing the same controls for the same selection.
  */
-
-/** Bend depths guitarists actually use. */
-const DEPTHS = [
-  { semitones: 1, label: '½' },
-  { semitones: 2, label: 'full' },
-  { semitones: 3, label: '1½' },
-  { semitones: 4, label: '2' },
-] as const;
-
-/** What the marks are called out loud — the abbreviations alone are ambiguous
- *  to anyone who doesn't already read them. */
-const DYNAMIC_NAMES: Record<DynamicMark, string> = {
-  ppp: 'pianississimo — barely audible',
-  pp: 'pianissimo — very soft',
-  p: 'piano — soft',
-  mp: 'mezzo-piano — moderately soft',
-  mf: 'mezzo-forte — moderately loud',
-  f: 'forte — loud',
-  ff: 'fortissimo — very loud',
-  fff: 'fortississimo — as loud as it goes',
-};
-
-const FLAGS = [
-  { key: 'hammerOn', label: 'H-on' },
-  { key: 'pullOff', label: 'P-off' },
-  { key: 'palmMute', label: 'P.Mute' },
-  { key: 'ghost', label: 'Ghost' },
-  { key: 'dead', label: 'Dead' },
-  { key: 'tap', label: 'Tap' },
-] as const;
-
-function Choice({
-  on,
-  label,
-  title,
-  onClick,
-}: {
-  on: boolean;
-  label: string;
-  title?: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-pressed={on}
-      onClick={onClick}
-      className={`pressable rounded-lg px-2 py-1.5 font-mono text-[9px] font-bold tracking-[0.06em] uppercase ${
-        on ? 'control-accent' : 'control'
-      }`}
-    >
-      {label}
-    </button>
-  );
-}
-
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-1.5 flex items-center gap-1.5">
-      <span className="w-14 font-mono text-[9px] tracking-[0.1em] text-ink-mut uppercase">
-        {label}
-      </span>
-      {children}
-    </div>
-  );
-}
-
 export function NotePopup({
   event,
   events,
@@ -104,16 +49,14 @@ export function NotePopup({
   onClose: () => void;
 }) {
   const pitch = readNotePitch(event);
-  const update = (next: NotePitch) => setNotePitch(event.id, next);
 
   // A tie only sounds if the lib can merge it: same string, same fret, starting
   // exactly where this note ends. Offering it otherwise would do nothing.
   const tieTarget = tieTargetFor(events, event);
   const lostToTie = event.tieToNext ? articulationsLostToTie(tieTarget) : [];
-
-  /** Selecting the active option again turns it off. */
-  const pick = <K extends keyof NotePitch>(key: K, value: NotePitch[K]) =>
-    update({ ...pitch, [key]: pitch[key] === value ? undefined : value });
+  // …and this note may be the one being swallowed, in which case nothing set
+  // below it sounds at all.
+  const mergedIntoPrevious = tieLeaderOf(events, event) !== undefined;
 
   return (
     <div
@@ -154,175 +97,43 @@ export function NotePopup({
         </button>
       </div>
 
-      {/* Slides read left-to-right the way they're played: into the note, then out. */}
-      <Row label="Slide in">
-        <Choice
-          on={pitch.slideIn === 'below'}
-          label="↗ below"
-          title="Slide up into the note"
-          onClick={() => pick('slideIn', 'below')}
-        />
-        <Choice
-          on={pitch.slideIn === 'above'}
-          label="↘ above"
-          title="Slide down into the note"
-          onClick={() => pick('slideIn', 'above')}
-        />
-      </Row>
+      <PitchControls
+        pitch={pitch}
+        onEdit={(edit) => setNotePitch(event.id, applyPitchEdit(pitch, edit))}
+      />
 
-      <Row label="Slide out">
-        <Choice
-          on={pitch.slideOut === 'up'}
-          label="out ↗"
-          title="Slide up off the end of the note"
-          onClick={() => pick('slideOut', 'up')}
-        />
-        <Choice
-          on={pitch.slideOut === 'down'}
-          label="out ↘"
-          title="Slide down off the end of the note"
-          onClick={() => pick('slideOut', 'down')}
-        />
-      </Row>
+      <VibratoRow
+        vibrato={event.vibrato}
+        onToggle={(next) => setArticulations(event.id, { vibrato: next })}
+      />
 
-      <Row label="Bend">
-        {(
-          [
-            { kind: 'bend', label: '⤴ bend' },
-            { kind: 'bend-release', label: '⤴⤵ release' },
-            { kind: 'pre-bend', label: 'pre-bend' },
-          ] as const
-        ).map(({ kind, label }) => (
-          <Choice
-            key={kind}
-            on={pitch.bend?.kind === kind}
-            label={label}
-            onClick={() =>
-              update({
-                ...pitch,
-                bend:
-                  pitch.bend?.kind === kind
-                    ? undefined
-                    : { kind, semitones: pitch.bend?.semitones ?? 2 },
-              })
-            }
-          />
-        ))}
-      </Row>
+      <TieRow
+        tied={!!event.tieToNext}
+        canTie={!!tieTarget}
+        lostToTie={lostToTie}
+        mergedIntoPrevious={mergedIntoPrevious}
+        onToggle={(next) => setArticulations(event.id, { tieToNext: next })}
+      />
 
-      {pitch.bend && (
-        <Row label="Depth">
-          {DEPTHS.map(({ semitones, label }) => (
-            <Choice
-              key={label}
-              on={pitch.bend!.semitones === semitones}
-              label={label}
-              title={`${label} step bend`}
-              onClick={() => update({ ...pitch, bend: { ...pitch.bend!, semitones } })}
-            />
-          ))}
-          <span className="font-mono text-[9px] text-ink-mut">steps</span>
-        </Row>
-      )}
-
-      {pitch.bend && (pitch.slideIn || pitch.slideOut) && (
-        <p className="mb-1.5 font-mono text-[9px] leading-relaxed text-ink-mut">
-          Bend and slide share one pitch line — they'll blend into a single move.
-        </p>
-      )}
-
-      <Row label="Vibrato">
-        {(['slight', 'wide'] as const).map((intensity) => (
-          <Choice
-            key={intensity}
-            on={event.vibrato === intensity}
-            label={intensity}
-            title="Applies across the whole note — length isn't adjustable yet"
-            onClick={() =>
-              setArticulations(event.id, {
-                vibrato: event.vibrato === intensity ? undefined : intensity,
-              })
-            }
-          />
-        ))}
-        <span className="font-mono text-[9px] text-ink-mut">whole note</span>
-      </Row>
-
-      <Row label="Tie">
-        <button
-          type="button"
-          aria-pressed={!!event.tieToNext}
-          disabled={!tieTarget}
-          title={
-            tieTarget
-              ? 'Ring on into the next note instead of re-picking it'
-              : 'Needs a note starting exactly where this one ends, on the same string and fret'
-          }
-          onClick={() =>
-            setArticulations(event.id, { tieToNext: event.tieToNext ? undefined : true })
-          }
-          className={`pressable rounded-lg px-2 py-1.5 font-mono text-[9px] font-bold uppercase disabled:cursor-not-allowed disabled:opacity-40 ${
-            event.tieToNext ? 'control-accent' : 'control'
-          }`}
-        >
-          ⌒ tie
-        </button>
-        {!tieTarget && (
-          <span className="font-mono text-[9px] text-ink-mut">no adjacent note</span>
-        )}
-      </Row>
-
-      {lostToTie.length > 0 && (
-        <p className="mb-1.5 font-mono text-[9px] leading-relaxed text-ink-mut">
-          The tied note's {lostToTie.join(', ')} won't sound — tied notes merge into one.
-        </p>
-      )}
-
-      {/* Loudness is offered as dynamics rather than a number because that is
-          how it's read and played. `dynamic` is display-only in the lib, so the
-          service writes the matching `velocity` — the field playback actually
-          reads — at the same time. */}
       <div className="mt-2.5 border-t border-line pt-2.5">
-        <Row label="Dynamic">
-          {/* A note can carry `velocity` with no mark — nothing here writes that,
-              but an imported or persisted pattern can. Reporting it as unset would
-              contradict both the timeline's bar and what playback does. */}
-          <span className="font-mono text-[9px] text-ink-mut">
-            {event.dynamic
-              ? DYNAMIC_NAMES[event.dynamic]
-              : event.velocity !== undefined
-                ? `${Math.round(event.velocity * 100)}% — no mark`
-                : 'unset — plays at full'}
-          </span>
-        </Row>
-        <div role="group" aria-label="Dynamic" className="grid grid-cols-4 gap-1.5">
-          {DYNAMICS.map((mark) => (
-            <Choice
-              key={mark}
-              on={event.dynamic === mark}
-              label={mark}
-              title={DYNAMIC_NAMES[mark]}
-              onClick={() => setNoteDynamic(event.id, event.dynamic === mark ? undefined : mark)}
-            />
-          ))}
-        </div>
+        <DynamicControls
+          dynamic={event.dynamic}
+          velocity={event.velocity}
+          onPick={(next) => setNoteDynamic(event.id, next)}
+        />
       </div>
 
-      <div className="mt-2.5 mb-2.5 grid grid-cols-3 gap-1.5 border-t border-line pt-2.5">
-        {FLAGS.map(({ key, label }) => (
-          <Choice
-            key={key}
-            on={!!event[key]}
-            label={label}
-            onClick={() => setArticulations(event.id, { [key]: event[key] ? undefined : true })}
-          />
-        ))}
+      <div className="mt-2.5 mb-2.5 border-t border-line pt-2.5">
+        <FlagControls
+          isOn={(key) => !!event[key]}
+          onToggle={(key, next) => setArticulations(event.id, { [key]: next })}
+        />
       </div>
 
       <div className="flex gap-1.5 border-t border-line pt-2.5">
         <button
           type="button"
-          onClick={() => update({})}
+          onClick={() => setNotePitch(event.id, {})}
           className="pressable control rounded-lg px-2.5 py-1.5 font-mono text-[9px] font-bold uppercase"
         >
           Clear pitch
