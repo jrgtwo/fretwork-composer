@@ -75,7 +75,9 @@ const VOICE_COMMIT_MS = 120;
  * `text-[8.5px]`, which renders "Karoryfer Green Guitar" and "Karoryfer Black
  * Guitar" identically. jsdom has no layout and cannot fail on that, so it is
  * written down instead: a full-width row is what makes the option names
- * readable, and it is where CP-14's rack will open too.
+ * readable. That same argument is why CP-14's rack did NOT open into this slot —
+ * it takes the track's whole lane in voice mode (`TrackVoiceRack`). This strip
+ * chooses the voice; the rack tunes it.
  *
  * ── The two confirmations ────────────────────────────────────────────────────
  *
@@ -348,8 +350,13 @@ export function TrackControls({
             outside, and "which voice is this track on" is the question the strip
             exists to answer.
 
-            TODO(CP-14): the rack opens HERE, into the same slot, and this plain
-            `<select>` becomes its picker row. */}
+            ⚠ CP-14 did NOT open here, and the TODO that said it would was
+            wrong. A rack does not fit a 200 px column — that is the same width
+            argument that put this picker behind a button in the first place — so
+            voice mode gives each track's whole LANE to its rack instead
+            (`TrackVoiceRack`), which is also the only layout where two tracks'
+            settings are readable at once. This picker stays, in every mode: it
+            is what CHOOSES the voice, where the rack TUNES it. */}
         <button
           type="button"
           aria-label={`Voice for ${track.name}`}
@@ -469,8 +476,9 @@ export function TrackControls({
               same variant the pattern page edits, so a later Save retunes both.
               That is intended and deliberately not forked per track.
 
-              The rack is TODO(CP-14); the variant list and Save / Save-as /
-              Rename are TODO(CP-15). This is a plain picker. */}
+              The TUNING is voice mode's rack (CP-14); the variant list and
+              Save / Save-as / Rename are TODO(CP-15). This is a plain picker,
+              and staying one is the point. */}
           <select
             aria-label={`Voice for ${track.name}`}
             // The resolved preset, which is the only place the fallback's

@@ -155,7 +155,7 @@ describe('page routing', () => {
 });
 
 describe('composition mode bar', () => {
-  it('offers three modes with Pattern active, and only the unbuilt one inert', async () => {
+  it('offers three modes, all built, with Pattern active', async () => {
     render(<App />);
     await goTo('Composition');
 
@@ -163,12 +163,12 @@ describe('composition mode bar', () => {
       'aria-pressed',
       'true',
     );
-    // Edit mode landed in CP-11; voice mode is slice 3.
+    // Edit mode landed in CP-11, voice mode in CP-14. The `pending` tooltip and
+    // the `disabled` flag went with the placeholder they described.
     expect(modes().getByRole('button', { name: 'Edit mode' })).toBeEnabled();
     const voice = modes().getByRole('button', { name: 'Voice mode' });
-    expect(voice).toBeDisabled();
-    // The slice it lands in, said on the control rather than nowhere.
-    expect(voice).toHaveAttribute('title', expect.stringMatching(/slice 3/));
+    expect(voice).toBeEnabled();
+    expect(voice).not.toHaveAttribute('title');
   });
 });
 

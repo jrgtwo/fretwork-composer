@@ -34,6 +34,15 @@ export function App() {
   // bug as a pane that forgets its view on every collapse.
   const [mode, setMode] = useState<ArrangementMode>('pattern');
 
+  // Which voice racks are folded — the same rule again, one level deeper: the
+  // racks are drawn by lanes that are replaced on every mode switch, inside a
+  // page that unmounts on every visit to the pattern page. The UNSAVED EDITS
+  // those racks hold are deliberately NOT here, and that is not an
+  // inconsistency: `playbackService` builds each track's voice from them, so
+  // they have to be readable without a render — see `voice/trackVoiceDrafts`,
+  // which is above every component for both reasons at once.
+  const [collapsedRacks, setCollapsedRacks] = useState<readonly string[]>([]);
+
   // Which reference view is showing is pane state, but it can't live in the pane:
   // `PaneStack` unmounts a collapsed pane's body — deliberately, so a folded-away pane
   // runs no observers — and that unmount would forget it. Anything that has to outlive
@@ -86,7 +95,15 @@ export function App() {
   }
 
   if (page === 'composition') {
-    return <CompositionShell onPageChange={setPage} mode={mode} onModeChange={setMode} />;
+    return (
+      <CompositionShell
+        onPageChange={setPage}
+        mode={mode}
+        onModeChange={setMode}
+        collapsedRacks={collapsedRacks}
+        onCollapsedRacksChange={setCollapsedRacks}
+      />
+    );
   }
 
   // No heights here on purpose. Every pane is as tall as its content needs and the
@@ -158,10 +175,14 @@ function CompositionShell({
   onPageChange,
   mode,
   onModeChange,
+  collapsedRacks,
+  onCollapsedRacksChange,
 }: {
   onPageChange: (page: PageId) => void;
   mode: ArrangementMode;
   onModeChange: (mode: ArrangementMode) => void;
+  collapsedRacks: readonly string[];
+  onCollapsedRacksChange: (collapsed: readonly string[]) => void;
 }) {
   const composition = useEditingComposition();
 
@@ -179,7 +200,12 @@ function CompositionShell({
       page="composition"
       onPageChange={onPageChange}
     >
-      <CompositionPage mode={mode} onModeChange={onModeChange} />
+      <CompositionPage
+        mode={mode}
+        onModeChange={onModeChange}
+        collapsedRacks={collapsedRacks}
+        onCollapsedRacksChange={onCollapsedRacksChange}
+      />
     </AppShell>
   );
 }

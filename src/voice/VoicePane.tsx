@@ -53,13 +53,13 @@ import {
 } from './voiceService';
 import {
   PARAM_SECTIONS,
-  sectionApplies,
+  enabledParamOf,
+  sectionPresence,
   type EnumParam,
   type Param,
   type ParamSection,
   type SectionId,
   type SliderParam,
-  type ToggleParam,
 } from './paramSchema';
 import { getAtPath, removeAtPath, setAtPath } from './presetPaths';
 import { VoiceSection, type SectionStatus } from './VoiceSection';
@@ -139,17 +139,15 @@ function warmSampleBanks(banks: ReadonlyArray<Readonly<Record<string, string>>>)
   }, WARM_COALESCE_MS);
 }
 
-/** The stage's `enabled` param, if it has one — bypass is a param, not a section flag. */
-const enabledParamOf = (section: ParamSection): ToggleParam | undefined =>
-  section.params.find(
-    (param): param is ToggleParam => param.kind === 'toggle' && param.path.endsWith('.enabled'),
-  );
-
-function statusOf(preset: VoicePreset, section: ParamSection): SectionStatus {
-  if (!sectionApplies(preset, section)) return 'absent';
-  const toggle = enabledParamOf(section);
-  return toggle && getAtPath(preset, toggle.path) === false ? 'bypassed' : 'active';
-}
+/**
+ * Both moved to `paramSchema` when CP-14 gave the composition page a second
+ * renderer of this same table: "which state is this stage in" is the schema's
+ * rule, and a second copy of it is a lamp that disagrees with the ear.
+ * `SectionStatus` and `SectionPresence` are the same three words by
+ * construction, which the aliases below keep honest.
+ */
+const statusOf = (preset: VoicePreset, section: ParamSection): SectionStatus =>
+  sectionPresence(preset, section);
 
 export function VoicePane({
   working,

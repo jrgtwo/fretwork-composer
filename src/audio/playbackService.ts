@@ -60,6 +60,10 @@ import {
   type Result,
 } from '../composition/compositionService';
 import { readTrackVoiceRef, readVoiceRef, resolveVoicePreset } from '../voice/voiceService';
+import {
+  readTrackVoiceDraft,
+  subscribeTrackVoiceDrafts,
+} from '../voice/trackVoiceDrafts';
 import { wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
@@ -765,13 +769,97 @@ const loopBoundaryOf = (composition: Composition): number =>
  * `Voice` through this factory and disposes the old one after a release tail, so
  * the rebuild-versus-retune classification the pattern path needs simply does not
  * arise for a track — there is nothing live to retune.
+ *
+ * CP-14: a track's rack edits go through `trackVoiceDrafts`, which holds a
+ * preset no variant has yet — so nothing the lib resolves can see it and the
+ * draft has to be built directly, exactly as `buildVoice` does for the pattern
+ * page's working copy. `new Voice(…, { autoConnectToMaster: false })` is the
+ * same opt-out `buildEffectiveVoice` is passed, and it is REQUIRED rather than
+ * preferred: a voice that wired itself to `MasterBus` would ignore its track's
+ * fader, mute and solo entirely. `readTrackVoiceDraft` is also what retires a
+ * draft whose voice choice has moved on, so this is the call that makes a
+ * changed ref win over a stale edit.
  */
 function buildTrackVoice(track: Track): Voice {
+  const draft = readTrackVoiceDraft(track);
+  if (draft) return new Voice(draft, { autoConnectToMaster: false });
   return buildEffectiveVoice(trackInstrumentId(track), {
     autoConnectToMaster: false,
     voiceRef: readTrackVoiceRef(track),
   }).voice;
 }
+
+/** One trailing timer PER TRACK — see {@link scheduleTrackVoiceRebuild} for why
+ *  this is a map and not a single handle. */
+const pendingTrackRebuilds = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelPendingTrackRebuilds(): void {
+  pendingTrackRebuilds.forEach((timer) => clearTimeout(timer));
+  pendingTrackRebuilds.clear();
+}
+
+/**
+ * Make one track's unsaved voice edit audible.
+ *
+ * LIB-GAP(19): this is a full voice REBUILD for what is a knob turn. The pattern
+ * page retunes in place — `Voice.swapPreset` mutates the live chain, which is
+ * what makes dragging a slider on a live voice viable at all — but
+ * `MultiTrackPlayback` keeps its per-track `Voice` objects private and exposes
+ * only `setTrackVoice(trackId)`, which rebuilds through the `buildVoice` factory
+ * and disposes the outgoing voice after a release tail. So an amp knob costs one
+ * `Tone.Sampler` per bank and an HTTP load each, where the same knob on the
+ * pattern page costs a parameter write. Delete when `MultiTrackPlayback` exposes
+ * the track's voice (or a `setTrackPreset(trackId, preset)`); see
+ * docs/FOLLOW-UPS.md.
+ *
+ * Coalesced on {@link REBUILD_COALESCE_MS} — the SAME window the pattern path's
+ * rebuild uses, and for the same reason rather than a second policy: a knob is a
+ * drag, and an unthrottled path turns one gesture into sixty rebuilds. Keyed by
+ * track, because two racks can be edited in one window and one rebuild must not
+ * swallow the other's. Trailing, so a continuous drag collapses into exactly one
+ * build, of the last value.
+ *
+ * Deliberately NOT gated on `snapshot.isPlaying`: with the transport stopped the
+ * swap is what keeps the engine current, so the next press of Play sounds the
+ * edit rather than the variant it was taken from.
+ */
+function scheduleTrackVoiceRebuild(trackId: string): void {
+  const pending = pendingTrackRebuilds.get(trackId);
+  if (pending !== undefined) clearTimeout(pending);
+  pendingTrackRebuilds.set(
+    trackId,
+    setTimeout(() => {
+      pendingTrackRebuilds.delete(trackId);
+      // Re-read rather than close over the engine: it can have been disposed
+      // (a document switch, a track added) inside the window, and whatever is
+      // live NOW is what should be rebuilt.
+      const active = compositionEngine;
+      if (!active) return;
+      // Attempted, not trusted: a preset the audio graph refuses must not take
+      // the edit down with it — the draft is already recorded and the next play
+      // builds from it.
+      attempt(() => active.playback.setTrackVoice(trackId));
+    }, REBUILD_COALESCE_MS),
+  );
+}
+
+/**
+ * CP-14's live retune, subscribed HERE rather than from a component's effect.
+ *
+ * Module scope because that is the ENGINE's scope: `compositionEngine` is a
+ * module binding, and a listener whose job is "rebuild that engine's voice"
+ * should live and die with it rather than with whichever component happened to
+ * mount. `setTrackVoiceParam` is documented as reachable by id and value with no
+ * pointer, so nothing about it should depend on a render tree existing.
+ *
+ * Never torn down, and nothing leaks by it: `scheduleTrackVoiceRebuild` no-ops
+ * while `compositionEngine` is null (which is exactly the state the composition
+ * page's unmount leaves behind — it stops playback and disposes both engines),
+ * and `disposeCompositionEngine` cancels whatever is already in flight. A draft
+ * written with no engine standing is not lost either: `buildTrackVoice` reads
+ * the drafts store, so the next engine is built from it.
+ */
+subscribeTrackVoiceDrafts(scheduleTrackVoiceRebuild);
 
 /**
  * Tracks whose voice change the ENGINE'S OWN DIFF will miss.
@@ -896,6 +984,10 @@ function disposeCompositionEngine(): void {
   if (!current) return;
 
   stopHeadLoop(current);
+  // Before the teardown: a rebuild that fired after this would build a voice for
+  // an engine nothing on screen can reach, and connect it to the shared
+  // `MasterBus` with no handle left to dispose it.
+  cancelPendingTrackRebuilds();
   current.unsubscribes.forEach((unsubscribe) => unsubscribe());
   // The metronome owns the transport and `MultiTrackPlayback.dispose()` only
   // tears down its own schedulers, voices and gains — tearing this down
@@ -1138,6 +1230,12 @@ export function useCompositionPlayback(): void {
   useEffect(() => {
     syncComposition(composition);
   }, [composition]);
+
+  // CP-14's live retune is NOT wired here — see the module-scope
+  // `subscribeTrackVoiceDrafts` call. A rack edit writes a preset no variant
+  // holds, so the composition store does not move and `syncComposition` above
+  // never runs; that subscription is the only path from a turned knob to a
+  // sounding one, and it belongs to the engine's lifetime, not to this hook's.
 }
 
 /**

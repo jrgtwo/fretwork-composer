@@ -31,7 +31,7 @@ import {
   getAmpModel,
   type VoicePreset,
 } from '@fretwork/lib';
-import { hasBranchAtPath } from './presetPaths';
+import { getAtPath, hasBranchAtPath } from './presetPaths';
 
 // ------------------------------------------------------------- descriptors ---
 
@@ -468,4 +468,35 @@ export const PARAM_SECTIONS: readonly ParamSection[] = [
  */
 export function sectionApplies(preset: VoicePreset, section: ParamSection): boolean {
   return section.presenceProbe === null || hasBranchAtPath(preset, section.presenceProbe);
+}
+
+/**
+ * The stage's `enabled` param, if it has one — bypass is a param, not a section
+ * flag, which is why it is found in the table rather than declared beside it.
+ */
+export function enabledParamOf(section: ParamSection): ToggleParam | undefined {
+  return section.params.find(
+    (param): param is ToggleParam =>
+      param.kind === 'toggle' && param.path.endsWith('.enabled'),
+  );
+}
+
+/**
+ * Which of the three states a section is in on a given preset.
+ *
+ * Here rather than in a pane because TWO surfaces render this table now — the
+ * pattern page's `VoicePane` and the composition page's per-track racks — and a
+ * second definition of "bypassed" is a rack whose lamp disagrees with the ear.
+ * `absent` beats `bypassed`: a preset with no `effects` branch at all has no
+ * `enabled` flag to be false.
+ */
+export type SectionPresence = 'active' | 'bypassed' | 'absent';
+
+export function sectionPresence(
+  preset: VoicePreset,
+  section: ParamSection,
+): SectionPresence {
+  if (!sectionApplies(preset, section)) return 'absent';
+  const toggle = enabledParamOf(section);
+  return toggle && getAtPath(preset, toggle.path) === false ? 'bypassed' : 'active';
 }

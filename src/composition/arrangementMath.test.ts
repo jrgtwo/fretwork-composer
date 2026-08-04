@@ -22,6 +22,8 @@ import {
   MIN_PREVIEW_WIDTH,
   PREVIEW_ROW_GAP_PX,
   TRIM_HANDLE_PX,
+  VOICE_LANE_COLLAPSED_PX,
+  voiceLaneHeight,
   arrangementBars,
   arrangementSnap,
   arrangementWidth,
@@ -1438,6 +1440,90 @@ describe('edit lane heights', () => {
         DEFAULT_LANE_HEIGHTS[mode],
       ]);
     }
+  });
+});
+
+describe('voice lane heights', () => {
+  /**
+   * The cabinet is the tallest of the four stages and it is a FIXED 200 px
+   * `aspect-square` well — `CabinetGraphic` says so in a `w-[200px]` — so the
+   * open lane has to clear it plus its own caption, the `RackFace` plate and the
+   * lane's strip. jsdom has no layout, so this is the only side of that
+   * relationship a test can hold: the number is not merely bigger than edit
+   * mode's, it is bigger than the one component that cannot shrink.
+   */
+  const CABINET_PX = 200;
+
+  it('is tall enough for the stage that cannot shrink', () => {
+    expect(DEFAULT_LANE_HEIGHTS.voice).toBeGreaterThan(CABINET_PX);
+    // The figure CP-14 replaced was `edit`'s 192, which is under it — the lane
+    // would have clipped the cabinet at every zoom and in every browser.
+    expect(DEFAULT_LANE_HEIGHTS.voice).toBeGreaterThan(DEFAULT_LANE_HEIGHTS.edit);
+  });
+
+  it('folds to a strip, which is what makes eight tracks reachable at once', () => {
+    expect(voiceLaneHeight(false)).toBe(DEFAULT_LANE_HEIGHTS.voice);
+    expect(voiceLaneHeight(true)).toBe(VOICE_LANE_COLLAPSED_PX);
+    // Two open racks and six folded ones is the shape the ticket is for, and it
+    // only exists if a folded lane costs a fraction of an open one. Stated as
+    // the relationship rather than against a number, so raising either constant
+    // cannot quietly satisfy it.
+    expect(voiceLaneHeight(true) * 6).toBeLessThan(voiceLaneHeight(false) * 2);
+  });
+
+  it('never folds below what a TRACK HEADER needs', () => {
+    // One `laneRects` entry sizes the lane AND the header beside it, and
+    // `TrackHeader` is an `overflow-hidden` column drawn for pattern mode's
+    // height. Fold below that and the mute, the solo, the fader and CP-13's
+    // voice picker are clipped out of sight while staying tabbable — a rack
+    // folded to see MORE tracks would silently disable that track's mixer
+    // strip. jsdom has no layout, so this constant is the only place it can be
+    // caught.
+    expect(VOICE_LANE_COLLAPSED_PX).toBeGreaterThanOrEqual(DEFAULT_LANE_HEIGHTS.pattern);
+  });
+
+  it('folds lanes one at a time, and stacks the rest under them', () => {
+    const tracks = [track('a'), track('b'), track('c')];
+    const heights = laneHeightsFor(
+      () => 'guitar',
+      (id) => id === 'b',
+    );
+
+    const lanes = laneRects(tracks, 'voice', heights);
+
+    expect(lanes.map((lane) => lane.height)).toEqual([
+      DEFAULT_LANE_HEIGHTS.voice,
+      VOICE_LANE_COLLAPSED_PX,
+      DEFAULT_LANE_HEIGHTS.voice,
+    ]);
+    // The one that matters: folding a lane MOVES the ones below it, which is
+    // the whole point and is also what a height held in the component could not
+    // do without `laneRects` knowing.
+    expect(lanes[2].top).toBe(DEFAULT_LANE_HEIGHTS.voice + VOICE_LANE_COLLAPSED_PX);
+  });
+
+  it('leaves the other two modes untouched by a folded rack', () => {
+    const tracks = [track('a'), track('b')];
+    const heights = laneHeightsFor(
+      () => 'guitar',
+      () => true,
+    );
+
+    expect(laneRects(tracks, 'pattern', heights).map((lane) => lane.height)).toEqual([
+      DEFAULT_LANE_HEIGHTS.pattern,
+      DEFAULT_LANE_HEIGHTS.pattern,
+    ]);
+    expect(laneRects(tracks, 'edit', heights).map((lane) => lane.height)).toEqual([
+      editLaneHeight(6),
+      editLaneHeight(6),
+    ]);
+  });
+
+  it('opens every rack for a caller that has no rack state at all', () => {
+    // The default argument, which is what every pattern- and edit-mode caller
+    // relies on — including `laneHeightsFor`'s pre-CP-14 call sites.
+    const lanes = laneRects([track('a')], 'voice', laneHeightsFor(() => 'guitar'));
+    expect(lanes[0].height).toBe(DEFAULT_LANE_HEIGHTS.voice);
   });
 });
 

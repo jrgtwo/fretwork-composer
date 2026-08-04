@@ -23,7 +23,7 @@ const MODES: readonly {
 }[] = [
   { id: 'pattern', label: 'Pattern' },
   { id: 'edit', label: 'Edit' },
-  { id: 'voice', label: 'Voice', disabled: true, pending: 'Voice mode arrives in slice 3' },
+  { id: 'voice', label: 'Voice' },
 ];
 
 /**
@@ -58,9 +58,20 @@ function CompositionAudio() {
 export function CompositionPage({
   mode,
   onModeChange,
+  collapsedRacks,
+  onCollapsedRacksChange,
 }: {
   mode: ArrangementMode;
   onModeChange: (mode: ArrangementMode) => void;
+  /**
+   * Which voice racks are folded, owned by `App` for the reason `mode` is —
+   * this page unmounts on every visit to the pattern page. The UNSAVED edits
+   * those racks hold are a different problem with a different answer: they are
+   * in `voice/trackVoiceDrafts`, above every component, because the engine has
+   * to read them too. See that module.
+   */
+  collapsedRacks?: readonly string[];
+  onCollapsedRacksChange?: (collapsed: readonly string[]) => void;
 }) {
   const [openFailure, setOpenFailure] = useState<string | null>(null);
   /**
@@ -173,7 +184,12 @@ export function CompositionPage({
                 </p>
               </div>
             ) : (
-              <ArrangementGrid mode={mode} patternDragRef={patternDragRef} />
+              <ArrangementGrid
+                mode={mode}
+                collapsedRacks={collapsedRacks}
+                onCollapsedRacksChange={onCollapsedRacksChange}
+                patternDragRef={patternDragRef}
+              />
             )}
           </div>
         </section>
@@ -201,9 +217,11 @@ export function CompositionPage({
           ) : (
             <div className="flex flex-1 items-center justify-center px-3 text-center">
               <span className="font-mono text-[9px] leading-relaxed tracking-[0.14em] text-ink-mut uppercase">
-                {/* TODO(CP-15): the voice list. The lanes it belongs to are not
-                    built either, which is why the wording says what is missing
-                    rather than what has not been built. */}
+                {/* TODO(CP-15): the voice list, and Save / Save as… / Rename
+                    with it. The LANES are built (CP-14) — each is a rack whose
+                    strip says "Unsaved" and offers a Revert — so this is the
+                    slice boundary rather than an unbuilt mode: what is missing
+                    is the list of variants to save one INTO. */}
                 Voice list arrives in slice 3
               </span>
             </div>
