@@ -773,13 +773,25 @@ export function setTrackName(trackId: string, name: string): Result {
  * the write and keep stating it afterwards. Silence is the one wrong answer;
  * refusal is merely the unhelpful one.
  *
- * TODO(CP-13): the lib CLEARS `Track.voiceRef` as part of this write (the chosen
- * voice may have been for the old instrument), and this write pushes no undo
- * step — so once CP-13 wires `setTrackVoiceRef` to a control, instrument →A →B
- * →A loses a per-track voice override with no route back. `mergeSettingsForward`
- * carries the CLEARED ref forward over a restored snapshot, so undo cannot
- * recover it either. Whoever wires that picker owns the answer: mention the loss
- * in the confirmation, or make this one write undoable.
+ * ── CP-13: this write DESTROYS the track's voice override, and says so first ──
+ *
+ * The lib CLEARS `Track.voiceRef` here (the chosen voice may have been for the
+ * old instrument), this write pushes no undo step, and `mergeSettingsForward`
+ * carries the CLEARED ref forward over a restored snapshot — so instrument
+ * A → B → A loses a per-track voice with no route back at all, by undo or
+ * otherwise. CP-13 wired a picker, which put that three clicks away.
+ *
+ * THE ANSWER IS THE CONFIRMATION, not undo. `TrackControls` now asks whenever a
+ * track HAS an override, whether or not the change also strands notes, and names
+ * the loss. The alternative — dropping `voiceRef` from `mergeSettingsForward` so
+ * this one write became undoable — was rejected: that field is carried forward
+ * precisely because the mix and the naming push no undo step of their own, and
+ * an undo of some unrelated arrangement edit would then silently revert a voice
+ * pick made after the snapshot was captured, destroying it (a later edit clears
+ * the redo stack). That trades a loss the user was warned about for a quieter one
+ * they were not, and reverses a settled CP-06/CP-07 decision to do it. If this is
+ * ever revisited, the honest fix is an undo step for the instrument write itself,
+ * not an exception in the merge.
  */
 export function setTrackInstrument(
   trackId: string,

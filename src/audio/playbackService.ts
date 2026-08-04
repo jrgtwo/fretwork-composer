@@ -59,7 +59,7 @@ import {
   useEditingComposition,
   type Result,
 } from '../composition/compositionService';
-import { readVoiceRef, resolveVoicePreset } from '../voice/voiceService';
+import { readTrackVoiceRef, readVoiceRef, resolveVoicePreset } from '../voice/voiceService';
 import { wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
@@ -753,16 +753,61 @@ const loopBoundaryOf = (composition: Composition): number =>
  * output to `MasterBus`. A voice that connected itself would still be audible —
  * and would ignore its track's fader, mute and solo entirely.
  *
- * TODO(CP-13): per-track voices. `Track.voiceRef` exists and
- * `compositionService.setTrackVoiceRef` can write it, but nothing picks one yet,
- * so every track resolves to the global active variant for its instrument —
- * which is exactly what the lib's resolver does with a null ref.
+ * The track's OWN ref (CP-13), read through the voice seam so the `unknown` cast
+ * and its validation stay in the one module that owns them. A null ref is not a
+ * missing value: it is the lib's documented fallback to the instrument's global
+ * active variant, and `resolveActiveVoice` treats it as exactly that — so a
+ * track nobody has picked a voice for still sounds like the rest of the app.
+ *
+ * `sourceFingerprint` is deliberately NOT consulted here, and this is the one
+ * place that could look like an omission: `Voice.swapPreset` is never called on
+ * this path at all. `MultiTrackPlayback.setTrackVoice` constructs a whole new
+ * `Voice` through this factory and disposes the old one after a release tail, so
+ * the rebuild-versus-retune classification the pattern path needs simply does not
+ * arise for a track — there is nothing live to retune.
  */
 function buildTrackVoice(track: Track): Voice {
   return buildEffectiveVoice(trackInstrumentId(track), {
     autoConnectToMaster: false,
-    voiceRef: null,
+    voiceRef: readTrackVoiceRef(track),
   }).voice;
+}
+
+/**
+ * Tracks whose voice change the ENGINE'S OWN DIFF will miss.
+ *
+ * The ordinary case needs nothing from us: `diffTracks` classifies a `voiceRef`
+ * change as `'voice'` and `updateComposition` calls `setTrackVoice(trackId)`
+ * itself, which builds the new voice, hands it to that track's scheduler and
+ * disposes the old one after a 4 s tail — a click-free swap mid-playback, for one
+ * track and no other.
+ *
+ * LIB-GAP(18): that diff picks ONE action per track by priority, and `restream`
+ * outranks `voice`. So an update in which a track's placements AND its voiceRef
+ * both moved reschedules the notes and keeps the OLD voice — silently, and until
+ * something else happens to rebuild. Two seam writes landing in one React tick is
+ * all it takes, which is a normal shape for the agent's tools and reachable by
+ * hand through undo. Named here and swapped explicitly rather than blanket-calling
+ * `setTrackVoice` on every voiceRef change, which would double-build the voice
+ * (one `Tone.Sampler` and an HTTP load per bank) for the case the lib gets right.
+ *
+ * Delete when `diffTracks` reports the voice swap alongside the restream. See
+ * docs/FOLLOW-UPS.md.
+ */
+function voiceSwapsMissedByDiff(previous: Composition, next: Composition): string[] {
+  const missed: string[] = [];
+  next.tracks.forEach((track, index) => {
+    // Index-matched because that is how `diffTracks` pairs them; a shape change
+    // never reaches here (`updateComposition` returns true and the engine goes).
+    const before = previous.tracks[index];
+    if (!before || before.id !== track.id) return;
+    if (track.placements === before.placements) return;
+    if (track.voiceRef === before.voiceRef && track.instrumentId === before.instrumentId) {
+      return;
+    }
+    missed.push(track.id);
+  });
+  return missed;
 }
 
 /**
@@ -982,10 +1027,12 @@ function stopHeadLoop(active: CompositionEngine): void {
  * `CompositionTrackSource` per track whose placements moved; with the transport
  * stopped `restream` clears and returns without rescheduling.
  *
- * Three things `updateComposition` does NOT do, and this therefore has to: push
+ * Four things `updateComposition` does NOT do, and this therefore has to: push
  * the composition's tempo into the metronome, recompute the tuning when a
- * track's instrument changed, and restream when the loop boundary moved. Each
- * of them is silent when missed — see the comments on the calls.
+ * track's instrument changed, restream when the loop boundary moved, and swap
+ * the voice for a track whose placements moved in the same update as its
+ * `voiceRef` ({@link voiceSwapsMissedByDiff}). Each of them is silent when
+ * missed — see the comments on the calls.
  */
 function syncComposition(composition: Composition | null): void {
   const active = compositionEngine;
@@ -996,20 +1043,39 @@ function syncComposition(composition: Composition | null): void {
   }
 
   try {
+    // Computed against the mirror BEFORE the update, because `updateComposition`
+    // replaces the engine's snapshot as its first act and the comparison would
+    // then be against itself.
+    const missedVoices = voiceSwapsMissedByDiff(active.composition, composition);
+
     if (active.playback.updateComposition(composition)) {
       stop();
       disposeCompositionEngine();
       return;
     }
 
-    // The mirror is written only once the engine has ACCEPTED the update. Ahead
-    // of it, a throw would leave `pollHead` lighting blocks from a document the
-    // audio never took.
+    // The mirror is written as soon as the engine has ACCEPTED the update, and
+    // BEFORE anything else here — `updateComposition` replaces the engine's own
+    // snapshot as its first act, so from this line on the engine holds
+    // `composition` and a mirror still holding the previous one is simply wrong.
+    // Everything below can throw (`setTrackVoice` builds a voice; Tone is on the
+    // other side of it), and the `catch` swallows it, so leaving the mirror until
+    // last would strand `pollHead` on a document the audio no longer has and make
+    // the NEXT `voiceSwapsMissedByDiff` diff against it.
     const nextLoopTicks = loopBoundaryOf(composition);
     const boundaryMoved = nextLoopTicks !== active.loopTicks;
     active.composition = composition;
     active.loop = composition.loop;
     active.loopTicks = nextLoopTicks;
+
+    // After the update, never before: `setTrackVoice` reads the engine's own
+    // snapshot to find the track, so called first it would rebuild the voice from
+    // the ref that is being replaced — a wasted sampler load AND the wrong voice.
+    // Separately attempted, because one track whose preset the audio graph refuses
+    // must not cost the others their swap.
+    for (const trackId of missedVoices) {
+      attempt(() => active.playback.setTrackVoice(trackId));
+    }
 
     active.playback.setLoop(composition.loop);
 

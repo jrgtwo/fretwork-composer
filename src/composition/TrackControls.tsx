@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FretInstrumentId, Track } from '@fretwork/lib';
 import {
   VOLUME_RANGE_DB,
@@ -15,6 +15,35 @@ import {
   trackInstrumentId,
   type Result,
 } from './compositionService';
+import {
+  parseVoiceKey,
+  readTrackVoiceRef,
+  setTrackVoice,
+  useSelectableVoices,
+  useTrackVoicePreset,
+  useTrackVoiceStatus,
+  voiceKey,
+} from '../voice/voiceService';
+
+/**
+ * How long a voice pick waits before it is written.
+ *
+ * The same window, and the same reason, as `playbackService`'s
+ * `REBUILD_COALESCE_MS` and `VoicePane`'s `WARM_COALESCE_MS`: a native `<select>`
+ * fires `change` once per arrow key while closed, so a keyboard user stepping the
+ * eleven guitar voices passes through all of them. Ten of those slots are
+ * sampler-sourced, and once the page has played, every one of those writes reaches
+ * `MultiTrackPlayback.setTrackVoice` — a whole new `Voice`, one `Tone.Sampler` and
+ * an HTTP load per bank, with the outgoing one held alive on a 4 s release tail.
+ * One arrow-key walk is a fetch storm.
+ *
+ * PERMANENT ADAPTER, not a masked lib gap: the lib cannot know it is behind a
+ * `<select>`, which is exactly the argument the prefetch-rate row in
+ * docs/FOLLOW-UPS.md already makes. It lives in the GESTURE and not in the seam —
+ * `voiceService.setTrackVoice` writes on the call, so the agent is never
+ * debounced, and one command stays one undo step.
+ */
+const VOICE_COMMIT_MS = 120;
 
 /**
  * One track's mixer strip and its structural controls: instrument, position in
@@ -22,13 +51,31 @@ import {
  *
  * Split out of `TrackHeader` because the header is IDENTITY — the name plate,
  * the selection, the audibility state — and this is everything that WRITES.
- * They are two different rates of change: the plate is settled, this row is
- * where CP-13's per-track voice picker lands next.
+ * They are two different rates of change: the plate is settled, this is the row
+ * that grows.
  *
- * Every write goes through `compositionService`, and every refusal is handed up
- * to `onNotice` rather than swallowed. There is deliberately no local mirror of
- * any track field: the strip renders the `track` it is given and the next store
- * write re-renders it, so a control can never show a value the model rejected.
+ * Every write goes through a seam, and every refusal is handed up to `onNotice`
+ * rather than swallowed. There is deliberately no local mirror of any track
+ * field — the strip renders the `track` it is given and the next store write
+ * re-renders it, so a control can never show a value the model rejected — with
+ * ONE exception, the voice pick, whose draft exists only for the length of
+ * {@link VOICE_COMMIT_MS} and is dropped on a refusal so the control still snaps
+ * back to what the model took.
+ *
+ * ── The second row holds one of three things ─────────────────────────────────
+ *
+ * The header has ~88 px for its rows and a 200 px column to fit them in, so the
+ * strip has exactly two rows and the second one is a slot. A confirmation wins
+ * it (it is a question, and it has replaced the control that asked); the voice
+ * panel takes it next; otherwise it is the mixer.
+ *
+ * ⚠ THE VOICE PICKER IS BEHIND A BUTTON FOR A MEASURED REASON. Two `<select>`s
+ * plus ▲▼✕ in a 200 px column leave each picker about 60 px, of which a native
+ * dropdown arrow and the padding take half — six or seven characters at
+ * `text-[8.5px]`, which renders "Karoryfer Green Guitar" and "Karoryfer Black
+ * Guitar" identically. jsdom has no layout and cannot fail on that, so it is
+ * written down instead: a full-width row is what makes the option names
+ * readable, and it is where CP-14's rack will open too.
  *
  * ── The two confirmations ────────────────────────────────────────────────────
  *
@@ -40,11 +87,21 @@ import {
  *  - REMOVE takes the track's placements with it. It asks only when there are
  *    placements to lose: an empty track destroys nothing, and a confirmation for
  *    a free action is how people learn to click through confirmations.
- *  - CHANGING THE INSTRUMENT asks only when it would STRAND notes — a six-string
+ *  - CHANGING THE INSTRUMENT asks when it would STRAND notes — a six-string
  *    riff moved onto a four-string bass leaves two strings the bass has not got
- *    (`strandedByInstrument`). A change that strands nothing applies
- *    immediately; the mismatch it may still leave is reported by the badge in
- *    `TrackHeader` instead, which is a standing fact rather than a decision.
+ *    (`strandedByInstrument`) — OR when it would throw away the track's VOICE.
+ *    A change that costs neither applies immediately; the mismatch it may still
+ *    leave is reported by the badge in `TrackHeader` instead, which is a
+ *    standing fact rather than a decision.
+ *
+ * ⚠ THE VOICE HALF IS THE IRRECOVERABLE ONE, and it is why this confirmation now
+ * fires with nothing stranded at all. The lib clears `Track.voiceRef` as part of
+ * the instrument write, that write pushes no undo step, and
+ * `mergeSettingsForward` carries the CLEARED ref forward over any snapshot undo
+ * restores — so A → B → A does not bring the voice back and neither does ↶. The
+ * full reasoning, and why making that one write undoable was rejected instead,
+ * is on `compositionService.setTrackInstrument`. Asking is the whole remedy, so
+ * a change that only costs the voice still has to ask.
  *
  * Both confirmations state their SUBJECT, not just their cost: the `<select>` is
  * controlled on the stored instrument, so it snaps back to the old one the
@@ -72,9 +129,16 @@ export function TrackControls({
 }) {
   const [pending, setPending] = useState<
     | { kind: 'remove'; placements: number }
-    | { kind: 'instrument'; instrumentId: FretInstrumentId; stranded: number }
+    | {
+        kind: 'instrument';
+        instrumentId: FretInstrumentId;
+        stranded: number;
+        /** Whether the write will destroy a voice override — see the banner. */
+        losesVoice: boolean;
+      }
     | null
   >(null);
+  const [voiceOpen, setVoiceOpen] = useState(false);
 
   const report = (result: Result<unknown>) => {
     if (!result.ok) onNotice(result.reason);
@@ -83,8 +147,82 @@ export function TrackControls({
   const instrumentId = trackInstrumentId(track);
   const isLast = trackCount === 1;
 
+  // All three through the VOICE seam: `Track.voiceRef` is `unknown` on the model
+  // and exactly one module is allowed to cast it, which is not this one.
+  const voiceRef = readTrackVoiceRef(track);
+  const voices = useSelectableVoices(instrumentId);
+  const voicePreset = useTrackVoicePreset(track);
+  // A ref can outlive its variant, or outlive the instrument it made sense for:
+  // `voiceService.deleteVoice` repairs the editing PATTERN and deliberately
+  // leaves every other holder to the lib's clean fallback, so deleting a variant
+  // in the voice pane leaves any track pointing at it dangling. Asked of the seam
+  // rather than derived from `voices` here, because "gone" and "for another
+  // instrument" are indistinguishable from a membership test and are not the same
+  // sentence — nor the same answer to whether an instrument change costs anything.
+  const voiceStatus = useTrackVoiceStatus(track);
+
+  const voiceRefKey = voiceRef ? voiceKey(voiceRef) : '';
+
   const instrumentName = (id: FretInstrumentId) =>
     listTrackInstruments().find((instrument) => instrument.id === id)?.name ?? id;
+
+  /**
+   * The one draft in this component, and it is a rate limiter rather than a
+   * mirror — see {@link VOICE_COMMIT_MS}. `flush` holds the write the timer is
+   * going to make, so a gesture that ends the window early (leaving the field,
+   * closing the panel) commits instead of racing it.
+   */
+  const [draftVoiceKey, setDraftVoiceKey] = useState<string | null>(null);
+  const voiceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceFlush = useRef<(() => void) | null>(null);
+
+  // Unmount is the one end with no gesture on it: a track removed, or the page
+  // swapped, mid-window would otherwise drop the pick with nothing to notice.
+  useEffect(
+    () => () => {
+      voiceFlush.current?.();
+    },
+    [],
+  );
+
+  const commitVoice = (key: string) => {
+    if (voiceTimer.current !== null) clearTimeout(voiceTimer.current);
+    voiceTimer.current = null;
+    voiceFlush.current = null;
+    // Dropped whatever the seam says: on `ok` the store re-renders this strip
+    // with the value it took, and on a refusal the control has to snap back to
+    // what the model actually holds rather than keep showing the rejected pick.
+    setDraftVoiceKey(null);
+
+    // '' is the fallback option, and clearing is a real choice rather than an
+    // absence — it puts the track back on the instrument's global active voice,
+    // which is the lib's documented meaning for a null ref.
+    if (key === '') {
+      report(setTrackVoice(track.id, null));
+      return;
+    }
+    const ref = parseVoiceKey(key);
+    // Unreachable from this picker — every option's value came from `voiceKey` —
+    // but the seam refuses an unparseable ref and so must this, rather than
+    // writing null and silently resetting the track to the fallback.
+    if (!ref) {
+      onNotice('That voice is no longer in your library.');
+      return;
+    }
+    report(setTrackVoice(track.id, ref));
+  };
+
+  const onVoiceChange = (key: string) => {
+    setDraftVoiceKey(key);
+    if (voiceTimer.current !== null) clearTimeout(voiceTimer.current);
+    voiceFlush.current = () => commitVoice(key);
+    voiceTimer.current = setTimeout(() => commitVoice(key), VOICE_COMMIT_MS);
+  };
+
+  const closeVoice = () => {
+    voiceFlush.current?.();
+    setVoiceOpen(false);
+  };
 
   const applyInstrument = (next: FretInstrumentId) => {
     setPending(null);
@@ -112,8 +250,21 @@ export function TrackControls({
 
   const onInstrumentChange = (next: FretInstrumentId) => {
     const stranded = strandedByInstrument(track, next);
-    if (stranded > 0) {
-      setPending({ kind: 'instrument', instrumentId: next, stranded });
+    // The voice is gone the moment this write lands and no undo brings it back,
+    // so a track with an override asks even when nothing would be stranded.
+    //
+    // `=== 'ok'` and not "has a ref": a dangling ref (its variant deleted, or one
+    // for another instrument) is non-null and costs NOTHING to destroy — the
+    // track fell back to the instrument's voice the moment it went. Asking "drops
+    // this track's voice for good?" about a voice that is already gone, while the
+    // picker beside it says so, is a confirmation with no subject.
+    const losesVoice = voiceStatus === 'ok';
+    if (stranded > 0 || losesVoice) {
+      // The panel is a control that opens, and this replaces the row it opened
+      // into. Left open it would come back after the answer showing a picker for
+      // a voice the confirmed write has just cleared.
+      closeVoice();
+      setPending({ kind: 'instrument', instrumentId: next, stranded, losesVoice });
       return;
     }
     applyInstrument(next);
@@ -142,17 +293,35 @@ export function TrackControls({
     applyInstrument(pending.instrumentId);
   };
 
+  /**
+   * The instrument question, in one line of a 200 px header.
+   *
+   * Three shapes rather than two sentences stacked, because the confirm row
+   * replaces the mixer strip and cannot grow: the strings clause is the one
+   * that carries a count, the voice clause is the one that carries the word
+   * "for good" — which is the only honest way to say "undo will not help".
+   * STRINGS, never audibility (LIB-GAP(15)).
+   */
+  const instrumentQuestion = (choice: {
+    instrumentId: FretInstrumentId;
+    stranded: number;
+    losesVoice: boolean;
+  }) => {
+    const name = instrumentName(choice.instrumentId);
+    const notes = `${choice.stranded} ${choice.stranded === 1 ? 'note' : 'notes'}`;
+    if (choice.stranded > 0 && choice.losesVoice) {
+      return `${name} has no string for ${notes}, and drops this voice for good?`;
+    }
+    if (choice.stranded > 0) return `${name} has no string for ${notes}?`;
+    return `${name} drops this track's voice for good?`;
+  };
+
   const tiny =
     'pressable control rounded-md px-1 py-0.5 font-mono text-[8.5px] font-bold leading-none disabled:opacity-30';
 
   return (
     <>
       <div className="flex items-center gap-1">
-        {/* TODO(CP-13): the per-track VOICE picker belongs beside this one.
-            Until it exists a track plays the global active variant for its
-            instrument, which is the lib's documented fallback for a null
-            `voiceRef` — `setTrackVoiceRef` is deliberately not wired to any
-            control here. */}
         {/* The picker shows the RESOLVED instrument, not the raw string: a track
             whose `instrumentId` is not in the catalog plays as guitar, and the
             control has to name what will be heard. */}
@@ -168,6 +337,39 @@ export function TrackControls({
             </option>
           ))}
         </select>
+
+        {/* CP-13 — the per-track VOICE, opened rather than crammed in beside the
+            instrument. See the width argument on the component: two `<select>`s
+            in this row leave each of them about six readable characters.
+
+            The button carries the ANSWER even while closed — the resolved preset
+            is in its title and the override shows as the accent — because a
+            control that opens is a control whose state has to be visible from the
+            outside, and "which voice is this track on" is the question the strip
+            exists to answer.
+
+            TODO(CP-14): the rack opens HERE, into the same slot, and this plain
+            `<select>` becomes its picker row. */}
+        <button
+          type="button"
+          aria-label={`Voice for ${track.name}`}
+          aria-expanded={voiceOpen}
+          title={
+            voiceStatus === 'deleted'
+              ? `${track.name}'s voice has left your library — it plays ${voicePreset.name}`
+              : voiceStatus === 'wrong-instrument'
+                ? `${track.name}'s voice is for another instrument — it plays ${voicePreset.name}`
+                : voiceStatus === 'ok'
+                  ? `${track.name} plays through ${voicePreset.name}`
+                  : `${track.name} follows this instrument's voice (${voicePreset.name})`
+          }
+          onClick={() => (voiceOpen ? closeVoice() : setVoiceOpen(true))}
+          className={`pressable rounded-md px-1 py-0.5 font-mono text-[8.5px] font-bold leading-none ${
+            voiceStatus === 'ok' ? 'control-accent' : 'control'
+          }`}
+        >
+          ♪
+        </button>
 
         {/* Reorder is a pair of buttons and not a drag, and that is the point:
             `moveTrack` takes an id and an index, so the agent reaches the same
@@ -223,11 +425,8 @@ export function TrackControls({
               ? `Delete ${pending.placements} ${pending.placements === 1 ? 'block' : 'blocks'}?`
               : /* Names the instrument being confirmed: the picker has already
                    snapped back to the stored one, so the count alone would be a
-                   question about nothing on screen. STRINGS, not audibility —
-                   LIB-GAP(15). */
-                `${instrumentName(pending.instrumentId)} has no string for ${pending.stranded} ${
-                  pending.stranded === 1 ? 'note' : 'notes'
-                }?`}
+                   question about nothing on screen. */
+                instrumentQuestion(pending)}
           </span>
           <button
             type="button"
@@ -239,7 +438,11 @@ export function TrackControls({
             title={
               pending.kind === 'remove'
                 ? 'Removing the track deletes its blocks — undoable with ↶'
-                : "Those notes sit on strings the new instrument hasn't got, and stay in the block"
+                : pending.losesVoice
+                  ? // The one confirmation on this page whose cost ↶ cannot
+                    // reverse, so the tooltip says which half is which.
+                    "The track's own voice is cleared and ↶ will not bring it back; stranded notes stay in the block"
+                  : "Those notes sit on strings the new instrument hasn't got, and stay in the block"
             }
             onClick={confirmPending}
             className="pressable control-accent rounded-md px-1.5 py-0.5 font-mono text-[8.5px] font-bold leading-none"
@@ -250,6 +453,84 @@ export function TrackControls({
             type="button"
             aria-label={`Cancel, keep ${track.name} as it is`}
             onClick={() => setPending(null)}
+            className={tiny}
+          >
+            ✕
+          </button>
+        </div>
+      ) : voiceOpen ? (
+        <div className="flex items-center gap-1">
+          {/* ⚠ NOT `voiceService.selectVoice`, which writes the editing PATTERN's
+              ref and would change no track at all. `setTrackVoice` writes this
+              track's `Track.voiceRef` and nothing else — the whole point being
+              that two guitar tracks can sound different.
+
+              A voice is a SHARED asset: picking a user variant here points at the
+              same variant the pattern page edits, so a later Save retunes both.
+              That is intended and deliberately not forked per track.
+
+              The rack is TODO(CP-14); the variant list and Save / Save-as /
+              Rename are TODO(CP-15). This is a plain picker. */}
+          <select
+            aria-label={`Voice for ${track.name}`}
+            // The resolved preset, which is the only place the fallback's
+            // identity is visible — the option labels name the CHOICE.
+            title={
+              voiceRef
+                ? `${track.name} plays through ${voicePreset.name}`
+                : `${track.name} follows this instrument's voice (${voicePreset.name})`
+            }
+            autoFocus
+            value={draftVoiceKey ?? voiceRefKey}
+            onChange={(e) => onVoiceChange(e.target.value)}
+            // Leaving the field ends the coalescing window early. Without it a
+            // pick made with the keyboard and then tabbed away from would sit for
+            // {@link VOICE_COMMIT_MS} looking committed and not being.
+            onBlur={() => voiceFlush.current?.()}
+            className="control min-w-0 flex-1 rounded-md px-1 py-0.5 font-mono text-[8.5px] font-bold text-ink"
+          >
+            {/* Disabled, because it is a fact rather than a choice — and present
+                at all so the control can say WHY it is showing a voice the list
+                below does not contain. The two failures are named apart: one is
+                a variant that is gone, the other is one that exists and is for
+                another neck, and only the first reads as a deletion. */}
+            {voiceStatus === 'deleted' && (
+              <option value={voiceRefKey} disabled>
+                Voice deleted
+              </option>
+            )}
+            {voiceStatus === 'wrong-instrument' && (
+              <option value={voiceRefKey} disabled>
+                Another instrument’s voice
+              </option>
+            )}
+            {/* Not "none": a null ref plays something, it just isn't this track's
+                choice. Listed first so the way back is always in the same place. */}
+            <option value="">Auto</option>
+            {/* Grouped because the distinction is load-bearing rather than
+                cosmetic — only one of the two can ever be saved to (CP-15). */}
+            <optgroup label="Built-in">
+              {voices.builtIns.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.name}
+                </option>
+              ))}
+            </optgroup>
+            {voices.userVariants.length > 0 && (
+              <optgroup label="Yours">
+                {voices.userVariants.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+          <button
+            type="button"
+            aria-label={`Close the voice picker for ${track.name}`}
+            title="Back to the mixer"
+            onClick={closeVoice}
             className={tiny}
           >
             ✕

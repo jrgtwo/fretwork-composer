@@ -37,6 +37,7 @@ import {
   type FretInstrumentId,
   type Pattern,
   type SlotId,
+  type Track,
   type Variant,
   type VariantRef,
   type VoicePreset,
@@ -47,6 +48,15 @@ import {
   setEditingPatternVoiceRef,
   useEditingPattern,
 } from '../patterns/patternService';
+// The COMPOSITION seam, for the track path below. One-directional:
+// `compositionService` imports nothing from here — it stores `Track.voiceRef`
+// opaquely and says so — so there is no cycle.
+import {
+  findTrack,
+  setTrackVoiceRef,
+  trackInstrumentId,
+  type Result,
+} from '../composition/compositionService';
 
 const store = () => useVoiceStore.getState();
 
@@ -102,17 +112,20 @@ export function parseVoiceKey(key: string): VariantRef | null {
 }
 
 /**
- * The pattern's own voice choice, validated — null when it has none and playback
- * falls back to the instrument's active voice.
+ * The one cast, in the one module allowed to make it.
+ *
+ * `Pattern.voiceRef` and `Track.voiceRef` are the SAME `unknown` field for the
+ * same reason (the lib keeps its pattern model independent of the voices
+ * module), so they validate through one function rather than two that drift.
  *
  * Validated rather than cast blind because a ref is *persisted*: a malformed one
  * (a slot id the lib has since renamed, hand-edited storage) has to read as "no
  * choice" so resolution falls through cleanly, not as a choice the picker then
  * cannot find. The stored object is returned as-is when it is valid, so the
- * reference stays stable for callers that compare or memoise on it.
+ * reference stays stable for callers that compare or memoise on it — which
+ * `playbackService` and the lib's own `diffTracks` both do.
  */
-export function readVoiceRef(pattern: Pattern): VariantRef | null {
-  const ref = pattern.voiceRef;
+function validateVoiceRef(ref: unknown): VariantRef | null {
   if (typeof ref !== 'object' || ref === null) return null;
   const candidate = ref as { kind?: unknown; slotId?: unknown; id?: unknown };
   if (candidate.kind === 'user' && typeof candidate.id === 'string' && candidate.id !== '') {
@@ -126,6 +139,17 @@ export function readVoiceRef(pattern: Pattern): VariantRef | null {
     return ref as VariantRef;
   }
   return null;
+}
+
+/**
+ * The pattern's own voice choice, validated — null when it has none and playback
+ * falls back to the instrument's active voice.
+ *
+ * ⚠ PATTERN, not track. {@link readTrackVoiceRef} is the other one; see the
+ * TRACK PATH banner below for why they are two functions and not one generic.
+ */
+export function readVoiceRef(pattern: Pattern): VariantRef | null {
+  return validateVoiceRef(pattern.voiceRef);
 }
 
 /** React hook: the editing pattern's voice choice, or null. */
@@ -231,6 +255,189 @@ export function useSelectableVoices(instrumentId: FretInstrumentId): SelectableV
   return useMemo(() => selectableVoices(instrumentId, variants), [instrumentId, variants]);
 }
 
+// -------------------------------------------------------------- track path ---
+/**
+ * ⚠ THE SECOND PATH. Everything above this line is PATTERN-shaped; everything
+ * between here and the writing section is TRACK-shaped, and the two must not be
+ * crossed.
+ *
+ * A composition track carries its own `Track.voiceRef`, which is what lets a
+ * clean lead guitar and a driven rhythm guitar exist in one arrangement. The
+ * lib's resolver takes that ref DIRECTLY (`resolveActiveVoice(instrumentId,
+ * explicitRef)`), bypassing the global `activeVariants` map, so per-track voices
+ * need no new resolution order — only a read, a resolve and a write of their own.
+ *
+ * ⚠ {@link selectVoice} IS THE FUNCTION THAT LOOKS RIGHT AND IS WRONG for a
+ * track. It writes the EDITING PATTERN's ref: called from a track control it
+ * would retune whatever pattern happens to be open (on this page, the placement
+ * being edited) and leave every track exactly as it was — which, with a single
+ * track on screen and that track on the fallback, can even look like it worked.
+ * {@link setTrackVoice} is the track write. They are deliberately named so that
+ * neither completes into the other.
+ *
+ * The `unknown` cast stays in this module for tracks too: `compositionService`
+ * stores `Track.voiceRef` opaquely by charter and must not narrow it.
+ */
+
+/**
+ * A track's own voice choice, validated — null when it has none, which is the
+ * lib's documented fallback to the instrument's global active variant.
+ */
+export function readTrackVoiceRef(track: Track): VariantRef | null {
+  return validateVoiceRef(track.voiceRef);
+}
+
+/**
+ * The preset a track actually plays through.
+ *
+ * The same delegation {@link resolveVoicePreset} makes, for the same reason: the
+ * fall-through (user variant → default slot → the instrument's first default) is
+ * the lib's, and `playbackService`'s `buildTrackVoice` reaches it through
+ * `buildEffectiveVoice`, which is that same call. A second copy here would drift
+ * from what is audible.
+ */
+export function resolveTrackVoicePreset(track: Track): VoicePreset {
+  return resolveActiveVoice(trackInstrumentId(track), readTrackVoiceRef(track));
+}
+
+/**
+ * React hook: the resolved preset for one track.
+ *
+ * Subscribed through `useVoiceStore` for {@link useEditingVoicePreset}'s reason —
+ * `resolveActiveVoice` reads that store and is not reactive, so a rename, an edit
+ * or a change of the instrument's global active variant would otherwise never
+ * reach the picker. The `track` argument carries the ref itself and comes from the
+ * composition store, which re-renders the strip on its own.
+ */
+export function useTrackVoicePreset(track: Track): VoicePreset {
+  return useVoiceStore(() => resolveTrackVoicePreset(track));
+}
+
+/**
+ * What a track's stored ref actually IS, which is not a yes/no.
+ *
+ *   `none`            — no override; the track follows the instrument's global
+ *                       active variant, which is the lib's documented fallback.
+ *   `ok`              — a voice this track can be offered and does play.
+ *   `deleted`         — a user variant that has left the library. The track fell
+ *                       back the moment it went, so nothing is lost by clearing.
+ *   `wrong-instrument`— a real variant, for another instrument. Never offered
+ *                       here, and resolving it would pick a preset for a neck
+ *                       this track has not got.
+ *
+ * Three states rather than "offered / not offered" because the two failures are
+ * different sentences to the user AND different answers to "is there anything to
+ * lose here" — a dangling ref costs nothing to destroy, and a confirmation for a
+ * free action is how people learn to click through confirmations.
+ */
+export type TrackVoiceStatus = 'none' | 'ok' | 'deleted' | 'wrong-instrument';
+
+/** The shared classifier, so {@link setTrackVoice}'s refusal and the picker's
+ *  label can never disagree about which of the two failures this is. */
+function voiceStatusOf(
+  instrumentId: FretInstrumentId,
+  ref: VariantRef,
+  variants: readonly Variant[],
+): Exclude<TrackVoiceStatus, 'none'> {
+  const key = voiceKey(ref);
+  const offered = selectableVoices(instrumentId, variants);
+  const known =
+    offered.builtIns.some((option) => option.key === key) ||
+    offered.userVariants.some((option) => option.key === key);
+  if (known) return 'ok';
+  if (ref.kind === 'user' && !variants.some((variant) => variant.id === ref.id)) {
+    return 'deleted';
+  }
+  return 'wrong-instrument';
+}
+
+/** Non-reactive read — for event handlers and the write path. */
+export function trackVoiceRefStatus(track: Track): TrackVoiceStatus {
+  const ref = readTrackVoiceRef(track);
+  if (!ref) return 'none';
+  return voiceStatusOf(trackInstrumentId(track), ref, store().variants);
+}
+
+/**
+ * React hook: {@link trackVoiceRefStatus}, subscribed.
+ *
+ * Through `useVoiceStore` because the answer changes when the LIBRARY changes,
+ * not when the track does: deleting a variant in the voice pane is what turns an
+ * `ok` ref into a `deleted` one, and nothing about the composition store moves
+ * when that happens.
+ */
+export function useTrackVoiceStatus(track: Track): TrackVoiceStatus {
+  const variants = useVoiceStore((s) => s.variants);
+  return useMemo(() => {
+    const ref = readTrackVoiceRef(track);
+    if (!ref) return 'none';
+    return voiceStatusOf(trackInstrumentId(track), ref, variants);
+  }, [track, variants]);
+}
+
+/**
+ * Point ONE track at a voice. `null` clears the override and puts the track back
+ * on the instrument's global active variant.
+ *
+ * Refused rather than coerced when the ref is not one this track could be offered
+ * — a variant that has been deleted, or one belonging to another instrument, which
+ * would resolve to a preset for a neck the track has not got. Membership is asked
+ * of {@link listSelectableVoices}, so the picker's offer set and the write can
+ * never disagree; the agent reaches the same guard by calling this with a ref of
+ * its own.
+ *
+ * Returns the COMPOSITION seam's `Result` rather than {@link VoiceWriteResult}: the
+ * write lands in the composition store, its refusals are composition facts ("no
+ * such track"), and every other track write on this page already reports that way.
+ *
+ * Nothing is disposed or rebuilt here. `playbackService` picks the change up from
+ * the composition store — the engine's own diff swaps that track's voice and only
+ * that track's — so this is audible mid-playback without a restart.
+ *
+ * ⚠ IDEMPOTENT BY VALUE, and that is not a nicety. `compositionService` guards on
+ * REFERENCE identity, deliberately — the value is opaque to it by charter — but
+ * every ref that reaches here is freshly minted (`parseVoiceKey` builds one,
+ * `listSelectableVoices` builds new ones per call), so a re-emitted pick would be
+ * a write. During playback the lib's `diffTracks` compares by reference too, so
+ * that write comes out as `'voice'` and rebuilds the whole `Voice` — one
+ * `Tone.Sampler` and an HTTP load per bank, with the track silent until they
+ * decode — for a change that is not a change. Unreachable from a `<select>`,
+ * which fires nothing on an unchanged value; squarely reachable by the agent,
+ * which is the caller that matters here.
+ */
+export function setTrackVoice(trackId: string, ref: VariantRef | null): Result {
+  const track = findTrack(trackId);
+  if (!track) return { ok: false, reason: 'No such track.' };
+  // Cleared straight through: "follow the instrument" is always a legal choice,
+  // and there is nothing to validate about it. `== null` rather than `=== null`
+  // because `createEmptyTrack` never sets the field at all — a fresh track holds
+  // `undefined`, and writing `null` over it would rebuild the voice to say the
+  // same thing. A ref that is merely MALFORMED is written over, not skipped: it
+  // resolves the same way but it is still garbage in the document.
+  if (ref === null) {
+    return track.voiceRef == null ? { ok: true, value: undefined } : setTrackVoiceRef(trackId, null);
+  }
+
+  const instrumentId = trackInstrumentId(track);
+  const status = voiceStatusOf(instrumentId, ref, store().variants);
+  if (status !== 'ok') {
+    // Two different mistakes, and the caller can only fix one of them: a variant
+    // that is simply gone, versus one that exists but is for another instrument.
+    return {
+      ok: false,
+      reason:
+        status === 'deleted'
+          ? 'That voice is no longer in your library.'
+          : `That voice is not one of the ${instrumentId} voices this track can play.`,
+    };
+  }
+  // After the membership check, never before: a ref this track cannot play still
+  // has to be refused, even in the impossible case that it is already stored.
+  const current = readTrackVoiceRef(track);
+  if (current && voiceKey(current) === voiceKey(ref)) return { ok: true, value: undefined };
+  return setTrackVoiceRef(trackId, ref);
+}
+
 // ----------------------------------------------------------------- writing ---
 
 /**
@@ -262,7 +469,11 @@ export type VoiceWriteResult =
 const refuse = (reason: VoiceRefusal): VoiceWriteResult => ({ ok: false, reason });
 
 /**
- * Point the editing pattern at a voice.
+ * Point the EDITING PATTERN at a voice.
+ *
+ * ⚠ NOT the track write — {@link setTrackVoice} is. This one addresses whichever
+ * pattern is open, so from a composition track control it would retune the
+ * placement being edited and change no track at all.
  *
  * Writes `pattern.voiceRef` and nothing else. In particular not the global
  * `activeVariants` map: that is the instrument-wide default shared by every pattern
