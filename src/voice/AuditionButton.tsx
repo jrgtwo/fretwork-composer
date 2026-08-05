@@ -1,4 +1,10 @@
-import { auditionVoice, warmVoice } from '../audio/playbackService';
+import type { Track } from '@fretwork/lib';
+import {
+  auditionTrackVoice,
+  auditionVoice,
+  warmTrackVoice,
+  warmVoice,
+} from '../audio/playbackService';
 
 /**
  * Play one note through the voice being edited, with the transport stopped.
@@ -22,16 +28,34 @@ import { auditionVoice, warmVoice } from '../audio/playbackService';
  * the failure it was meant to prevent. Repeating costs nothing: `startAudio`,
  * `MasterBus.warmup` and `ensureBuilt` are each idempotent and return immediately once
  * their work is done.
+ *
+ * ── ⚠ WITH A TRACK, IT IS A DIFFERENT VOICE (CP-15) ──────────────────────────
+ *
+ * `auditionVoice` resolves through `getEditingPattern()`. In the composition
+ * page's voice rail that would play whichever pattern or placement happens to be
+ * open rather than the track whose voice is being picked — silently wrong, and
+ * indistinguishable from the picker not working. `track` switches BOTH calls to
+ * the track path, which resolves through the same draft `buildTrackVoice` reads,
+ * so an audition matches what playback will do including unsaved edits.
+ *
+ * Optional rather than a second component: everything else here — the warm on
+ * hover and focus, the press-down chrome, the accessible name — is identical,
+ * and two copies of the warming rule is how one of them ends up without it.
  */
-export function AuditionButton() {
-  const warm = () => void warmVoice();
+export function AuditionButton({ track }: { track?: Track }) {
+  const warm = () => void (track ? warmTrackVoice(track.id) : warmVoice());
+  const audition = () => void (track ? auditionTrackVoice(track.id) : auditionVoice());
 
   return (
     <button
       type="button"
+      // The name stays "Audition" in both surfaces: each renders exactly one of
+      // these, so the track's name would disambiguate nothing and would make
+      // the one control whose label is a verb read as a track list entry.
+      title={track ? `Play one note through ${track.name}’s voice` : undefined}
       onPointerEnter={warm}
       onFocus={warm}
-      onClick={() => void auditionVoice()}
+      onClick={audition}
       className="pressable control flex-none rounded-lg px-2 py-1 font-mono text-[9px] font-bold tracking-[0.06em] uppercase"
     >
       Audition

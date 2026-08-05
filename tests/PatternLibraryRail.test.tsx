@@ -281,12 +281,15 @@ describe('where the rail appears', () => {
     expect(getTracks()[0].placements[0].startTick).toBe(twoBars);
   });
 
-  it('is replaced by a placeholder in the modes that own their own rail', () => {
+  it('is replaced in the modes that own their own rail', () => {
     seedPattern('Riff');
+    // Each mode's rail names itself for what it holds — CP-15 gave voice mode
+    // its own list, so 'Inspector' is no longer the name for both.
+    const railName = { edit: 'Inspector', voice: 'Voices' } as const;
     for (const mode of ['edit', 'voice'] as const) {
       const view = render(<CompositionPage mode={mode} onModeChange={() => {}} />);
       expect(screen.queryByRole('button', { name: 'Place pattern Riff' })).not.toBeInTheDocument();
-      expect(screen.getByRole('complementary', { name: 'Inspector' })).toBeInTheDocument();
+      expect(screen.getByRole('complementary', { name: railName[mode] })).toBeInTheDocument();
       view.unmount();
     }
   });

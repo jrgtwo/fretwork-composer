@@ -469,6 +469,23 @@ export type VoiceWriteResult =
 const refuse = (reason: VoiceRefusal): VoiceWriteResult => ({ ok: false, reason });
 
 /**
+ * The same refusals, plus the one only a track can suffer.
+ *
+ * A SUPERSET rather than a member of {@link VoiceRefusal}, deliberately:
+ * `VoicePane` maps that union with a `Record`, so widening it would make the
+ * pattern page fail to compile for a state it can never be in. `no-pattern` is
+ * carried along because {@link renameVoice} and {@link deleteVoice} are shared
+ * with the pattern page and are typed on the narrower union — neither can
+ * actually return it, but a rail rendering their results has to have a sentence
+ * for every member it is handed.
+ */
+export type TrackVoiceRefusal = VoiceRefusal | 'no-track';
+
+export type TrackVoiceWriteResult =
+  | { readonly ok: true; readonly id: string }
+  | { readonly ok: false; readonly reason: TrackVoiceRefusal };
+
+/**
  * Point the EDITING PATTERN at a voice.
  *
  * ⚠ NOT the track write — {@link setTrackVoice} is. This one addresses whichever
@@ -508,8 +525,23 @@ export function selectVoice(ref: VariantRef): void {
 export function saveVoice(preset: VoicePreset): VoiceWriteResult {
   const pattern = getEditingPattern();
   if (!pattern) return refuse('no-pattern');
+  return writeVariant(readVoiceRef(pattern), patternInstrumentId(pattern), preset);
+}
 
-  const ref = readVoiceRef(pattern);
+/**
+ * Overwrite the variant a ref names — the shared core of {@link saveVoice} and
+ * {@link saveTrackVoice}.
+ *
+ * The two callers differ only in WHOSE ref and instrument they resolve. Shared
+ * rather than copied because these four guards are the whole of Save's
+ * semantics, and a second copy of the built-in refusal is a second place for it
+ * to drift from the one the buttons are disabled by.
+ */
+function writeVariant(
+  ref: VariantRef | null,
+  instrumentId: FretInstrumentId,
+  preset: VoicePreset,
+): VoiceWriteResult {
   if (!ref) return refuse('no-voice');
   if (ref.kind === 'default') return refuse('built-in');
 
@@ -519,9 +551,7 @@ export function saveVoice(preset: VoicePreset): VoiceWriteResult {
   // future multi-instrument flow. Refused rather than coerced: the picker doesn't offer
   // this variant for this instrument, so a Save that landed here would overwrite a voice
   // the user cannot even see from where they are standing.
-  if (variant.instrumentId !== patternInstrumentId(pattern)) {
-    return refuse('unknown-variant');
-  }
+  if (variant.instrumentId !== instrumentId) return refuse('unknown-variant');
 
   // `Variant.name`/`family` and the payload's are kept in lockstep — the picker reads the
   // record, exports and Save-as read the payload, and a user who renames one and
@@ -547,9 +577,32 @@ export function saveVoiceAs(name: string, preset: VoicePreset): VoiceWriteResult
   const trimmed = name.trim();
   if (!trimmed) return refuse('empty-name');
 
-  const instrumentId = patternInstrumentId(pattern);
-  const id = store().addVariant({
-    name: trimmed,
+  const id = addUserVariant(trimmed, patternInstrumentId(pattern), preset);
+  // `addVariant` returns '' when the tier gate refuses; it has already opened its
+  // own signup/upgrade prompt, so there is nothing for us to report but the refusal.
+  if (!id) return refuse('capped');
+
+  selectVoice({ kind: 'user', id });
+  return { ok: true, id };
+}
+
+/**
+ * Copy a preset into a new user variant and return its id, or '' when the lib's
+ * tier gate refuses.
+ *
+ * The COPY only — pointing something at the result is the caller's, and it is
+ * the whole difference between {@link saveVoiceAs} and {@link saveTrackVoiceAs}.
+ * Folders are a later slice, so the variant lands at the root; `collectionId`
+ * has to be passed regardless, because the lib's `addVariant` takes the whole
+ * record minus its generated fields.
+ */
+function addUserVariant(
+  name: string,
+  instrumentId: FretInstrumentId,
+  preset: VoicePreset,
+): string {
+  return store().addVariant({
+    name,
     instrumentId,
     family: preset.family,
     collectionId: null,
@@ -557,14 +610,8 @@ export function saveVoiceAs(name: string, preset: VoicePreset): VoiceWriteResult
     // instrument because the record is what filters the picker while the payload is
     // what gets built — disagree and the picker offers a voice that plays on another
     // instrument's neck.
-    preset: { ...preset, name: trimmed, instrumentId },
+    preset: { ...preset, name, instrumentId },
   });
-  // `addVariant` returns '' when the tier gate refuses; it has already opened its
-  // own signup/upgrade prompt, so there is nothing for us to report but the refusal.
-  if (!id) return refuse('capped');
-
-  selectVoice({ kind: 'user', id });
-  return { ok: true, id };
 }
 
 /**
@@ -607,5 +654,112 @@ export function deleteVoice(id: string): VoiceWriteResult {
   const ref = pattern ? readVoiceRef(pattern) : null;
   if (ref?.kind === 'user' && ref.id === id) setEditingPatternVoiceRef(null);
 
+  return { ok: true, id };
+}
+
+// --------------------------------------------------------- track writing ---
+/**
+ * ⚠ THE SECOND WRITE PATH, and the same trap as {@link selectVoice}.
+ *
+ * {@link saveVoice} and {@link saveVoiceAs} resolve their target through
+ * `getEditingPattern()`. Called from a composition surface they would overwrite
+ * the variant the OPEN PATTERN points at and repoint that pattern — leaving
+ * every track exactly as it was, which with one track on the fallback can even
+ * look like it worked. The two below resolve through a `Track` instead and
+ * repoint through {@link setTrackVoice}. They share `writeVariant` and
+ * `addUserVariant` with the pattern pair, so the refusals cannot drift.
+ *
+ * {@link renameVoice} is NOT duplicated here: it addresses a variant by id, and a
+ * variant is a SHARED asset with no per-holder identity — renaming one from a
+ * track and from a pattern are the same act on the same object. Deleting is the
+ * same act too, but it leaves a dangling ref BEHIND it, and the holder to repair
+ * differs — hence {@link deleteTrackVoice}, which is `deleteVoice` plus that one
+ * repair rather than a second implementation of it.
+ */
+
+/**
+ * Overwrite the variant ONE TRACK points at.
+ *
+ * Takes the preset rather than reading the track's draft, exactly as
+ * {@link saveVoice} does: `trackVoiceDrafts` imports this module, so reading it
+ * from here would be a cycle. The caller passes `trackVoicePreset(track)`.
+ *
+ * Remember that a variant is SHARED. This retunes every pattern AND every other
+ * track pointing at the same ref, which is intended and is why the rail says so
+ * before the button is pressed. There is deliberately no per-track fork.
+ */
+export function saveTrackVoice(trackId: string, preset: VoicePreset): TrackVoiceWriteResult {
+  const track = findTrack(trackId);
+  if (!track) return { ok: false, reason: 'no-track' };
+  return writeVariant(readTrackVoiceRef(track), trackInstrumentId(track), preset);
+}
+
+/**
+ * Copy a preset into a new user variant and point ONE TRACK at it.
+ *
+ * The repoint is the whole point, and it is the half that differs from
+ * {@link saveVoiceAs}: without it the track keeps playing the built-in the copy
+ * was taken from and the saved variant sits in the library unused.
+ */
+export function saveTrackVoiceAs(
+  trackId: string,
+  name: string,
+  preset: VoicePreset,
+): TrackVoiceWriteResult {
+  const track = findTrack(trackId);
+  if (!track) return { ok: false, reason: 'no-track' };
+
+  const trimmed = name.trim();
+  if (!trimmed) return { ok: false, reason: 'empty-name' };
+
+  const id = addUserVariant(trimmed, trackInstrumentId(track), preset);
+  if (!id) return { ok: false, reason: 'capped' };
+
+  // The variant was just minted FOR this track's instrument, so the membership
+  // half of `setTrackVoice` cannot refuse it; the only reachable refusal left is
+  // the track having gone, which this synchronous stretch makes impossible. The
+  // guard stands anyway, and the variant is deliberately NOT rolled back if it
+  // ever fires — a voice the user has named is not garbage, and it is now in the
+  // library where they can point anything at it.
+  const pointed = setTrackVoice(trackId, { kind: 'user', id });
+  // Reported as the only refusal that could still be true rather than collapsing
+  // three into one: `setTrackVoice` also refuses `deleted` and `wrong-instrument`,
+  // and printing "that track is no longer in this composition" for either would be
+  // a confidently wrong sentence the day `voiceStatusOf` changes.
+  if (!pointed.ok) {
+    return { ok: false, reason: findTrack(trackId) ? 'unknown-variant' : 'no-track' };
+  }
+
+  return { ok: true, id };
+}
+
+/**
+ * Delete a user variant AND repair the track that pointed at it — one act.
+ *
+ * {@link deleteVoice} repairs the editing PATTERN's ref and knows nothing about
+ * tracks, so a caller with no pointer would get the pattern fixed and every track
+ * left dangling. Pairing them here is what keeps the gesture and the seam doing
+ * the same thing: one command, one undo step, callable by id.
+ *
+ * Only THIS track is repaired, for the same reason only the editing pattern is:
+ * there is no bulk track write to fix the others with (LIB-GAP(1) is the same
+ * missing primitive), and they fall back cleanly, which is the lib's own answer.
+ */
+export function deleteTrackVoice(trackId: string, id: string): TrackVoiceWriteResult {
+  const track = findTrack(trackId);
+  if (!track) return { ok: false, reason: 'no-track' };
+
+  const deleted = deleteVoice(id);
+  // `unknown-variant` is the ONLY refusal `deleteVoice` has, and it means the
+  // variant is already gone — this track's ref is the dangling remains of it, so
+  // the repair below still has to happen. Anything else left the library untouched
+  // and the ref is still good.
+  if (!deleted.ok && deleted.reason !== 'unknown-variant') return deleted;
+
+  const ref = readTrackVoiceRef(track);
+  if (ref?.kind === 'user' && ref.id === id) {
+    const repaired = setTrackVoice(trackId, null);
+    if (!repaired.ok) return { ok: false, reason: 'no-track' };
+  }
   return { ok: true, id };
 }

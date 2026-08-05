@@ -166,59 +166,58 @@ export function rulerMarks(
 export type ArrangementMode = 'pattern' | 'edit' | 'voice';
 
 /**
- * Default lane height per mode. Pattern mode draws one block row, so eight
+ * The modes that have a TIME AXIS, and so the only ones with lane geometry.
+ *
+ * ⚠ THIS IS THE CP-16 DISTINCTION, and it is what the types in this section
+ * exist to enforce. `laneRects` places lanes against a shared horizontal axis at
+ * absolute tops so the ruler, the header column and the lane area can be three
+ * separately-clipped viewports showing the same rows. Voice mode has no axis —
+ * no ruler, no playhead, no zoom, no grid lines, no horizontal overflow — and a
+ * rack is as tall as the sections a user has unfolded inside it, which is a
+ * number no pure function here can know. So voice mode draws its tracks as
+ * ordinary rows in normal flow (header and rack together, see `ArrangementGrid`)
+ * and never calls any of this.
+ *
+ * That is a deliberate narrowing, not an omission: CP-14 DID keep a
+ * `DEFAULT_LANE_HEIGHTS.voice`, and it under-measured the real content by ~40 px
+ * because the derivation omitted two rendered rows — which put the cabinet
+ * picker below the fold of every open rack, in a place jsdom (no layout) could
+ * never fail on. A hand-maintained pixel table for content that folds is that
+ * bug waiting to recur. Excluding `'voice'` here is what stops one being added
+ * back by accident.
+ */
+export type TimedArrangementMode = Exclude<ArrangementMode, 'voice'>;
+
+/**
+ * Default lane height per timed mode. Pattern mode draws one block row, so eight
  * tracks plus a ruler fit a laptop viewport without scrolling; edit mode has to
- * hold a full set of string rows, and voice mode a rack face.
+ * hold a full set of string rows.
  *
  * The EDIT figure is now a fallback rather than the number in use: CP-11 sizes
  * each edit lane to its own track's string count (`laneHeightsFor`), and this is
  * what a six-string lane comes to — see `EDIT_STRING_ROW_PX`, which is derived
  * from it so the two cannot drift.
- *
- * ⚠ THE VOICE FIGURE WAS 192 AND WAS WRONG. CP-14 measured what a rack actually
- * needs and this is it: `CabinetGraphic` is a fixed 200 px `aspect-square` well
- * plus its mic caption (~228 px in its `.tray`), which is the tallest of the
- * four stages and therefore the one that sets the number; over it sits a
- * `RackFace` faceplate (~32 px) and this lane's own strip and padding (~44 px).
- * A rack IS wider than it is tall — that is why the stages sit side by side
- * across the lane rather than stacked — but the cabinet is square and no
- * arrangement of four stages gets under it. Changed HERE rather than overridden
- * in the grid so `laneRects` stays the one thing that decides where the next
- * lane starts.
- *
- * That derivation only holds because the cabinet stage's non-knob rows (its
- * bypass and its IR picker) sit BESIDE the graphic rather than under it — see
- * `TrackVoiceRack.renderCabinet`, which says so for the same reason. Stack them
- * and the stage is ~50 px taller than this number, which puts the IR picker
- * below the fold of every open lane.
  */
-export const DEFAULT_LANE_HEIGHTS: Record<ArrangementMode, number> = {
+export const DEFAULT_LANE_HEIGHTS: Record<TimedArrangementMode, number> = {
   pattern: 88,
   edit: 192,
-  voice: 304,
 };
 
 /**
- * A collapsed voice lane: the rack's strip and nothing else, so a track you are
- * not tuning costs a mixer strip rather than a screen.
+ * How tall a TRACK HEADER is drawn in voice mode.
  *
- * Collapse is per TRACK (CP-14), which is why this is a second height rather
- * than a mode: eight tracks with two racks open is the shape the ticket is for,
- * and it only exists if a lane can be short.
+ * Voice rows are normal flow and grow with their rack, so nothing sizes the row
+ * — but the header inside it still needs a number, because `TrackHeader` is an
+ * `overflow-hidden` column that takes an explicit height (its own comment says
+ * so). This is the figure it was drawn for: three control rows, a status line
+ * and CP-13's voice picker. Anything smaller clips the mute, the solo, the fader
+ * and the picker out of sight while leaving them in the DOM and tabbable — a
+ * silently disabled mixer strip, which jsdom has no layout to catch.
  *
- * ⚠ IT CANNOT GO BELOW `pattern`. A lane's height is also its TRACK HEADER's —
- * one `laneRects` entry sizes both — and `TrackHeader` is an `overflow-hidden`
- * column drawn for exactly this many pixels (its own comment says so). Fold a
- * rack to less and the header's mute, solo, fader and voice picker are clipped
- * out of sight while staying in the DOM and staying tabbable, so the gesture
- * that means "show me more tracks" silently disables that track's mixer strip.
- * jsdom has no layout, so nothing can catch that but this constant.
+ * Derived from pattern mode's lane rather than restated, because it IS the same
+ * strip: that is the one mode whose lane is sized by what the header needs.
  */
-export const VOICE_LANE_COLLAPSED_PX = DEFAULT_LANE_HEIGHTS.pattern;
-
-/** How tall one voice lane is. */
-export const voiceLaneHeight = (collapsed: boolean): number =>
-  collapsed ? VOICE_LANE_COLLAPSED_PX : DEFAULT_LANE_HEIGHTS.voice;
+export const VOICE_HEADER_HEIGHT = DEFAULT_LANE_HEIGHTS.pattern;
 
 /** The height of the ruler strip. Lanes start below it. */
 export const RULER_HEIGHT = 28;
@@ -249,12 +248,12 @@ export interface LaneRect {
  * lane has four string rows where a guitar lane has six.
  */
 export type LaneHeights =
-  | Partial<Record<ArrangementMode, number>>
-  | ((track: LaneTrack, mode: ArrangementMode) => number);
+  | Partial<Record<TimedArrangementMode, number>>
+  | ((track: LaneTrack, mode: TimedArrangementMode) => number);
 
 function resolveLaneHeight(
   track: LaneTrack,
-  mode: ArrangementMode,
+  mode: TimedArrangementMode,
   laneHeights: LaneHeights,
 ): number {
   const raw =
@@ -271,10 +270,12 @@ function resolveLaneHeight(
  *
  * Coordinates are lane-area content space: y = 0 is the first lane's top, the
  * ruler is not included, and the caller has already undone scroll.
+ *
+ * Timed modes only — see `TimedArrangementMode`.
  */
 export function laneRects(
   tracks: readonly LaneTrack[],
-  mode: ArrangementMode,
+  mode: TimedArrangementMode,
   laneHeights: LaneHeights = DEFAULT_LANE_HEIGHTS,
 ): LaneRect[] {
   const rects: LaneRect[] = [];
@@ -329,27 +330,22 @@ export function laneStringCount(instrumentId: string): number {
 }
 
 /**
- * Lane heights that fit edit mode's rows to each track's own string count and
- * voice mode's to whether that track's rack is folded, and leave pattern mode on
- * its fixed figure.
+ * Lane heights that fit edit mode's rows to each track's own string count, and
+ * leave pattern mode on its fixed figure.
  *
  * A function rather than a table because that is the case `LaneHeights` grew its
- * function form for: BOTH of those vary per track — a bass lane is four rows
- * where a guitar lane is six, and a folded rack is a strip where an open one is
- * a rack — and `laneRects` is the only thing that may decide where the next lane
- * starts.
+ * function form for: edit mode's height genuinely varies per track — a bass lane
+ * is four rows where a guitar lane is six — and `laneRects` is the only thing
+ * that may decide where the next lane starts.
  *
- * `rackCollapsed` is optional so a caller with no rack state (every test of the
- * other two modes, and pattern mode itself) gets the open height, which is the
- * mode's declared default.
+ * CP-14's voice branch is GONE, with `DEFAULT_LANE_HEIGHTS.voice` and the folded
+ * height beside it: voice rows are normal flow now and are not laid out from
+ * here at all. See `TimedArrangementMode` for why that is a narrowing worth
+ * enforcing in the types rather than a line to add back.
  */
-export function laneHeightsFor(
-  instrumentOf: (trackId: string) => string,
-  rackCollapsed: (trackId: string) => boolean = () => false,
-): LaneHeights {
+export function laneHeightsFor(instrumentOf: (trackId: string) => string): LaneHeights {
   return (track, mode) => {
     if (mode === 'edit') return editLaneHeight(laneStringCount(instrumentOf(track.id)));
-    if (mode === 'voice') return voiceLaneHeight(rackCollapsed(track.id));
     return DEFAULT_LANE_HEIGHTS[mode];
   };
 }

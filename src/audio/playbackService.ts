@@ -54,6 +54,7 @@ import {
 } from '@fretwork/lib';
 import { getEditingPattern, patternInstrumentId } from '../patterns/patternService';
 import {
+  findTrack,
   getEditingComposition,
   trackInstrumentId,
   useEditingComposition,
@@ -63,6 +64,7 @@ import { readTrackVoiceRef, readVoiceRef, resolveVoicePreset } from '../voice/vo
 import {
   readTrackVoiceDraft,
   subscribeTrackVoiceDrafts,
+  trackVoicePreset,
 } from '../voice/trackVoiceDrafts';
 import { wrapToDuration } from './transportClock';
 
@@ -658,6 +660,123 @@ export async function auditionVoice(note: string = AUDITION_NOTE): Promise<void>
   }
 }
 
+// ------------------------------------------------- track audition (CP-15) ---
+/**
+ * ⚠ WHY THIS IS NOT `auditionVoice`.
+ *
+ * That one resolves its voice through `getEditingPattern()`. Called from the
+ * composition page's voice rail it would play whichever pattern or placement
+ * happens to be open rather than the track whose voice is being picked —
+ * silently wrong, and it reads as the picker not working.
+ *
+ * The track's voice is resolved through `trackVoicePreset`, which is the SAME
+ * call `buildTrackVoice` reaches through `readTrackVoiceDraft`: the unsaved
+ * draft when there is one, the stored ref otherwise. So the audition is of what
+ * playback will actually do, including edits no variant holds yet — which is the
+ * only version of this worth having, since the rack is where the tweaking
+ * happens.
+ *
+ * ── Its own `Voice`, and why it cannot borrow the engine's ───────────────────
+ *
+ * `MultiTrackPlayback` keeps its per-track `Voice` objects private and exposes
+ * only `setTrackVoice(trackId)` (the same enclosure LIB-GAP(19) is about), so
+ * there is nothing to reach for. The pattern path can borrow `engine.voice`;
+ * this one cannot, and building a rig of its own is the alternative rather than
+ * a preference.
+ *
+ * ONE rig, not one per track: it is a preview, only ever sounding one note at a
+ * time, and eight idle `Tone.Sampler` sets would be eight bank loads for a
+ * button most users press once. Re-pointing it at another track's preset is a
+ * `swapPreset` while the SOURCE is unchanged — the whole point of that call — and
+ * a rebuild only when the source itself differs, which is the same
+ * `sourceFingerprint` classification the pattern engine uses.
+ *
+ * ⚠ It connects to `MasterBus` (the constructor's default), which is the
+ * opposite of `buildTrackVoice`'s `autoConnectToMaster: false` — deliberately.
+ * There is no per-track gain to insert here, so a voice that did not connect
+ * would be inaudible. The consequence is that an audition ignores the track's
+ * fader, mute and solo: it is an audition of the VOICE, not a preview of the
+ * mix, and a muted track still has to be tunable.
+ */
+let auditionRig: { fingerprint: string; preset: VoicePreset; voice: Voice } | null = null;
+
+function disposeAuditionRig(): void {
+  const rig = auditionRig;
+  auditionRig = null;
+  if (rig) attempt(() => rig.voice.dispose());
+}
+
+function auditionRigFor(preset: VoicePreset): Voice {
+  const fingerprint = sourceFingerprint(preset.source);
+  const current = auditionRig;
+  if (current && current.fingerprint === fingerprint) {
+    // Identity, not deep equality: every edit mints a new preset object
+    // (`setAtPath`), and one that is the same object is the same tone.
+    if (current.preset !== preset) {
+      current.voice.swapPreset(preset);
+      current.preset = preset;
+    }
+    return current.voice;
+  }
+  disposeAuditionRig();
+  const voice = new Voice(preset);
+  auditionRig = { fingerprint, preset, voice };
+  return voice;
+}
+
+/** What the rig should be holding for this track, or null when the track is
+ *  gone — which is reachable by id from the agent, and by an undo that retracts
+ *  a track between the hover and the click. */
+function trackAuditionPreset(trackId: string): VoicePreset | null {
+  const track = findTrack(trackId);
+  return track ? trackVoicePreset(track) : null;
+}
+
+/**
+ * Get one track's voice loaded before anything asks to hear it —
+ * {@link warmVoice} for the track path, and needed for the same reason: ten of
+ * the eleven guitar slots are sampler-sourced, so on a cold page the first
+ * audition click would otherwise be the click that starts the download.
+ */
+export async function warmTrackVoice(trackId: string): Promise<void> {
+  const preset = trackAuditionPreset(trackId);
+  if (!preset) return;
+
+  try {
+    await startAudio();
+    await MasterBus.warmup();
+    await auditionRigFor(preset).ready();
+  } catch {
+    // No audio graph available; the audition path degrades the same way.
+  }
+}
+
+/** Play one note through ONE TRACK's voice with the transport stopped. Call
+ *  {@link warmTrackVoice} first if the samples may not be loaded. */
+export async function auditionTrackVoice(
+  trackId: string,
+  note: string = AUDITION_NOTE,
+): Promise<void> {
+  const preset = trackAuditionPreset(trackId);
+  if (!preset) return;
+
+  try {
+    await startAudio();
+    // The master bus renders its reverb impulse response lazily and every voice
+    // outputs through it; auditioning before it is ready is how the first note
+    // after a cold load comes out dry.
+    await MasterBus.warmup();
+
+    const voice = auditionRigFor(preset);
+    // Synchronous from here: an audition must fire on the click that asked for
+    // it. `warmTrackVoice` is what awaits the load.
+    voice.ensureBuilt();
+    voice.play(note, '4n', audioNow() + AUDITION_PREROLL_SEC);
+  } catch {
+    // Auditioning is best-effort; it must never break the click that asked.
+  }
+}
+
 // ------------------------------------------------- composition playback ---
 // The second engine. `MultiTrackPlayback` builds one (Voice → per-track Gain →
 // master Gain) chain and one `EventScheduler` per track and drives them all from
@@ -981,6 +1100,17 @@ function ensureCompositionEngine(composition: Composition): CompositionEngine | 
 function disposeCompositionEngine(): void {
   const current = compositionEngine;
   compositionEngine = null;
+
+  // ⚠ ABOVE THE EARLY RETURN, and that is the whole point of where it sits. The
+  // audition rig's lifetime is this PAGE's, not this ENGINE's: `warmTrackVoice`
+  // and `auditionTrackVoice` build it without ever calling
+  // `ensureCompositionEngine`, so the ordinary flow — open voice mode, audition a
+  // few voices, never press Play — leaves a rig standing while
+  // `compositionEngine` is still null. Below the guard this would never run in
+  // exactly that case, stranding a voice on the shared `MasterBus` with no handle
+  // left to dispose it.
+  disposeAuditionRig();
+
   if (!current) return;
 
   stopHeadLoop(current);

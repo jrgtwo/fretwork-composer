@@ -20,7 +20,7 @@
  *   - The working copy is keyed (see `workingKey`). Switch voice, instrument or pattern
  *     and it stops applying — which is why every switch confirms first.
  */
-import { useEffect, useRef, useState, type MouseEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   detectSamplePack,
   getAmpModel,
@@ -67,6 +67,9 @@ import { ParamSlider } from './controls/ParamSlider';
 import { ParamEnum } from './controls/ParamEnum';
 import { ParamToggle } from './controls/ParamToggle';
 import { Knob } from './controls/Knob';
+import { SHARED_VOICE_REFUSAL_TEXT, useNameForm, voiceButtonClass, voiceLabelClass } from './voiceChrome';
+import { DirtyPill } from './DirtyPill';
+import { NameForm } from './NameForm';
 import { AmpHead } from './rack/AmpHead';
 import { CabinetGraphic } from './rack/CabinetGraphic';
 import { AuditionButton } from './AuditionButton';
@@ -82,12 +85,10 @@ const INSTRUMENTS = listInstruments();
 /** Every refusal `voiceService` can return is a state this pane can be in, so each one
  *  needs a sentence. `built-in` is Sound Lab's shipped wording, kept verbatim. */
 const REFUSAL_TEXT: Record<VoiceRefusal, string> = {
-  'no-pattern': 'No pattern is open.',
+  ...SHARED_VOICE_REFUSAL_TEXT,
+  // The two that name the holder, and so cannot be shared with the rail.
   'no-voice': 'This pattern has no voice of its own. Use Save as… to keep these tweaks.',
   'built-in': 'Defaults are read-only. Use Save as new variant to keep your tweaks.',
-  'unknown-variant': 'That voice is no longer in your library.',
-  'empty-name': 'Give the variant a name.',
-  capped: 'Your plan’s variant limit has been reached.',
 };
 
 /** The two paths "Use suggested cab" spans. It is the one control in the pane that
@@ -99,11 +100,6 @@ const CAB_URL_PATH = 'effects.cabIR.url';
 /** `id` on an `<input>`, `htmlFor` on its label. Dots are legal in an id but awkward in
  *  a CSS selector, so they go. */
 const domId = (path: string) => `voice-${path.replaceAll('.', '-')}`;
-
-const buttonClass =
-  'pressable control flex-none rounded-lg px-2 py-1 font-mono text-[9px] font-bold tracking-[0.06em] uppercase disabled:cursor-not-allowed disabled:opacity-40';
-
-const labelClass = 'flex-none font-mono text-[9px] tracking-[0.1em] text-ink-mut uppercase';
 
 const selectClass = 'control pressable min-w-0 rounded-lg px-1.5 py-1 font-mono text-[10px]';
 
@@ -206,14 +202,14 @@ function VoiceEditor({
   const [notice, setNotice] = useState<string | null>(null);
   // Transient, so it is allowed to live here: collapsing the pane mid-rename cancels the
   // rename, which is the same thing pressing Escape would do. The working copy and the
-  // open sections are the state that must survive, and they are in `App`.
-  const [nameForm, setNameForm] = useState<{ mode: 'save-as' | 'rename'; value: string } | null>(
-    null,
-  );
-  // The form takes focus when it opens (`autoFocus`) and then deletes itself, so without
-  // this a keyboard user who presses Create or Cancel lands on `<body>`. Focus goes back
-  // to whichever button opened it — the same place a dialog would return it.
-  const nameFormOpener = useRef<HTMLButtonElement | null>(null);
+  // open sections are the state that must survive, and they are in `App`. The hook is
+  // shared with the rail — see `voiceChrome.useNameForm` for the focus-return it carries.
+  const {
+    form: nameForm,
+    setForm: setNameForm,
+    open: openNameForm,
+    close: closeNameForm,
+  } = useNameForm();
 
   // Mirrors `playbackService`'s `workingTagOf`: pattern + instrument + ref. The pattern id
   // is in it because an unsaved edit belongs to the editor that is open, while two
@@ -322,21 +318,6 @@ function VoiceEditor({
     // a later Save or rename against the same shared variant would never reach the
     // engine.
     applyVoicePreset(null);
-  };
-
-  /** Open the name form, remembering the button to hand focus back to. */
-  const openNameForm =
-    (mode: 'save-as' | 'rename', value: string) =>
-    (event: MouseEvent<HTMLButtonElement>) => {
-      nameFormOpener.current = event.currentTarget;
-      setNameForm({ mode, value });
-    };
-
-  /** Dismiss it and return focus. Only for the form's own buttons — a switch that
-   *  happens to close the form has already moved focus somewhere the user chose. */
-  const closeNameForm = () => {
-    setNameForm(null);
-    nameFormOpener.current?.focus();
   };
 
   const submitName = () => {
@@ -626,7 +607,7 @@ function VoiceEditor({
           commit(setAtPath(preset, CAB_URL_PATH, suggested.url));
           if (!openSections.includes('cabinet')) onOpenSectionsChange([...openSections, 'cabinet']);
         }}
-        className={`${buttonClass} self-start`}
+        className={`${voiceButtonClass} self-start`}
       >
         Use suggested cab · {suggested.label}
       </button>
@@ -663,7 +644,7 @@ function VoiceEditor({
     <div className="flex flex-col gap-1.5">
       {/* ---- header: what is being edited, and what can be done to it ---------- */}
       <div className="flex flex-none flex-wrap items-center gap-x-2 gap-y-1">
-        <label htmlFor="voice-instrument" className={labelClass}>
+        <label htmlFor="voice-instrument" className={`flex-none ${voiceLabelClass}`}>
           Instrument
         </label>
         <select
@@ -679,7 +660,7 @@ function VoiceEditor({
           ))}
         </select>
 
-        <label htmlFor="voice-preset" className={labelClass}>
+        <label htmlFor="voice-preset" className={`flex-none ${voiceLabelClass}`}>
           Voice
         </label>
         <select
@@ -726,26 +707,15 @@ function VoiceEditor({
       </div>
 
       <div className="flex flex-none flex-wrap items-center gap-x-1.5 gap-y-1">
-        {/* Brass marks unsaved, the way it marks every other live state in the app. */}
-        <span
-          className={`flex items-center gap-1 font-mono text-[9px] tracking-[0.1em] uppercase ${
-            dirty ? 'text-brass-hi' : 'text-ink-mut'
-          }`}
-        >
-          <i
-            aria-hidden
-            className={`h-1.5 w-1.5 rounded-full ${dirty ? 'bg-brass-hi' : 'bg-line-hi'}`}
-          />
-          {dirty ? 'Unsaved' : 'Saved'}
-        </span>
+        <DirtyPill dirty={dirty} />
         <span className="flex-1" />
-        <button type="button" onClick={save} disabled={!dirty || isBuiltIn} className={buttonClass}>
+        <button type="button" onClick={save} disabled={!dirty || isBuiltIn} className={voiceButtonClass}>
           Save
         </button>
         <button
           type="button"
           onClick={openNameForm('save-as', `${preset.name} copy`)}
-          className={buttonClass}
+          className={voiceButtonClass}
         >
           Save as…
         </button>
@@ -753,11 +723,11 @@ function VoiceEditor({
           type="button"
           onClick={openNameForm('rename', preset.name)}
           disabled={isBuiltIn}
-          className={buttonClass}
+          className={voiceButtonClass}
         >
           Rename
         </button>
-        <button type="button" onClick={remove} disabled={isBuiltIn} className={buttonClass}>
+        <button type="button" onClick={remove} disabled={isBuiltIn} className={voiceButtonClass}>
           Delete
         </button>
       </div>
@@ -771,30 +741,13 @@ function VoiceEditor({
       )}
 
       {nameForm && (
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            submitName();
-          }}
-          className="flex flex-none items-center gap-1.5"
-        >
-          <label htmlFor="voice-name" className={labelClass}>
-            {nameForm.mode === 'save-as' ? 'New name' : 'Rename'}
-          </label>
-          <input
-            id="voice-name"
-            autoFocus
-            value={nameForm.value}
-            onChange={(event) => setNameForm({ ...nameForm, value: event.currentTarget.value })}
-            className="well min-w-0 flex-1 px-1.5 py-1 font-mono text-[10px] text-ink"
-          />
-          <button type="submit" className={buttonClass}>
-            {nameForm.mode === 'save-as' ? 'Create' : 'Apply'}
-          </button>
-          <button type="button" onClick={closeNameForm} className={buttonClass}>
-            Cancel
-          </button>
-        </form>
+        <NameForm
+          form={nameForm}
+          inputId="voice-name"
+          onChange={(value) => setNameForm({ ...nameForm, value })}
+          onSubmit={submitName}
+          onCancel={closeNameForm}
+        />
       )}
 
       {/* Mounted always, `sr-only` when empty: a live region has to exist *before* its
@@ -834,7 +787,7 @@ function VoiceEditor({
                     onClick={() =>
                       status === 'absent' ? addSection(section) : removeSection(section)
                     }
-                    className={buttonClass}
+                    className={voiceButtonClass}
                   >
                     {status === 'absent' ? `Add ${section.label}` : 'Remove'}
                   </button>

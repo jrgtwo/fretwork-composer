@@ -461,6 +461,25 @@ export const PARAM_SECTIONS: readonly ParamSection[] = [
 ];
 
 /**
+ * Which stages a voice editor opens on: Amp and Cabinet — the two you actually
+ * turn. The source and the output trim are tuned once and left, so they start
+ * folded.
+ *
+ * Here rather than in either editor because BOTH render `PARAM_SECTIONS` and the
+ * two must not drift: the pattern page's `VoicePane` shipped with this default,
+ * CP-14's track rack shipped with all four open, and the result was one surface
+ * showing a stage folded that the other showed open. It also makes the composition
+ * page's own design argument true again — racks beat a modal because TWO TRACKS'
+ * settings are visible at once, which four open stages per rack denies.
+ *
+ * The OPEN set rather than the folded one, because that is the smaller list and
+ * the one a reader can check against the chain above. Each editor derives what it
+ * needs from it and `PARAM_SECTIONS`, so a new section is folded by default
+ * without either of them being edited.
+ */
+export const DEFAULT_OPEN_SECTIONS: readonly SectionId[] = ['amp', 'cabinet'];
+
+/**
  * Whether `section` has anything to edit on `preset` — i.e. its branch is really
  * there, as opposed to bypassed (`enabled: false`) or removable-but-removed. The one
  * evaluator for `presenceProbe`, so the pane and the schema test cannot drift into

@@ -1,17 +1,46 @@
 /**
- * One track's voice, drawn as a rack across its whole lane — voice mode's answer
- * to "what does a lane draw".
+ * One track's voice, drawn as a rack down its whole row — voice mode's answer to
+ * "what does a lane draw".
  *
- * ── Why the lane and not a modal or the header ───────────────────────────────
+ * ── Why the row and not a modal or the header ────────────────────────────────
  *
  * The rejected alternative was a modal per track: a modal can only show one
  * track at a time, and the whole point of per-track voices is comparing two.
  * The 200 px track header was the other, and CP-13 measured it — two `<select>`s
  * in that column leave each about six readable characters, which is why the
  * compact voice PICKER there stays behind a disclosure and stays a picker. A
- * lane is the only surface wide enough for four stages side by side, and stacked
- * down the page the lanes are a 19" equipment rack, which is the design language
- * this project already chose.
+ * row of the arrangement is the only surface with room for a whole chain, and
+ * stacked down the page the rows are a 19" equipment rack, which is the design
+ * language this project already chose.
+ *
+ * ── ⚠ THE STAGES STACK. CP-16 corrected CP-14 here ───────────────────────────
+ *
+ * They ran left to right, in a flex row with its own horizontal scrollbar. That
+ * came out of a brief that said "a rack spanning the full lane width", and it
+ * was wrong twice over: it is not what a rack looks like, and it forced the row
+ * to a FIXED height that no function could keep in step with what the sections
+ * inside it were showing. They are now `flex flex-col`, exactly as `VoicePane`
+ * arranges the same four stages on the pattern page.
+ *
+ * The design argument for racks-over-modals survives intact, because it was
+ * never about this axis: what has to be visible at once is TWO TRACKS' settings,
+ * and stacking the sections within one track does not touch that.
+ *
+ * TWO LEVELS OF DISCLOSURE now, and their accessible names have to say which is
+ * which — "Voice rack for Lead" folds this whole rack away (its state is
+ * `collapsedRacks` in `App`), "Amp stage for Lead" folds one section of it
+ * (`collapsedRackSections`, beside it, for the same reason).
+ *
+ * `VoiceSection` is the pattern page's component for that disclosure and is NOT
+ * reused, which is a call worth recording rather than leaving to be rediscovered.
+ * It hard-codes its landmark name as `${label} stage`, and the whole reason the
+ * stages here are landmarks is that up to eight racks are on screen at once and
+ * the TRACK is what tells eight "Drive" sliders apart (see the banner below). It
+ * takes no override for that name. Its status vocabulary is the pane's, too
+ * ("Not on this preset" where a rack says nothing and goes dark). So this file
+ * keeps mounting `RackFace` — the chassis `VoiceSection` itself mounts — and
+ * adds the same disclosure markup around a track-scoped name. If `VoiceSection`
+ * ever grows a `regionName` prop, this becomes a straight substitution.
  *
  * ── This is chrome. The table is `paramSchema` ───────────────────────────────
  *
@@ -60,12 +89,14 @@
  */
 import { getAmpModel, getSamplePack, detectSamplePack, type Track } from '@fretwork/lib';
 import {
+  DEFAULT_OPEN_SECTIONS,
   PARAM_SECTIONS,
   enabledParamOf,
   sectionPresence,
   type EnumParam,
   type Param,
   type ParamSection,
+  type SectionId,
   type SliderParam,
 } from '../voice/paramSchema';
 import { getAtPath } from '../voice/presetPaths';
@@ -104,11 +135,26 @@ const domId = (trackId: string, path: string) =>
 const buttonClass =
   'pressable control flex-none rounded-md px-1.5 py-0.5 font-mono text-[8.5px] font-bold tracking-[0.06em] uppercase disabled:opacity-40';
 
+/**
+ * What a rack nobody has folded yet shows: everything except
+ * `DEFAULT_OPEN_SECTIONS`, which is the pattern page's default and now the
+ * schema's. DERIVED rather than listed, so a fifth `ParamSection` starts folded
+ * here without this file being edited — and so the two editors cannot open on
+ * different stages, which is what CP-14 shipped.
+ *
+ * Module-level so the default prop keeps a stable identity across renders.
+ */
+const DEFAULT_COLLAPSED_SECTIONS: readonly SectionId[] = PARAM_SECTIONS.filter(
+  (section) => !DEFAULT_OPEN_SECTIONS.includes(section.id),
+).map((section) => section.id);
+
 export function TrackVoiceRack({
   track,
   audible,
   collapsed,
   onCollapsedChange,
+  collapsedSections = DEFAULT_COLLAPSED_SECTIONS,
+  onCollapsedSectionsChange,
   onNotice,
 }: {
   track: Track;
@@ -119,12 +165,37 @@ export function TrackVoiceRack({
   audible: boolean;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
+  /**
+   * Which of THIS track's stages are folded. The FOLDED set rather than the open
+   * one so it cannot go stale when `paramSchema` gains a section: a name nobody
+   * has heard of is open, which is the safe way round for a control surface.
+   *
+   * `undefined` is "nobody has folded this rack yet" and opens on
+   * `DEFAULT_COLLAPSED_SECTIONS` — which is NOT the same as an empty list, and
+   * the caller must keep the two apart: an empty list is a user who has unfolded
+   * everything, and collapsing it back to `undefined` would re-fold two stages
+   * under them on the next render.
+   *
+   * Reported up rather than kept here for the reason `collapsed` is: this
+   * component is replaced on every mode switch and unmounted on every visit to
+   * the pattern page, and a section that unfolds itself behind your back is the
+   * same bug as a rack that does. It lives in `App`, beside `collapsedRacks`.
+   */
+  collapsedSections?: readonly SectionId[];
+  onCollapsedSectionsChange?: (collapsed: readonly SectionId[]) => void;
   /** Refusals go to the grid's one message strip, as every other track write
    *  does — there is no room for a per-rack alert and no reason for one. */
   onNotice: (message: string) => void;
 }) {
   const preset = useTrackVoiceWorkingPreset(track);
   const dirty = useTrackVoiceDirty(track);
+
+  const toggleSection = (id: SectionId) =>
+    onCollapsedSectionsChange?.(
+      collapsedSections.includes(id)
+        ? collapsedSections.filter((candidate) => candidate !== id)
+        : [...collapsedSections, id],
+    );
 
   const report = (result: Result) => {
     if (!result.ok) onNotice(result.reason);
@@ -288,12 +359,12 @@ export function TrackVoiceRack({
    *  stays as the text-level route to the same value and as the only place the
    *  registry's description of a capture is readable.
    *
-   *  ⚠ BESIDE THE GRAPHIC, NOT UNDER IT. `DEFAULT_LANE_HEIGHTS.voice` is derived
-   *  from the cabinet well plus its caption because that is the tallest thing a
-   *  rack contains; stacking the bypass and the IR picker below it adds ~50 px
-   *  the lane has not got, and the picker lands below the fold of every open
-   *  lane. The column beside a 200 px square has room for both several times
-   *  over, so this costs nothing and keeps the stage graphic-height. */
+   *  BESIDE THE GRAPHIC, NOT UNDER IT — still, though the reason has changed.
+   *  CP-14 needed it because a fixed lane height had no room for another ~50 px
+   *  and the IR picker fell below the fold; CP-16 deleted that height, so the
+   *  row would simply grow. It stays because the column beside a 200 px square
+   *  is otherwise empty, and a stage that is as tall as its own graphic reads as
+   *  one piece of gear rather than as a picture with a form under it. */
   const renderCabinet = (section: ParamSection) => {
     const cab = section.params.find(
       (param): param is EnumParam => param.kind === 'enum' && param.path === CAB_URL_PATH,
@@ -324,6 +395,8 @@ export function TrackVoiceRack({
 
   const renderStage = (section: ParamSection) => {
     const presence = sectionPresence(preset, section);
+    const open = !collapsedSections.includes(section.id);
+    const regionId = domId(track.id, `${section.id}-stage`);
     return (
       <RackFace
         key={section.id}
@@ -332,15 +405,41 @@ export function TrackVoiceRack({
         // axis a listener is navigating.
         regionName={`${track.name} ${section.label}`}
         name={
-          <span className="flex-none font-mono text-[9px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
-            {section.label}
-          </span>
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={regionId}
+            // Deliberately NOT the landmark's name, and deliberately not the
+            // rack's either: three things are foldable on this page and they
+            // have to be tellable apart by name alone — "Voice rack for Lead"
+            // is the whole rack, this is one stage of it, and the region it
+            // controls is "Lead Amp".
+            aria-label={`${section.label} stage for ${track.name}`}
+            onClick={() => toggleSection(section.id)}
+            className="-mx-1 flex flex-none items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-ink-mut hover:text-brass-hi"
+          >
+            <span aria-hidden className="flex-none font-mono text-[9px]">
+              {open ? '▾' : '▸'}
+            </span>
+            <span className="font-mono text-[9px] font-semibold tracking-[0.16em] uppercase">
+              {section.label}
+            </span>
+          </button>
         }
         note={presence === 'bypassed' ? 'Bypassed' : null}
         lit={presence === 'active'}
         actions={stageActions(section, presence !== 'absent')}
       >
-        <div className="flex flex-col gap-1 px-1.5 py-1">
+        {/* Mounted when folded, hidden — `aria-controls` has to point at an
+            element that exists, and there is nothing expensive in here to
+            unmount. `VoiceSection` says the same and for the same reasons;
+            `hidden` alone would lose to the `flex` utility, so the class carries
+            the hiding and the attribute carries the semantics. */}
+        <div
+          id={regionId}
+          hidden={!open}
+          className={`flex-col gap-1 px-1.5 py-1 ${open ? 'flex' : 'hidden'}`}
+        >
           {presence === 'absent' ? (
             <p className="max-w-[26ch] font-mono text-[8.5px] leading-snug text-ink-mut">
               {section.removableBranch
@@ -364,7 +463,9 @@ export function TrackVoiceRack({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-1 p-1">
+    // Normal flow, no height of its own: the ROW is as tall as this is (CP-16),
+    // rather than this being clipped or scrolled inside a computed lane.
+    <div className="flex flex-col gap-1 p-1">
       <div className="flex flex-none items-center gap-1.5">
         <button
           type="button"
@@ -408,22 +509,22 @@ export function TrackVoiceRack({
             Revert
           </button>
         )}
-        {/* TODO(CP-15): Save / Save as… / Rename and the variant list arrive in
-            the rail, which still shows its placeholder. Said out loud here
-            because "Unsaved" with no Save beside it otherwise reads as a bug
-            rather than as a slice boundary. */}
+        {/* CP-15 landed the other half: Save / Save as… / Rename and the variant
+            list are in the rail, acting on the SELECTED track. Said out loud
+            here because "Unsaved" with a Revert and no Save beside it otherwise
+            reads as a missing button rather than as a division of labour — this
+            strip discards an edit where it was made, the rail is where a voice
+            is chosen and written. */}
         <span className="flex-none font-mono text-[8px] tracking-[0.1em] text-ink-mut/70 uppercase">
-          Saving arrives with the voice list
+          Save in the rail
         </span>
       </div>
 
       {!collapsed && (
-        // Scrolls rather than clips: the lane's height is a constant in
-        // `arrangementMath` measured against the tallest stage, and a browser
-        // that lays a face out a few pixels taller must lose nothing.
-        <div className="flex min-h-0 flex-1 items-start gap-1.5 overflow-auto">
-          {PARAM_SECTIONS.map(renderStage)}
-        </div>
+        // Stacked, and nothing scrolls here: `VoicePane.tsx`'s arrangement of
+        // the same four stages, for the same reason it gives — a rack is as tall
+        // as it is, and what scrolls is the surface holding the racks.
+        <div className="flex flex-col gap-1.5">{PARAM_SECTIONS.map(renderStage)}</div>
       )}
     </div>
   );

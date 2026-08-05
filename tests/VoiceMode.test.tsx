@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -20,6 +21,11 @@ import {
   selectTrack,
 } from '../src/composition/compositionService';
 import { listSelectableVoices, setTrackVoice } from '../src/voice/voiceService';
+import {
+  DEFAULT_OPEN_SECTIONS,
+  PARAM_SECTIONS,
+  type SectionId,
+} from '../src/voice/paramSchema';
 import {
   addTrackVoiceSection,
   clearTrackVoiceDrafts,
@@ -54,9 +60,15 @@ import {
  * recorders below are what tell "built from this track's unsaved edit" apart
  * from "built from its stored ref".
  *
- * jsdom also has no LAYOUT, so nothing here asserts that a rack fits its lane or
- * that two are visible at once. That is `arrangementMath`'s job as arithmetic
- * (`voice lane heights` there) and the ticket's by-eye acceptance otherwise.
+ * jsdom also has no LAYOUT — every box is 0×0 and nothing scrolls — so nothing
+ * here asserts that a rack fits its row or that two are visible at once. CP-16
+ * is largely a BY-EYE ticket for that reason, and it deleted the arithmetic that
+ * used to stand in for the eye (`DEFAULT_LANE_HEIGHTS.voice`), because that
+ * number was ~40 px short of the real content and no test could say so. What is
+ * asserted below is the STRUCTURE that makes the layout right — the stages are
+ * siblings in one column in schema order, a row holds its own header, per-section
+ * folds round-trip — and, for the mode this risks regressing, that pattern mode's
+ * two clipped viewports still come back in step.
  */
 const lib = vi.hoisted(() => {
   const startAudio = vi.fn(async () => {});
@@ -248,6 +260,56 @@ const stage = (track: Track, section: string) =>
 
 const knob = (track: Track, section: string, name: string) =>
   stage(track, section).getByRole('slider', { name });
+
+/**
+ * What a rack nobody has touched has FOLDED: everything the schema does not name
+ * in `DEFAULT_OPEN_SECTIONS`. Derived rather than listed for the same reason the
+ * rack derives it — a fifth `ParamSection` must not need this file edited.
+ */
+const DEFAULT_FOLDED = PARAM_SECTIONS.filter(
+  (section) => !DEFAULT_OPEN_SECTIONS.includes(section.id),
+).map((section) => section.id);
+
+/**
+ * Unfold one stage of one rack, idempotently.
+ *
+ * A rack opens on Amp and Cabinet, exactly as the pattern page's pane does, so
+ * Samples and Level start folded — and a folded stage's controls are `hidden`,
+ * which puts them out of reach of a role query ON PURPOSE. `Level` is the stage
+ * most of this file turns a knob on (it is the one no preset can be missing), so
+ * most of them go through here first.
+ *
+ * `fireEvent` rather than `userEvent` because half the callers are synchronous:
+ * this is a plain button and one click is the whole gesture.
+ */
+/**
+ * Voice mode with the per-stage folds actually WIRED.
+ *
+ * `TrackVoiceRack` is controlled all the way up — `App` holds the folds, because
+ * the rack unmounts on every mode switch and every visit to the pattern page —
+ * so a bare `<ArrangementGrid mode="voice" />` has disclosure buttons that
+ * report and do nothing. This is the smallest stand-in for `App`, for the tests
+ * that need to open a stage before turning something inside it.
+ */
+function VoiceGrid() {
+  const [sections, setSections] = useState<Readonly<Record<string, readonly SectionId[]>>>(
+    {},
+  );
+  return (
+    <ArrangementGrid
+      mode="voice"
+      collapsedRackSections={sections}
+      onCollapsedRackSectionsChange={setSections}
+    />
+  );
+}
+
+function openStage(track: Track, section: string): void {
+  const button = screen.getByRole('button', {
+    name: `${section} stage for ${track.name}`,
+  });
+  if (button.getAttribute('aria-expanded') === 'false') fireEvent.click(button);
+}
 
 /** A rack's own header strip — the disclosure button's row, which carries the
  *  voice name and the Unsaved/Saved word. Not a landmark, so it is reached
@@ -502,7 +564,9 @@ describe('the rack in a lane', () => {
 
   it('turns a knob on one rack without moving the other', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<VoiceGrid />);
+    openStage(tracks[0], 'Level');
+    openStage(tracks[1], 'Level');
     const mine = knob(tracks[0], 'Level', 'Volume');
     const theirs = knob(tracks[1], 'Level', 'Volume');
     // Read rather than assumed: the built-in this fixture resolves to is the
@@ -537,8 +601,9 @@ describe('the rack in a lane', () => {
     // A selection made in pattern mode and still standing — the arrangement's
     // key handler is on `window`, so it hears every key a rack does.
     selectPlacements([placementId]);
-    render(<ArrangementGrid mode="voice" />);
+    render(<VoiceGrid />);
 
+    openStage(getTracks()[0], 'Level');
     fireEvent.keyDown(knob(getTracks()[0], 'Level', 'Volume'), { key: 'ArrowUp' });
 
     // ArrowUp transposes the selection a semitone in pattern mode. One press
@@ -551,8 +616,9 @@ describe('the rack in a lane', () => {
   it('says which rack is unsaved, and reverts only that one', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<VoiceGrid />);
 
+    openStage(tracks[0], 'Level');
     fireEvent.keyDown(knob(tracks[0], 'Level', 'Volume'), { key: 'ArrowUp' });
     const revert = await screen.findByRole('button', {
       name: `Discard voice changes for ${tracks[0].name}`,
@@ -636,6 +702,195 @@ describe('the rack in a lane', () => {
   });
 });
 
+// ------------------------------------------------------------ CP-16 layout ---
+
+/** The row a track occupies in voice mode — its header AND its rack. The one
+ *  thing CP-16 changed structurally: these used to be in two separately-clipped
+ *  columns locked together by `style.transform`. */
+const row = (track: Track) => {
+  const el = document.querySelector<HTMLElement>(`[data-lane-track="${track.id}"]`);
+  if (!el) throw new Error(`no row rendered for ${track.name}`);
+  return el;
+};
+
+describe('the stages stack, and the row fits them', () => {
+  it('draws the four stages as siblings in one column, in schema order', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    const stages = PARAM_SECTIONS.map((section) =>
+      screen.getByRole('region', { name: `${tracks[0].name} ${section.label}` }),
+    );
+    // SIBLINGS, in one parent: CP-14 had them in a horizontally scrolling flex
+    // row, and the fix is that they are stacked the way `VoicePane` stacks the
+    // same four on the pattern page.
+    const column = stages[0].parentElement;
+    expect(column).not.toBeNull();
+    for (const stage of stages) expect(stage.parentElement).toBe(column);
+    // …and in the descriptor table's order, which is the order the pattern page
+    // reads in. Asserted as DOM order rather than by index, so a stage moved in
+    // the markup fails here.
+    expect([...column!.children]).toEqual(stages);
+
+    // jsdom computes no layout, so which WAY that column runs is observable only
+    // as the class that decides it. Stated explicitly rather than left implied:
+    // this is the assertion that would have caught CP-14, and it is also the one
+    // that proves nothing about pixels.
+    expect(column!.className).toContain('flex-col');
+    expect(column!.className).not.toContain('overflow-auto');
+  });
+
+  it('puts a track’s header in the same row as its rack, with no computed height', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    for (const track of tracks) {
+      const mine = row(track);
+      // The header is INSIDE the row, not in a separate viewport translated to
+      // match it — which is what lets the row be as tall as its content without
+      // anything measuring the content.
+      expect(mine.querySelector(`[data-track-header="${track.id}"]`)).not.toBeNull();
+      expect(
+        within(mine).getByRole('button', { name: `Voice rack for ${track.name}` }),
+      ).toBeInTheDocument();
+      // Normal flow: nothing writes a height, so nothing can disagree with the
+      // height the browser gives it.
+      expect(mine.style.height).toBe('');
+    }
+
+    // The timed layout's machinery is ABSENT rather than hidden: no ruler, no
+    // second header column, and no horizontally scrolling lane area — there is
+    // no time axis to scroll along.
+    expect(screen.queryByTestId('arrangement-ruler')).toBeNull();
+    expect(screen.queryByTestId('track-header-column')).toBeNull();
+    expect(screen.queryByTestId('arrangement-lanes-scroller')).toBeNull();
+    // …and the stack that replaces it answers to the same name, so the lane area
+    // is still reachable without a pointer.
+    const stack = screen.getByRole('group', { name: 'Arrangement lanes' });
+    expect(stack).toBe(screen.getByTestId('arrangement-voice-stack'));
+    expect(stack.className).toContain('overflow-x-hidden');
+    stack.focus();
+    expect(stack).toHaveFocus();
+  });
+
+  it('folds one stage of one rack, and says which fold is which', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    const folded: Record<string, readonly SectionId[]>[] = [];
+    render(
+      <ArrangementGrid
+        mode="voice"
+        collapsedRackSections={{}}
+        onCollapsedRackSectionsChange={(next) => folded.push({ ...next })}
+      />,
+    );
+
+    // Two levels of disclosure on one page, and the names have to tell them
+    // apart — "Voice rack for Rhythm" is the whole rack, this is one stage of it.
+    const disclosure = screen.getByRole('button', {
+      name: `Amp stage for ${tracks[0].name}`,
+    });
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    expect(
+      screen.getByRole('button', { name: `Voice rack for ${tracks[0].name}` }),
+    ).not.toBe(disclosure);
+
+    await user.click(disclosure);
+
+    // Reported UP rather than folded here, for the reason the rack's own
+    // collapse is: this outlives the mode switch that unmounts the rack. What
+    // travels is the WHOLE folded set, which starts as the schema's default —
+    // the caller stores a list, not a diff.
+    expect(folded).toEqual([{ [tracks[0].id]: [...DEFAULT_FOLDED, 'amp'] }]);
+  });
+
+  it('opens on the same stages the pattern page does', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" collapsedRackSections={{}} />);
+
+    // A rack nobody has touched shows Amp and Cabinet and folds the rest, which
+    // is what `VoicePane` has always done with the same four sections. CP-14
+    // opened all four, and one open rack is then about a viewport tall — which
+    // denies voice mode its own design argument, that TWO tracks' settings are
+    // visible at once. jsdom has no layout, so the count is the only part of
+    // that an assertion can reach.
+    for (const section of PARAM_SECTIONS) {
+      expect(
+        screen.getByRole('button', { name: `${section.label} stage for ${tracks[0].name}` }),
+      ).toHaveAttribute('aria-expanded', String(DEFAULT_OPEN_SECTIONS.includes(section.id)));
+    }
+  });
+
+  it('remembers a rack whose every stage the user opened', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    let sections: Readonly<Record<string, readonly SectionId[]>> = {};
+    const view = render(
+      <ArrangementGrid
+        mode="voice"
+        collapsedRackSections={sections}
+        onCollapsedRackSectionsChange={(next) => {
+          sections = next;
+        }}
+      />,
+    );
+
+    // Unfolding the LAST folded stage reports an empty list, and empty is not
+    // the same as absent: absent means "nobody has touched this rack" and opens
+    // on the default. Dropping the empty one would re-fold Samples and Level the
+    // moment the user finished opening them.
+    for (const id of DEFAULT_FOLDED) {
+      const label = PARAM_SECTIONS.find((section) => section.id === id)?.label;
+      await user.click(
+        screen.getByRole('button', { name: `${label} stage for ${tracks[0].name}` }),
+      );
+      view.rerender(
+        <ArrangementGrid
+          mode="voice"
+          collapsedRackSections={sections}
+          onCollapsedRackSectionsChange={(next) => {
+            sections = next;
+          }}
+        />,
+      );
+    }
+
+    expect(sections).toEqual({ [tracks[0].id]: [] });
+    for (const section of PARAM_SECTIONS) {
+      expect(
+        screen.getByRole('button', { name: `${section.label} stage for ${tracks[0].name}` }),
+      ).toHaveAttribute('aria-expanded', 'true');
+    }
+  });
+
+  it('hides a folded stage’s controls and keeps the region its button points at', () => {
+    const tracks = twoTracks();
+    setTrackVoice(tracks[0].id, voiceNamed('Crunch').ref);
+    setTrackVoice(tracks[1].id, voiceNamed('Crunch').ref);
+
+    render(
+      <ArrangementGrid
+        mode="voice"
+        collapsedRackSections={{ [getTracks()[0].id]: ['amp'] }}
+      />,
+    );
+
+    const button = screen.getByRole('button', {
+      name: `Amp stage for ${getTracks()[0].name}`,
+    });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    // The region stays mounted — `aria-controls` has to point at something that
+    // exists — but its controls leave the accessibility tree with it.
+    const region = screen.getByRole('region', { name: `${getTracks()[0].name} Amp` });
+    expect(document.getElementById(button.getAttribute('aria-controls') ?? '')).not.toBeNull();
+    expect(within(region).queryByRole('slider', { name: 'Drive' })).toBeNull();
+    // Per TRACK and per STAGE: the neighbour's amp is open, and this rack's own
+    // Level stage is untouched.
+    expect(stage(getTracks()[1], 'Amp').getByRole('slider', { name: 'Drive' })).toBeInTheDocument();
+    expect(knob(getTracks()[0], 'Level', 'Volume')).toBeInTheDocument();
+  });
+});
+
 // -------------------------------------------------------- what must survive ---
 
 const nav = () => within(screen.getByRole('navigation', { name: 'Editor' }));
@@ -655,6 +910,7 @@ describe('unsaved tone survives the things that unmount it', () => {
     const track = getTracks()[0];
     const tuned = (volumeOf(track) as number) + 0.5;
 
+    openStage(track, 'Level');
     fireEvent.keyDown(knob(track, 'Level', 'Volume'), { key: 'ArrowUp' });
     expect(volumeOf(getTracks()[0])).toBe(tuned);
 
@@ -707,6 +963,81 @@ describe('unsaved tone survives the things that unmount it', () => {
     expect(
       screen.getByRole('button', { name: `Voice rack for ${track.name}` }),
     ).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('keeps a folded STAGE folded across both', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await intoVoiceMode(user);
+    const track = getTracks()[0];
+    const amp = () => screen.getByRole('button', { name: `Amp stage for ${track.name}` });
+
+    await user.click(amp());
+    expect(amp()).toHaveAttribute('aria-expanded', 'false');
+
+    // (1) A mode switch — every row is replaced, so every rack unmounts.
+    await user.click(modes().getByRole('button', { name: 'Pattern mode' }));
+    await user.click(modes().getByRole('button', { name: 'Voice mode' }));
+    expect(amp()).toHaveAttribute('aria-expanded', 'false');
+
+    // (2) A page round trip — `CompositionPage` unmounts outright. The rack's
+    // own collapse already had to survive both; a stage inside it is the same
+    // promise one level deeper, which is why it is held in the same place.
+    await user.click(nav().getByRole('button', { name: 'Pattern' }));
+    await user.click(nav().getByRole('button', { name: 'Composition' }));
+
+    expect(amp()).toHaveAttribute('aria-expanded', 'false');
+    // The rack around it did NOT fold: two levels of disclosure, two pieces of
+    // state, and folding one must not fold the other.
+    expect(
+      screen.getByRole('button', { name: `Voice rack for ${track.name}` }),
+    ).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  /**
+   * ⚠ THE REGRESSION CP-16 RISKS. Voice mode used to share the timed layout's
+   * scroller; now it replaces it, so a visit UNMOUNTS the element the scroll
+   * position lives on and a new one is mounted on the way back — and a new
+   * element starts at 0 on BOTH axes.
+   *
+   * `timedScrollLeftRef` carries the time axis across; without it, tuning a rack
+   * at bar 40 returns you to bar 1. `timedScrollTopRef` carries WHICH TRACKS were
+   * in view; without it, eight edit lanes (8 × 192 px) means tuning track 8's amp
+   * returns you to track 1 — and `syncViewports` then translates the header
+   * column to agree with it, which is the silent discard `EditMode.test.tsx`
+   * guards the pattern↔edit switch against.
+   *
+   * jsdom neither scrolls nor clamps, so the offsets here are written onto the
+   * element by hand and the scroll event raised explicitly — which is exactly
+   * what the app's own writes do, and the two viewport transforms are the
+   * observable that proves they came back in step.
+   */
+  it('comes back to the bar AND the track it left, with both viewports on it', () => {
+    twoTracks();
+    const rulerContent = () => screen.getByTestId('arrangement-ruler-content');
+    const headerStack = () => screen.getByTestId('track-header-stack');
+
+    const view = render(<ArrangementGrid mode="pattern" />);
+    const before = screen.getByTestId('arrangement-lanes-scroller');
+    before.scrollLeft = 480;
+    before.scrollTop = 176;
+    fireEvent.scroll(before);
+    expect(rulerContent().style.transform).toBe('translateX(-480px)');
+    expect(headerStack().style.transform).toBe('translateY(-176px)');
+
+    view.rerender(<ArrangementGrid mode="voice" />);
+    expect(screen.queryByTestId('arrangement-lanes-scroller')).toBeNull();
+
+    view.rerender(<ArrangementGrid mode="pattern" />);
+
+    const after = screen.getByTestId('arrangement-lanes-scroller');
+    // A genuinely new element, or this test would pass on an offset that was
+    // never lost — which is the whole thing it exists to check.
+    expect(after).not.toBe(before);
+    expect(after.scrollLeft).toBe(480);
+    expect(after.scrollTop).toBe(176);
+    expect(rulerContent().style.transform).toBe('translateX(-480px)');
+    expect(headerStack().style.transform).toBe('translateY(-176px)');
   });
 });
 
@@ -916,6 +1247,7 @@ describe('the pattern page’s voice pane is untouched', () => {
     render(<App />);
     await user.click(nav().getByRole('button', { name: 'Composition' }));
     await user.click(modes().getByRole('button', { name: 'Voice mode' }));
+    openStage(getTracks()[0], 'Level');
     fireEvent.keyDown(knob(getTracks()[0], 'Level', 'Volume'), { key: 'ArrowUp' });
     expect(isTrackVoiceDirty(getTracks()[0])).toBe(true);
 

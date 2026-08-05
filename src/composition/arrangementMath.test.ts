@@ -22,8 +22,6 @@ import {
   MIN_PREVIEW_WIDTH,
   PREVIEW_ROW_GAP_PX,
   TRIM_HANDLE_PX,
-  VOICE_LANE_COLLAPSED_PX,
-  voiceLaneHeight,
   arrangementBars,
   arrangementSnap,
   arrangementWidth,
@@ -51,7 +49,7 @@ import {
   tickToPx,
   trimHandleWidth,
   zoomAnchoredScrollLeft,
-  type ArrangementMode,
+  type TimedArrangementMode,
   type PlacedTrack,
   type PlacementDragItem,
   type PreviewMark,
@@ -61,7 +59,13 @@ const TS_4_4: PatternTimeSignature = { numerator: 4, denominator: 4 };
 const TS_3_4: PatternTimeSignature = { numerator: 3, denominator: 4 };
 const TS_7_8: PatternTimeSignature = { numerator: 7, denominator: 8 };
 
-const MODES: ArrangementMode[] = ['pattern', 'edit', 'voice'];
+/**
+ * Every mode `laneRects` lays out — which since CP-16 is every mode that HAS a
+ * time axis, and no longer includes voice. Voice rows are normal flow and are
+ * not placed by anything in this module; `TimedArrangementMode` is what stops
+ * one being added back, and the type is what would fail here first.
+ */
+const MODES: TimedArrangementMode[] = ['pattern', 'edit'];
 
 /** A placement whose snapshot has a real duration, so trimming and repeating are
  *  distinguishable from the untouched case. */
@@ -1425,7 +1429,7 @@ describe('edit lane heights', () => {
     expect(laneStringCount('sitar')).toBe(6);
   });
 
-  it('sizes only edit lanes per track and leaves the other modes alone', () => {
+  it('sizes only edit lanes per track and leaves pattern mode alone', () => {
     const tracks = [track('bass-track'), track('guitar-track')];
     const heights = laneHeightsFor((id) => (id === 'bass-track' ? 'bass' : 'guitar'));
 
@@ -1434,97 +1438,39 @@ describe('edit lane heights', () => {
     // Stacked, so the guitar lane starts where the bass lane ends.
     expect(edit[1].top).toBe(editLaneHeight(4));
 
-    for (const mode of ['pattern', 'voice'] as const) {
-      expect(laneRects(tracks, mode, heights).map((lane) => lane.height)).toEqual([
-        DEFAULT_LANE_HEIGHTS[mode],
-        DEFAULT_LANE_HEIGHTS[mode],
-      ]);
-    }
-  });
-});
-
-describe('voice lane heights', () => {
-  /**
-   * The cabinet is the tallest of the four stages and it is a FIXED 200 px
-   * `aspect-square` well — `CabinetGraphic` says so in a `w-[200px]` — so the
-   * open lane has to clear it plus its own caption, the `RackFace` plate and the
-   * lane's strip. jsdom has no layout, so this is the only side of that
-   * relationship a test can hold: the number is not merely bigger than edit
-   * mode's, it is bigger than the one component that cannot shrink.
-   */
-  const CABINET_PX = 200;
-
-  it('is tall enough for the stage that cannot shrink', () => {
-    expect(DEFAULT_LANE_HEIGHTS.voice).toBeGreaterThan(CABINET_PX);
-    // The figure CP-14 replaced was `edit`'s 192, which is under it — the lane
-    // would have clipped the cabinet at every zoom and in every browser.
-    expect(DEFAULT_LANE_HEIGHTS.voice).toBeGreaterThan(DEFAULT_LANE_HEIGHTS.edit);
-  });
-
-  it('folds to a strip, which is what makes eight tracks reachable at once', () => {
-    expect(voiceLaneHeight(false)).toBe(DEFAULT_LANE_HEIGHTS.voice);
-    expect(voiceLaneHeight(true)).toBe(VOICE_LANE_COLLAPSED_PX);
-    // Two open racks and six folded ones is the shape the ticket is for, and it
-    // only exists if a folded lane costs a fraction of an open one. Stated as
-    // the relationship rather than against a number, so raising either constant
-    // cannot quietly satisfy it.
-    expect(voiceLaneHeight(true) * 6).toBeLessThan(voiceLaneHeight(false) * 2);
-  });
-
-  it('never folds below what a TRACK HEADER needs', () => {
-    // One `laneRects` entry sizes the lane AND the header beside it, and
-    // `TrackHeader` is an `overflow-hidden` column drawn for pattern mode's
-    // height. Fold below that and the mute, the solo, the fader and CP-13's
-    // voice picker are clipped out of sight while staying tabbable — a rack
-    // folded to see MORE tracks would silently disable that track's mixer
-    // strip. jsdom has no layout, so this constant is the only place it can be
-    // caught.
-    expect(VOICE_LANE_COLLAPSED_PX).toBeGreaterThanOrEqual(DEFAULT_LANE_HEIGHTS.pattern);
-  });
-
-  it('folds lanes one at a time, and stacks the rest under them', () => {
-    const tracks = [track('a'), track('b'), track('c')];
-    const heights = laneHeightsFor(
-      () => 'guitar',
-      (id) => id === 'b',
-    );
-
-    const lanes = laneRects(tracks, 'voice', heights);
-
-    expect(lanes.map((lane) => lane.height)).toEqual([
-      DEFAULT_LANE_HEIGHTS.voice,
-      VOICE_LANE_COLLAPSED_PX,
-      DEFAULT_LANE_HEIGHTS.voice,
-    ]);
-    // The one that matters: folding a lane MOVES the ones below it, which is
-    // the whole point and is also what a height held in the component could not
-    // do without `laneRects` knowing.
-    expect(lanes[2].top).toBe(DEFAULT_LANE_HEIGHTS.voice + VOICE_LANE_COLLAPSED_PX);
-  });
-
-  it('leaves the other two modes untouched by a folded rack', () => {
-    const tracks = [track('a'), track('b')];
-    const heights = laneHeightsFor(
-      () => 'guitar',
-      () => true,
-    );
-
     expect(laneRects(tracks, 'pattern', heights).map((lane) => lane.height)).toEqual([
       DEFAULT_LANE_HEIGHTS.pattern,
       DEFAULT_LANE_HEIGHTS.pattern,
     ]);
-    expect(laneRects(tracks, 'edit', heights).map((lane) => lane.height)).toEqual([
-      editLaneHeight(6),
-      editLaneHeight(6),
-    ]);
+  });
+});
+
+describe('voice mode has no lane geometry, by construction', () => {
+  // NOT TESTED, deliberately: that `VOICE_HEADER_HEIGHT` is tall enough for the
+  // mute, the solo, the fader and CP-13's voice picker. jsdom has no layout, and
+  // the constant is DEFINED as `DEFAULT_LANE_HEIGHTS.pattern` — so any assertion
+  // comparing the two is a restatement of that line and cannot fail. Whether the
+  // strip fits is checked in the browser, like the rest of this ticket.
+
+  it('keeps the per-track resolver on the one mode that still needs it', () => {
+    // What `laneHeightsFor` is FOR, now that CP-14's `rackCollapsed` argument is
+    // gone with the voice branch it fed: edit mode's string count, which
+    // genuinely varies per track. That the voice branch cannot come back is the
+    // `TimedArrangementMode` type's job and `tsc`'s to enforce — an arity check
+    // here would not have caught it, since a defaulted second parameter does not
+    // count towards `Function.length`.
+    const heights = laneHeightsFor((id) => (id === 'bass-track' ? 'bass' : 'guitar'));
+    expect(laneRects([track('bass-track')], 'edit', heights)[0].height).toBe(
+      editLaneHeight(4),
+    );
   });
 
-  it('opens every rack for a caller that has no rack state at all', () => {
-    // The default argument, which is what every pattern- and edit-mode caller
-    // relies on — including `laneHeightsFor`'s pre-CP-14 call sites.
-    const lanes = laneRects([track('a')], 'voice', laneHeightsFor(() => 'guitar'));
-    expect(lanes[0].height).toBe(DEFAULT_LANE_HEIGHTS.voice);
-  });
+  // The rest of what CP-14 asserted here — an open lane taller than the cabinet,
+  // a folded lane shorter than an open one, and the tops that follow — is gone
+  // rather than moved. There is no number left to assert: a row is as tall as
+  // the sections a user has unfolded inside it, which only a browser knows. That
+  // is the CP-16 trade and it is deliberate, because the figure those tests
+  // guarded was ~40 px short of the real content and nothing here could say so.
 });
 
 describe('editableSpans', () => {

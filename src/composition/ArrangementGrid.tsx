@@ -6,6 +6,7 @@ import {
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   RULER_HEIGHT,
   TRACK_HEADER_WIDTH,
+  VOICE_HEADER_HEIGHT,
   arrangementBars,
   arrangementSnap,
   arrangementWidth,
@@ -66,6 +67,7 @@ import {
 import { PlacementBlock } from './PlacementBlock';
 import { TrackHeader } from './TrackHeader';
 import { TrackVoiceRack } from './TrackVoiceRack';
+import type { SectionId } from '../voice/paramSchema';
 
 /**
  * Enough empty bars that a fresh composition is a grid to arrange into rather
@@ -77,9 +79,13 @@ import { TrackVoiceRack } from './TrackVoiceRack';
 const MIN_BARS = 8;
 const TRAILING_BARS = 2;
 
-/** Shared empty list so the default prop keeps a stable identity across renders
- *  — it feeds `laneHeightsFor`, which is called in the render body. */
+/** Shared empty list so the default prop keeps a stable identity across renders. */
 const NO_COLLAPSED_RACKS: readonly string[] = [];
+
+/** Same, for the per-section folds. An absent entry means nobody has folded that
+ *  track's rack yet, and it opens on the schema's `DEFAULT_OPEN_SECTIONS` — see
+ *  `TrackVoiceRack`, which is where absent and empty are told apart. */
+const NO_COLLAPSED_SECTIONS: Readonly<Record<string, readonly SectionId[]>> = {};
 
 /**
  * The arrangement: a time ruler across the top, a fixed track-header column down
@@ -116,6 +122,22 @@ const NO_COLLAPSED_RACKS: readonly string[] = [];
  *    scroller, which needs no JS at all; that is not available here because the
  *    lanes scroll vertically too, and a header column inside the scroller would
  *    scroll away horizontally with them.
+ *
+ *    ⚠ ALL OF THAT IS TIMED-MODE MACHINERY, and CP-16 made voice mode opt out of
+ *    it entirely rather than thread a third case through it. Voice mode has no
+ *    time axis, so it has no horizontal overflow, so there is nothing for a
+ *    header column to scroll away FROM — which means the header can simply sit
+ *    in the same normal-flow row as the rack beside it and the whole
+ *    two-viewport lock becomes unnecessary. That is also what lets a row be as
+ *    tall as the sections a user has unfolded inside it, with no measurement and
+ *    no height table to drift (see `TimedArrangementMode` in `arrangementMath`).
+ *    The two layouts are two subtrees below, and pattern and edit mode's is
+ *    untouched.
+ *
+ *    The one thing voice mode still owes the timed layout is `timedScrollLeftRef`
+ *    below: leaving a timed mode unmounts the scroller, so the offset has to be
+ *    remembered here and written back on the way in, or tuning a rack at bar 40
+ *    returns you to bar 1.
  *
  * 2. Zoom holds the leftmost visible tick still, which is real arithmetic
  *    (`zoomAnchoredScrollLeft`) and not a CSS property. Without it, zooming out
@@ -286,6 +308,8 @@ export function ArrangementGrid({
   mode,
   collapsedRacks = NO_COLLAPSED_RACKS,
   onCollapsedRacksChange,
+  collapsedRackSections = NO_COLLAPSED_SECTIONS,
+  onCollapsedRackSectionsChange,
   patternDragRef,
 }: {
   mode: ArrangementMode;
@@ -299,6 +323,21 @@ export function ArrangementGrid({
    */
   collapsedRacks?: readonly string[];
   onCollapsedRacksChange?: (collapsed: readonly string[]) => void;
+  /**
+   * Which STAGES are folded, per track — the second level of disclosure CP-16
+   * added inside a rack. Held by `App` for the reason above, one level deeper
+   * again, and keyed by track id because that is the axis it varies on.
+   *
+   * The FOLDED set rather than the open one, so it cannot go stale when
+   * `paramSchema` gains a section. A track with NO ENTRY is one nobody has
+   * folded and opens on `DEFAULT_OPEN_SECTIONS`, exactly as the pattern page's
+   * pane does — which is not the same as an EMPTY entry, and this component is
+   * careful to keep the two apart when it reports a change.
+   */
+  collapsedRackSections?: Readonly<Record<string, readonly SectionId[]>>;
+  onCollapsedRackSectionsChange?: (
+    collapsed: Readonly<Record<string, readonly SectionId[]>>,
+  ) => void;
   /**
    * Filled with the grid's drag-to-place entry point while this is mounted, so
    * the rail — a sibling, not a child — can hand it a press.
@@ -389,6 +428,10 @@ export function ArrangementGrid({
    *  moved" — the effect never imposes a position the user's own scrolling
    *  produced. */
   const pendingScrollLeftRef = useRef<number | null>(null);
+  /** The vertical twin of the above, and set only by the return from voice mode.
+   *  Nothing else moves the view vertically on our behalf — the user's own
+   *  wheel and the browser's focus scrolling both leave it null. */
+  const pendingScrollTopRef = useRef<number | null>(null);
   /**
    * Where the TIME AXIS was, kept across a visit to voice mode.
    *
@@ -404,6 +447,19 @@ export function ArrangementGrid({
    * happened and the number is gone.
    */
   const timedScrollLeftRef = useRef(0);
+  /**
+   * And WHICH TRACKS were in view, kept across the same visit and for a stronger
+   * reason than the axis.
+   *
+   * CP-14 could omit this because voice mode reused the timed scroller, so the
+   * element — and its `scrollTop` — survived the switch. CP-16 unmounts that
+   * subtree and mounts a new one on the way back, and a new element starts at 0.
+   * Eight edit lanes are 8 × 192 = 1536 px, so tuning track 8's amp and coming
+   * back would land on track 1 — and `syncViewports` would then translate the
+   * header column to agree with it, which is the same silent discard
+   * `tests/EditMode.test.tsx` guards the pattern↔edit switch against.
+   */
+  const timedScrollTopRef = useRef(0);
   /** For `syncViewports`, which is a stable callback and so cannot close over
    *  `timed` — and must not record voice mode's clamped zero as the axis. */
   const timedRef = useRef(timed);
@@ -531,7 +587,10 @@ export function ArrangementGrid({
     // Every write to `scrollLeft` — a drag, a zoom, the playhead's auto-scroll —
     // raises the scroll event that runs this, so this is the one place that sees
     // all of them. Voice mode's clamped zero is not the axis and is not recorded.
-    if (timedRef.current) timedScrollLeftRef.current = el.scrollLeft;
+    if (timedRef.current) {
+      timedScrollLeftRef.current = el.scrollLeft;
+      timedScrollTopRef.current = el.scrollTop;
+    }
     if (rulerContentRef.current) {
       rulerContentRef.current.style.transform = `translateX(${-el.scrollLeft}px)`;
     }
@@ -548,6 +607,7 @@ export function ArrangementGrid({
   useLayoutEffect(() => {
     if (!timed) return;
     pendingScrollLeftRef.current = timedScrollLeftRef.current;
+    pendingScrollTopRef.current = timedScrollTopRef.current;
   }, [timed]);
 
   // No dependency list on purpose: the transforms are not rendered from props,
@@ -559,6 +619,10 @@ export function ArrangementGrid({
     if (el && pendingScrollLeftRef.current !== null) {
       el.scrollLeft = pendingScrollLeftRef.current;
       pendingScrollLeftRef.current = null;
+    }
+    if (el && pendingScrollTopRef.current !== null) {
+      el.scrollTop = pendingScrollTopRef.current;
+      pendingScrollTopRef.current = null;
     }
     // After the write, never instead of it: zooming out shrinks the content, and
     // the browser clamps an offset past the new end. Reading back is how the
@@ -614,14 +678,17 @@ export function ArrangementGrid({
     return track ? trackInstrumentId(track) : '';
   };
   // Edit lanes fit their own track's string count — a bass lane is four rows
-  // where a guitar lane is six — and voice lanes fit whether that track's rack
-  // is folded. Both vary PER TRACK, which is the case `LaneHeights` grew its
+  // where a guitar lane is six — which is the case `LaneHeights` grew its
   // function form for. Pattern mode is unaffected.
-  const lanes = laneRects(
-    tracks,
-    mode,
-    laneHeightsFor(instrumentOfTrack, (trackId) => collapsedRacks.includes(trackId)),
-  );
+  //
+  // ⚠ EMPTY IN VOICE MODE, and that is the CP-16 fix rather than a shortcut. A
+  // lane rect is an absolute top against a shared time axis; voice mode has no
+  // axis and its rows are normal flow, so there is nothing for `laneRects` to be
+  // right about. `mode !== 'voice'` rather than `timed` because only the literal
+  // comparison narrows the argument to `TimedArrangementMode`, which is the
+  // type that now says all of this.
+  const lanes =
+    mode !== 'voice' ? laneRects(tracks, mode, laneHeightsFor(instrumentOfTrack)) : [];
   const height = lanesHeight(lanes);
   const snap = arrangementSnap(ts, snapId);
   const gridOptions = snapOptions(ts);
@@ -649,6 +716,11 @@ export function ArrangementGrid({
   // the very first pointerdown after a zoom, which is before any effect for that
   // render has run. Everything here is already computed above, so this is a
   // handoff, not work.
+  //
+  // In voice mode `lanes` is empty, which is honest rather than degraded: every
+  // gesture is switched off there (`gestures.enabled`, and no handler on the
+  // rows), and an empty stack hit-tests to nothing — so a listener that somehow
+  // outlived the switch refuses instead of acting on stale rects.
   geometryRef.current = {
     lanes,
     tracks,
@@ -977,176 +1049,263 @@ export function ArrangementGrid({
         </div>
       )}
 
-      <div
-        className="grid min-h-0 flex-1"
-        style={{
-          gridTemplateColumns: `${TRACK_HEADER_WIDTH}px minmax(0, 1fr)`,
-          // The ruler's row disappears entirely in voice mode rather than
-          // collapsing to zero: a 0px row still places its two children, and the
-          // header column and the lanes are positioned by SOURCE ORDER into
-          // whatever rows exist. Two templates, two child sets — see below.
-          gridTemplateRows: timed
-            ? `${RULER_HEIGHT}px minmax(0, 1fr)`
-            : 'minmax(0, 1fr)',
-        }}
-      >
-        {/* ⚠ THE RULER IS ABSENT IN VOICE MODE, not hidden. Racks are not placed
-            in time, and a bar ruler over them says they are — a track's amp
-            settings do not start at bar 1 and change at bar 5. Its corner cell
-            goes with it, or the header column would sit under an empty "Bar"
-            box. The zoom and the snap are React state and simply survive; the
-            scroll position does NOT survive on its own — voice mode's content
-            has no overflow, so the element clamps itself to 0 — and is put back
-            by `timedScrollLeftRef`, so coming back to pattern mode still finds
-            the axis where it was left. */}
-        {timed && (
-          <>
-            <div
-              className="flex items-center border-r border-b border-rim-dark px-2 font-mono text-[8.5px] font-semibold tracking-[0.16em] text-ink-mut uppercase"
-              style={{ height: RULER_HEIGHT }}
-            >
-              Bar
-            </div>
+      {mode === 'voice' ? (
+        /* ── VOICE MODE: normal-flow rows, not lane rects ────────────────────
+           One row per track holding its header AND its rack, so the row is as
+           tall as the sections unfolded inside it and the rows below simply
+           move. No ruler (racks are not placed in time — a bar ruler over them
+           says a track's amp settings start at bar 1 and change at bar 5), no
+           second clipped viewport, and nothing to lock together: the header sits
+           in the same row as the rack it belongs to rather than in a column
+           translated to match.
 
-            {/* The ruler's viewport. `data-testid` is a test seam throughout this
-                component: none of these elements has a role or an accessible name,
-                and with jsdom reporting every box as 0×0 there is nothing else to
-                hold on to.
-
-                `aria-hidden`: the whole strip is a picture of the time axis. Left
-                audible it reads out as "1 2 3 4 5 6 7 8" — the bar count is already
-                stated in words above.
-
-                `border-l border-transparent` is ALIGNMENT, not decoration: the lane
-                scroller wears `.well`, whose 1px border pushes its content box a
-                pixel in from the column edge. Without a matching pixel here the
-                ruler names bar 40 one pixel left of where bar 40 is drawn, at every
-                zoom. Same reason for `border-t` on the header column below. */}
-            <div
-              aria-hidden
-              data-testid="arrangement-ruler"
-              className="relative overflow-hidden border-b border-b-rim-dark border-l border-l-transparent"
-              style={{ height: RULER_HEIGHT }}
-            >
-              <div
-                ref={rulerContentRef}
-                data-testid="arrangement-ruler-content"
-                className="relative h-full"
-                style={{ width }}
-              >
-                {marks.map((mark) => (
-                  <span key={mark.tick}>
-                    <i
-                      data-ruler-line={mark.tick}
-                      style={{ left: mark.x }}
-                      className={`absolute bottom-0 w-px ${
-                        mark.isBar
-                          ? mark.major
-                            ? 'top-0 bg-beat-line'
-                            : 'top-1 bg-beat-line/70'
-                          : 'top-2.5 bg-well-line'
-                      }`}
-                    />
-                    {mark.label !== null && (
-                      <span
-                        data-ruler-label={mark.bar}
-                        style={{ left: mark.x }}
-                        className={`absolute top-0.5 pl-1 font-mono text-[8.5px] font-bold ${
-                          mark.major ? 'text-ink-hi' : 'text-ink-mut'
-                        }`}
-                      >
-                        {mark.label}
-                      </span>
-                    )}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* The header column's viewport — vertically locked to the lanes. */}
+           Scrolls VERTICALLY only. There is no horizontal overflow to scroll
+           to, and `overflow-x-hidden` says so rather than leaving a scrollbar
+           that would move nothing. */
         <div
-          data-testid="track-header-column"
-          className="overflow-hidden border-t border-t-transparent border-r border-r-rim-dark"
+          data-testid="arrangement-voice-stack"
+          // Focusable and named for the same reason the timed scroller is: this
+          // is how the stack past the fold is reached without a pointer. It
+          // answers to the same name because it is the same thing — the window
+          // onto the tracks — and no mode has both.
+          tabIndex={0}
+          role="group"
+          aria-label="Arrangement lanes"
+          className="well flex min-h-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto p-2"
         >
-          <div ref={headerStackRef} data-testid="track-header-stack" style={{ height }}>
-            {lanes.map((lane, index) => {
-              const track = tracks[index];
-              return (
+          {tracks.map((track, index) => (
+            <div
+              key={track.id}
+              // `data-lane` is NOT under `.lanes` here, so none of the recessed
+              // channel, divider or zebra styling applies — deliberately, and
+              // for the reason CP-14 gave the `edit-lane` class it replaces: a
+              // timeline channel under a rack face is two conflicting statements
+              // about which surface is on top. The attributes stay because they
+              // name the row for anything walking the DOM.
+              data-lane={track.name}
+              data-lane-track={track.id}
+              // A `.tray` in the stack's `.well`, not a row with a rule under it.
+              // A single hairline is what this had, and against four faceplates
+              // it disappeared — the two tracks read as one continuous list of
+              // stages. Depth is what separates surfaces everywhere else here,
+              // and it is also the literal metaphor: separate units bolted into
+              // a rack, not a table of rows.
+              //
+              // `flex-none` so a tray keeps the height its content asks for.
+              // Inside a scrolling flex column the default `flex-shrink: 1`
+              // would squash the tallest rack to fit rather than scrolling it,
+              // which is the whole point of CP-16.
+              className="tray grid flex-none overflow-hidden"
+              style={{ gridTemplateColumns: `${TRACK_HEADER_WIDTH}px minmax(0, 1fr)` }}
+            >
+              {/* The header keeps the height it is DRAWN for rather than being
+                  stretched to the rack beside it: it is an `overflow-hidden`
+                  column of fixed rows, so a taller box would only add empty
+                  space inside it, and a shorter one would clip the mixer strip.
+                  The tray's edge and the gap beside it are what separate one
+                  track from the next.
+
+                  Which is why the header's OWN bottom rule is suppressed here:
+                  in the timed modes the header IS the full lane, so its border
+                  and the lane divider are the same line. An open rack makes the
+                  row ~650 px, and that line would float at y=88 with the row's
+                  real divider hundreds of pixels below it — two rules per track
+                  where one is meant. jsdom has no layout, so nothing but the eye
+                  can see this. */}
+              <div className="overflow-hidden border-r border-rim-dark [&>*]:border-b-0">
                 <TrackHeader
-                  key={lane.trackId}
                   track={track}
                   index={index}
                   trackCount={tracks.length}
-                  height={lane.height}
-                  selected={selectedTrackId === lane.trackId}
-                  // Computed HERE, once per render, because the answer depends
-                  // on every other track's solo state — a header cannot work it
-                  // out from the track it is given.
+                  height={VOICE_HEADER_HEIGHT}
+                  selected={selectedTrackId === track.id}
                   audible={isTrackAudible(track, tracks)}
-                  onSelect={() => selectTrack(lane.trackId)}
+                  onSelect={() => selectTrack(track.id)}
                   onNotice={setTrackNotice}
                 />
-              );
-            })}
-            {/* Add / remove live in the toolbar rather than under this stack:
-                the stack is exactly as tall as the lanes and scrolls with them,
-                so a control appended here sits at the one offset that is never
-                on screen — the bottom edge at maximum scroll. */}
-          </div>
-        </div>
+              </div>
 
-        {/* Wrapper so the empty-arrangement hint can sit OUTSIDE the scrolled
-            content: printed inside it, the one message telling a user what to do
-            next scrolls off the screen the moment they look around. */}
-        <div className="relative min-h-0 min-w-0">
+              <TrackVoiceRack
+                track={track}
+                audible={isTrackAudible(track, tracks)}
+                collapsed={collapsedRacks.includes(track.id)}
+                // Rebuilt from the LIVE tracks rather than pushed onto the old
+                // list, which also prunes it: a removed track's id would
+                // otherwise sit in `App`'s state for the rest of the session,
+                // matching nothing.
+                onCollapsedChange={(next) =>
+                  onCollapsedRacksChange?.(
+                    tracks
+                      .map((candidate) => candidate.id)
+                      .filter((id) =>
+                        id === track.id ? next : collapsedRacks.includes(id),
+                      ),
+                  )
+                }
+                collapsedSections={collapsedRackSections[track.id]}
+                // Same rule one level in: rebuilt from the live tracks, so a
+                // removed track's entry goes with it.
+                //
+                // An EMPTY list is stored, not dropped: absent means "nobody has
+                // folded this rack" and opens on the schema's default (Amp and
+                // Cabinet), while empty means "the user unfolded everything".
+                // Dropping the empty one would re-fold two stages the moment
+                // they opened the last of them.
+                onCollapsedSectionsChange={(next) => {
+                  const rebuilt: Record<string, readonly SectionId[]> = {};
+                  for (const candidate of tracks) {
+                    const folded =
+                      candidate.id === track.id ? next : collapsedRackSections[candidate.id];
+                    if (folded !== undefined) rebuilt[candidate.id] = folded;
+                  }
+                  onCollapsedRackSectionsChange?.(rebuilt);
+                }}
+                onNotice={setTrackNotice}
+              />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div
+          className="grid min-h-0 flex-1"
+          style={{
+            gridTemplateColumns: `${TRACK_HEADER_WIDTH}px minmax(0, 1fr)`,
+            gridTemplateRows: `${RULER_HEIGHT}px minmax(0, 1fr)`,
+          }}
+        >
           <div
-            ref={scrollerRef}
-            data-testid="arrangement-lanes-scroller"
-            onScroll={syncViewports}
-            // Focusable because it is the only way to reach bar 40 without a
-            // pointer: in pattern and edit mode nothing inside is focusable
-            // (blocks are inert DOM — the lane area hit-tests presses instead),
-            // so without this a keyboard user cannot scroll the arrangement at
-            // all. The editing keys are window-level and work wherever focus is;
-            // this is only scrolling. In VOICE mode the lanes are full of
-            // controls and this is one extra tab stop ahead of the first rack —
-            // harmless, and cheaper than a mode-dependent tab order, but it is
-            // the reason the sentence above is qualified.
-            tabIndex={0}
-            role="group"
-            aria-label="Arrangement lanes"
-            className="well h-full overflow-auto"
+            className="flex items-center border-r border-b border-rim-dark px-2 font-mono text-[8.5px] font-semibold tracking-[0.16em] text-ink-mut uppercase"
+            style={{ height: RULER_HEIGHT }}
+          >
+            Bar
+          </div>
+
+        {/* The ruler's viewport. `data-testid` is a test seam throughout this
+              component: none of these elements has a role or an accessible name,
+              and with jsdom reporting every box as 0×0 there is nothing else to
+              hold on to.
+
+              `aria-hidden`: the whole strip is a picture of the time axis. Left
+              audible it reads out as "1 2 3 4 5 6 7 8" — the bar count is already
+              stated in words above.
+
+              `border-l border-transparent` is ALIGNMENT, not decoration: the lane
+              scroller wears `.well`, whose 1px border pushes its content box a
+              pixel in from the column edge. Without a matching pixel here the
+              ruler names bar 40 one pixel left of where bar 40 is drawn, at every
+              zoom. Same reason for `border-t` on the header column below. */}
+          <div
+            aria-hidden
+            data-testid="arrangement-ruler"
+            className="relative overflow-hidden border-b border-b-rim-dark border-l border-l-transparent"
+            style={{ height: RULER_HEIGHT }}
           >
             <div
-              className="relative"
-              // Voice mode's content is as wide as the WINDOW, not as wide as
-              // the arrangement: a rack spans its lane, and pinning the content
-              // to `width` would leave every rack in the leftmost few bars with
-              // a hundred bars of empty scroll to its right. The cost is that
-              // there is then no horizontal overflow, so the browser clamps
-              // `scrollLeft` to 0 and the axis position is gone — which is what
-              // `timedScrollLeftRef` above exists to hand back.
-              style={{ width: timed ? width : '100%', height }}
+              ref={rulerContentRef}
+              data-testid="arrangement-ruler-content"
+              className="relative h-full"
+              style={{ width }}
             >
-              {/* The bar/beat grid, drawn from the SAME marks the ruler is drawn
-                  from — not from a second computation that could round
-                  differently and leave every block a pixel off its bar line.
+              {marks.map((mark) => (
+                <span key={mark.tick}>
+                  <i
+                    data-ruler-line={mark.tick}
+                    style={{ left: mark.x }}
+                    className={`absolute bottom-0 w-px ${
+                      mark.isBar
+                        ? mark.major
+                          ? 'top-0 bg-beat-line'
+                          : 'top-1 bg-beat-line/70'
+                        : 'top-2.5 bg-well-line'
+                    }`}
+                  />
+                  {mark.label !== null && (
+                    <span
+                      data-ruler-label={mark.bar}
+                      style={{ left: mark.x }}
+                      className={`absolute top-0.5 pl-1 font-mono text-[8.5px] font-bold ${
+                        mark.major ? 'text-ink-hi' : 'text-ink-mut'
+                      }`}
+                    >
+                      {mark.label}
+                    </span>
+                  )}
+                </span>
+              ))}
+            </div>
+          </div>
 
-                  Under the lanes rather than inside them, so `.lanes`' zebra and
-                  channel shading (src/styles/index.css) still see the lane
-                  elements as its only children — `:nth-child(even)` counts every
-                  sibling, so a line layer in there would shade the wrong rows.
+          {/* The header column's viewport — vertically locked to the lanes. */}
+          <div
+            data-testid="track-header-column"
+            className="overflow-hidden border-t border-t-transparent border-r border-r-rim-dark"
+          >
+            <div ref={headerStackRef} data-testid="track-header-stack" style={{ height }}>
+              {lanes.map((lane, index) => {
+                const track = tracks[index];
+                return (
+                  <TrackHeader
+                    key={lane.trackId}
+                    track={track}
+                    index={index}
+                    trackCount={tracks.length}
+                    height={lane.height}
+                    selected={selectedTrackId === lane.trackId}
+                    // Computed HERE, once per render, because the answer depends
+                    // on every other track's solo state — a header cannot work it
+                    // out from the track it is given.
+                    audible={isTrackAudible(track, tracks)}
+                    onSelect={() => selectTrack(lane.trackId)}
+                    onNotice={setTrackNotice}
+                  />
+                );
+              })}
+              {/* Add / remove live in the toolbar rather than under this stack:
+                  the stack is exactly as tall as the lanes and scrolls with them,
+                  so a control appended here sits at the one offset that is never
+                  on screen — the bottom edge at maximum scroll. */}
+            </div>
+          </div>
 
-                  Elements rather than the pattern editor's repeating-gradient
-                  background (`gridImage` in Timeline.tsx), and the difference is
-                  deliberate: that gradient repeats on a fixed period, which is
-                  exactly right for a lane whose lines are evenly spaced, and
-                  wrong here — this ruler THINS ITSELF OUT with zoom, so the line
-                  set is a list, not a period. Sharing `marks` with the ruler is
-                  what guarantees the two layers agree. */}
-              {timed && (
+          {/* Wrapper so the empty-arrangement hint can sit OUTSIDE the scrolled
+              content: printed inside it, the one message telling a user what to do
+              next scrolls off the screen the moment they look around. */}
+          <div className="relative min-h-0 min-w-0">
+            <div
+              ref={scrollerRef}
+              data-testid="arrangement-lanes-scroller"
+              onScroll={syncViewports}
+              // Focusable because it is the only way to reach bar 40 without a
+              // pointer: in pattern and edit mode nothing inside is focusable
+              // (blocks are inert DOM — the lane area hit-tests presses instead),
+              // so without this a keyboard user cannot scroll the arrangement at
+              // all. The editing keys are window-level and work wherever focus is;
+              // this is only scrolling. In VOICE mode the lanes are full of
+              // controls and this is one extra tab stop ahead of the first rack —
+              // harmless, and cheaper than a mode-dependent tab order, but it is
+              // the reason the sentence above is qualified.
+              tabIndex={0}
+              role="group"
+              aria-label="Arrangement lanes"
+              className="well h-full overflow-auto"
+            >
+              <div className="relative" style={{ width, height }}>
+                {/* The bar/beat grid, drawn from the SAME marks the ruler is drawn
+                    from — not from a second computation that could round
+                    differently and leave every block a pixel off its bar line.
+
+                    Under the lanes rather than inside them, so `.lanes`' zebra and
+                    channel shading (src/styles/index.css) still see the lane
+                    elements as its only children — `:nth-child(even)` counts every
+                    sibling, so a line layer in there would shade the wrong rows.
+
+                    Elements rather than the pattern editor's repeating-gradient
+                    background (`gridImage` in Timeline.tsx), and the difference is
+                    deliberate: that gradient repeats on a fixed period, which is
+                    exactly right for a lane whose lines are evenly spaced, and
+                    wrong here — this ruler THINS ITSELF OUT with zoom, so the line
+                    set is a list, not a period. Sharing `marks` with the ruler is
+                    what guarantees the two layers agree. */}
                 <div aria-hidden className="pointer-events-none absolute inset-0">
                   {marks.map((mark) => (
                     <i
@@ -1159,212 +1318,185 @@ export function ArrangementGrid({
                     />
                   ))}
                 </div>
-              )}
 
-              {/* `data-lane` is not a test hook: `.lanes > [data-lane]` in
-                  src/styles/index.css is what carves the recessed channel, the
-                  divider and the zebra. Renaming it silently flattens the grid
-                  into a plain box.
+                {/* `data-lane` is not a test hook: `.lanes > [data-lane]` in
+                    src/styles/index.css is what carves the recessed channel, the
+                    divider and the zebra. Renaming it silently flattens the grid
+                    into a plain box.
 
-                  ONE pointer handler for every block, every edge and every
-                  patch of empty lane. What was pressed is `hitTest`'s answer,
-                  not the DOM's — which is why the blocks below carry no
-                  handlers, why a trim edge needs no element of its own to work,
-                  and why all of it is testable where every box is 0×0. */}
-              <div
-                ref={lanesRef}
-                data-testid="arrangement-lanes"
-                // Nothing in edit mode: the note surfaces below own the pointer
-                // there, and a second handler on their container would run a
-                // block gesture under every note gesture. Nothing in voice mode
-                // either — the racks own it, and `gestures.enabled` says so as
-                // well, so this is the second of the two locks rather than the
-                // only one.
-                onPointerDown={mode === 'pattern' ? gestures.onLanesPointerDown : undefined}
-                onPointerMove={mode === 'pattern' ? gestures.onLanesPointerMove : undefined}
-                className={`lanes absolute inset-0 ${
-                  mode === 'pattern' ? 'cursor-crosshair' : ''
-                }`}
-              >
-                {lanes.map((lane, index) => {
-                  const track = tracks[index];
-                  const instrumentId = trackInstrumentId(track);
-                  return (
-                    <div
-                      key={lane.trackId}
-                      data-lane={track.name}
-                      data-lane-track={lane.trackId}
-                      style={{ height: lane.height }}
-                      // `edit-lane` turns this lane's own recess and zebra OFF
-                      // (src/styles/index.css). Edit mode nests one `.lanes`
-                      // inside another — the track lanes, and each placement's
-                      // string rows — and `.lanes > [data-lane]` matches both,
-                      // so a track lane and every row inside it would each take
-                      // the channel shadow and the zebra lift. Compounded, the
-                      // stack stops reading as one instrument rack. The INNER
-                      // set wins, because in edit mode the rows ARE the lanes;
-                      // the divider between tracks is kept.
-                      // `edit-lane` is applied in voice mode too, and for the
-                      // same reason it exists: the recessed channel and the
-                      // zebra are what make a row of BLOCKS read as a timeline
-                      // channel, and under a rack face they fight the rack's own
-                      // raised plate — two conflicting statements about which
-                      // surface is on top.
-                      className={`relative ${timed && !editing ? '' : 'edit-lane'}`}
-                    >
-                      {/* What a lane draws is the ONLY thing that changes between
-                          modes — the headers and the scroll position do not
-                          (CP-01); the ruler goes only where there is no time
-                          axis to rule. Pattern mode draws one block per
-                          placement, edit mode that placement's notes on the same
-                          ruler at the same zoom, and voice mode the track's
-                          voice as a rack across the lane. */}
-                      {mode === 'voice' ? (
-                        <TrackVoiceRack
-                          track={track}
-                          audible={isTrackAudible(track, tracks)}
-                          collapsed={collapsedRacks.includes(lane.trackId)}
-                          // Rebuilt from the LIVE tracks rather than pushed onto
-                          // the old list, which also prunes it: a removed
-                          // track's id would otherwise sit in `App`'s state for
-                          // the rest of the session, matching nothing.
-                          onCollapsedChange={(next) =>
-                            onCollapsedRacksChange?.(
-                              tracks
-                                .map((candidate) => candidate.id)
-                                .filter((id) =>
-                                  id === lane.trackId ? next : collapsedRacks.includes(id),
-                                ),
-                            )
-                          }
-                          onNotice={setTrackNotice}
-                        />
-                      ) : editing
-                        ? editableSpans(track, pxPerBeat, lane.height).map((span) => {
-                            const placement = track.placements.find(
-                              (candidate) => candidate.id === span.placementId,
-                            );
-                            if (!placement) return null;
-                            return (
-                              <PlacementSurface
+                    ONE pointer handler for every block, every edge and every
+                    patch of empty lane. What was pressed is `hitTest`'s answer,
+                    not the DOM's — which is why the blocks below carry no
+                    handlers, why a trim edge needs no element of its own to work,
+                    and why all of it is testable where every box is 0×0. */}
+                <div
+                  ref={lanesRef}
+                  data-testid="arrangement-lanes"
+                  // Nothing in edit mode: the note surfaces below own the pointer
+                  // there, and a second handler on their container would run a
+                  // block gesture under every note gesture. (Voice mode never
+                  // reaches this subtree at all — its rows own their own
+                  // pointers, and `gestures.enabled` says so as well.)
+                  onPointerDown={mode === 'pattern' ? gestures.onLanesPointerDown : undefined}
+                  onPointerMove={mode === 'pattern' ? gestures.onLanesPointerMove : undefined}
+                  className={`lanes absolute inset-0 ${
+                    mode === 'pattern' ? 'cursor-crosshair' : ''
+                  }`}
+                >
+                  {lanes.map((lane, index) => {
+                    const track = tracks[index];
+                    const instrumentId = trackInstrumentId(track);
+                    return (
+                      <div
+                        key={lane.trackId}
+                        data-lane={track.name}
+                        data-lane-track={lane.trackId}
+                        style={{ height: lane.height }}
+                        // `edit-lane` turns this lane's own recess and zebra OFF
+                        // (src/styles/index.css). Edit mode nests one `.lanes`
+                        // inside another — the track lanes, and each placement's
+                        // string rows — and `.lanes > [data-lane]` matches both,
+                        // so a track lane and every row inside it would each take
+                        // the channel shadow and the zebra lift. Compounded, the
+                        // stack stops reading as one instrument rack. The INNER
+                        // set wins, because in edit mode the rows ARE the lanes;
+                        // the divider between tracks is kept.
+                        className={`relative ${editing ? 'edit-lane' : ''}`}
+                      >
+                        {/* What a lane draws is the ONLY thing that changes between
+                            these two modes — the headers, the ruler and the scroll
+                            position do not (CP-01). Pattern mode draws one block
+                            per placement, edit mode that placement's notes on the
+                            same ruler at the same zoom. Voice mode is the third
+                            answer and is not here: it has no time axis, so it is a
+                            different layout entirely (above). */}
+                        {editing
+                          ? editableSpans(track, pxPerBeat, lane.height).map((span) => {
+                              const placement = track.placements.find(
+                                (candidate) => candidate.id === span.placementId,
+                              );
+                              if (!placement) return null;
+                              return (
+                                <PlacementSurface
+                                  key={placement.id}
+                                  placement={placement}
+                                  span={span}
+                                  focused={editingPlacementId === placement.id}
+                                  sounding={playingPlacementIds.includes(placement.id)}
+                                  onFocus={() => focusPlacement(placement.id)}
+                                  drifted={placementDrifted(
+                                    placement,
+                                    libraryById.get(placement.patternSnapshot.id),
+                                  )}
+                                  pxPerBeat={pxPerBeat}
+                                  laneHeight={lane.height}
+                                  stringCount={laneStringCount(instrumentId)}
+                                  instrumentId={instrumentId}
+                                  grid={noteGrid}
+                                  edgeScroll={noteEdgeScroll}
+                                  geometry={surfaceGeometry}
+                                />
+                              );
+                            })
+                          : track.placements.map((placement) => (
+                              <PlacementBlock
                                 key={placement.id}
                                 placement={placement}
-                                span={span}
-                                focused={editingPlacementId === placement.id}
-                                sounding={playingPlacementIds.includes(placement.id)}
-                                onFocus={() => focusPlacement(placement.id)}
+                                pxPerBeat={pxPerBeat}
+                                laneHeight={lane.height}
+                                selected={selectedPlacementIds.includes(placement.id)}
+                                playing={playingPlacementIds.includes(placement.id)}
                                 drifted={placementDrifted(
                                   placement,
                                   libraryById.get(placement.patternSnapshot.id),
                                 )}
-                                pxPerBeat={pxPerBeat}
-                                laneHeight={lane.height}
-                                stringCount={laneStringCount(instrumentId)}
-                                instrumentId={instrumentId}
-                                grid={noteGrid}
-                                edgeScroll={noteEdgeScroll}
-                                geometry={surfaceGeometry}
                               />
-                            );
-                          })
-                        : track.placements.map((placement) => (
-                            <PlacementBlock
-                              key={placement.id}
-                              placement={placement}
-                              pxPerBeat={pxPerBeat}
-                              laneHeight={lane.height}
-                              selected={selectedPlacementIds.includes(placement.id)}
-                              playing={playingPlacementIds.includes(placement.id)}
-                              drifted={placementDrifted(
-                                placement,
-                                libraryById.get(placement.patternSnapshot.id),
-                              )}
-                            />
-                          ))}
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* The gesture overlay. A SIBLING of `.lanes`, never a child:
-                  `.lanes > [data-lane]:nth-child(even)` counts every sibling,
-                  so an extra element in there shifts the zebra by one row and
-                  the grid quietly stops reading as a stack of channels.
-
-                  Drawn in lanes-CONTENT coordinates (lane tops included), which
-                  is the frame the gestures work in — `PlacementBlock` is the
-                  one that draws lane-LOCAL, because its lane element is already
-                  positioned. */}
-              {gestures.preview && (
-                <div aria-hidden className="pointer-events-none absolute inset-0">
-                  {gestures.preview.kind === 'drop' ? (
-                    <div
-                      data-testid="arrangement-drop-preview"
-                      data-drop-track={gestures.preview.trackId}
-                      data-drop-refused={gestures.preview.refusal ?? undefined}
-                      style={{
-                        left: gestures.preview.left,
-                        top: gestures.preview.top,
-                        width: gestures.preview.width,
-                        height: gestures.preview.height,
-                      }}
-                      className={`absolute flex flex-col justify-center overflow-hidden rounded-md border-2 border-dashed px-1.5 ${
-                        gestures.preview.refusal
-                          ? 'border-ink-mut bg-ink-mut/10'
-                          : 'border-brass bg-brass/10'
-                      }`}
-                    >
-                      <span className="truncate font-mono text-[9.5px] font-bold text-ink-hi">
-                        {gestures.preview.label}
-                      </span>
-                      {/* The reason travels WITH the indicator: read after the
-                          drop it explains a mystery, read during it prevents
-                          one. */}
-                      {gestures.preview.refusal && (
-                        <span className="truncate font-mono text-[8px] tracking-[0.1em] text-ink-mut uppercase">
-                          {gestures.preview.refusal}
-                        </span>
-                      )}
-                    </div>
-                  ) : (
-                    <div
-                      data-testid="arrangement-marquee"
-                      style={{
-                        left: gestures.preview.left,
-                        top: gestures.preview.top,
-                        width: gestures.preview.width,
-                        height: gestures.preview.height,
-                      }}
-                      className="absolute rounded-xs border border-brass bg-brass/10"
-                    />
-                  )}
+                            ))}
+                      </div>
+                    );
+                  })}
                 </div>
-              )}
 
-              {/* Also a SIBLING of `.lanes`, for the zebra reason above — and
-                  above the gesture preview in the source so the head is never
-                  hidden under a drop indicator. Absent in voice mode with the
-                  rest of the time axis: playback still runs, but a sweeping line
-                  over a rack points at nothing. */}
-              {timed && <ArrangementPlayhead pxPerBeat={pxPerBeat} />}
+                {/* The gesture overlay. A SIBLING of `.lanes`, never a child:
+                    `.lanes > [data-lane]:nth-child(even)` counts every sibling,
+                    so an extra element in there shifts the zebra by one row and
+                    the grid quietly stops reading as a stack of channels.
+
+                    Drawn in lanes-CONTENT coordinates (lane tops included), which
+                    is the frame the gestures work in — `PlacementBlock` is the
+                    one that draws lane-LOCAL, because its lane element is already
+                    positioned. */}
+                {gestures.preview && (
+                  <div aria-hidden className="pointer-events-none absolute inset-0">
+                    {gestures.preview.kind === 'drop' ? (
+                      <div
+                        data-testid="arrangement-drop-preview"
+                        data-drop-track={gestures.preview.trackId}
+                        data-drop-refused={gestures.preview.refusal ?? undefined}
+                        style={{
+                          left: gestures.preview.left,
+                          top: gestures.preview.top,
+                          width: gestures.preview.width,
+                          height: gestures.preview.height,
+                        }}
+                        className={`absolute flex flex-col justify-center overflow-hidden rounded-md border-2 border-dashed px-1.5 ${
+                          gestures.preview.refusal
+                            ? 'border-ink-mut bg-ink-mut/10'
+                            : 'border-brass bg-brass/10'
+                        }`}
+                      >
+                        <span className="truncate font-mono text-[9.5px] font-bold text-ink-hi">
+                          {gestures.preview.label}
+                        </span>
+                        {/* The reason travels WITH the indicator: read after the
+                            drop it explains a mystery, read during it prevents
+                            one. */}
+                        {gestures.preview.refusal && (
+                          <span className="truncate font-mono text-[8px] tracking-[0.1em] text-ink-mut uppercase">
+                            {gestures.preview.refusal}
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <div
+                        data-testid="arrangement-marquee"
+                        style={{
+                          left: gestures.preview.left,
+                          top: gestures.preview.top,
+                          width: gestures.preview.width,
+                          height: gestures.preview.height,
+                        }}
+                        className="absolute rounded-xs border border-brass bg-brass/10"
+                      />
+                    )}
+                  </div>
+                )}
+
+                {/* Also a SIBLING of `.lanes`, for the zebra reason above — and
+                    above the gesture preview in the source so the head is never
+                    hidden under a drop indicator. There is none in voice mode,
+                    with the rest of the time axis: playback still runs, but a
+                    sweeping line over a rack points at nothing. */}
+                <ArrangementPlayhead pxPerBeat={pxPerBeat} />
+              </div>
             </div>
-          </div>
 
-          {/* Not in voice mode: an empty arrangement still has tracks, and every
-              one of them has a voice to tune — so "nothing placed yet" would be
-              printed over a screen that is doing its whole job. */}
-          {nothingPlaced && timed && (
-            <p className="pointer-events-none absolute top-2 left-3 font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-              {/* Edit mode's rail holds the inspector, not the library, so
-                  "drag a pattern in from the rail" would name a thing that
-                  isn't there. Notes are only editable inside a block. */}
-              {editing
-                ? 'Nothing to edit yet — place a pattern in Pattern mode first'
-                : 'Nothing placed yet — drag a pattern in from the rail'}
-            </p>
-          )}
+            {/* Nothing like it in voice mode: an empty arrangement still has
+                tracks, and every one of them has a voice to tune — so "nothing
+                placed yet" would be printed over a screen doing its whole job. */}
+            {nothingPlaced && (
+              <p className="pointer-events-none absolute top-2 left-3 font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
+                {/* Edit mode's rail holds the inspector, not the library, so
+                    "drag a pattern in from the rail" would name a thing that
+                    isn't there. Notes are only editable inside a block. */}
+                {editing
+                  ? 'Nothing to edit yet — place a pattern in Pattern mode first'
+                  : 'Nothing placed yet — drag a pattern in from the rail'}
+              </p>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

@@ -11,11 +11,9 @@ import { Timeline } from './timeline/Timeline';
 import { seedDemoPattern } from './timeline/demoPattern';
 import { ensurePattern, getLibraryPatterns, useEditingPattern } from './patterns/patternService';
 import { VoicePane, type WorkingVoice } from './voice/VoicePane';
-import type { SectionId } from './voice/paramSchema';
-
-/** Amp and Cabinet — the two stages you actually turn. The source and the output trim
- *  are tuned once and left, so they start folded. */
-const DEFAULT_OPEN_SECTIONS: readonly SectionId[] = ['amp', 'cabinet'];
+// The default lives with the schema it indexes, so the pattern page's pane and the
+// composition page's racks cannot open on different stages (see `paramSchema`).
+import { DEFAULT_OPEN_SECTIONS, type SectionId } from './voice/paramSchema';
 
 /** The stack's starting order. Which panes exist is decided below; this is only
  *  the order they open in, and the stack reconciles the two. */
@@ -42,6 +40,18 @@ export function App() {
   // they have to be readable without a render — see `voice/trackVoiceDrafts`,
   // which is above every component for both reasons at once.
   const [collapsedRacks, setCollapsedRacks] = useState<readonly string[]>([]);
+
+  // And which STAGES are folded inside those racks — CP-16's second level of
+  // disclosure, held here for the same reason and keyed by track id because that
+  // is the axis it varies on. Folding Amp on the Lead rack and coming back to
+  // find it open again is the same broken promise as a rack that unfolds itself.
+  // A track with NO ENTRY is one nobody has folded yet, and opens on
+  // `DEFAULT_OPEN_SECTIONS` like the pattern page does. Absent and empty are
+  // therefore different states — empty means "every stage open, and the user
+  // said so" — which is why the grid stores an empty list rather than dropping it.
+  const [collapsedRackSections, setCollapsedRackSections] = useState<
+    Readonly<Record<string, readonly SectionId[]>>
+  >({});
 
   // Which reference view is showing is pane state, but it can't live in the pane:
   // `PaneStack` unmounts a collapsed pane's body — deliberately, so a folded-away pane
@@ -102,6 +112,8 @@ export function App() {
         onModeChange={setMode}
         collapsedRacks={collapsedRacks}
         onCollapsedRacksChange={setCollapsedRacks}
+        collapsedRackSections={collapsedRackSections}
+        onCollapsedRackSectionsChange={setCollapsedRackSections}
       />
     );
   }
@@ -177,12 +189,18 @@ function CompositionShell({
   onModeChange,
   collapsedRacks,
   onCollapsedRacksChange,
+  collapsedRackSections,
+  onCollapsedRackSectionsChange,
 }: {
   onPageChange: (page: PageId) => void;
   mode: ArrangementMode;
   onModeChange: (mode: ArrangementMode) => void;
   collapsedRacks: readonly string[];
   onCollapsedRacksChange: (collapsed: readonly string[]) => void;
+  collapsedRackSections: Readonly<Record<string, readonly SectionId[]>>;
+  onCollapsedRackSectionsChange: (
+    collapsed: Readonly<Record<string, readonly SectionId[]>>,
+  ) => void;
 }) {
   const composition = useEditingComposition();
 
@@ -205,6 +223,8 @@ function CompositionShell({
         onModeChange={onModeChange}
         collapsedRacks={collapsedRacks}
         onCollapsedRacksChange={onCollapsedRacksChange}
+        collapsedRackSections={collapsedRackSections}
+        onCollapsedRackSectionsChange={onCollapsedRackSectionsChange}
       />
     </AppShell>
   );

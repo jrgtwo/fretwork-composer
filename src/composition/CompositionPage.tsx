@@ -6,6 +6,8 @@ import { closePlacementEditing, ensureComposition } from './compositionService';
 import { NoteInspectorRail } from './NoteInspectorRail';
 import { PatternLibraryRail } from './PatternLibraryRail';
 import { TransportBar } from './TransportBar';
+import { VoiceRail } from './VoiceRail';
+import type { SectionId } from '../voice/paramSchema';
 
 /**
  * The three modes are one surface, not three pages: the ruler, the track headers
@@ -60,6 +62,8 @@ export function CompositionPage({
   onModeChange,
   collapsedRacks,
   onCollapsedRacksChange,
+  collapsedRackSections,
+  onCollapsedRackSectionsChange,
 }: {
   mode: ArrangementMode;
   onModeChange: (mode: ArrangementMode) => void;
@@ -72,6 +76,12 @@ export function CompositionPage({
    */
   collapsedRacks?: readonly string[];
   onCollapsedRacksChange?: (collapsed: readonly string[]) => void;
+  /** Which STAGES are folded inside those racks, per track — the same rule one
+   *  level deeper (CP-16). Passed straight through for the same reason. */
+  collapsedRackSections?: Readonly<Record<string, readonly SectionId[]>>;
+  onCollapsedRackSectionsChange?: (
+    collapsed: Readonly<Record<string, readonly SectionId[]>>,
+  ) => void;
 }) {
   const [openFailure, setOpenFailure] = useState<string | null>(null);
   /**
@@ -188,6 +198,8 @@ export function CompositionPage({
                 mode={mode}
                 collapsedRacks={collapsedRacks}
                 onCollapsedRacksChange={onCollapsedRacksChange}
+                collapsedRackSections={collapsedRackSections}
+                onCollapsedRackSectionsChange={onCollapsedRackSectionsChange}
                 patternDragRef={patternDragRef}
               />
             )}
@@ -197,9 +209,11 @@ export function CompositionPage({
         {/* The rail is what CHANGES between the three modes, along with what a
             lane draws — the ruler, the headers and the scroll position never do
             (tickets/composition-page/README.md). Pattern mode gets the library,
-            edit mode the note inspector; the voice list is slice 3. */}
+            edit mode the note inspector, voice mode the voice list. */}
         <aside
-          aria-label={mode === 'pattern' ? 'Pattern library' : 'Inspector'}
+          aria-label={
+            mode === 'pattern' ? 'Pattern library' : mode === 'voice' ? 'Voices' : 'Inspector'
+          }
           className="rail flex min-h-0 flex-col"
         >
           {mode === 'pattern' ? (
@@ -215,16 +229,10 @@ export function CompositionPage({
             // selection would move the grid beside it on every click.
             <NoteInspectorRail />
           ) : (
-            <div className="flex flex-1 items-center justify-center px-3 text-center">
-              <span className="font-mono text-[9px] leading-relaxed tracking-[0.14em] text-ink-mut uppercase">
-                {/* TODO(CP-15): the voice list, and Save / Save as… / Rename
-                    with it. The LANES are built (CP-14) — each is a rack whose
-                    strip says "Unsaved" and offers a Revert — so this is the
-                    slice boundary rather than an unbuilt mode: what is missing
-                    is the list of variants to save one INTO. */}
-                Voice list arrives in slice 3
-              </span>
-            </div>
+            // Follows the TRACK selection — the third one on this page, and
+            // neither of the two above. Always mounted for the same reason, with
+            // its own empty states. See the header of VoiceRail.
+            <VoiceRail />
           )}
         </aside>
       </div>
