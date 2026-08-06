@@ -40,9 +40,13 @@ vi.mock('../src/audio/playbackService', async (importOriginal) => {
 });
 
 const { TablatureView } = await import('../src/reference/TablatureView');
-const { openBlankPattern, stampNote, getEditingPattern, setArticulations } = await import(
-  '../src/patterns/patternService'
-);
+const {
+  openBlankPattern,
+  stampNote,
+  getEditingPattern,
+  setArticulations,
+  setEditingPatternInstrument,
+} = await import('../src/patterns/patternService');
 
 const BAR = ticksPerBar({ numerator: 4, denominator: 4 });
 
@@ -317,13 +321,18 @@ describe('TablatureView — patterns it cannot fully draw', () => {
   });
 
   it('admits to the notes it has no line for', () => {
-    useFretworkStore.getState().setInstrumentId('bass');
+    // Built the way the app actually produces this state — a pattern whose
+    // INSTRUMENT changed under it, which the seam allows on purpose because it
+    // is lossless and reverses. Stamping straight onto string 5 of a bass is
+    // refused at the seam since AG-04 (nothing would draw or play the note), so
+    // the note is stamped on a six-string neck and the neck is then swapped. A
+    // note drawn nowhere at all, unremarked, is the failure mode this whole
+    // caption exists for.
+    useFretworkStore.getState().setInstrumentId('guitar');
     openBlankPattern('Bassline');
     stampNote({ stringIndex: 0, fret: 3, tick: 0, durationTicks: PPQ / 2 });
-    // Nothing in the UI authors this, but a pattern whose instrument changed under
-    // it can hold one — and a note drawn nowhere at all, unremarked, is the failure
-    // mode this whole caption exists for.
     stampNote({ stringIndex: 5, fret: 3, tick: PPQ, durationTicks: PPQ / 2 });
+    setEditingPatternInstrument('bass');
 
     render(<TablatureView />);
 

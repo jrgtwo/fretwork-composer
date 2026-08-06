@@ -254,9 +254,37 @@ export function articulationsLostToTie(
   return MERGED_AWAY.filter((key) => follower[key] !== undefined && follower[key] !== false);
 }
 
-export type SlideIn = 'below' | 'above';
-export type SlideOut = 'down' | 'up';
-export type BendKind = 'bend' | 'bend-release' | 'pre-bend' | 'release';
+/**
+ * The vocabulary, as RUNTIME lists with the types derived from them.
+ *
+ * Written this way because a schema needs the values and a signature needs the
+ * type, and a union typed in one place and re-typed as a literal array in
+ * another drifts the moment either grows: `tsc` says nothing when a schema
+ * silently omits the member that was just added, and the model is then told a
+ * real value is invalid. One list, both jobs — the same argument the agent's
+ * `INSTRUMENT_IDS`/`GROOVE_IDS` make for reading the lib's catalogs rather than
+ * restating them.
+ */
+export const SLIDE_INS = ['below', 'above'] as const;
+export const SLIDE_OUTS = ['down', 'up'] as const;
+export const BEND_KINDS = ['bend', 'bend-release', 'pre-bend', 'release'] as const;
+export const VIBRATOS = ['slight', 'wide'] as const;
+
+/**
+ * The bend depths that actually exist as a choice.
+ *
+ * ⚠ `DEPTHS` in `src/timeline/noteModel.ts` is the LABELLED version of this same
+ * list, and the two are pinned together by a test rather than by an import
+ * (`tests/AgentTools.test.ts`) — the labels are the editor's and the semitone
+ * values are musical. A caller offering anything else (2.7 semitones, or the
+ * missing 4) produces a note the editor renders as a bend with no depth
+ * selected, because it compares against these exact numbers.
+ */
+export const BEND_SEMITONES = [1, 2, 3, 4] as const;
+
+export type SlideIn = (typeof SLIDE_INS)[number];
+export type SlideOut = (typeof SLIDE_OUTS)[number];
+export type BendKind = (typeof BEND_KINDS)[number];
 
 export interface NotePitch {
   slideIn?: SlideIn;

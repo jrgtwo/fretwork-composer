@@ -19,13 +19,18 @@ import { useSyncExternalStore } from 'react';
 import {
   DEFAULT_INSTRUMENT_ID,
   DYNAMIC_VELOCITY,
+  GROOVE_PRESETS,
   INSTRUMENTS,
+  PPQ,
   getInstrument,
+  presetMatching,
   usePatternsStore,
   selectEditingPattern,
   type DynamicMark,
   type EventDragSnapshot,
   type FretInstrumentId,
+  type GroovePreset,
+  type GroovePresetId,
   type Pattern,
   type PatternEvent,
   type Tick,
@@ -33,7 +38,40 @@ import {
 import { createHistory } from './history';
 import { toPitchPatch, type NotePitch } from './articulations';
 
+/**
+ * Ticks per quarter note — the unit every `Tick` in this seam is counted in.
+ *
+ * Re-exported rather than imported from the lib at each call site for the same
+ * reason `listInstruments` reads the lib's catalog: a caller that has to reach
+ * past the seam for the meaning of the numbers the seam takes is a caller with
+ * two dependencies instead of one. It matters most for the agent's tools, whose
+ * schema descriptions have to state what a tick IS.
+ */
+export { PPQ };
+
 type SelectionMode = 'replace' | 'add' | 'toggle';
+
+/**
+ * Every write that can be refused reports it rather than throwing or silently
+ * doing nothing.
+ *
+ * Declared HERE and re-exported by `compositionService` so the two seams return
+ * ONE type rather than two structurally identical ones that drift; the module
+ * dependency already runs this way (`compositionService` imports this file,
+ * nothing imports back).
+ *
+ * AG-04 is why it exists on this side at all. The lib's pattern ops return the
+ * pattern UNCHANGED when they decline — a stamp onto an occupied string, a move
+ * that would overlap, an unknown event id — and the store then writes nothing.
+ * A pointer-driven caller can see that on screen; the agent cannot, and "it did
+ * nothing" is the one refusal that cannot be recovered from.
+ */
+export type Result<T = void> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly reason: string };
+
+const ok = <T>(value: T): Result<T> => ({ ok: true, value });
+const refuse = (reason: string): Result<never> => ({ ok: false, reason });
 
 /** The lib exports `EventDragSnapshot` but not its resize counterpart, so the
  *  shape is mirrored here. Structural typing makes it interchangeable. */
@@ -134,6 +172,22 @@ export function listInstruments(): readonly { id: FretInstrumentId; name: string
   }));
 }
 
+/**
+ * A feel a pattern or composition can be set to, by id.
+ *
+ * The lib's `GROOVE_PRESETS` is the list, and `GrooveSpec` — a `swing` in
+ * [0.5, 0.75] plus which subdivision it applies to — is the value. Only the
+ * NAMED presets are offered: `presetMatching` calls anything else `'custom'`,
+ * and a caller inventing swing numbers is exactly the free-text-instead-of-lib-
+ * type mistake the agent's schemas exist to prevent. A control that genuinely
+ * needs an arbitrary swing can take `GrooveSpec` when one appears.
+ */
+export type GrooveId = GroovePreset['id'];
+
+export function listGrooves(): readonly { id: GrooveId; name: string }[] {
+  return GROOVE_PRESETS.map((preset) => ({ id: preset.id, name: preset.label }));
+}
+
 // ------------------------------------------------------------------ undo ---
 // LIB-GAP(1): the lib has no history support and no way to write a whole
 // pattern back. Everything undo-related is confined to this section plus
@@ -208,15 +262,41 @@ function capture(): void {
 }
 
 /**
+ * How many brackets are open.
+ *
+ * `history` keeps ONE gesture slot, so a nested `beginGesture` overwrites the
+ * outer snapshot and the inner `endGesture` closes the outer bracket — after
+ * which the outer gesture's remaining writes each push their own step. Counting
+ * here is what keeps "one gesture, one step" true regardless of the order
+ * callers reach the seam in.
+ *
+ * AG-04 is what forced it. `compositionService` has counted depth since CP-06
+ * (a keyboard shortcut fired during a held drag nests one bracket inside
+ * another); this side never did, because every UI gesture here is a pointer
+ * drag and pointer drags do not overlap. The agent's tools nest by
+ * construction — a tool that stamps a riff brackets itself, and a tool that
+ * calls another one wraps that bracket — so without this a batching tool
+ * collapses to one undo step only when it happens to be the outermost caller.
+ */
+let gestureDepth = 0;
+
+/**
  * Bracket a multi-step edit — a drag fires dozens of mutations but must undo as
- * one step. Safe to call without a pattern open.
+ * one step. Safe to call without a pattern open, and safe to nest.
  */
 export function beginEditGesture(): void {
+  // Nested: the outermost bracket's snapshot already covers everything inside
+  // it, so this one records nothing and only deepens the count.
+  if (gestureDepth++ > 0) return;
   const pattern = getEditingPattern();
   if (pattern) history.beginGesture(pattern);
 }
 
+/** `changed` is honoured only on the OUTERMOST close, because only that one
+ *  decides whether a step is pushed. */
 export function endEditGesture(changed = true): void {
+  if (gestureDepth === 0) return;
+  if (--gestureDepth > 0) return;
   history.endGesture({ changed });
 }
 
@@ -234,8 +314,22 @@ export function redo(): void {
   if (next) writePatternBack(next);
 }
 
+/**
+ * Drop the stacks — done on every switch of edit target, because history is
+ * per-pattern.
+ *
+ * ⚠ The bracket DEPTH deliberately survives. `history.clear()` drops the gesture
+ * slot, so an open bracket would otherwise be silently orphaned: the writes
+ * after the clear would each push their own step and the outer close would find
+ * nothing, which is the one-command-three-undos failure the count exists to
+ * prevent — and `openBlankPattern` and the placement-switch path both clear from
+ * inside a caller's bracket. The bracket is re-armed on whatever is open now
+ * instead, so it goes on covering the edits made through it.
+ */
 export function clearHistory(): void {
   history.clear();
+  const pattern = getEditingPattern();
+  if (gestureDepth > 0 && pattern) history.beginGesture(pattern);
 }
 
 /** React hook: whether undo/redo are currently available. */
@@ -247,19 +341,109 @@ export function useHistoryState(): { canUndo: boolean; canRedo: boolean } {
 
 // ---------------------------------------------------------------- writing ---
 
-/** Create a fresh pattern and open it for editing. */
-export function openBlankPattern(name?: string): void {
+/**
+ * Create a fresh pattern and open it for editing.
+ *
+ * Returns the pattern it opened rather than `void`: the id is the only handle a
+ * caller has on it afterwards, and a caller with no pointer (the agent) would
+ * otherwise have to guess which of the library's patterns it just made. The
+ * lib's `createPattern` returns `''` when the tier gate declines, which is the
+ * only signal it gives — the same shape `openBlankComposition` handles.
+ */
+export function openBlankPattern(name?: string): Result<Pattern> {
   const id = store().createPattern(name);
+  if (id === '') return refuse("Couldn't create a pattern — the library refused.");
   store().openPatternForEditing(id);
   store().selectEvents([], 'replace');
   // History is per-pattern; carrying it across a switch would undo into a
   // pattern that is no longer open.
-  history.clear();
+  clearHistory();
+  const pattern = getEditingPattern();
+  if (!pattern || pattern.id !== id) return refuse("Couldn't open the new pattern.");
+  return ok(pattern);
 }
 
 /** Open whatever pattern was last edited, seeding a draft if there is none. */
 export function ensurePattern(): void {
   store().ensureEditingPattern();
+}
+
+/**
+ * How many strings the open pattern's instrument has.
+ *
+ * ⚠ `stringIndex` 0 is the LOW E — the physically bottom string. Display order
+ * is the reverse of index order (see `ROW_ORDER` in Timeline.tsx), and a caller
+ * that has them backwards puts every note on the wrong string while producing
+ * something that still looks like a pattern.
+ */
+export function stringCount(): number {
+  const pattern = getEditingPattern();
+  if (!pattern) return 0;
+  return getInstrument(patternInstrumentId(pattern))?.stringCount ?? 0;
+}
+
+/**
+ * Reject a string the instrument hasn't got.
+ *
+ * The lib does NOT: `stampEvent` and `moveEvent` take the index at face value,
+ * so a note on string 9 of a guitar is stored, drawn by nothing, played by
+ * nothing and reported by nobody. A pointer can only ever hit a lane that
+ * exists; a caller working by value can't, and this is the exact failure the
+ * seam exists to turn into a sentence.
+ */
+function checkString(stringIndex: number): Result {
+  const count = stringCount();
+  if (!Number.isInteger(stringIndex) || stringIndex < 0 || stringIndex >= count) {
+    return refuse(
+      `String ${stringIndex} does not exist — this instrument has strings 0 to ${count - 1}, where 0 is the lowest (low E on a guitar).`,
+    );
+  }
+  return ok(undefined);
+}
+
+/**
+ * How many frets the open pattern's instrument has.
+ *
+ * ⚠ NOT the same bound as {@link MAX_FRET}, and the difference is the whole
+ * reason this exists: `MAX_FRET` is 24 for everything, while a guitar has 22, a
+ * bass 21 and a ukulele 15. A note between the two is perfectly legal — the
+ * editor keeps it, so that changing instrument stays lossless — but the
+ * fretboard cannot draw it (`cellsAboveFret` counts them) and `flattenTrack`
+ * drops it from playback at transpose 0 as well as under one. A caller with no
+ * screen has to be able to ask.
+ */
+export function fretCount(): number {
+  const pattern = getEditingPattern();
+  if (!pattern) return 0;
+  return getInstrument(patternInstrumentId(pattern))?.fretCount ?? 0;
+}
+
+/** Notes whose fret this instrument's neck hasn't got — stored and editable,
+ *  drawn by nothing and played by nothing. See {@link fretCount}. */
+export function notesAboveNeck(): number {
+  const pattern = getEditingPattern();
+  if (!pattern) return 0;
+  const frets = fretCount();
+  return pattern.events.filter((event) => event.fret > frets).length;
+}
+
+/**
+ * Reject a fret outside the app's own range.
+ *
+ * {@link MAX_FRET} is applied by `setSelectedFret` and by the popup's stepper
+ * and by nothing else, which made it a rule only a button enforced — precisely
+ * what {@link checkString} exists to stop being true of the string axis. The
+ * lib floors at 0 and has no ceiling, so an unchecked value is stored verbatim
+ * and vanishes at playback. The instrument's own shorter neck is NOT refused
+ * here: the editor deliberately tolerates a note above it, and refusing would
+ * make the seam stricter than the UI. It is reported instead — see
+ * {@link notesAboveNeck}.
+ */
+function checkFret(fret: number): Result {
+  if (!Number.isInteger(fret) || fret < 0 || fret > MAX_FRET) {
+    return refuse(`Fret ${fret} does not exist — frets run from 0 (open) to ${MAX_FRET}.`);
+  }
+  return ok(undefined);
 }
 
 export interface StampArgs {
@@ -270,47 +454,116 @@ export interface StampArgs {
 }
 
 /**
- * Place a note at an explicit tick.
+ * Place a note at an explicit tick, and report the note that landed.
  *
  * The store's `stampAt` always stamps at its own cursor, so we move the cursor
  * first — that's the intended flow, and it keeps the cursor where the user last
  * acted. A stamp that would overlap an existing note on the same string is
- * rejected by the lib and simply leaves the pattern unchanged.
+ * rejected by the lib, which returns the pattern unchanged and hands back the
+ * note that was in the way; the new note is found by DIFFING the ids for that
+ * reason, and its absence is the refusal.
+ *
+ * ⚠ `durationTicks` is optional here and must not be treated as such by a caller
+ * with no UI: `stampAt` falls back to the STORE'S `stepLength`, which is the
+ * pattern page's grid setting. Omitting it means "whatever the user last chose",
+ * which is not a thing an agent can mean. It is also only a REQUEST — the lib
+ * clamps a note so it cannot run into the next one on its string, so the value
+ * on the returned event is the one that stuck.
  */
-export function stampNote({ stringIndex, fret, tick, durationTicks }: StampArgs): void {
+export function stampNote({
+  stringIndex,
+  fret,
+  tick,
+  durationTicks,
+}: StampArgs): Result<PatternEvent> {
+  const pattern = getEditingPattern();
+  if (!pattern) return refuse('No pattern is open.');
+  const onNeck = checkString(stringIndex);
+  if (!onNeck.ok) return onNeck;
+  const inRange = checkFret(fret);
+  if (!inRange.ok) return inRange;
   capture();
   const s = store();
   s.setCursorTick(tick);
-  if (durationTicks !== undefined) {
-    const before = getEditingPattern()?.events.map((e) => e.id) ?? [];
-    s.stampAt({ stringIndex, fret }, false);
-    const added = getEditingPattern()?.events.find((e) => !before.includes(e.id));
-    if (added) s.resizeEvent(added.id, durationTicks);
-    return;
-  }
+  // LIB-GAP(20): `stampEvent` returns `{ pattern, event }` — including the note
+  // that was in the way when it declines — and the store's `stampAt` throws all
+  // of it away and returns `void`. Diffing the ids is the only way back to the
+  // note that landed. See docs/FOLLOW-UPS.md.
+  const before = new Set(pattern.events.map((e) => e.id));
   s.stampAt({ stringIndex, fret }, false);
+  const added = getEditingPattern()?.events.find((e) => !before.has(e.id));
+  if (!added) {
+    return refuse(
+      `String ${stringIndex} is already sounding at tick ${tick} — one string can only ring one note at a time.`,
+    );
+  }
+  if (durationTicks !== undefined) s.resizeEvent(added.id, durationTicks);
+  return ok(findEvent(added.id) ?? added);
 }
 
-export function moveNote(id: string, startTick: Tick, stringIndex?: number): void {
+/**
+ * Move a note, reporting where it actually ended up.
+ *
+ * The lib REJECTS a move that would overlap another note on the target string
+ * (unlike the group move, which clamps), leaving the note exactly where it was
+ * and the pattern reference unchanged — so the refusal is detected by reading
+ * the note back. Compared against the lib's own floor of 0 rather than against
+ * the request, because a negative tick is CLAMPED and clamping is not a refusal.
+ */
+export function moveNote(
+  id: string,
+  startTick: Tick,
+  stringIndex?: number,
+): Result<{ startTick: Tick; stringIndex: number }> {
+  const before = findEvent(id);
+  if (!before) return refuse('No such note.');
+  if (stringIndex !== undefined) {
+    const onNeck = checkString(stringIndex);
+    if (!onNeck.ok) return onNeck;
+  }
   capture();
   store().moveEvent(id, startTick, stringIndex);
+  // LIB-GAP(20) again: `moveEvent` (the op) returns the pattern unchanged when
+  // it rejects an overlap, and the store action returns `void`, so the decline
+  // is only visible by reading the note back.
+  const after = findEvent(id);
+  if (!after) return refuse('No such note.');
+  const wantedTick = Math.max(0, startTick);
+  const wantedString = stringIndex ?? before.stringIndex;
+  if (after.startTick !== wantedTick || after.stringIndex !== wantedString) {
+    return refuse(
+      `That move would overlap another note on string ${wantedString}; the note is still at tick ${after.startTick} on string ${after.stringIndex}.`,
+    );
+  }
+  return ok({ startTick: after.startTick, stringIndex: after.stringIndex });
 }
 
-export function resizeNote(id: string, durationTicks: Tick): void {
+/** Resize a note, reporting the duration that stuck — the lib clamps it against
+ *  the next note on the same string, so a request can be honoured in part. */
+export function resizeNote(id: string, durationTicks: Tick): Result<Tick> {
+  if (!findEvent(id)) return refuse('No such note.');
   capture();
   store().resizeEvent(id, durationTicks);
+  return ok(findEvent(id)?.durationTicks ?? durationTicks);
 }
 
-export function setNoteFret(id: string, fret: number): void {
+/** Set a note's fret, reporting the value that stuck — the lib floors it at 0
+ *  and has no ceiling, so {@link checkFret} applies the app's own. */
+export function setNoteFret(id: string, fret: number): Result<number> {
+  if (!findEvent(id)) return refuse('No such note.');
+  const inRange = checkFret(fret);
+  if (!inRange.ok) return inRange;
   capture();
   store().setEventFret(id, fret);
+  return ok(findEvent(id)?.fret ?? fret);
 }
 
 /**
  * The top of the neck. The lib floors a fret at 0 but has no ceiling of its own
  * (`setEventFret` only does `Math.max(0, …)`), so the upper bound is the app's
- * rule and has to be applied on the way in. Exported so the popup's stepper and
- * keyboard entry can't drift apart.
+ * rule and has to be applied on the way in — by {@link checkFret} on the
+ * id-addressed writes and by the clamps below on the selection ones. Exported so
+ * the popup's stepper and keyboard entry can't drift apart from either.
  */
 export const MAX_FRET = 24;
 
@@ -361,17 +614,33 @@ export function nudgeSelectedFret(delta: number): void {
   store().nudgeSelectedFret(clamped);
 }
 
-export function deleteNotes(ids: readonly string[]): void {
+/**
+ * Delete notes by id. ALL OR NOTHING: an id that names no note refuses the whole
+ * call rather than deleting the rest, because a caller that cannot see the
+ * pattern has no way to tell a partial delete from a complete one, and the lib's
+ * `deleteEvents` simply skips what it can't find.
+ */
+export function deleteNotes(ids: readonly string[]): Result<number> {
+  if (ids.length === 0) return ok(0);
+  const unique = [...new Set(ids)];
+  const missing = unique.filter((id) => !findEvent(id));
+  if (missing.length > 0) return refuse(`No such note: ${missing.join(', ')}.`);
   capture();
-  store().deleteEvents(ids);
+  store().deleteEvents(unique);
+  // The count of notes GONE, not of ids sent: a repeated id deletes one note
+  // once, and reporting two would have a caller believing a note it can still
+  // see was removed.
+  return ok(unique.length);
 }
 
 /**
  * Whether editor playback repeats. Stored on the pattern (the lib defaults it to
  * true) rather than held in transport state, so it survives reopening.
  */
-export function setPatternLoop(loop: boolean): void {
+export function setPatternLoop(loop: boolean): Result {
+  if (!getEditingPattern()) return refuse('No pattern is open.');
   store().setEditingPatternLoop(loop);
+  return ok(undefined);
 }
 
 /**
@@ -379,8 +648,37 @@ export function setPatternLoop(loop: boolean): void {
  * loads it into the metronome when the pattern is opened; the metronome holds
  * the live value during playback.
  */
-export function setPatternBpm(bpm: number | null): void {
+export function setPatternBpm(bpm: number | null): Result {
+  if (!getEditingPattern()) return refuse('No pattern is open.');
   store().setEditingPatternSuggestedBpm(bpm);
+  return ok(undefined);
+}
+
+/**
+ * The pattern's feel, by preset id — see {@link listGrooves}.
+ *
+ * Not captured for undo, matching loop and tempo: it is a preference about how
+ * the pattern is played, not an edit to its notes.
+ */
+export function setPatternGroove(grooveId: GrooveId): Result {
+  if (!getEditingPattern()) return refuse('No pattern is open.');
+  const preset = GROOVE_PRESETS.find((candidate) => candidate.id === grooveId);
+  if (!preset) return refuse(`No such groove: ${grooveId}.`);
+  store().setEditingPatternGroove(preset.groove);
+  return ok(undefined);
+}
+
+/**
+ * The open pattern's feel, as an id — the read half of {@link setPatternGroove}.
+ *
+ * `'custom'` for any `GrooveSpec` that matches no named preset (a document made
+ * elsewhere can hold one), and null when nothing is open. A capability that can
+ * only be WRITTEN is one a caller can neither confirm nor reason from.
+ */
+export function patternGrooveId(): GroovePresetId | null {
+  const pattern = getEditingPattern();
+  if (!pattern) return null;
+  return presetMatching(pattern.groove ?? null);
 }
 
 /**
@@ -398,8 +696,10 @@ export function setPatternBpm(bpm: number | null): void {
  * snapshot — so undoing past the point where the voice was chosen reverts it as a side
  * effect. Fix that for all three at once by carrying them forward in `writePatternBack`.
  */
-export function setEditingPatternVoiceRef(voiceRef: unknown): void {
+export function setEditingPatternVoiceRef(voiceRef: unknown): Result {
+  if (!getEditingPattern()) return refuse('No pattern is open.');
   store().setEditingPatternVoiceRef(voiceRef);
+  return ok(undefined);
 }
 
 /**
@@ -415,12 +715,19 @@ export function setEditingPatternVoiceRef(voiceRef: unknown): void {
  *
  * Not captured for undo, matching loop, tempo and voice above.
  */
-export function setEditingPatternInstrument(instrumentId: FretInstrumentId): void {
+export function setEditingPatternInstrument(instrumentId: FretInstrumentId): Result {
   const pattern = getEditingPattern();
-  if (!pattern) return;
+  if (!pattern) return refuse('No pattern is open.');
+  // Membership checked rather than trusted: the id is a string at every real
+  // caller (a `<select>` value, a tool argument) and `getInstrument` returns
+  // `undefined` for one the catalog hasn't got, after which the pattern is on an
+  // instrument that does not exist and every neck question answers with the
+  // fallback. Same rule as the groove ids below.
+  if (!getInstrument(instrumentId)) return refuse(`No such instrument: ${instrumentId}.`);
   // The store's action addresses a pattern by id — there is no editing-pattern
   // shorthand for this one, unlike loop/tempo/voiceRef.
   store().setPatternInstrument(pattern.id, instrumentId);
+  return ok(undefined);
 }
 
 export function selectNotes(ids: readonly string[], mode: SelectionMode = 'replace'): void {
@@ -480,15 +787,19 @@ export function resizeNotesBy(
 export function setArticulations(
   id: string,
   patch: Parameters<ReturnType<typeof store>['updateEventArticulations']>[1],
-): void {
+): Result {
+  if (!findEvent(id)) return refuse('No such note.');
   capture();
   store().updateEventArticulations(id, patch);
+  return ok(undefined);
 }
 
 /** Replace the note's pitch movement — slides and bends. */
-export function setNotePitch(id: string, pitch: NotePitch): void {
+export function setNotePitch(id: string, pitch: NotePitch): Result {
+  if (!findEvent(id)) return refuse('No such note.');
   capture();
   store().updateEventArticulations(id, toPitchPatch(pitch) as never);
+  return ok(undefined);
 }
 
 /** Softest → loudest, ordered by the curve itself rather than by how the lib's literal
@@ -505,10 +816,12 @@ export const DYNAMICS = Object.entries(DYNAMIC_VELOCITY)
  * note labelled *pp* that plays at full force. Clearing has to clear both for
  * the same reason.
  */
-export function setNoteDynamic(id: string, dynamic: DynamicMark | undefined): void {
+export function setNoteDynamic(id: string, dynamic: DynamicMark | undefined): Result {
+  if (!findEvent(id)) return refuse('No such note.');
   capture();
   store().updateEventArticulations(id, {
     dynamic,
     velocity: dynamic === undefined ? undefined : DYNAMIC_VELOCITY[dynamic],
   });
+  return ok(undefined);
 }

@@ -486,6 +486,40 @@ export type TrackVoiceWriteResult =
   | { readonly ok: false; readonly reason: TrackVoiceRefusal };
 
 /**
+ * The refusal as a SENTENCE.
+ *
+ * The codes above are for a pane that wants to render each state differently
+ * (`VoicePane` maps them with a `Record`, and gets to phrase them in its own
+ * voice next to the control that caused them). A caller with no pane — the
+ * agent's tools, a log line — needs prose, and `'built-in'` on its own is not
+ * prose. Authored HERE rather than in the tool layer so there is one map to
+ * widen when the union grows, and so a new refusal cannot reach a caller as a
+ * bare identifier.
+ *
+ * Deliberately not wired into `VoicePane`: its copy sits inside a rail with its
+ * own layout and can say less because the button is right there. Two audiences,
+ * one union, and only this one has to be self-contained.
+ */
+export function describeVoiceRefusal(reason: TrackVoiceRefusal): string {
+  switch (reason) {
+    case 'no-pattern':
+      return 'No pattern is open.';
+    case 'no-track':
+      return 'No such track.';
+    case 'no-voice':
+      return 'That has no voice of its own to save — it is playing the instrument’s active voice. Save it as a new voice instead.';
+    case 'built-in':
+      return 'That is one of the built-in voices — they cannot be renamed, deleted or overwritten. Save it as a new voice instead.';
+    case 'unknown-variant':
+      return 'That voice is not in your library (or belongs to another instrument).';
+    case 'empty-name':
+      return 'A voice needs a name.';
+    case 'capped':
+      return 'Your library is at its voice limit, so nothing was saved.';
+  }
+}
+
+/**
  * Point the EDITING PATTERN at a voice.
  *
  * ⚠ NOT the track write — {@link setTrackVoice} is. This one addresses whichever
@@ -612,6 +646,33 @@ function addUserVariant(
     // instrument's neck.
     preset: { ...preset, name, instrumentId },
   });
+}
+
+/**
+ * The user variant a {@link voiceKey} names — the bridge between the READ path
+ * and the WRITE path.
+ *
+ * Everything that offers a voice hands out keys (`listSelectableVoices`,
+ * `voiceKey`) and `setTrackVoice` takes a ref, but {@link renameVoice} and
+ * {@link deleteVoice} take a bare VARIANT ID, which a built-in slot does not
+ * have. A caller holding only keys therefore had to strip the prefix itself and
+ * got `unknown-variant` back for `default:clean-amp` — which is a wrong sentence
+ * as well as an unhelpful one: that voice is not unknown, it is one of the
+ * fourteen readonly slot presets and there is no setter for it anywhere in the
+ * lib. Answering `built-in` is the difference between "check the id" and "copy
+ * it to a voice of your own first".
+ *
+ * Guarded HERE rather than in a caller for the reason the built-in refusal
+ * itself is: a rule only one surface enforces is a rule every other surface
+ * walks past.
+ */
+export function variantIdFromKey(
+  key: string,
+): { readonly ok: true; readonly id: string } | { readonly ok: false; readonly reason: VoiceRefusal } {
+  const ref = parseVoiceKey(key);
+  if (!ref) return { ok: false, reason: 'unknown-variant' };
+  if (ref.kind === 'default') return { ok: false, reason: 'built-in' };
+  return { ok: true, id: ref.id };
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { INSTRUMENTS, PPQ, type Pattern } from '@fretwork/lib';
+import { INSTRUMENTS, PPQ, usePatternsStore, type Pattern } from '@fretwork/lib';
 import {
   beginEditGesture,
   patternInstrumentId,
@@ -378,7 +378,11 @@ describe('fret entry', () => {
    */
   it('does not drag a note above the ceiling back down when nudged up', () => {
     const id = seedOne(5);
-    setNoteFret(id, 30);
+    // Written through the STORE, because the seam now refuses a fret above
+    // `MAX_FRET` on the way in (AG-04: a rule only the popup's stepper applied
+    // was a rule the agent walked straight past). This is the state an import or
+    // a restored session produces, which is the state the clamp is for.
+    usePatternsStore.getState().setEventFret(id, 30);
 
     nudgeSelectedFret(1);
     expect(getEditingPattern()!.events[0].fret).toBe(30);

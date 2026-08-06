@@ -23,15 +23,18 @@
 import { useSyncExternalStore } from 'react';
 import {
   DEFAULT_INSTRUMENT_ID,
+  GROOVE_PRESETS,
   INSTRUMENTS,
   MAX_COMPOSITION_TRACKS,
   getInstrument,
   placementEffectiveLength,
   placementEndTick,
+  presetMatching,
   selectEditingComposition,
   usePatternsStore,
   type Composition,
   type FretInstrumentId,
+  type GroovePresetId,
   type PatternTimeSignature,
   type Placement,
   type Tick,
@@ -41,11 +44,28 @@ import { createHistory } from '../patterns/history';
 // The PATTERN seam's history, cleared whenever the edit target moves — see
 // `openPlacementForEditing`. One-directional: `patternService` imports nothing
 // from here, so there is no cycle to reason about.
-import { clearHistory as clearPatternHistory } from '../patterns/patternService';
+import {
+  clearHistory as clearPatternHistory,
+  listGrooves,
+  type GrooveId,
+  type Result,
+} from '../patterns/patternService';
+// The transposition's COST, for the write that incurs it — see
+// `setPlacementTranspose`. A pure per-placement count with no store in it, so
+// this direction is safe: `arrangementMath` imports the lib and `timelineMath`
+// and nothing else.
+import { droppedByTranspose } from './arrangementMath';
 
 export { MAX_COMPOSITION_TRACKS, placementEffectiveLength, placementEndTick };
 
-type SelectionMode = 'replace' | 'add' | 'toggle';
+/**
+ * Re-exported so a caller that PRICES a transposition and one that MAKES it
+ * reach the same module — the reason `strandedByInstrument` and
+ * `mismatchedPlacements` live here rather than beside it. The function itself
+ * stays in `arrangementMath`, where the neck arithmetic and the LIB-GAP(12)
+ * note belong; this is only its address.
+ */
+export { droppedByTranspose };
 
 /**
  * Every write that can be refused reports it rather than throwing or silently
@@ -53,10 +73,18 @@ type SelectionMode = 'replace' | 'add' | 'toggle';
  * decline (past the track cap, on the last remaining track, on an unknown id),
  * which leaves a caller unable to tell "done" from "declined" — the seam is
  * where that distinction is recovered.
+ *
+ * Declared in `patternService` and re-exported here so both seams speak ONE
+ * type: AG-04 gave the pattern side the same refusals, and two structurally
+ * identical `Result`s in two files is one of them drifting later.
  */
-export type Result<T = void> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly reason: string };
+export type { Result };
+
+/** The feel list and its ids, re-exported so a caller doing composition work
+ *  reaches one module — the values are the lib's `GROOVE_PRESETS` either way. */
+export { listGrooves, type GrooveId };
+
+type SelectionMode = 'replace' | 'add' | 'toggle';
 
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
 const refuse = (reason: string): Result<never> => ({ ok: false, reason });
@@ -540,10 +568,20 @@ export function redo(): void {
   pruneTrackSelection();
 }
 
+/**
+ * Drop the stacks — done on every switch of composition, because history is
+ * per-composition.
+ *
+ * ⚠ The bracket DEPTH deliberately survives, for `patternService.clearHistory`'s
+ * reason: `forgetPerCompositionState` clears from inside whatever bracket the
+ * caller opened, and zeroing the count there would orphan it — every later write
+ * in the same command pushing its own step and the outer close finding nothing.
+ * The bracket is re-armed on whatever is open now instead.
+ */
 export function clearHistory(): void {
-  gestureSnapshot = null;
-  gestureDepth = 0;
   history.clear();
+  gestureSnapshot = gestureDepth > 0 ? getEditingComposition() : null;
+  if (gestureSnapshot) history.beginGesture(gestureSnapshot);
 }
 
 /** React hook: whether undo/redo are currently available. */
@@ -659,7 +697,16 @@ export function addTrack(name?: string, instrumentId?: FretInstrumentId): Result
     // rule someone can plan around and one that looks arbitrary.
     return refuse(TRACK_CAP_REASON);
   }
-  const chosen = name ?? nextTrackName(composition.tracks);
+  if (instrumentId !== undefined && !getInstrument(instrumentId)) {
+    return refuse(`No such instrument: ${instrumentId}.`);
+  }
+  // The same non-blank rule `setTrackName` applies, for the same reason — every
+  // control in the header builds its accessible name out of it, so a track added
+  // as "   " gives two headers nothing to tell them apart. Omitting the name is
+  // a different request and still means "number it for me".
+  const trimmed = name?.trim();
+  if (name !== undefined && trimmed === '') return refuse('A track needs a name.');
+  const chosen = trimmed ?? nextTrackName(composition.tracks);
   commit(() => store().addCompositionTrack(chosen, instrumentId));
   const added = getTracks().at(-1);
   if (!added || added.id === composition.tracks.at(-1)?.id) {
@@ -799,6 +846,10 @@ export function setTrackInstrument(
 ): Result {
   const track = findTrack(trackId);
   if (!track) return refuse('No such track.');
+  // Membership checked rather than trusted, as on the pattern side: an id the
+  // catalog hasn't got leaves the track pointing at an instrument that does not
+  // exist, and every read then answers with the fallback instead.
+  if (!getInstrument(instrumentId)) return refuse(`No such instrument: ${instrumentId}.`);
   // Guarded on the instrument alone, deliberately: the lib clears the track's
   // voice override as part of this write, because the chosen voice may have been
   // for the old instrument — and a picker re-emitting the value it already has
@@ -891,6 +942,10 @@ export function addPlacement(
   trackId: string,
   atTick?: Tick,
 ): Result<string> {
+  // Named separately from the pattern/track refusal below: the lib returns the
+  // same `null` for "nothing is open" as for "no such id", and telling a caller
+  // to check ids it got right is the unrecoverable kind of wrong answer.
+  if (!getEditingComposition()) return refuse('No composition is open.');
   const placementId = commit(() =>
     store().addPlacementToTrack(patternId, trackId, atTick),
   );
@@ -901,50 +956,136 @@ export function addPlacement(
   return ok(placementId);
 }
 
-/** Move a placement, possibly to another track. The lib BLOCKS/CLAMPS rather
- *  than rejecting: the block lands in the free slot nearest the requested tick
- *  and never overlaps or pushes a neighbour. */
+/**
+ * Every placement id in the composition, for the before/after diffs the writes
+ * that MINT ids have to do.
+ *
+ * LIB-GAP(20): `composition-ops` knows exactly which placements it created —
+ * `splitPlacement` and `duplicatePlacements` build them — and the store's
+ * actions return `void`, so the only way back to them is to diff the document
+ * around the call. See docs/FOLLOW-UPS.md.
+ */
+function placementIds(): readonly string[] {
+  return getTracks().flatMap((track) => track.placements.map((p) => p.id));
+}
+
+/**
+ * Move a placement, possibly to another track, reporting where it landed.
+ *
+ * The lib BLOCKS/CLAMPS rather than rejecting: the block lands in the free slot
+ * nearest the requested tick and never overlaps or pushes a neighbour. So the
+ * refusals are only the ids, and the landing tick is returned because it is
+ * routinely NOT the one asked for — a caller that cannot see the grid would
+ * otherwise carry on believing the block is where it aimed it.
+ */
 export function movePlacement(
   placementId: string,
   destTrackId: string,
   destStartTick: Tick,
-): void {
+): Result<{ trackId: string; startTick: Tick }> {
+  if (!findPlacement(placementId)) return refuse('No such block in this composition.');
+  if (!findTrack(destTrackId)) return refuse('No such track.');
   commit(() => store().movePlacement(placementId, destTrackId, destStartTick));
+  const landed = findPlacement(placementId);
+  if (!landed) return refuse('No such block in this composition.');
+  return ok({ trackId: landed.track.id, startTick: landed.placement.startTick });
 }
 
-/** Cut a placement in two. Both halves are NEW placements with new ids — the
- *  original is discarded — so the selection has to be reconciled or it keeps
- *  naming a block that no longer exists and every later gesture no-ops. */
-export function splitPlacement(placementId: string, atTick: Tick): void {
+/**
+ * Cut a placement in two, reporting the two halves.
+ *
+ * Both halves are NEW placements with new ids — the original is discarded — so
+ * the selection has to be reconciled or it keeps naming a block that no longer
+ * exists and every later gesture no-ops. For the same reason the new ids are
+ * RETURNED: without them a caller holding the old id is holding nothing, and
+ * finding the halves means diffing the whole composition.
+ *
+ * A split at the block's own edge is declined by the lib (it would produce a
+ * zero-length half), which is reference-identical to no write at all — hence
+ * the diff rather than a trust in "it must have worked".
+ */
+export function splitPlacement(placementId: string, atTick: Tick): Result<readonly string[]> {
+  if (!findPlacement(placementId)) return refuse('No such block in this composition.');
+  const before = new Set(placementIds());
   commit(() => store().splitPlacement(placementId, atTick));
   prunePlacementSelection();
+  const created = placementIds().filter((id) => !before.has(id));
+  if (created.length === 0) {
+    return refuse(
+      `Nothing to split at tick ${atTick} — the cut has to fall inside the block, not on its edge.`,
+    );
+  }
+  return ok(created);
 }
 
-/** Truncate a placement to `lengthTicks`. Clamped to at least one beat and at
- *  most the snapshot's own duration; a legacy `repeat > 1` collapses to 1. */
-export function resizePlacement(placementId: string, lengthTicks: Tick): void {
+/** Truncate a placement to `lengthTicks`, reporting the length that stuck.
+ *  Clamped to at least one beat and at most the snapshot's own duration (and by
+ *  the next block on the track); a legacy `repeat > 1` collapses to 1. */
+export function resizePlacement(placementId: string, lengthTicks: Tick): Result<Tick> {
+  const found = findPlacement(placementId);
+  if (!found) return refuse('No such block in this composition.');
   commit(() => store().resizePlacement(placementId, lengthTicks));
+  const after = findPlacement(placementId)?.placement;
+  return ok(after?.lengthTicks ?? placementEffectiveLength(found.placement));
 }
 
-/** Non-destructive render-time pitch shift, clamped by the lib to ±24. */
-export function setPlacementTranspose(placementId: string, semitones: number): void {
+/**
+ * Non-destructive render-time pitch shift, clamped by the lib to ±24 — and it
+ * PRICES ITSELF.
+ *
+ * LIB-GAP(12): `flattenComposition` silently DROPS any event whose transposed
+ * fret leaves `0..fretCount`, so a transposition can delete a part from playback
+ * with no trace. `PlacementBlock` shows the count as a badge; a caller with no
+ * screen has to be TOLD, so the applied shift and the number of notes it costs
+ * come back with the write. `droppedByTranspose` is the same restatement of the
+ * lib's rule the badge uses — one function, so the two can't disagree — and it
+ * goes when that gap does. See docs/FOLLOW-UPS.md.
+ */
+export function setPlacementTranspose(
+  placementId: string,
+  semitones: number,
+): Result<{ semitones: number; droppedNotes: number }> {
+  if (!findPlacement(placementId)) return refuse('No such block in this composition.');
+  if (!Number.isFinite(semitones)) return refuse('That is not a number of semitones.');
   commit(() => store().setPlacementTranspose(placementId, semitones));
+  const after = findPlacement(placementId)?.placement;
+  if (!after) return refuse('No such block in this composition.');
+  return ok({
+    semitones: after.transposeSemitones ?? 0,
+    droppedNotes: droppedByTranspose(after),
+  });
 }
 
-export function removePlacement(placementId: string): void {
+export function removePlacement(placementId: string): Result {
+  if (!findPlacement(placementId)) return refuse('No such block in this composition.');
   commit(() => store().removePlacement(placementId));
   prunePlacementSelection();
+  return ok(undefined);
 }
 
-/** Clone placements with their start ticks offset. `destTrackId` sends every
- *  clone to one track; omitting it clones each within its own. */
+/**
+ * Clone placements with their start ticks offset, reporting the clones' ids —
+ * which the lib mints and does not return (LIB-GAP(20), see
+ * {@link placementIds}). `destTrackId` sends every clone to one track; omitting
+ * it clones each within its own.
+ *
+ * ⚠ The ids come back in DOCUMENT order — track by track, then by start tick —
+ * and not in the order `ids` was given, because they are recovered by diffing
+ * the composition rather than reported by the op. A caller that needs to pair an
+ * original with its clone has to match on position.
+ */
 export function duplicatePlacements(
   ids: readonly string[],
   deltaTicks: Tick,
   destTrackId?: string,
-): void {
-  if (ids.length === 0) return;
+): Result<readonly string[]> {
+  if (ids.length === 0) return ok([]);
+  const missing = ids.filter((id) => !findPlacement(id));
+  if (missing.length > 0) return refuse(`No such block: ${missing.join(', ')}.`);
+  if (destTrackId !== undefined && !findTrack(destTrackId)) return refuse('No such track.');
+  const before = new Set(placementIds());
   commit(() => store().duplicatePlacements([...ids], deltaTicks, destTrackId));
+  return ok(placementIds().filter((id) => !before.has(id)));
 }
 
 // ------------------------------------------------------- placement editing ---
@@ -1076,26 +1217,75 @@ export function closePlacementEditing(): Result<void> {
 
 // ---------------------------------------------------- composition settings ---
 
-export function setCompositionName(name: string): void {
+// Each of these reports the missing composition rather than no-opping into it,
+// for the reason every other write in this module does: an agent that cannot see
+// the page needs "nothing is open" to be a sentence, not a silence.
+
+/** Returns the name actually STORED, which is the trimmed one — a caller that
+ *  echoed its own argument back would be reporting a value the document does not
+ *  hold. */
+export function setCompositionName(name: string): Result<string> {
   const composition = getEditingComposition();
-  if (composition) store().renameComposition(composition.id, name);
+  if (!composition) return refuse('No composition is open.');
+  const trimmed = name.trim();
+  // The same rule tracks have, for the same reason: every accessible name on the
+  // page is built out of it, and a blank one blanks them all.
+  if (trimmed === '') return refuse('A composition needs a name.');
+  store().renameComposition(composition.id, trimmed);
+  return ok(trimmed);
 }
 
 /** The composition's tempo. Pushed into the metronome on play; not the
  *  metronome's live value until then. */
-export function setCompositionBpm(bpm: number): void {
+export function setCompositionBpm(bpm: number): Result {
   const composition = getEditingComposition();
-  if (composition) store().setCompositionBpm(composition.id, bpm);
+  if (!composition) return refuse('No composition is open.');
+  if (!Number.isFinite(bpm) || bpm <= 0) return refuse('That is not a tempo.');
+  store().setCompositionBpm(composition.id, bpm);
+  return ok(undefined);
 }
 
-export function setCompositionTimeSignature(timeSignature: PatternTimeSignature): void {
+export function setCompositionTimeSignature(
+  timeSignature: PatternTimeSignature,
+): Result {
   const composition = getEditingComposition();
-  if (composition) store().setCompositionTimeSignature(composition.id, timeSignature);
+  if (!composition) return refuse('No composition is open.');
+  store().setCompositionTimeSignature(composition.id, timeSignature);
+  return ok(undefined);
 }
 
 /** Whether arrangement playback repeats. Stored on the composition rather than
  *  in transport state, so it survives reopening — as it is for patterns. */
-export function setCompositionLoop(loop: boolean): void {
+export function setCompositionLoop(loop: boolean): Result {
   const composition = getEditingComposition();
-  if (composition) store().setCompositionLoop(composition.id, loop);
+  if (!composition) return refuse('No composition is open.');
+  store().setCompositionLoop(composition.id, loop);
+  return ok(undefined);
+}
+
+/**
+ * The composition's feel, by preset id — see {@link listGrooves}.
+ *
+ * The lib's `grooveMode` decides whether this is the WHOLE arrangement's feel
+ * ('global') or only the fallback for placements whose source pattern has none
+ * ('inherit'). `createEmptyComposition` sets 'global' and nothing in this app
+ * changes it, so this is the arrangement's feel — verified rather than assumed,
+ * because setting a groove that is only a fallback would look identical from
+ * here and be inaudible.
+ */
+export function setCompositionGroove(grooveId: GrooveId): Result {
+  if (!getEditingComposition()) return refuse('No composition is open.');
+  const preset = GROOVE_PRESETS.find((candidate) => candidate.id === grooveId);
+  if (!preset) return refuse(`No such groove: ${grooveId}.`);
+  store().setEditingCompositionGroove(preset.groove);
+  return ok(undefined);
+}
+
+/** The open composition's feel, as an id — the read half of
+ *  {@link setCompositionGroove}. `'custom'` for a spec matching no named preset;
+ *  null when nothing is open. */
+export function compositionGrooveId(): GroovePresetId | null {
+  const composition = getEditingComposition();
+  if (!composition) return null;
+  return presetMatching(composition.groove ?? null);
 }
