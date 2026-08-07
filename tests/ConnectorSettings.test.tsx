@@ -1,6 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+
+/**
+ * AG-03's provisional trigger sits in this component, so the harness is mocked
+ * here too — at the module boundary, which is possible only because
+ * `agentService` is the one file that imports it. Nothing else in this file
+ * touches it, and the connector's own tests are unaffected.
+ *
+ * `run` and `OpenAICompatibleClient` are stubbed rather than omitted: the seam
+ * constructs a client before it runs anything, and a bare `vi.fn()` module would
+ * fail on the `new`.
+ */
+const harness = vi.hoisted(() => ({ runAgent: vi.fn() }));
+
+vi.mock('agent-harness/browser', () => ({
+  ToolRegistry: class {
+    register(): void {}
+  },
+  OpenAICompatibleClient: class {},
+  runAgent: harness.runAgent,
+}));
+
 import { ConnectorControl } from '../src/ai/ConnectorPanel';
 import {
   CONNECTOR_STORAGE_KEY,
@@ -658,5 +679,204 @@ describe('ConnectorControl', () => {
 
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(opener).toHaveFocus();
+  });
+});
+
+// -------------------------------------------------------- composer trigger ---
+
+/**
+ * AG-03's provisional trigger — ⚠ **AG-06 deletes it, and these tests with it.**
+ *
+ * They are here anyway because one of them covers a stated acceptance criterion
+ * that jsdom CAN check: "the app still works with no provider configured — a
+ * missing base URL is a stated refusal, not a crash". That was pinned only at
+ * the service level, so nothing rendered the button at all, and every part of
+ * the wiring between the two — the click, the refusal reaching the live region,
+ * the guard against a second run — could be deleted with the suite still green.
+ *
+ * The RUN itself is still not tested and cannot be: the harness is mocked, so
+ * what is asserted below is what this component does with an answer, never that
+ * an answer can be obtained. That remains a by-hand check.
+ */
+const RUN_NAME = /run composer/i;
+
+describe('the composer trigger', () => {
+  /** A `runAgent` that stays outstanding until the test lets it answer — the
+   *  only way to observe the in-flight state. */
+  function deferredRun() {
+    let resolve!: (result: unknown) => void;
+    const promise = new Promise<unknown>((r) => {
+      resolve = r;
+    });
+    harness.runAgent.mockReturnValue(promise);
+    return {
+      answer: (content: string) =>
+        resolve({ messages: [], newMessages: [], content, stoppedReason: 'answered' }),
+    };
+  }
+
+  /** What the harness hands back when a run called a tool: the seam reconstructs
+   *  `toolCalls` from the event stream, so a run that "wrote" has to EMIT. */
+  const runThatCalled = (name: string) =>
+    harness.runAgent.mockImplementation(
+      async (
+        _agent: unknown,
+        _input: unknown,
+        options: { onEvent?: (event: { type: string; name?: string }) => void },
+      ) => {
+        options.onEvent?.({ type: 'tool.started', name });
+        return { messages: [], newMessages: [], content: 'Made you a riff.', stoppedReason: 'answered' };
+      },
+    );
+
+  beforeEach(() => {
+    harness.runAgent.mockReset();
+  });
+
+  // Belt and braces: a test that TIMES OUT never reaches its own `finally`, and
+  // fake timers left installed take the rest of the file down with them.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('states the refusal when no provider is configured, and asks for nothing', async () => {
+    const user = userEvent.setup();
+    render(<ConnectorControl />);
+
+    await user.click(screen.getByRole('button', { name: RUN_NAME }));
+
+    expect(await screen.findByText(/no provider is configured/i)).toBeInTheDocument();
+    // The whole point of the criterion: nothing was attempted, and the app is
+    // still standing.
+    expect(harness.runAgent).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: RUN_NAME })).toBeEnabled();
+  });
+
+  it('refuses a base URL a browser cannot post to, without sending anything', async () => {
+    const user = userEvent.setup();
+    // Non-empty, so `isConfigured` is satisfied. `localhost:8080/v1` PARSES —
+    // as a URL whose scheme is `localhost:` — which is why the seam needs the
+    // protocol check and not just a `new URL` in a `try`. Left to `fetch` the
+    // browser resolves it against this page's own origin, the app answers 200
+    // with its own HTML, and the run comes back looking like a model that chose
+    // to do nothing.
+    setConnectorSettings({ baseUrl: 'localhost:8080/v1', token: '' });
+    render(<ConnectorControl />);
+
+    await user.click(screen.getByRole('button', { name: RUN_NAME }));
+
+    expect(await screen.findByText(/unsupported scheme/i)).toBeInTheDocument();
+    expect(harness.runAgent).not.toHaveBeenCalled();
+  });
+
+  it('reports what ran, and says so plainly when nothing did', async () => {
+    const user = userEvent.setup();
+    setConnectorSettings({ baseUrl: LOCAL, token: '' });
+    harness.runAgent.mockResolvedValue({
+      messages: [],
+      newMessages: [],
+      content: 'All done!',
+      stoppedReason: 'answered',
+    });
+    render(<ConnectorControl />);
+
+    await user.click(screen.getByRole('button', { name: RUN_NAME }));
+
+    // A model that answers without calling anything is the commonest way for
+    // this to look like it worked and change nothing, so the trigger has to name
+    // it rather than render the model's own claim on its own.
+    expect(await screen.findByText(/no tools called — all done!/i)).toBeInTheDocument();
+  });
+
+  it('keeps the button focused and refuses a second run while one is in flight', async () => {
+    const user = userEvent.setup();
+    setConnectorSettings({ baseUrl: LOCAL, token: '' });
+    const run = deferredRun();
+    render(<ConnectorControl />);
+
+    const button = screen.getByRole('button', { name: RUN_NAME });
+    await user.click(button);
+
+    expect(await screen.findByRole('button', { name: /running/i })).toBeInTheDocument();
+    // NOT disabled, and asserted on the ATTRIBUTE rather than only on focus:
+    // jsdom does not blur an element that becomes disabled, so a focus check
+    // alone passes either way. Disabling the button under the pointer is what
+    // sends focus to <body> in a real browser — the trap `ConnectorDialog` goes
+    // out of its way to avoid — so the guard is inside the handler instead.
+    expect(button).toBeEnabled();
+    expect(button).toHaveFocus();
+
+    await user.click(button);
+    expect(harness.runAgent).toHaveBeenCalledTimes(1);
+
+    run.answer('done');
+    expect(await screen.findByRole('button', { name: RUN_NAME })).toBeInTheDocument();
+  });
+
+  it('says it gave up, rather than reporting a deadline as a cancellation', async () => {
+    // The harness reports an abort as a SUCCESS with `stoppedReason: 'aborted'`,
+    // which read plainly says the user cancelled. Nobody cancelled this one, and
+    // telling the two apart is the whole point of having a deadline.
+    //
+    // ⚠ `fireEvent`, and it is the only place in this file that uses it —
+    // `userEvent` awaits its own `setTimeout` between steps, so it DEADLOCKS
+    // against a fake clock only the test may advance (verified: a bare click on
+    // a counter hangs the same way). `toFake` is narrowed to the two functions
+    // the deadline uses for the same class of reason: faking the whole clock
+    // stalls React's scheduler before `render` even returns.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      setConnectorSettings({ baseUrl: LOCAL, token: '' });
+      harness.runAgent.mockImplementation(
+        (_agent: unknown, _input: unknown, options: { signal?: AbortSignal }) =>
+          new Promise((resolve) => {
+            options.signal?.addEventListener('abort', () =>
+              resolve({ messages: [], newMessages: [], content: '', stoppedReason: 'aborted' }),
+            );
+          }),
+      );
+      render(<ConnectorControl />);
+
+      fireEvent.click(screen.getByRole('button', { name: RUN_NAME }));
+      expect(screen.getByRole('button', { name: /running/i })).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+
+      expect(screen.getByText(/gave up after 60s/i)).toBeInTheDocument();
+      // And the button comes back, which is the half a missing deadline breaks:
+      // a firewalled host would otherwise leave it saying "Running…" until the
+      // tab is closed.
+      expect(screen.getByRole('button', { name: RUN_NAME })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('goes to the pattern page when a run wrote, and stays put when it did not', async () => {
+    const user = userEvent.setup();
+    setConnectorSettings({ baseUrl: LOCAL, token: '' });
+    const onDidWrite = vi.fn();
+
+    harness.runAgent.mockResolvedValue({
+      messages: [],
+      newMessages: [],
+      content: 'I would rather not.',
+      stoppedReason: 'answered',
+    });
+    const view = render(<ConnectorControl onDidWrite={onDidWrite} />);
+    await user.click(screen.getByRole('button', { name: RUN_NAME }));
+    await screen.findByText(/no tools called/i);
+    // A run that wrote nothing must not yank the user off the page they are on.
+    expect(onDidWrite).not.toHaveBeenCalled();
+
+    runThatCalled('sketch_stub_riff');
+    await user.click(screen.getByRole('button', { name: RUN_NAME }));
+
+    // The write is a PATTERN, and pressed from the composition page nothing on
+    // screen would move — "a pattern appears" is the acceptance criterion.
+    await waitFor(() => expect(onDidWrite).toHaveBeenCalledTimes(1));
+    view.unmount();
   });
 });

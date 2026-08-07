@@ -2,10 +2,59 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import { statSync } from 'node:fs';
 import path from 'node:path';
 
+/**
+ * Make the harness's build date part of Vite's dep-cache identity — AG-03.
+ *
+ * `agent-harness` is a `file:` sibling pinned at 0.0.0, so nothing about it ever
+ * changes from Vite's point of view: it pre-bundles the dep once, serves it
+ * under an IMMUTABLE `?v=<hash>` URL, and the browser then caches that build for
+ * the life of the cache directory. Rebuild the harness and the app goes on
+ * running the old one — and you debug the wrong repo, which is the failure
+ * `docs/PLAN.md` recorded in advance.
+ *
+ * The fix, lifted from `../fantasy-football/vite.config.ts`: Vite's
+ * `getConfigHash` hashes `plugins.map(p => p.name)` (verified in
+ * `vite/dist/node/chunks/node.js`), and that hash feeds the optimizer's
+ * `browserHash`. So stamping a no-op plugin's NAME with the built file's mtime
+ * makes a harness rebuild change the config hash, which re-runs the optimizer
+ * and moves the `?v=`. No URL rewriting, no extra query, no `optimizeDeps
+ * .exclude` — which would be worse here, because the harness's own `ajv` is CJS
+ * and needs pre-bundling to load in a browser at all.
+ *
+ * ⚠ pnpm installs a `file:` directory dep as a HARDLINKED COPY, not a symlink,
+ * and the harness's tsup config runs `clean: true` — so a rebuild replaces
+ * `dist/` with new inodes and the copy under `node_modules` keeps pointing at
+ * the old ones. And the stamp below is read ONCE, when this config is loaded, so
+ * a dev server already running never sees a new one: `pnpm install --force`
+ * changes neither this file's mtime nor the lockfile's contents, which are the
+ * two things Vite watches to re-read a config.
+ *
+ * The whole loop, and it is in `docs/HANDOFF.md` as well because a comment in a
+ * config file is not where anyone looks for it:
+ *
+ *     pnpm build   # in ../agent-harness
+ *     pnpm install --force
+ *     # restart pnpm dev
+ *
+ * Same loop fantasy-football uses.
+ */
+function harnessBuildStamp(): string {
+  try {
+    const built = path.resolve(__dirname, 'node_modules/agent-harness/dist/browser.js');
+    return String(Math.floor(statSync(built).mtimeMs));
+  } catch {
+    // Not installed yet. A constant is right: the app builds without it (nothing
+    // imports the harness at module scope in a way that runs), and once it IS
+    // installed the stamp changes and the cache turns over on its own.
+    return 'unbuilt';
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [{ name: `harness-build-stamp:${harnessBuildStamp()}` }, react(), tailwindcss()],
   resolve: {
     // `alias` is the array form on purpose: string keys are PREFIX matches, so a plain
     // `react` entry would also swallow `react-dom`. Exact-and-subpath regexes keep them

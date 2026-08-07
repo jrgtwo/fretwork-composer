@@ -169,34 +169,90 @@ describe('the tool registry', () => {
       eager: true,
     }) as Record<string, string>;
 
+    /**
+     * The harness check runs over a SECOND, WIDER glob — every source file in
+     * the app, `.tsx` included.
+     *
+     * The narrow one above cannot see the failure it was written for.
+     * `ConnectorPanel.tsx` is in `src/ai` and is not a `.ts`; `src/shell` and
+     * `src/timeline` are not scanned at all. Any one of them could
+     * `import { runAgent } from 'agent-harness'` — the default entry, which
+     * pulls in `ws` and Node builtins — and the only symptom would be a broken
+     * `pnpm build`, which is precisely what this test exists to pre-empt.
+     *
+     * The SEAM allow-list stays on the narrow glob: it is a rule about what the
+     * agent layer may reach, and the rest of the app reaches the lib legitimately
+     * everywhere.
+     */
+    const everySource = import.meta.glob('../src/**/*.{ts,tsx}', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+
     // The `../` prefix is REPEATED rather than fixed at two, because the glob
     // above is recursive in both directions: `src/ai/commandCatalog.ts` (AG-05)
     // sits one level up from `tools/` and reaches the same seams by a shorter
     // path. Pinning the depth would have made the check pass or fail on where a
     // file lives rather than on what it imports, which is not what it is for.
+    // `\./[a-zA-Z]+(/[a-zA-Z]+)*` and not `\./[a-zA-Z]+`: AG-03 put
+    // `agentService.ts` and `composerAgent.ts` at the top of `src/ai`, and they
+    // reach the tool vocabulary as `./tools/types` — a SIBLING, one directory
+    // down. Pinning the sibling branch to a single segment made the check pass
+    // or fail on how deep a file sat rather than on what it reached, which is
+    // not what it is for. It still cannot match `..`, which is the half that
+    // matters.
     const ALLOWED =
-      /^(\.\/[a-zA-Z]+|(\.\.\/)+(patterns\/(patternService|articulations)|composition\/compositionService|voice\/voiceService|audio\/playbackService))$/;
+      /^(\.\/[a-zA-Z]+(\/[a-zA-Z]+)*|(\.\.\/)+(patterns\/(patternService|articulations)|composition\/compositionService|voice\/voiceService|audio\/playbackService))$/;
+
+    /**
+     * The fifth seam's charter, pinned. `agentService.ts` is the ONLY module in
+     * the app allowed to import the harness, and `agent-harness/browser` is the
+     * only entry it may import: the default '.' entry pulls in `ws` and Node
+     * builtins and does not survive a browser build, and './client' is a
+     * WebSocket client to a server this app has decided not to run. Both
+     * mistakes are silent in a unit test and fatal in a browser, so they are
+     * checked here rather than discovered at `pnpm build`.
+     */
+    const HARNESS_SEAM = '../src/ai/agentService.ts';
+
+    // Both quote styles and dynamic `import('…')` as well as `from '…'`: a
+    // check a rename of the quote character defeats is not a check.
+    const importsIn = (source: string): string[] =>
+      [...source.matchAll(/(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g)].map((match) => match[1]);
 
     const files = Object.keys(sources);
     expect(files.length).toBeGreaterThan(4);
     for (const [file, source] of Object.entries({ ...sources, ...helper })) {
-      // Both quote styles and dynamic `import('…')` as well as `from '…'`: a
-      // check a rename of the quote character defeats is not a check.
-      const imports = [
-        ...source.matchAll(/(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g),
-      ].map((match) => match[1]);
-      for (const specifier of imports) {
+      for (const specifier of importsIn(source)) {
         expect(`${file}: ${specifier}`).not.toMatch(/@fretwork\/lib/);
         expect(`${file}: ${specifier}`).not.toMatch(/composition-ops/);
         // The helper is scanned for lib imports only — the allow-list is about
         // what the TOOLS may reach. Compared as a sentence so a failure names
         // the file that broke it.
-        if (file in sources) {
+        if (file in sources && !specifier.startsWith('agent-harness')) {
           expect(ALLOWED.test(specifier) ? 'a seam' : `${file}: ${specifier}`).toBe('a seam');
         }
       }
     }
     expect(Object.keys(helper)).toHaveLength(1);
+
+    // The whole app, for the harness rule alone.
+    expect(Object.keys(everySource).length).toBeGreaterThan(files.length);
+    // The seam has to be IN the wide glob, or the loop below would pass by
+    // scanning nothing that could break it.
+    expect(everySource).toHaveProperty(HARNESS_SEAM);
+    let seamImports = 0;
+    for (const [file, source] of Object.entries(everySource)) {
+      for (const specifier of importsIn(source)) {
+        if (!specifier.startsWith('agent-harness')) continue;
+        // Stated as a sentence so a failure names the file and the entry that
+        // broke it rather than just saying `false`.
+        expect(`${file} imports ${specifier}`).toBe(`${HARNESS_SEAM} imports agent-harness/browser`);
+        seamImports += 1;
+      }
+    }
+    expect(seamImports).toBe(1);
   });
 });
 

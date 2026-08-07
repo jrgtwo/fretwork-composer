@@ -88,8 +88,13 @@ export function AppShell({
         <span className="flex-1" />
 
         {/* App-level config, so it belongs to the frame both pages share rather
-            than to either page's rail — see the note in `ai/ConnectorPanel`. */}
-        <ConnectorControl />
+            than to either page's rail — see the note in `ai/ConnectorPanel`.
+
+            `onDidWrite` is for the provisional composer trigger sitting beside
+            it: what it writes is a PATTERN, and pressed from the composition
+            page it would land on a surface that cannot show it. AG-06 deletes
+            the trigger and this prop with it. */}
+        <ConnectorControl onDidWrite={() => onPageChange('pattern')} />
       </header>
 
       {panes && paneLayout ? (
