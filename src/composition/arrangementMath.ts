@@ -29,6 +29,7 @@ import {
   DEFAULT_ZOOM_INDEX,
   ZOOM_LEVELS,
   barBeatLines,
+  barsSpanned,
   pxToTick,
   snapOptions,
   tickToPx,
@@ -36,7 +37,11 @@ import {
   type SnapOption,
 } from '../timeline/timelineMath';
 
-export { pxToTick, tickToPx };
+// `barsSpanned` is re-exported rather than re-homed here because both library
+// rails print it and only one of them is on this side of the app — see its note
+// in `timelineMath`. Callers already reading arrangement geometry keep reading
+// it from one place.
+export { barsSpanned, pxToTick, tickToPx };
 
 // ------------------------------------------------------------------- zoom ---
 
@@ -79,24 +84,6 @@ export function arrangementSnap(ts: PatternTimeSignature, snapId: string): SnapO
 export function snapArrangementTick(tick: Tick, snap: SnapOption | null): Tick {
   if (snap === null || snap.ticks === null) return Math.max(0, Math.round(tick));
   return Math.max(0, snapTick(Math.max(0, tick), snap.ticks));
-}
-
-/**
- * How many bars a span of ticks occupies, rounded up.
- *
- * The pattern library rail's "4 bars" is this and nothing else — DERIVED, never
- * stored. `fitPatternDuration` re-fits a pattern's length to its content on
- * every edit (docs/HANDOFF.md, hard-won facts), so a bar count cached anywhere
- * is a bar count that goes stale the next time a note is dragged.
- *
- * Rounded up because a riff that runs a beat into bar 3 occupies three bars of
- * the arrangement, not two and a bit. A non-positive or non-finite span is 0
- * bars rather than NaN — an empty pattern has no length to print.
- */
-export function barsSpanned(ticks: Tick, ts: PatternTimeSignature): number {
-  const perBar = ticksPerBar(ts);
-  if (!(perBar > 0) || !Number.isFinite(ticks) || ticks <= 0) return 0;
-  return Math.ceil(ticks / perBar);
 }
 
 // ------------------------------------------------------------------ ruler ---

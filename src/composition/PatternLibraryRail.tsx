@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import type { Pattern } from '@fretwork/lib';
-import { patternInstrumentId, useLibraryPatterns } from '../patterns/patternService';
-import { barsSpanned } from './arrangementMath';
+import { useLibraryPatterns } from '../patterns/patternService';
+import { PatternRowLabel } from '../patterns/PatternLibraryPanel';
 import { useSelectedTrackId, useTracks } from './compositionService';
 import { DRAG_THRESHOLD_PX, appendPatternToTrack } from './useArrangementGestures';
 
@@ -25,9 +25,11 @@ import { DRAG_THRESHOLD_PX, appendPatternToTrack } from './useArrangementGesture
  *     capability with no keyboard route is one a keyboard user simply does not
  *     have. Same reasoning that makes every capability a function first.
  *
- * The bar count is DERIVED on every render and never stored. Pattern length
- * auto-fits to its content on every edit, so a cached figure is a figure that
- * goes stale the next time a note moves.
+ * A row's TEXT is `PatternRowLabel`, shared with the pattern page's library panel
+ * (PP-01) so that a pattern describes itself — name, instrument and derived
+ * length — identically on both pages. Only the text is shared; what a row DOES
+ * here has nothing in common with what it does there, and the note on
+ * `PatternLibraryPanel` says exactly what differs.
  */
 export function PatternLibraryRail({
   onPatternPointerDown,
@@ -104,12 +106,11 @@ export function PatternLibraryRail({
         ) : (
           <ul className="flex flex-col gap-1">
             {patterns.map((pattern) => {
-              // In the PATTERN's own meter, not the composition's: this row
-              // describes the pattern as written, and a 3/4 riff is two of its
-              // bars whichever arrangement it is dropped into. It does mean a
-              // cross-meter drop occupies a different number of ARRANGEMENT
-              // bars than the row states.
-              const bars = barsSpanned(pattern.durationTicks, pattern.timeSignature);
+              // The length `PatternRowLabel` prints is in the PATTERN's own
+              // meter, not the composition's: the row describes the pattern as
+              // written, and a 3/4 riff is two of its bars whichever arrangement
+              // it is dropped into. It does mean a cross-meter drop occupies a
+              // different number of ARRANGEMENT bars than the row states.
               return (
                 <li key={pattern.id}>
                   <button
@@ -133,17 +134,7 @@ export function PatternLibraryRail({
                     }}
                     className="control pressable flex w-full touch-none cursor-grab flex-col items-start gap-0.5 rounded-lg px-2 py-1.5 text-left select-none"
                   >
-                    <span className="max-w-full truncate font-mono text-[10.5px] font-bold text-ink">
-                      {pattern.name}
-                    </span>
-                    <span className="flex max-w-full gap-1.5 font-mono text-[8.5px] tracking-[0.12em] text-ink-mut uppercase">
-                      <span className="truncate">{patternInstrumentId(pattern)}</span>
-                      <span aria-hidden>·</span>
-                      {/* Derived, never stored — see the module note. */}
-                      <span className="whitespace-nowrap">
-                        {bars} {bars === 1 ? 'bar' : 'bars'}
-                      </span>
-                    </span>
+                    <PatternRowLabel pattern={pattern} />
                   </button>
                 </li>
               );

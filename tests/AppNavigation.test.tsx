@@ -53,8 +53,12 @@ const expectPatternPage = () => {
   for (const title of ['Reference', 'Instrument & Amp', 'Timeline']) {
     expect(screen.getByText(title)).toBeInTheDocument();
   }
-  // Scoped to the rail landmark: the app title also reads "Composer".
-  expect(within(screen.getByRole('complementary')).getByText('Composer')).toBeInTheDocument();
+  // Scoped to the rail landmark, which since PP-01 holds the pattern library
+  // rather than a label. The library's own behaviour is `PatternLibrary.test.tsx`;
+  // what matters here is only that the rail is still beside the panes.
+  const rail = within(screen.getByRole('complementary'));
+  expect(rail.getByText('Patterns')).toBeInTheDocument();
+  expect(rail.getByRole('button', { name: 'New pattern' })).toBeInTheDocument();
 };
 
 describe('page routing', () => {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AppShell, type PageId } from './shell/AppShell';
 import type { Pane } from './shell/PaneStack';
-import { stop } from './audio/playbackService';
+import { applyVoicePreset, stop } from './audio/playbackService';
 import { CompositionPage } from './composition/CompositionPage';
 import type { ArrangementMode } from './composition/arrangementMath';
 import { useEditingComposition } from './composition/compositionService';
@@ -10,6 +10,7 @@ import { ThemeReference } from './theme/ThemeReference';
 import { Timeline } from './timeline/Timeline';
 import { seedDemoPattern } from './timeline/demoPattern';
 import { ensurePattern, getLibraryPatterns, useEditingPattern } from './patterns/patternService';
+import { PatternLibraryPanel, type SwitchGuard } from './patterns/PatternLibraryPanel';
 import { VoicePane, type WorkingVoice } from './voice/VoicePane';
 // The default lives with the schema it indexes, so the pattern page's pane and the
 // composition page's racks cannot open on different stages (see `paramSchema`).
@@ -18,6 +19,9 @@ import { DEFAULT_OPEN_SECTIONS, type SectionId } from './voice/paramSchema';
 /** The stack's starting order. Which panes exist is decided below; this is only
  *  the order they open in, and the stack reconciles the two. */
 const DEFAULT_PANE_ORDER: readonly string[] = ['reference', 'amp', 'timeline'];
+
+/** A switch that costs nothing: go ahead, and there is nothing to run after. */
+const NOTHING_STRANDED = () => {};
 
 export function App() {
   const pattern = useEditingPattern();
@@ -83,6 +87,19 @@ export function App() {
   //
   // `ensurePattern` adopts the most recently updated pattern, so a returning
   // session reopens what it was last editing rather than the demo.
+  //
+  // The DEMO branch is a first-run affordance and nothing else. Deleting the
+  // last pattern does not reach it: `patternService.deletePattern` leaves
+  // something open (the lib's blank "Untitled pattern" when it has emptied the
+  // library), so `pattern` is not null here on the way back from a delete.
+  // Resurrecting a demo riff the user did not write, immediately after they
+  // deleted everything, would read as the delete having failed.
+  //
+  // With one degenerate exception, stated where it arises (`deletePattern`):
+  // the lib's `ensureEditingPattern` skips its auto-seed when a single pattern
+  // would exceed the tier cap, which needs a cap of zero and no such tier
+  // exists. Should one ever ship, this branch runs after a delete and the demo
+  // is what comes back.
   useEffect(() => {
     if (pattern) return;
     if (getLibraryPatterns().length === 0) seedDemoPattern();
@@ -97,6 +114,44 @@ export function App() {
   useEffect(() => {
     if (page !== 'pattern') stop();
   }, [page]);
+
+  /**
+   * Asked before the library panel changes which pattern is open.
+   *
+   * SWITCHING COSTS NOTHING IN THE TIMELINE — every edit there is written to the
+   * store as it is made. The app's one piece of unsaved work is the voice pane's
+   * working preset, and it is keyed by pattern id (`workingKey` in `VoicePane`),
+   * so the instant another pattern opens the edit stops applying to anything.
+   *
+   * The clear has to happen HERE rather than being left to `VoicePane`'s own
+   * retire-a-stranded-copy effect, for the reason the state is here at all:
+   * `PaneStack` unmounts a collapsed pane's body, so with Instrument & Amp folded
+   * away that effect does not run — and `playbackService` keeps its own tagged
+   * copy, which goes on sounding until something consults it. Hence
+   * `applyVoicePreset(null)` too, exactly as the pane does it.
+   *
+   * The key is split rather than matched whole because only its first field —
+   * the pattern id — decides whether THIS switch is what strands the copy; a copy
+   * already stranded by something else has nothing left to lose.
+   *
+   * ASKING AND DISCARDING ARE TWO STEPS ({@link SwitchGuard}): this returns what
+   * to run once the switch has actually happened. A create can still be refused
+   * after the question has been answered — the lib's `createPattern` declines at
+   * the tier cap — and discarding the user's tone for a pattern that was never
+   * made is the one outcome nothing can put back.
+   *
+   * `window.confirm` and this wording are `VoicePane`'s, kept verbatim: the same
+   * loss should not be described two ways depending on which control caused it.
+   */
+  const confirmPatternSwitch: SwitchGuard = () => {
+    if (!workingVoice || !pattern) return NOTHING_STRANDED;
+    if (workingVoice.key.split('|')[0] !== pattern.id) return NOTHING_STRANDED;
+    if (!window.confirm('Discard unsaved changes to this voice?')) return null;
+    return () => {
+      setWorkingVoice(null);
+      applyVoicePreset(null);
+    };
+  };
 
   // The theme reference stays reachable while we build — it's the living record
   // of the design system.
@@ -164,13 +219,7 @@ export function App() {
         collapsed: collapsedPanes,
         onCollapsedChange: setCollapsedPanes,
       }}
-      rail={
-        <div className="flex flex-1 items-center justify-center">
-          <span className="font-mono text-[10px] font-semibold tracking-[0.18em] text-ink-mut uppercase">
-            Composer
-          </span>
-        </div>
-      }
+      rail={<PatternLibraryPanel confirmSwitch={confirmPatternSwitch} />}
     />
   );
 }

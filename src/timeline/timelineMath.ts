@@ -61,6 +61,30 @@ export function barBeatLines(
 }
 
 /**
+ * How many bars a span of ticks occupies, rounded up.
+ *
+ * Here rather than beside either library rail because BOTH print it — the
+ * pattern page's `PatternLibraryPanel` and the composition page's
+ * `PatternLibraryRail` — and a pattern that reads "4 bars" on one page and
+ * "5 bars" on the other is a disagreement nobody reports and everybody
+ * distrusts. This module already owns tick↔bar conversion, and it is the one
+ * module both pages may import without either importing the other.
+ *
+ * DERIVED, never stored. `fitPatternDuration` re-fits a pattern's length to its
+ * content on every edit (docs/HANDOFF.md, hard-won facts), so a bar count cached
+ * anywhere is a bar count that goes stale the next time a note is dragged.
+ *
+ * Rounded up because a riff that runs a beat into bar 3 occupies three bars of
+ * the arrangement, not two and a bit. A non-positive or non-finite span is 0
+ * bars rather than NaN — an empty pattern has no length to print.
+ */
+export function barsSpanned(ticks: Tick, ts: PatternTimeSignature): number {
+  const perBar = ticksPerBar(ts);
+  if (!(perBar > 0) || !Number.isFinite(ticks) || ticks <= 0) return 0;
+  return Math.ceil(ticks / perBar);
+}
+
+/**
  * Grid resolutions for snapping and for the length of a newly stamped note.
  *
  * Richer than the lib's `StepLength` (quarter/eighth/sixteenth only) because

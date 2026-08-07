@@ -371,6 +371,42 @@ export function useHistoryState(): { canUndo: boolean; canRedo: boolean } {
 // ---------------------------------------------------------------- writing ---
 
 /**
+ * What the lib calls a pattern nobody has named — mirrored rather than imported
+ * because `createEmptyPattern`'s default is a parameter default and is not
+ * exported. Only used to build a name that does NOT collide with it.
+ */
+const BLANK_PATTERN_NAME = 'Untitled pattern';
+
+/**
+ * `base`, or `base 2`, `base 3` … — whichever the library has not got.
+ *
+ * The name is the ONLY handle a caller has on a pattern it did not create: the
+ * library rails address rows by it, a screen reader reads it as the row's whole
+ * identity, and the agent picks by it. Two rows called "Untitled pattern" are
+ * therefore two rows that cannot be told apart or referred to, which is what a
+ * second press of New used to produce.
+ *
+ * It de-duplicates the DEFAULTS only. A user who deliberately renames two
+ * patterns the same way has said what they meant, and silently editing their
+ * text would be worse than the ambiguity.
+ *
+ * Bounded by the number of names taken, so it terminates whatever is in there.
+ */
+function uniqueLibraryName(base: string, exceptId?: string): string {
+  const taken = new Set(
+    getLibraryPatterns()
+      .filter((pattern) => pattern.id !== exceptId)
+      .map((pattern) => pattern.name),
+  );
+  if (!taken.has(base)) return base;
+  for (let n = 2; n <= taken.size + 1; n++) {
+    const candidate = `${base} ${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return base;
+}
+
+/**
  * Create a fresh pattern and open it for editing.
  *
  * Returns the pattern it opened rather than `void`: the id is the only handle a
@@ -378,9 +414,13 @@ export function useHistoryState(): { canUndo: boolean; canRedo: boolean } {
  * otherwise have to guess which of the library's patterns it just made. The
  * lib's `createPattern` returns `''` when the tier gate declines, which is the
  * only signal it gives — the same shape `openBlankComposition` handles.
+ *
+ * An unnamed pattern gets a name that is unique in the library rather than the
+ * lib's flat "Untitled pattern" — see {@link uniqueLibraryName}. A name the
+ * caller passed is used verbatim: it said what it wanted.
  */
 export function openBlankPattern(name?: string): Result<Pattern> {
-  const id = store().createPattern(name);
+  const id = store().createPattern(name ?? uniqueLibraryName(BLANK_PATTERN_NAME));
   if (id === '') return refuse("Couldn't create a pattern — the library refused.");
   store().openPatternForEditing(id);
   store().selectEvents([], 'replace');
@@ -395,6 +435,160 @@ export function openBlankPattern(name?: string): Result<Pattern> {
 /** Open whatever pattern was last edited, seeding a draft if there is none. */
 export function ensurePattern(): void {
   store().ensureEditingPattern();
+}
+
+/**
+ * Open an existing library pattern for editing — the read-a-list-and-pick-one
+ * half of {@link useLibraryPatterns}, and the one thing the seam could not do.
+ *
+ * The id is checked against the library first because the lib does not:
+ * `openPatternForEditing` writes whatever id it is handed, after which
+ * `selectEditingPattern` resolves to null and the editor is pointed at a pattern
+ * that does not exist. Same class of adapter work as {@link checkString} — the
+ * lib takes the value at face value, and a caller working by id rather than by
+ * pointer is the one that can get it wrong.
+ *
+ * Re-opening what is ALREADY open is a no-op rather than a reopen:
+ * `openPatternForEditing` resets `cursorTick`, `selectedEventIds` and
+ * `pendingChordStamp`, and clicking the row you are already editing must not
+ * throw your place away. The guard reads `editingPatternId` rather than
+ * comparing `getEditingPattern()?.id`, because a PLACEMENT's snapshot carries
+ * the id of the library pattern it was cut from (see `writePatternBack`) — so
+ * the id can match while what is open is not this pattern at all.
+ *
+ * ⚠ HISTORY IS PER-PATTERN, and this is the reason `clearHistory` exists.
+ * `writePatternBack` addresses whatever is open NOW, so an undo carried across a
+ * switch would restore a snapshot of the previous pattern over — or rather,
+ * silently back into — a document the user is no longer looking at. Cleared for
+ * exactly the reason `openBlankPattern` clears it, and `clearHistory`
+ * deliberately keeps an open gesture bracket alive (see its body).
+ *
+ * NOTHING ELSE IS LOST BY SWITCHING: every timeline edit is written straight to
+ * the store as it is made, so there is no unsaved pattern state anywhere. The
+ * app's one unsaved thing is the voice pane's working copy, which lives in `App`
+ * and is keyed by pattern id — `App` confirms before stranding it, because this
+ * function cannot see it and must not pretend to.
+ */
+export function openPattern(id: string): Result<Pattern> {
+  const target = findLibraryPattern(id);
+  if (!target) return refuse(`No such pattern: ${id}.`);
+  const s = store();
+  if (s.editingPatternId === id && s.editingPlacementId === null) {
+    const already = getEditingPattern();
+    if (already) return ok(already);
+  }
+  s.openPatternForEditing(id);
+  clearHistory();
+  const opened = getEditingPattern();
+  if (!opened || opened.id !== id) return refuse(`Couldn't open ${target.name}.`);
+  return ok(opened);
+}
+
+/**
+ * Rename a library pattern, by id — it need not be the one that is open.
+ *
+ * The trim and the emptiness check are ours: the lib's `setPatternName` writes
+ * whatever string it is given, and a pattern named `''` disappears from the
+ * header, from this rail and from the composition page's rail at once, with no
+ * way left to point at it. Not a lib defect to mask, just a rule the lib has no
+ * opinion about.
+ *
+ * Not captured for undo, matching loop, tempo, voice and instrument above: it is
+ * a change to the document's identity rather than to its notes. It is still
+ * *restored* by one, since `writePatternBack` swaps in a whole `Pattern` — the
+ * same side effect documented on {@link setEditingPatternVoiceRef}.
+ */
+export function renamePattern(id: string, name: string): Result<Pattern> {
+  const target = findLibraryPattern(id);
+  if (!target) return refuse(`No such pattern: ${id}.`);
+  const trimmed = name.trim();
+  if (trimmed === '') return refuse('A pattern needs a name.');
+  store().renamePattern(id, trimmed);
+  const renamed = findLibraryPattern(id);
+  if (!renamed || renamed.name !== trimmed) return refuse(`Couldn't rename ${target.name}.`);
+  return ok(renamed);
+}
+
+/**
+ * Copy a library pattern, notes and all. The copy is NOT opened.
+ *
+ * Deliberate, and the opposite of {@link openBlankPattern}: a blank pattern is
+ * only useful once you are in it, while a duplicate is usually made to keep the
+ * original safe before changing it — switching the editor away from what you
+ * were doing is the wrong default. A caller that wants the copy open follows
+ * with `openPattern(result.value.id)`, which is one line and says so.
+ *
+ * No diffing here, unlike {@link stampNote}: `duplicatePattern` is one of the few
+ * store actions that DOES hand back what it made, so LIB-GAP(20) doesn't bite.
+ * Its `''` means the tier gate declined — the missing-source case is refused
+ * above it, so the two cannot be confused.
+ *
+ * The lib names every copy `X (copy)` with no uniquifying, so copying the same
+ * row twice hands back two patterns with one name between them; the rename
+ * afterwards is {@link uniqueLibraryName}'s job for the same reason it is on
+ * {@link openBlankPattern}.
+ */
+export function duplicatePattern(id: string): Result<Pattern> {
+  const target = findLibraryPattern(id);
+  if (!target) return refuse(`No such pattern: ${id}.`);
+  const copyId = store().duplicatePattern(id);
+  if (copyId === '') return refuse(`Couldn't copy ${target.name} — the library refused.`);
+  const named = findLibraryPattern(copyId);
+  if (!named) return refuse(`Couldn't copy ${target.name}.`);
+  const unique = uniqueLibraryName(named.name, copyId);
+  if (unique !== named.name) store().renamePattern(copyId, unique);
+  const copy = findLibraryPattern(copyId);
+  if (!copy) return refuse(`Couldn't copy ${target.name}.`);
+  return ok(copy);
+}
+
+/**
+ * Remove a library pattern, and leave something open.
+ *
+ * The lib's `deletePattern` nulls `editingPatternId` when it deletes the pattern
+ * that id points at, and stops there — leaving the editor pointed at nothing.
+ * {@link ensurePattern} is the existing answer to "nothing is open" and is used
+ * here rather than a second rule: it adopts the most recently updated pattern,
+ * or seeds a blank one when the library is now empty.
+ *
+ * ⚠ THAT SEEDED PATTERN IS THE LIB'S BLANK "Untitled pattern", NOT `App`'s demo.
+ * `App` seeds "A major arpeggio" only into an EMPTY library, and because this
+ * leaves one open the library is not empty after a delete — so the demo stays
+ * what it is, a first-run affordance. Deleting everything and watching a pattern
+ * you did not write reappear reads as the delete having failed.
+ *
+ * The one exception is degenerate and unreachable: `ensureEditingPattern` skips
+ * its auto-seed silently when a SINGLE pattern would exceed the tier cap, which
+ * needs a cap of zero and no such tier exists (the lib's own comment says so).
+ * Should one ever ship, this returns with nothing open and `App` re-seeds the
+ * demo. Called out rather than guarded because a guard on that path could not be
+ * reached to test, and the refusal it would return has no better answer.
+ *
+ * Order matters: `ensurePattern` first, so `clearHistory` re-arms an open gesture
+ * bracket on the pattern that is open NOW (see its body). History is dropped only
+ * when the pattern that went was the one being edited — deleting some other row
+ * leaves the open pattern's undo stack exactly where it was.
+ *
+ * The selection and the cursor are cleared with it, which `ensureEditingPattern`
+ * does NOT do (unlike `openPatternForEditing`): it adopts a pattern by setting
+ * one field, so without this the newly opened document arrives holding the
+ * deleted one's selected event ids and its cursor tick. Nothing renders wrong —
+ * every consumer filters against `pattern.events` — but `getSelectedIds` would
+ * report notes that do not exist, and the seam exists so that an agent reading
+ * it is not lied to.
+ */
+export function deletePattern(id: string): Result<Pattern> {
+  const target = findLibraryPattern(id);
+  if (!target) return refuse(`No such pattern: ${id}.`);
+  const wasOpen = store().editingPatternId === id;
+  store().deletePattern(id);
+  if (wasOpen) {
+    ensurePattern();
+    store().selectEvents([], 'replace');
+    store().setCursorTick(0);
+    clearHistory();
+  }
+  return ok(target);
 }
 
 /**
