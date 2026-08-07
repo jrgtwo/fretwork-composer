@@ -66,6 +66,20 @@ describe('page routing', () => {
     expect(screen.queryByRole('group', { name: 'Composition mode' })).not.toBeInTheDocument();
   });
 
+  // The connector is APP config, not a property of either document, so it lives
+  // in the shared header rather than in a rail. Asserted here because the panel's
+  // own tests render it in isolation: deleting it from `AppShell` leaves those
+  // green while the settings become unreachable from the running app.
+  it('keeps the connector in the frame on both pages', async () => {
+    render(<App />);
+
+    expect(screen.getByRole('button', { name: /^connector/i })).toBeInTheDocument();
+
+    await goTo('Composition');
+
+    expect(screen.getByRole('button', { name: /^connector/i })).toBeInTheDocument();
+  });
+
   it('the Composition button swaps the body and moves aria-current', async () => {
     render(<App />);
 

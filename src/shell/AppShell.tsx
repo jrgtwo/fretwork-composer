@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { ConnectorControl } from '../ai/ConnectorPanel';
 import { PaneStack, type Pane, type PaneLayoutControl } from './PaneStack';
 
 export type PageId = 'pattern' | 'composition';
@@ -83,6 +84,12 @@ export function AppShell({
             {documentMeta}
           </span>
         )}
+
+        <span className="flex-1" />
+
+        {/* App-level config, so it belongs to the frame both pages share rather
+            than to either page's rail — see the note in `ai/ConnectorPanel`. */}
+        <ConnectorControl />
       </header>
 
       {panes && paneLayout ? (

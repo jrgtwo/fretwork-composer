@@ -31,6 +31,7 @@ import {
   placementEndTick,
   presetMatching,
   selectEditingComposition,
+  ticksPerBar,
   usePatternsStore,
   type Composition,
   type FretInstrumentId,
@@ -57,6 +58,18 @@ import {
 import { droppedByTranspose } from './arrangementMath';
 
 export { MAX_COMPOSITION_TRACKS, placementEffectiveLength, placementEndTick };
+
+/**
+ * Ticks in one bar of a given time signature — the lib's own function, at this
+ * seam's address.
+ *
+ * Re-exported for `PPQ`'s reason in `patternService`: a caller that counts bars
+ * out of a tick total needs the conversion, and the alternative every time is
+ * `(PPQ * 4 * numerator) / denominator` written out again. That expression is
+ * correct and also a copy of lib maths, which is how 6/8 quietly becomes six
+ * quarter-notes somewhere.
+ */
+export { ticksPerBar };
 
 /**
  * Re-exported so a caller that PRICES a transposition and one that MAKES it

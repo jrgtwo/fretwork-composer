@@ -169,8 +169,13 @@ describe('the tool registry', () => {
       eager: true,
     }) as Record<string, string>;
 
+    // The `../` prefix is REPEATED rather than fixed at two, because the glob
+    // above is recursive in both directions: `src/ai/commandCatalog.ts` (AG-05)
+    // sits one level up from `tools/` and reaches the same seams by a shorter
+    // path. Pinning the depth would have made the check pass or fail on where a
+    // file lives rather than on what it imports, which is not what it is for.
     const ALLOWED =
-      /^(\.\/[a-zA-Z]+|\.\.\/\.\.\/patterns\/(patternService|articulations)|\.\.\/\.\.\/composition\/compositionService|\.\.\/\.\.\/voice\/voiceService|\.\.\/\.\.\/audio\/playbackService)$/;
+      /^(\.\/[a-zA-Z]+|(\.\.\/)+(patterns\/(patternService|articulations)|composition\/compositionService|voice\/voiceService|audio\/playbackService))$/;
 
     const files = Object.keys(sources);
     expect(files.length).toBeGreaterThan(4);

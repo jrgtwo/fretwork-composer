@@ -17,11 +17,14 @@
  */
 import { useSyncExternalStore } from 'react';
 import {
+  CHROMATIC_KEYS,
   DEFAULT_INSTRUMENT_ID,
+  DEFAULT_SCALE_ID,
   DYNAMIC_VELOCITY,
   GROOVE_PRESETS,
   INSTRUMENTS,
   PPQ,
+  SCALES,
   getInstrument,
   presetMatching,
   usePatternsStore,
@@ -187,6 +190,32 @@ export type GrooveId = GroovePreset['id'];
 export function listGrooves(): readonly { id: GrooveId; name: string }[] {
   return GROOVE_PRESETS.map((preset) => ({ id: preset.id, name: preset.label }));
 }
+
+/**
+ * The vocabulary of `Pattern.key` and `Pattern.scaleType` — the two fields the
+ * lib documents as "a note name like 'A', 'C#'" and "a scale id (e.g. 'major',
+ * 'minor-pentatonic')".
+ *
+ * Here for exactly `listInstruments`' and `listGrooves`' reason and no other:
+ * these are lib catalogs that grow on the lib side, and a caller that wrote the
+ * twelve note names or the twelve scale ids out by hand would silently omit
+ * whatever is added next while still type-checking. Nothing in this app EDITS
+ * key or scale yet (`FretboardView` says so) — AG-05's command catalog is the
+ * first caller, and it needs the offered values to come from the lib rather than
+ * from a literal beside the slot, which is the one thing its tripwire checks.
+ *
+ * Reads no store, so it is safe to call before a pattern exists.
+ */
+export function listKeys(): readonly string[] {
+  return CHROMATIC_KEYS;
+}
+
+export function listScales(): readonly { id: string; name: string }[] {
+  return SCALES.map((scale) => ({ id: scale.id, name: scale.name }));
+}
+
+/** The scale a picker opens on when nothing has been chosen — the lib's own. */
+export { DEFAULT_SCALE_ID };
 
 // ------------------------------------------------------------------ undo ---
 // LIB-GAP(1): the lib has no history support and no way to write a whole

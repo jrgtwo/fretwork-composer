@@ -1,0 +1,851 @@
+import { beforeEach, describe, expect, it } from 'vitest';
+import {
+  CHROMATIC_KEYS,
+  DEFAULT_PATTERNS_STATE,
+  DEFAULT_SCALE_ID,
+  GROOVE_PRESETS,
+  INSTRUMENTS,
+  PPQ,
+  SCALES,
+  usePatternsStore,
+} from '@fretwork/lib';
+import { AGENT_TOOLS } from '../src/ai/tools';
+import {
+  COMMAND_CATALOG,
+  commandsForPage,
+  findCommand,
+} from '../src/ai/commandCatalog';
+import {
+  fillCommand,
+  templateSlotIds,
+  type ChoiceSource,
+  type Command,
+  type Slot,
+  type SlotValue,
+} from '../src/ai/commandTypes';
+import {
+  allowedValues,
+  defaultValues,
+  fillForNow,
+  resolveCommand,
+  resolveSlot,
+  slotOptions,
+} from '../src/ai/slotSources';
+import {
+  clearHistory as clearPatternHistory,
+  openBlankPattern,
+  setEditingPatternInstrument,
+  setPatternBpm,
+  setPatternGroove,
+  stampNote,
+} from '../src/patterns/patternService';
+import {
+  addPlacement,
+  addTrack,
+  clearHistory as clearCompositionHistory,
+  getTracks,
+  openBlankComposition,
+  removeTrack,
+  selectTrack,
+  setCompositionBpm,
+  setCompositionGroove,
+  setCompositionTimeSignature,
+  setTrackName,
+  ticksPerBar,
+  totalDurationTicks,
+} from '../src/composition/compositionService';
+
+/**
+ * AG-05 — the command catalog.
+ *
+ * ⚠ THERE IS NO DOM IN THIS FILE, no model, no provider and no harness. The
+ * catalog is data and the fill is a pure function, which is the whole reason
+ * AG-06 (the panel) is a separate ticket: if this needed a browser to test, the
+ * split would be in the wrong place.
+ *
+ * The store underneath is REAL, for `AgentTools.test.ts`'s reason — the claim
+ * being checked is that a slot's values are the app's actual state, and a mock
+ * would assert that away.
+ *
+ * The tests are organised around the four things that make a table safe to grow:
+ *
+ *   1. every command's slots resolve, and every slot the template mentions
+ *      exists (and vice versa);
+ *   2. every lib-derived slot's values come FROM the lib, not from a literal
+ *      written beside it;
+ *   3. every tool a command names exists in AG-04's registry;
+ *   4. the same slot values always render the same string.
+ *
+ * `ADDED_COMMAND` at the bottom is the acceptance criterion "adding a command is
+ * a row and nothing else", executed rather than asserted: it is a `Command`
+ * literal declared in this file and run through the same invariants, with no
+ * other change anywhere.
+ */
+
+// ------------------------------------------------------------------ setup ---
+
+beforeEach(() => {
+  sessionStorage.clear();
+  usePatternsStore.setState({
+    ...DEFAULT_PATTERNS_STATE,
+    library: { patterns: [], compositions: [], collections: [] },
+  });
+  clearPatternHistory();
+  clearCompositionHistory();
+});
+
+/** A pattern in the library with one note in it, so it has a real length. */
+function seedPattern(name: string): string {
+  const opened = openBlankPattern(name);
+  if (!opened.ok) throw new Error(opened.reason);
+  const stamped = stampNote({ stringIndex: 0, fret: 5, tick: 0, durationTicks: PPQ });
+  if (!stamped.ok) throw new Error(stamped.reason);
+  return opened.value.id;
+}
+
+function seedComposition(name = 'Arrangement'): void {
+  const opened = openBlankComposition(name);
+  if (!opened.ok) throw new Error(opened.reason);
+}
+
+/**
+ * `Pattern.key` / `Pattern.scaleType` are written through the STORE here, not
+ * through the seam, because no seam writes them: nothing in this app authors a
+ * key yet (`FretboardView` says as much). The slot binds to the field the lib
+ * already models so that it works the day something does, and this is the only
+ * way to stand that day up in a test today.
+ */
+function forceKeyOnPatterns(key: string | null, scaleType: string | null): void {
+  usePatternsStore.setState((state) => ({
+    library: {
+      ...state.library,
+      patterns: state.library.patterns.map((pattern) => ({ ...pattern, key, scaleType })),
+    },
+  }));
+}
+
+/** A composition with no tracks at all — see the track-slot test for why this
+ *  cannot be reached through the seam and is still worth standing up. */
+function forceTracklessComposition(): void {
+  usePatternsStore.setState((state) => ({
+    library: {
+      ...state.library,
+      compositions: state.library.compositions.map((composition) => ({
+        ...composition,
+        tracks: [],
+      })),
+    },
+  }));
+}
+
+const TOOL_NAMES = new Set(AGENT_TOOLS.map((tool) => tool.name));
+
+const LIB_VOCABULARIES: Readonly<Record<string, readonly string[]>> = {
+  groove: GROOVE_PRESETS.map((preset) => preset.id),
+  scale: SCALES.map((scale) => scale.id),
+  key: [...CHROMATIC_KEYS],
+  instrument: INSTRUMENTS.map((instrument) => instrument.id),
+};
+
+// ------------------------------------------------------------ invariants ---
+
+/**
+ * Everything that must be true of ANY row, existing or new. A function rather
+ * than an inline block so `ADDED_COMMAND` is held to exactly the same bar as the
+ * shipped catalog — which is the only way "adding a command is a row" can be
+ * demonstrated rather than claimed.
+ */
+function assertCommandInvariants(command: Command): void {
+  const where = `${command.id}:`;
+
+  expect(command.label.trim().length).toBeGreaterThan(2);
+  expect(command.summary.length).toBeGreaterThan(20);
+  expect(command.tools.length).toBeGreaterThan(0);
+
+  // 3. Every named tool exists. Not enforcement — the model still chooses — but
+  //    a renamed tool now fails here instead of mid-run.
+  for (const tool of command.tools) {
+    const verdict = TOOL_NAMES.has(tool) ? 'is in the registry' : 'IS NOT A TOOL';
+    expect(`${where} ${tool} ${verdict}`).toBe(`${where} ${tool} is in the registry`);
+  }
+  expect(new Set(command.tools).size).toBe(command.tools.length);
+
+  // 1. Slots and template agree in both directions. A placeholder with no slot
+  //    renders as literal `{foo}` to the model; a slot with no placeholder is a
+  //    control the user can move that changes nothing.
+  const slotIds = command.slots.map((slot) => slot.id);
+  expect(new Set(slotIds).size).toBe(slotIds.length);
+  for (const id of slotIds) expect(id).toMatch(/^[a-z][a-zA-Z0-9]*$/);
+  expect([...templateSlotIds(command.template)].sort()).toEqual([...slotIds].sort());
+
+  for (const slot of command.slots) {
+    // (A `choice` slot carrying its own `options` used to be asserted here. It
+    //  is an excess-property error on any typed literal, so the assertion could
+    //  not fail; the check that CAN fail is the source scan below, which catches
+    //  a lib vocabulary copied into this directory whatever shape it is in.)
+    if (slot.kind === 'enum') {
+      expect(slot.options.length).toBeGreaterThan(1);
+      expect(slot.options.map((option) => option.value)).toContain(slot.fallback);
+      expect(new Set(slot.options.map((o) => o.value)).size).toBe(slot.options.length);
+
+      // 2. Behavioural half: an authored list may not BE a lib vocabulary.
+      //    Subset rather than "no overlap", because a single word can honestly
+      //    appear in both — `blues` is a genre and also a scale id — while a
+      //    whole list that fits inside one is a copy of it.
+      const values = slot.options.map((option) => option.value);
+      for (const [catalog, vocabulary] of Object.entries(LIB_VOCABULARIES)) {
+        const copied = values.every((value) => vocabulary.includes(value));
+        const verdict = copied ? `duplicates the ${catalog} catalog` : 'is authored';
+        expect(`${where} ${slot.id} ${verdict}`).toBe(`${where} ${slot.id} is authored`);
+      }
+    }
+    if (slot.kind === 'number') {
+      expect(slot.min).toBeLessThan(slot.max);
+      expect(slot.fallback).toBeGreaterThanOrEqual(slot.min);
+      expect(slot.fallback).toBeLessThanOrEqual(slot.max);
+      expect(slot.step).toBeGreaterThan(0);
+    }
+  }
+
+  // 1. Resolution: every slot produces a usable default, whatever is open.
+  const resolved = resolveCommand(command);
+  expect(resolved.slots).toHaveLength(command.slots.length);
+  for (const entry of resolved.slots) {
+    if (entry.slot.kind === 'number') {
+      expect(typeof entry.value).toBe('number');
+    } else if (entry.options.length > 0) {
+      expect(entry.options.map((option) => option.value)).toContain(entry.value);
+    } else {
+      // The only legal empty list is one whose emptiness is a state of the app
+      // and says so — no composition open, nothing in the library.
+      expect(entry.unavailable).toBeTruthy();
+    }
+  }
+
+  // 4. Filling with the resolved defaults produces text — unless a slot has
+  //    nothing to offer, in which case the fill must REFUSE rather than render
+  //    an empty blank into the prompt. "Add a harmony track" with no tracks is
+  //    exactly that case, and a command that renders `doubles the track with id
+  //    , 3 semitones above it` is the failure this whole design is against.
+  const values = defaultValues(command);
+  const filled = fillCommand(command, values);
+  if (resolved.unavailable !== null) {
+    expect(`${where} ${filled.ok ? 'rendered anyway' : 'refused'}`).toBe(`${where} refused`);
+    return;
+  }
+  if (!filled.ok) throw new Error(`${where} ${filled.reason}`);
+  expect(filled.value).not.toMatch(/\{[a-zA-Z]/);
+  // Every slot's VALUE reached the text. Stronger than a length floor, which
+  // substitution can only ever satisfy: this fails if a placeholder is dropped,
+  // rendered as its label, or substituted with the wrong slot's value.
+  for (const slot of command.slots) {
+    expect(`${where} ${slot.id} ${filled.value.includes(String(values[slot.id]))}`).toBe(
+      `${where} ${slot.id} true`,
+    );
+  }
+
+  // The live form a panel will actually call — same text, and the
+  // anti-hallucination check on by construction rather than by remembering an
+  // argument. Number slots must survive it: `allowedValues` skipping them is
+  // what stops `bpm` being handed an empty option list and refusing itself.
+  expect(fillForNow(command, values)).toEqual(filled);
+}
+
+// -------------------------------------------------------------- the table ---
+
+describe('the catalog', () => {
+  it('gives every command a unique id and a page', () => {
+    const ids = COMMAND_CATALOG.map((command) => command.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(COMMAND_CATALOG.length).toBeGreaterThan(5);
+    for (const command of COMMAND_CATALOG) {
+      expect(findCommand(command.id)).toBe(command);
+    }
+    expect(findCommand('nothing-like-this')).toBeUndefined();
+  });
+
+  it('holds every row to the invariants, with nothing open', () => {
+    // Deliberately run on a bare app: a catalog that only resolves once a
+    // composition exists is a catalog you cannot use to make one.
+    for (const command of COMMAND_CATALOG) assertCommandInvariants(command);
+  });
+
+  it('holds every row to the invariants with real state open', () => {
+    seedPattern('Riff');
+    seedComposition();
+    expect(addTrack('Rhythm').ok).toBe(true);
+    // Guards the guard: with a pattern, a composition and a track all present,
+    // no slot may report itself unavailable, so every row really does go down
+    // the FILLED branch of the invariant above rather than the refused one.
+    for (const command of COMMAND_CATALOG) {
+      expect(`${command.id}: ${resolveCommand(command).unavailable ?? 'fillable'}`).toBe(
+        `${command.id}: fillable`,
+      );
+      assertCommandInvariants(command);
+    }
+  });
+});
+
+describe('page scoping', () => {
+  it('splits the catalog with no overlap and no leftovers', () => {
+    const pattern = commandsForPage('pattern');
+    const composition = commandsForPage('composition');
+    expect(pattern.length).toBeGreaterThan(0);
+    expect(composition.length).toBeGreaterThan(0);
+    expect(pattern.length + composition.length).toBe(COMMAND_CATALOG.length);
+    const patternIds = new Set(pattern.map((command) => command.id));
+    for (const command of composition) expect(patternIds.has(command.id)).toBe(false);
+  });
+
+  it('keeps composition-only slots and tools off the pattern page', () => {
+    for (const command of commandsForPage('pattern')) {
+      for (const slot of command.slots) {
+        if (slot.kind !== 'choice') continue;
+        // A pattern command has no composition in hand; a track picker on it
+        // would resolve to whatever composition happened to be open elsewhere.
+        expect(`${command.id}: ${slot.source}`).not.toMatch(/^.*: track$/);
+      }
+      for (const tool of command.tools) {
+        expect(`${command.id}: ${tool}`).not.toMatch(/: composition_/);
+      }
+    }
+  });
+
+  it('lets composition commands reach the pattern tools, because they build patterns', () => {
+    // The asymmetry is intentional and worth pinning: a composition command
+    // writes patterns into the library and then places them. If this ever fails,
+    // someone has "fixed" the leak check in the wrong direction.
+    const buildsPatterns = commandsForPage('composition').filter((command) =>
+      command.tools.includes('pattern_stamp_notes'),
+    );
+    expect(buildsPatterns.length).toBeGreaterThan(0);
+  });
+});
+
+// ------------------------------------------------------- lib-derived slots ---
+
+describe('slot values come from the lib', () => {
+  const sourceOf = (source: ChoiceSource): Slot => ({
+    kind: 'choice',
+    id: 'probe',
+    label: 'Probe',
+    source,
+  });
+
+  /**
+   * Every {@link ChoiceSource}, and where its values MUST come from.
+   *
+   * A `Record<ChoiceSource, …>` and not a list, so adding a source to the union
+   * is a COMPILE error here until someone states its origin. The previous shape
+   * — a handful of assertions naming sources by hand — let a seventh source with
+   * a literal array beside it pass every test, which is the exact defect this
+   * file exists to catch.
+   *
+   * `track` and `pattern` are live documents rather than lib catalogs, so their
+   * origin is the seam's own reader; they are covered by their own tests below
+   * and named here only so the record stays exhaustive.
+   */
+  const SOURCE_EXPECTATIONS: Readonly<Record<ChoiceSource, () => readonly string[]>> = {
+    groove: () => GROOVE_PRESETS.map((preset) => preset.id),
+    scale: () => SCALES.map((scale) => scale.id),
+    key: () => [...CHROMATIC_KEYS],
+    instrument: () => INSTRUMENTS.map((instrument) => instrument.id),
+    // Finest first — `pattern-fix-timing` opens on `options[0]` and must not
+    // default to flattening a riff onto quarter notes.
+    subdivision: () => [PPQ / 4, PPQ / 3, PPQ / 2, PPQ].map(String),
+    track: () => getTracks().map((track) => track.id),
+    pattern: () => usePatternsStore.getState().library.patterns.map((pattern) => pattern.id),
+  };
+
+  it('offers exactly what the lib offers, for every source there is', () => {
+    seedPattern('Riff');
+    seedComposition();
+    expect(addTrack('Rhythm').ok).toBe(true);
+
+    for (const [source, expected] of Object.entries(SOURCE_EXPECTATIONS)) {
+      const values = slotOptions(sourceOf(source as ChoiceSource)).map((o) => o.value);
+      expect(`${source}: ${values.join(',')}`).toBe(`${source}: ${expected().join(',')}`);
+      expect(values.length).toBeGreaterThan(0);
+    }
+
+    // Four grooves, and only four. "Heavy swing" is not one of them — a command
+    // that wants one asks for `shuffle`, which is what the lib calls it.
+    expect(GROOVE_PRESETS).toHaveLength(4);
+  });
+
+  it('derives the timing grid from PPQ rather than writing ticks out', () => {
+    const ticks = slotOptions(sourceOf('subdivision')).map((option) => Number(option.value));
+    expect(ticks.length).toBeGreaterThan(2);
+    for (const value of ticks) {
+      expect(Number.isInteger(value)).toBe(true);
+      expect(value).toBeLessThanOrEqual(PPQ);
+      // A grid that is not a whole division of a quarter note is a grid nothing
+      // in the app lines up with — and is what a hand-typed number produces.
+      expect(PPQ % value).toBe(0);
+    }
+    expect(ticks).toContain(PPQ);
+    // The default, and the reason the list is ordered the way it is: pressing
+    // "Fix the timing" without touching the picker must not quantise a
+    // sixteenth-note part onto quarter notes.
+    expect(resolveSlot(sourceOf('subdivision')).value).toBe(String(PPQ / 4));
+  });
+
+  it('never keeps a second copy of a lib vocabulary in src/ai', () => {
+    /**
+     * The scan that makes the table safe to grow. `SOURCE_EXPECTATIONS` above
+     * compares VALUES, so a hand-written copy that happens to be correct today
+     * is invisible to it — and a correct copy is precisely the failure mode,
+     * because it silently stops offering whatever the lib adds next.
+     *
+     * The rule is "quotes two or more members of one vocabulary", not "quotes
+     * any". One shared word is honest — `blues` is a genre in the catalog and
+     * also a scale id in the lib, and both are legitimately spelled that way.
+     * Two members of the same vocabulary in one file is a list.
+     *
+     * GROOVE_PRESETS is held to the stricter bar of one, below: it is the
+     * vocabulary the ticket calls out by name, its ids share no word with any
+     * authored enum, and the tempting mistake ("heavy swing" beside `shuffle`)
+     * starts with a single literal.
+     */
+    const VOCABULARIES: Readonly<Record<string, readonly string[]>> = {
+      groove: GROOVE_PRESETS.map((preset) => preset.id),
+      scale: SCALES.map((scale) => scale.id),
+      key: [...CHROMATIC_KEYS],
+      instrument: INSTRUMENTS.map((instrument) => instrument.id),
+      // The tick grid. `String(PPQ / 4)` is derivation; `'120'` is a copy.
+      subdivision: [PPQ, PPQ / 2, PPQ / 3, PPQ / 4].map(String),
+    };
+
+    const sources = import.meta.glob('../src/ai/*.ts', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+    expect(Object.keys(sources).length).toBeGreaterThan(2);
+
+    for (const [file, source] of Object.entries(sources)) {
+      for (const [name, vocabulary] of Object.entries(VOCABULARIES)) {
+        // Quote characters only — NOT backticks. A backticked word in this
+        // codebase is prose (`shuffle` in a doc comment explaining why the slot
+        // emits the id and not "heavy swing"), and a scan that fails on the
+        // comment explaining the rule is a scan people delete.
+        const quoted = vocabulary.filter((member) =>
+          [`'${member}'`, `"${member}"`].some((form) => source.includes(form)),
+        );
+        const limit = name === 'groove' ? 0 : 1;
+        const verdict =
+          quoted.length > limit ? `copies the ${name} catalog: ${quoted.join(',')}` : 'clean';
+        expect(`${file}: ${verdict}`).toBe(`${file}: clean`);
+      }
+    }
+  });
+
+  it('binds a track slot to the tracks that exist, and says so when none do', () => {
+    const track = sourceOf('track');
+    expect(slotOptions(track)).toEqual([]);
+    // The two empty states are DIFFERENT and the message has to distinguish
+    // them: "no composition open" is a thing to go and do, "no tracks yet" is
+    // another. A single generic sentence would satisfy a truthiness check and
+    // tell the user nothing.
+    expect(resolveSlot(track).unavailable).toBe('No composition is open.');
+
+    seedComposition();
+    // A blank composition starts with one track and the seam refuses to remove
+    // the last one, so the track-less state is written through the STORE — the
+    // reason `forceKeyOnPatterns` does the same. It is reachable: a document
+    // made elsewhere can carry zero tracks, and that is the case this branch is
+    // for.
+    expect(removeTrack(getTracks()[0].id).ok).toBe(false);
+    forceTracklessComposition();
+    expect(getTracks()).toEqual([]);
+    expect(resolveSlot(track).unavailable).toBe('This composition has no tracks.');
+
+    const added = addTrack('Rhythm');
+    expect(added.ok).toBe(true);
+
+    const options = slotOptions(track);
+    expect(options.map((option) => option.value)).toEqual(getTracks().map((track) => track.id));
+    expect(options.map((option) => option.label)).toContain('Rhythm');
+    expect(resolveSlot(track).unavailable).toBeNull();
+  });
+
+  it('binds a pattern slot to the library', () => {
+    const pattern = sourceOf('pattern');
+    expect(slotOptions(pattern)).toEqual([]);
+    expect(resolveSlot(pattern).unavailable).toBe(
+      'The pattern library is empty — nothing has been saved yet.',
+    );
+    const id = seedPattern('Chorus');
+    const options = slotOptions(pattern);
+    expect(options.map((option) => option.value)).toEqual([id]);
+    expect(options[0].label).toBe('Chorus');
+  });
+
+  it('hints with the instrument NAME, not its id', () => {
+    // Both hints and both labels are read by the same picker; one column saying
+    // `ukulele` while the next says `Ukulele` looks like two different things.
+    seedPattern('Riff');
+    expect(setEditingPatternInstrument('ukulele').ok).toBe(true);
+    const names = new Set(INSTRUMENTS.map((instrument) => instrument.name));
+
+    seedComposition();
+    for (const source of ['pattern', 'track'] as const) {
+      for (const option of slotOptions(sourceOf(source))) {
+        expect(`${source}: ${option.hint}`).toBe(
+          `${source}: ${names.has(option.hint ?? '') ? option.hint : 'a display name'}`,
+        );
+      }
+    }
+  });
+});
+
+// --------------------------------------------------------------- defaults ---
+
+describe('defaults come from live state', () => {
+  const defaultsOf = (id: string): Record<string, SlotValue> => {
+    const command = findCommand(id);
+    if (!command) throw new Error(`no command ${id}`);
+    return defaultValues(command);
+  };
+
+  it('takes the tempo and the groove from the composition', () => {
+    seedComposition();
+    expect(setCompositionBpm(137).ok).toBe(true);
+    expect(setCompositionGroove('shuffle').ok).toBe(true);
+
+    const values = defaultsOf('composition-backing-track');
+    expect(values.bpm).toBe(137);
+    expect(values.groove).toBe('shuffle');
+  });
+
+  it('takes the tempo and the groove from the pattern', () => {
+    seedPattern('Riff');
+    expect(setPatternBpm(72).ok).toBe(true);
+    expect(setPatternGroove('16th-swing').ok).toBe(true);
+
+    const values = defaultsOf('pattern-feel');
+    expect(values.bpm).toBe(72);
+    expect(values.groove).toBe('16th-swing');
+  });
+
+  it('takes the track from the selection', () => {
+    seedComposition();
+    const second = addTrack('Lead');
+    if (!second.ok) throw new Error(second.reason);
+    selectTrack(second.value.id);
+
+    expect(defaultsOf('composition-harmony-track').track).toBe(second.value.id);
+    expect(defaultsOf('composition-balance-mix').lead).toBe(second.value.id);
+  });
+
+  it('takes the instrument from the open pattern', () => {
+    seedPattern('Riff');
+    expect(setEditingPatternInstrument('ukulele').ok).toBe(true);
+    expect(defaultsOf('pattern-generate').instrument).toBe('ukulele');
+  });
+
+  it('takes the key and scale from the open pattern', () => {
+    seedPattern('Riff');
+    forceKeyOnPatterns('F#', 'dorian');
+    const values = defaultsOf('pattern-fit-key');
+    expect(values.key).toBe('F#');
+    expect(values.scale).toBe('dorian');
+  });
+
+  it("takes the composition's key from its harmonic context", () => {
+    seedComposition();
+    usePatternsStore.getState().addHarmonicBlock({
+      startTick: 0,
+      endTick: PPQ * 4,
+      scale: { root: 'A', type: 'minor' },
+    });
+    const values = defaultsOf('composition-backing-track');
+    expect(values.key).toBe('A');
+    expect(values.scale).toBe('minor');
+  });
+
+  it("falls back to the composition's placed patterns for a key", () => {
+    const patternId = seedPattern('Riff');
+    forceKeyOnPatterns('D', 'minor-pentatonic');
+    seedComposition();
+    const placed = addPlacement(patternId, getTracks()[0].id, 0);
+    expect(placed.ok).toBe(true);
+
+    const values = defaultsOf('composition-backing-track');
+    expect(values.key).toBe('D');
+    expect(values.scale).toBe('minor-pentatonic');
+  });
+
+  it("sizes 'extend by' against how long the arrangement already is", () => {
+    const patternId = seedPattern('Riff');
+    seedComposition();
+    const track = getTracks()[0].id;
+    expect(addPlacement(patternId, track, PPQ * 8).ok).toBe(true);
+    // Derived here the same way the slot derives it, but from the seam's own
+    // total — the claim is "it tracks the arrangement's length", not "it is 3".
+    const bars = Math.ceil(totalDurationTicks() / (PPQ * 4));
+    expect(bars).toBeGreaterThan(1);
+    expect(defaultsOf('composition-extend').bars).toBe(bars);
+  });
+
+  it('counts those bars in the composition\'s OWN time signature', () => {
+    // The only arithmetic in the module, and 4/4 hides every way of getting it
+    // wrong: `PPQ * numerator` and `(PPQ * 4 * numerator) / denominator` agree
+    // there and nowhere else. 6/8 is a three-quarter bar; 3/4 is a shorter bar
+    // than 4/4, so the same arrangement is MORE bars long.
+    const patternId = seedPattern('Riff');
+    seedComposition();
+    expect(addPlacement(patternId, getTracks()[0].id, PPQ * 8).ok).toBe(true);
+    const total = totalDurationTicks();
+
+    for (const ts of [
+      { numerator: 4, denominator: 4 },
+      { numerator: 6, denominator: 8 },
+      { numerator: 3, denominator: 4 },
+      { numerator: 7, denominator: 8 },
+    ] as const) {
+      expect(setCompositionTimeSignature(ts).ok).toBe(true);
+      const perBar = ticksPerBar(ts);
+      expect(defaultsOf('composition-extend').bars).toBe(Math.ceil(total / perBar));
+    }
+    // Sanity that the loop above discriminates at all: 6/8 bars are shorter than
+    // 4/4 bars, so the same total has to come out as more of them.
+    expect(ticksPerBar({ numerator: 6, denominator: 8 })).toBeLessThan(
+      ticksPerBar({ numerator: 4, denominator: 4 }),
+    );
+  });
+
+  it('clamps a live number into the range the slot offers', () => {
+    // `composition-bars` is the one default with no upstream clamp — it is
+    // COUNTED, not stored — so an arrangement longer than the slot's ceiling is
+    // reachable and is what the clamp is for. Without it the slot resolves past
+    // its own max and `fillCommand` then refuses its own default: a shipped
+    // command that cannot be pressed.
+    const patternId = seedPattern('Riff');
+    seedComposition();
+    const extend = findCommand('composition-extend');
+    if (!extend) throw new Error('missing command');
+    const bars = extend.slots.find((slot) => slot.id === 'bars');
+    if (bars?.kind !== 'number') throw new Error('bars is not a number slot');
+
+    const beyond = (bars.max + 40) * PPQ * 4;
+    expect(addPlacement(patternId, getTracks()[0].id, beyond).ok).toBe(true);
+    expect(Math.ceil(totalDurationTicks() / (PPQ * 4))).toBeGreaterThan(bars.max);
+
+    expect(defaultsOf('composition-extend').bars).toBe(bars.max);
+    expect(fillCommand(extend, defaultValues(extend)).ok).toBe(true);
+  });
+
+  it('rounds a fractional live number for a whole-number slot', () => {
+    // The lib clamps a composition's bpm but does not round it, so 137.6 is a
+    // value the app can genuinely hold. `fillCommand` rejects a fraction in a
+    // step-1 slot, so without the rounding the command refuses its own default.
+    seedComposition();
+    expect(setCompositionBpm(137.6).ok).toBe(true);
+    expect(defaultsOf('composition-backing-track').bpm).toBe(138);
+
+    const backing = findCommand('composition-backing-track');
+    if (!backing) throw new Error('missing command');
+    expect(fillCommand(backing, defaultValues(backing)).ok).toBe(true);
+  });
+
+  it('falls back rather than refusing when nothing is open', () => {
+    // Every command has to be fillable on a cold start, or the agent can never
+    // be asked to create the thing its slots want to read.
+    const values = defaultsOf('composition-backing-track');
+    // ⚠ This does NOT prove `fallbackOption` honours `DEFAULT_SCALE_ID`: the
+    // lib's default scale is also `SCALES[0]`, so "the declared default" and
+    // "the first option" are the same string and no assertion here can tell
+    // them apart. The branch is kept because it is right in principle — the day
+    // the lib's default stops being first, this test starts discriminating.
+    expect(values.scale).toBe(DEFAULT_SCALE_ID);
+    expect(values.key).toBe(CHROMATIC_KEYS[0]);
+    expect(values.groove).toBe(GROOVE_PRESETS[0].id);
+    expect(typeof values.bpm).toBe('number');
+  });
+
+  it('ignores a live value the picker cannot represent', () => {
+    seedComposition();
+    // A groove spec that matches no named preset — reachable from a document
+    // made elsewhere. `compositionGrooveId` calls it 'custom', which is not an
+    // offered value, so the slot must fall back rather than show nothing.
+    usePatternsStore.getState().setEditingCompositionGroove({ swing: 0.55, appliedTo: 'eighths' });
+    expect(defaultsOf('composition-backing-track').groove).toBe(GROOVE_PRESETS[0].id);
+  });
+});
+
+// ------------------------------------------------------------------- fill ---
+
+describe('filling a command', () => {
+  const backing = (): Command => {
+    const command = findCommand('composition-backing-track');
+    if (!command) throw new Error('missing command');
+    return command;
+  };
+
+  const text = (command: Command, values: Record<string, SlotValue>): string => {
+    const result = fillCommand(command, values);
+    if (!result.ok) throw new Error(result.reason);
+    return result.value;
+  };
+
+  it('is deterministic for the same values, whatever the app holds', () => {
+    seedComposition();
+    const command = backing();
+    const values = defaultValues(command);
+    const first = text(command, values);
+
+    // Move the world underneath it: rename the track, change the tempo, add a
+    // pattern. The rendered string must not shift, because the values did not.
+    expect(setTrackName(getTracks()[0].id, 'Renamed').ok).toBe(true);
+    expect(setCompositionBpm(191).ok).toBe(true);
+    seedPattern('Another');
+
+    expect(text(command, values)).toBe(first);
+    expect(text(command, { ...values })).toBe(first);
+  });
+
+  it('substitutes the slot VALUE, never the label the user saw', () => {
+    seedComposition();
+    const added = addTrack('Sludgy Rhythm Gtr');
+    if (!added.ok) throw new Error(added.reason);
+    const command = findCommand('composition-balance-mix');
+    if (!command) throw new Error('missing command');
+
+    const filled = text(command, { lead: added.value.id });
+    expect(filled).toContain(added.value.id);
+    // The name is live state; putting it in the prompt would make the same
+    // choices render differently tomorrow, which is the reproducibility the
+    // catalog exists to buy.
+    expect(filled).not.toContain('Sludgy Rhythm Gtr');
+  });
+
+  it('emits the lib groove id rather than a word for it', () => {
+    const command = backing();
+    const filled = text(command, { ...defaultValues(command), groove: 'shuffle' });
+    expect(filled).toContain('shuffle');
+    expect(filled).not.toMatch(/heavy swing/i);
+  });
+
+  it('refuses a missing, unknown, out-of-range or off-list value', () => {
+    const command = backing();
+    const values = defaultValues(command);
+
+    const missing = fillCommand(command, { ...values, bpm: undefined as unknown as number });
+    expect(missing.ok).toBe(false);
+
+    const unknown = fillCommand(command, { ...values, tempo: 120 });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.reason).toContain('tempo');
+
+    expect(fillCommand(command, { ...values, bpm: 9000 }).ok).toBe(false);
+    expect(fillCommand(command, { ...values, bpm: 100.5 }).ok).toBe(false);
+    expect(fillCommand(command, { ...values, genre: 'polka' }).ok).toBe(false);
+  });
+
+  it('leaves number slots out of the allow-list, so a tempo is not refused', () => {
+    // `slotOptions` answers `[]` for a number slot. An empty list reaching
+    // `fillCommand` means "offers nothing", so listing numbers here would refuse
+    // every tempo and every bar count — including the command's own defaults.
+    // This is the call shape the panel uses, so it has to be the tested one.
+    seedComposition();
+    const command = backing();
+    const allowed = allowedValues(command);
+    expect(Object.keys(allowed)).not.toContain('bpm');
+    expect(Object.keys(allowed)).not.toContain('bars');
+    expect(Object.keys(allowed)).toContain('groove');
+
+    const values = defaultValues(command);
+    expect(fillForNow(command, values).ok).toBe(true);
+    expect(fillForNow(command, { ...values, bpm: 137, bars: 16 }).ok).toBe(true);
+    // …and the live check is still ON in that form: an off-list groove refuses.
+    expect(fillForNow(command, { ...values, groove: 'heavy-swing' }).ok).toBe(false);
+  });
+
+  it('refuses a value the app no longer offers', () => {
+    seedComposition();
+    const added = addTrack('Doomed');
+    if (!added.ok) throw new Error(added.reason);
+    const command = findCommand('composition-balance-mix');
+    if (!command) throw new Error('missing command');
+
+    const stale = { lead: added.value.id };
+    expect(fillCommand(command, stale, allowedValues(command)).ok).toBe(true);
+
+    // The anti-hallucination property, made concrete: the panel resolved the
+    // options a moment ago, the world moved, and the id is refused HERE rather
+    // than costing a whole agent run to discover.
+    usePatternsStore.setState({
+      ...DEFAULT_PATTERNS_STATE,
+      library: { patterns: [], compositions: [], collections: [] },
+    });
+    const refused = fillCommand(command, stale, allowedValues(command));
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toContain('no longer offers');
+  });
+});
+
+// ------------------------------------------------------------ adding a row ---
+
+/**
+ * The acceptance criterion, executed: a new capability is THIS and nothing else.
+ * No new slot kind, no new source, no resolver, no component — a literal that
+ * satisfies `Command`, which the invariants below then hold to the same bar as
+ * every shipped row.
+ *
+ * It is deliberately NOT added to `COMMAND_CATALOG`. Shipping it is a one-line
+ * edit; the point being proved is that the MECHANISM needs no other change, and
+ * a test fixture proves that without deciding for the user that this particular
+ * command is worth offering.
+ */
+const ADDED_COMMAND: Command = {
+  id: 'pattern-halve-time',
+  page: 'pattern',
+  label: 'Play it half-time',
+  summary: 'Stretch the pattern to twice its length without changing which notes are in it.',
+  slots: [
+    { kind: 'choice', id: 'grid', source: 'subdivision', label: 'Grid' },
+    {
+      kind: 'enum',
+      id: 'ring',
+      label: 'Sustain',
+      options: [
+        { value: 'let every note ring into the next', label: 'Ringing' },
+        { value: 'keep the original note lengths', label: 'Detached' },
+      ],
+      // Deliberately the SECOND option. Every shipped enum puts its fallback
+      // first, so `slot.fallback` and `options[0].value` are indistinguishable
+      // across the whole catalog and a resolver that ignored `fallback` would
+      // pass every test. This row is the one that tells them apart.
+      fallback: 'keep the original note lengths',
+    },
+  ],
+  tools: ['read_pattern', 'pattern_move_note', 'pattern_resize_note'],
+  template: `Rewrite the open pattern half-time: double every start tick and {ring}, snapping everything to a grid of {grid} ticks.
+
+Do not add, delete or re-fret anything.`,
+};
+
+describe('adding a command', () => {
+  it('is a row and nothing else', () => {
+    assertCommandInvariants(ADDED_COMMAND);
+
+    seedPattern('Riff');
+    assertCommandInvariants(ADDED_COMMAND);
+
+    const values = defaultValues(ADDED_COMMAND);
+    // The enum opens on its declared `fallback`, not on whatever happens to be
+    // first in the list — see the comment on the row.
+    expect(values.ring).toBe('keep the original note lengths');
+    expect(values.ring).not.toBe(ADDED_COMMAND.slots[1].kind === 'enum'
+      ? ADDED_COMMAND.slots[1].options[0].value
+      : null);
+
+    const filled = fillCommand(ADDED_COMMAND, values, allowedValues(ADDED_COMMAND));
+    expect(filled.ok).toBe(true);
+    if (filled.ok) {
+      expect(filled.value).toContain(String(values.grid));
+      expect(filled.value).toContain(String(values.ring));
+    }
+  });
+});
