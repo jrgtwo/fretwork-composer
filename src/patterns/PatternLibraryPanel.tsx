@@ -76,7 +76,37 @@ export type SwitchGuard = () => (() => void) | null;
 const NO_GUARD: SwitchGuard = () => () => {};
 
 /**
+ * How many patterns the library holds, as its own subscriber.
+ *
+ * A leaf on purpose. It is the rail SECTION's header that shows the count, and
+ * the section is composed in `App` — but `useLibraryPatterns` reads
+ * `library.patterns`, whose array identity changes on every edit to the pattern
+ * being edited, not merely on create and delete. Subscribed in `App` that would
+ * re-render the pane stack and the timeline on every note drag. Subscribed here
+ * it re-renders a number.
+ */
+export function PatternLibraryCount() {
+  return <>{useLibraryPatterns().length}</>;
+}
+
+/**
  * The pattern library, in the pattern page's right rail (PP-01).
+ *
+ * THE HEADER IS NOT HERE. This is the BODY of a rail section — `shell/Section`
+ * draws the disclosure, the name and the count slot, and `App`'s `PatternRail`
+ * composes it. The header this file used to draw was the same header
+ * `composition/PatternLibraryRail` draws, which is PP-01's copied chrome; the
+ * point of the section is that the second copy is now the one that gets deleted
+ * rather than a third one written. (That deletion is the composition rail's own
+ * change and is not this ticket — nothing on that page is a section yet.)
+ *
+ * THE TWO HEADERS THEREFORE LOOK DIFFERENT UNTIL THAT LANDS, and it is a debt
+ * rather than a decision: this one is `Section`'s `text-[9px]`
+ * `tracking-[0.16em]` inheriting `text-ink`, the composition rail's is still its
+ * own `text-[10px]` `tracking-[0.18em]` `text-ink-mut`. PP-01's goal is that a
+ * pattern library reads the same on both pages, so the divergence is recorded
+ * here and closed by moving that rail onto `shell/Section` — not by hand-matching
+ * two class strings, which is how the copy got made in the first place.
  *
  * WHY THE RAIL AND NOT A FOURTH PANE. The three panes are all views OF the
  * pattern being edited; this is how you choose WHICH pattern that is. Chrome,
@@ -87,14 +117,16 @@ const NO_GUARD: SwitchGuard = () => () => {};
  * place on both pages, which is the only reason a user should ever have to
  * remember where it is.
  *
- * It does NOT buy a scroll region, and the earlier draft of this note claiming
- * otherwise was wrong: `#root` has no height, so the pattern page's `h-full`
- * resolves to auto and the whole document scrolls (see `AppShell`, and the
- * pane-layout debt in docs/FOLLOW-UPS.md). A thirty-pattern library therefore
- * grows the page — like every other thing on this page does today, and unlike
- * the composition page, whose rail gets a real viewport box. The `min-h-0` /
- * `overflow-y-auto` below is what makes it a scroller the day that debt is paid;
- * jsdom has no layout, so nothing here can assert either state.
+ * WHETHER IT SCROLLS DEPENDS ON THE OTHER COLUMN, which is worth stating plainly
+ * because two earlier drafts of this note each got it half right. `#root` has no
+ * height, so the pattern page's `h-full` resolves to auto and the row is as tall
+ * as its tallest column (see `AppShell`, and the pane-layout debt in
+ * docs/FOLLOW-UPS.md). The rail is a stretched grid item of that row. So when the
+ * pane stack is the taller one — the normal case — the rail has a definite height
+ * and the `min-h-0` / `overflow-y-auto` below really is a scroller; when the
+ * library is the taller one it is the whole document that scrolls instead and a
+ * thirty-pattern library grows the page. jsdom has no layout, so nothing here can
+ * assert either state.
  *
  * NOT A FORK OF `composition/PatternLibraryRail`, which lists the same patterns
  * for a different job. What differs is everything except the row's text:
@@ -119,8 +151,9 @@ const NO_GUARD: SwitchGuard = () => () => {};
  * there is a second kind of thing to pick. It is not this ticket, because its
  * shell is built around `FolderTree`, collections and folder dialogs, and
  * collections are exactly what PP-01 defers. What that leaves duplicated here is
- * chrome — a header, a scroller, an empty state and a row class — between two
- * files, which is a smaller debt than a generic tree with one caller.
+ * chrome — a scroller, an empty state and a row class — between two files, which
+ * is a smaller debt than a generic tree with one caller. One line shorter than it
+ * was: the header went to `shell/Section`.
  *
  * WHAT SWITCHING COSTS. Nothing in the timeline: every edit is written to the
  * store as it is made, so there is no unsaved pattern state to lose. The one
@@ -222,14 +255,7 @@ export function PatternLibraryPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-none items-baseline justify-between gap-2 border-b border-rim-dark px-3 py-2">
-        <span className="font-mono text-[10px] font-semibold tracking-[0.18em] text-ink-mut uppercase">
-          Patterns
-        </span>
-        <span className="font-mono text-[9px] text-ink-mut/70">{patterns.length}</span>
-      </div>
-
-      <div className="flex-none px-2 pt-2 pb-1">
+      <div className="flex-none px-2 pt-1 pb-1">
         <button
           type="button"
           onClick={create}

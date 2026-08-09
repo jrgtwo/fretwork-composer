@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ToolRegistry } from 'agent-harness/browser';
 import { toToolDef } from '../src/ai/agentService';
-import { SKETCH_STUB_RIFF } from '../src/ai/composerAgent';
 import { AGENT_TOOLS } from '../src/ai/tools';
 
 /**
@@ -26,8 +25,10 @@ import { AGENT_TOOLS } from '../src/ai/tools';
  */
 
 describe('the adapter against the real ToolRegistry', () => {
-  /** Every tool the app has, plus the stub, which is not in `AGENT_TOOLS`. */
-  const ALL = [...AGENT_TOOLS, SKETCH_STUB_RIFF];
+  /** Every tool the app has. AG-03's stub used to be appended here because it
+   *  was not in `AGENT_TOOLS`; AG-06 deleted it along with the agent that was
+   *  its only caller. */
+  const ALL = AGENT_TOOLS;
 
   it('compiles every tool the app ships', () => {
     // Construction is the assertion: `register` calls `ajv.compile` per tool and
@@ -54,18 +55,58 @@ describe('the adapter against the real ToolRegistry', () => {
     const registry = new ToolRegistry();
     registry.register(ALL.map(toToolDef));
 
-    // The stub's only argument is optional, so no arguments is valid.
-    expect(registry.validate('sketch_stub_riff', {})).toEqual({ ok: true });
+    // `pattern_open_blank`'s only argument is optional, so no arguments is valid.
+    expect(registry.validate('pattern_open_blank', {})).toEqual({ ok: true });
     // `minLength: 1` — the whole reason the tool uses the `name` helper and not
     // `str`. The lib names a pattern by default parameter, so `''` would be
     // stored verbatim as an unlabelled row in the library.
-    expect(registry.validate('sketch_stub_riff', { name: '' }).ok).toBe(false);
+    expect(registry.validate('pattern_open_blank', { name: '' }).ok).toBe(false);
     // `additionalProperties: false` on every tool: a misspelt argument has to be
     // a validation error the model can read, not an instruction silently
     // dropped.
-    expect(registry.validate('sketch_stub_riff', { nmae: 'typo' }).ok).toBe(false);
+    expect(registry.validate('pattern_open_blank', { nmae: 'typo' }).ok).toBe(false);
     // And a required argument that is missing, on a real tool.
     expect(registry.validate('pattern_stamp_notes', {}).ok).toBe(false);
+  });
+
+  /**
+   * The per-note writes are batches, so their real schema is an object nested
+   * inside `items` — required keys, enums and `nullable`'s widened type all one
+   * level down. `ajv` is the only thing in the project that enforces at that
+   * depth: the stand-in in `AgentTools.test.ts` reads the TOP level only, so a
+   * batch whose entries validated against nothing would pass there and fail in
+   * a browser.
+   */
+  it('validates the entries inside a batch, not just the array around them', () => {
+    const registry = new ToolRegistry();
+    registry.register(ALL.map(toToolDef));
+
+    expect(
+      registry.validate('pattern_move_notes', { moves: [{ noteId: 'ev_1', tick: 0 }] }),
+    ).toEqual({ ok: true });
+    // A missing required key INSIDE an entry.
+    expect(registry.validate('pattern_move_notes', { moves: [{ tick: 0 }] }).ok).toBe(false);
+    // A misspelt key inside an entry — `additionalProperties: false` has to
+    // reach the entry schema, or an instruction is silently dropped. The entry
+    // is otherwise COMPLETE on purpose: with `tick` left out as well, `required`
+    // alone would refuse it and the assertion would pass with
+    // `additionalProperties` deleted from `obj()`.
+    expect(
+      registry.validate('pattern_move_notes', { moves: [{ noteId: 'ev_1', tick: 0, tik: 0 }] }).ok,
+    ).toBe(false);
+    // The singular shape these tools replaced. It has to be a validation error
+    // rather than a batch of nothing.
+    expect(registry.validate('pattern_move_notes', { noteId: 'ev_1', tick: 0 }).ok).toBe(false);
+    // `nullable` inside an entry: null is a clear, a made-up mark is not.
+    expect(
+      registry.validate('pattern_set_dynamics', { dynamics: [{ noteId: 'ev_1', dynamic: null }] }),
+    ).toEqual({ ok: true });
+    expect(
+      registry.validate('pattern_set_dynamics', { dynamics: [{ noteId: 'ev_1', dynamic: 'sfz' }] })
+        .ok,
+    ).toBe(false);
+    // `minItems: 1` — an empty batch is a call that asks for nothing.
+    expect(registry.validate('pattern_move_notes', { moves: [] }).ok).toBe(false);
   });
 
   it('marks every tool as running without consent, which is what `mode` records', () => {

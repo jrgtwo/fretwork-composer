@@ -10,7 +10,13 @@ import { ThemeReference } from './theme/ThemeReference';
 import { Timeline } from './timeline/Timeline';
 import { seedDemoPattern } from './timeline/demoPattern';
 import { ensurePattern, getLibraryPatterns, useEditingPattern } from './patterns/patternService';
-import { PatternLibraryPanel, type SwitchGuard } from './patterns/PatternLibraryPanel';
+import {
+  PatternLibraryCount,
+  PatternLibraryPanel,
+  type SwitchGuard,
+} from './patterns/PatternLibraryPanel';
+import { Section } from './shell/Section';
+import { CommandPanel } from './ai/CommandPanel';
 import { VoicePane, type WorkingVoice } from './voice/VoicePane';
 // The default lives with the schema it indexes, so the pattern page's pane and the
 // composition page's racks cannot open on different stages (see `paramSchema`).
@@ -19,6 +25,25 @@ import { DEFAULT_OPEN_SECTIONS, type SectionId } from './voice/paramSchema';
 /** The stack's starting order. Which panes exist is decided below; this is only
  *  the order they open in, and the stack reconciles the two. */
 const DEFAULT_PANE_ORDER: readonly string[] = ['reference', 'amp', 'timeline'];
+
+/**
+ * The pattern page's rail sections, top to bottom.
+ *
+ * The rail is shared between the library and the agent as collapsible sections
+ * rather than the agent taking a fourth pane, for the reason a fourth pane was
+ * refused for the library itself (see the note on `PatternLibraryPanel`): these
+ * are chrome, not views of the pattern.
+ */
+type RailSectionId = 'library' | 'commands';
+
+/** Open ids, not collapsed ones — the opposite of `collapsedPanes` and for a
+ *  reason: a section a user has not asked for must not be open by default, and
+ *  a collapsed-list default would have to be edited every time one is added.
+ *
+ *  Commands is therefore CLOSED on arrival. It is the second surface competing
+ *  for a 300px column, and the library is the one you need to have a pattern to
+ *  run a command against at all. */
+const DEFAULT_OPEN_RAIL_SECTIONS: readonly RailSectionId[] = ['library'];
 
 /** A switch that costs nothing: go ahead, and there is nothing to run after. */
 const NOTHING_STRANDED = () => {};
@@ -75,6 +100,13 @@ export function App() {
   // inside it would be undone by every page round trip.
   const [paneOrder, setPaneOrder] = useState<readonly string[]>(DEFAULT_PANE_ORDER);
   const [collapsedPanes, setCollapsedPanes] = useState<readonly string[]>([]);
+
+  // And once more for the rail's sections. The rail only exists on the pattern
+  // page, so it is unmounted by every visit to the composition page — a section
+  // folded away would silently unfold itself on the way back. Same rule as the
+  // panes above, one surface across.
+  const [openRailSections, setOpenRailSections] =
+    useState<readonly RailSectionId[]>(DEFAULT_OPEN_RAIL_SECTIONS);
 
   // Seed something to edit until saved patterns exist.
   //
@@ -219,8 +251,85 @@ export function App() {
         collapsed: collapsedPanes,
         onCollapsedChange: setCollapsedPanes,
       }}
-      rail={<PatternLibraryPanel confirmSwitch={confirmPatternSwitch} />}
+      rail={
+        <PatternRail
+          confirmSwitch={confirmPatternSwitch}
+          open={openRailSections}
+          onOpenChange={setOpenRailSections}
+        />
+      }
     />
+  );
+}
+
+/**
+ * The pattern page's right rail: a stack of collapsible sections on the one
+ * shared `shell/Section`, the library being the first of them.
+ *
+ * FREE-FORM, NOT ACCORDION — any number of sections open at once.
+ *
+ * The accordion case is that `--width-rail` is 300px and does not grow, so two
+ * open sections split one narrow column. That premise is about WIDTH, and it is
+ * height an accordion rations — but the height is real, and an earlier draft of
+ * this note wrongly said it was not. `AppShell` hands the rail a stretched grid
+ * item, so the aside is as tall as the taller COLUMN, which is the pane stack in
+ * every normal case. What keeps that from becoming an accordion by accident is
+ * `Section`'s opt-in `grow`: the LIBRARY is the one section that flexes and the
+ * one that scrolls, so a second open section costs it rows rather than half the
+ * rail, and closing that section gives them straight back.
+ *
+ * With the cost that shape, the accordion's own costs are the deciding ones — a
+ * header press that cannot close the last section without leaving the rail
+ * empty, and losing your place in the library every time you open a command.
+ *
+ * The one-at-a-time instinct is honoured in the DEFAULT instead:
+ * `DEFAULT_OPEN_RAIL_SECTIONS` opens the library alone. Two open sections is
+ * something a user asked for on a screen tall enough to want it, rather than the
+ * state the app ships in.
+ */
+function PatternRail({
+  confirmSwitch,
+  open,
+  onOpenChange,
+}: {
+  confirmSwitch: SwitchGuard;
+  open: readonly RailSectionId[];
+  /** An updater rather than a value, for the reason the panes' is one: two
+   *  toggles batched into a single render must not lose the first. */
+  onOpenChange: (next: (open: readonly RailSectionId[]) => readonly RailSectionId[]) => void;
+}) {
+  const toggle = (id: RailSectionId) =>
+    onOpenChange((was) => (was.includes(id) ? was.filter((s) => s !== id) : [...was, id]));
+
+  return (
+    <>
+      <Section
+        label="Patterns"
+        open={open.includes('library')}
+        onToggle={() => toggle('library')}
+        // A leaf subscriber rather than a number read here — see the note on
+        // `PatternLibraryCount`. Reading the library in `App` re-renders the
+        // timeline on every note edit.
+        note={<PatternLibraryCount />}
+        bodyClassName="flex min-h-0 flex-1 flex-col"
+        // The rail's one growing section, and the only one with a scroller to
+        // absorb what it is given. See the free-form note above.
+        grow
+      >
+        <PatternLibraryPanel confirmSwitch={confirmSwitch} />
+      </Section>
+
+      {/* No `grow` — see the free-form note above. This section is as tall as
+          its content, so opening it costs the library rows rather than half the
+          rail, and closing it gives them straight back. */}
+      <Section
+        label="Commands"
+        open={open.includes('commands')}
+        onToggle={() => toggle('commands')}
+      >
+        <CommandPanel />
+      </Section>
+    </>
   );
 }
 

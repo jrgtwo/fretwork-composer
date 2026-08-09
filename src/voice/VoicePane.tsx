@@ -771,7 +771,6 @@ function VoiceEditor({
           return (
             <VoiceSection
               key={section.id}
-              id={`voice-section-${section.id}`}
               label={section.label}
               status={status}
               open={open}

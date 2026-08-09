@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { renderHook } from '@testing-library/react';
 import { DEFAULT_PATTERNS_STATE, usePatternsStore } from '@fretwork/lib';
 
 /**
@@ -79,27 +78,15 @@ import {
   toToolDef,
   type AgentSpec,
 } from '../src/ai/agentService';
-import { COMPOSER_AGENT, COMPOSER_SMOKE_INPUT, SKETCH_STUB_RIFF } from '../src/ai/composerAgent';
+import { PATTERN_AGENT } from '../src/ai/patternAgent';
 import { setConnectorSettings } from '../src/ai/connectorSettings';
 import { validateBaseUrl } from '../src/ai/testConnection';
 import { defineTool, fail, obj, ok, str, type AgentTool } from '../src/ai/tools/types';
-import {
-  PPQ,
-  clearHistory as clearPatternHistory,
-  getEditingPattern,
-  openBlankPattern as openPattern,
-  undo as patternUndo,
-  useHistoryState as usePatternHistory,
-} from '../src/patterns/patternService';
+import { clearHistory as clearPatternHistory } from '../src/patterns/patternService';
 
-/** An undo step that was never pushed is invisible in the document, so the only
- *  way to see one is to ask the history. */
-function canUndo(): boolean {
-  const view = renderHook(() => usePatternHistory());
-  const result = view.result.current.canUndo;
-  view.unmount();
-  return result;
-}
+/** Any input at all: the seam passes it through untouched, and the command
+ *  catalog is what turns a user's choices into a real one (AG-05/AG-06). */
+const INPUT = 'Tidy the timing of the pattern that is open.';
 
 /** The shape the seam is supposed to produce. Declared locally rather than
  *  imported from the harness, so a change to `ToolDef` shows up here as a
@@ -192,7 +179,7 @@ describe('the tool adapter', () => {
 
 describe('running without a provider', () => {
   it('is a stated refusal, and never reaches the harness', async () => {
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toMatch(/no provider is configured/i);
@@ -205,7 +192,7 @@ describe('running without a provider', () => {
   it('is decided by the URL alone — a blank token is a legitimate local server', async () => {
     harness.runAgent.mockResolvedValue(runResult());
     setConnectorSettings({ baseUrl: 'http://localhost:5174/v1', token: '' });
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
     expect(result.ok).toBe(true);
     // No token means no `apiKey` at all. An empty `Bearer ` is a malformed
     // credential and a local server that wants none rejects it.
@@ -228,14 +215,14 @@ describe('running without a provider', () => {
     ['a base URL carrying a query', 'https://api.example.com/v1?api-version=1'],
   ])('refuses %s before a request is built', async (_label, baseUrl) => {
     setConnectorSettings({ baseUrl, token: '' });
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
     expect(result.ok).toBe(false);
     expect(harness.runAgent).not.toHaveBeenCalled();
   });
 
   it('states the invalid-URL refusal in the same words the Test button uses', async () => {
     setConnectorSettings({ baseUrl: 'localhost:8080/v1', token: '' });
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
     const outcome = validateBaseUrl('localhost:8080/v1');
     expect(outcome).not.toBeNull();
     // Not two sets of sentences about the same fact: the connector authors them.
@@ -252,7 +239,7 @@ describe('running without a provider', () => {
     // `stoppedReason: 'error'` (see the test below). This pins the `catch` for
     // the day something upstream of the loop throws.
     harness.runAgent.mockRejectedValue(new TypeError('Failed to fetch'));
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
     expect(result).toEqual({
       ok: false,
       reason: 'The agent run could not complete: Failed to fetch',
@@ -283,7 +270,7 @@ describe('running without a provider', () => {
         return runResult({ stoppedReason: 'error', content: '' });
       },
     );
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toContain('model request failed (401)');
   });
@@ -291,14 +278,14 @@ describe('running without a provider', () => {
   it('still has something to say when nothing reported a reason', async () => {
     setConnectorSettings(CONFIGURED);
     harness.runAgent.mockResolvedValue(runResult({ stoppedReason: 'error', content: '' }));
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
     expect(result).toEqual({ ok: false, reason: 'The agent run ended in an error.' });
   });
 
   it('reports a cancelled run as a result, because the user got what they asked for', async () => {
     setConnectorSettings(CONFIGURED);
     harness.runAgent.mockResolvedValue(runResult({ stoppedReason: 'aborted', content: '' }));
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.stoppedReason).toBe('aborted');
   });
@@ -313,7 +300,7 @@ describe('what the seam hands the harness', () => {
   });
 
   it('builds the model from the connector settings, and only from those', async () => {
-    await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
+    await runAgentTask(PATTERN_AGENT, INPUT);
     expect(harness.profiles).toEqual([
       // Normalized: the panel renders `<base>/chat/completions` from the same
       // helper, so a trailing slash handled in one and not the other makes that
@@ -323,20 +310,20 @@ describe('what the seam hands the harness', () => {
   });
 
   it('honours an explicit model id', async () => {
-    await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT, { modelId: 'qwen' });
+    await runAgentTask(PATTERN_AGENT, INPUT, { modelId: 'qwen' });
     expect(harness.profiles[0]).toMatchObject({ model: 'qwen' });
   });
 
   it('passes the agent, the input and the cancellation signal', async () => {
     const controller = new AbortController();
-    await runAgentTask(COMPOSER_AGENT, 'go', { signal: controller.signal, maxIters: 2 });
+    await runAgentTask(PATTERN_AGENT, 'go', { signal: controller.signal, maxIters: 2 });
     const [agent, input, options] = harness.runAgent.mock.calls[0] as [
       { name: string; systemPrompt: string },
       string,
       { signal?: AbortSignal; maxIters?: number },
     ];
-    expect(agent.name).toBe('composer');
-    expect(agent.systemPrompt).toContain('sketch_stub_riff');
+    expect(agent.name).toBe('pattern');
+    expect(agent.systemPrompt).toContain('read_pattern');
     expect(input).toBe('go');
     expect(options.signal).toBe(controller.signal);
     expect(options.maxIters).toBe(2);
@@ -349,14 +336,14 @@ describe('what the seam hands the harness', () => {
         _input: unknown,
         options: { onEvent?: (event: { type: string; name?: string }) => void },
       ) => {
-        options.onEvent?.({ type: 'tool.started', name: 'sketch_stub_riff' });
+        options.onEvent?.({ type: 'tool.started', name: 'read_pattern' });
         options.onEvent?.({ type: 'token' });
-        options.onEvent?.({ type: 'tool.started', name: 'sketch_stub_riff' });
+        options.onEvent?.({ type: 'tool.started', name: 'read_pattern' });
         return runResult();
       },
     );
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT);
-    expect(result.ok && result.value.toolCalls).toEqual(['sketch_stub_riff', 'sketch_stub_riff']);
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
+    expect(result.ok && result.value.toolCalls).toEqual(['read_pattern', 'read_pattern']);
   });
 
   it('does not let a throw from the caller’s event view take down the run', async () => {
@@ -366,109 +353,11 @@ describe('what the seam hands the harness', () => {
         return runResult();
       },
     );
-    const result = await runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT, {
+    const result = await runAgentTask(PATTERN_AGENT, INPUT, {
       onEvent: () => {
         throw new Error('a bug in a view');
       },
     });
     expect(result.ok).toBe(true);
-  });
-});
-
-// ------------------------------------------------------------- the write ---
-
-describe('the stub tool', () => {
-  /** Driven through the ADAPTER's handler, not by calling `run` directly — the
-   *  path the harness would take is the path worth checking. */
-  const invoke = (args: Record<string, unknown> = {}) =>
-    (toToolDef(SKETCH_STUB_RIFF) as ToolDefLike).handler(args);
-
-  it('lands three notes in a new pattern, through patternService', () => {
-    const result = invoke({ name: 'Stub riff' });
-    expect(result).toMatchObject({ ok: true });
-
-    const pattern = getEditingPattern();
-    expect(pattern?.name).toBe('Stub riff');
-    // Read back off the seam, which reads the real store: a mock here would
-    // assert away the only thing worth asserting, which is that the agent's
-    // write lands where the UI's write lands.
-    //
-    // `durationTicks` is in the tuple deliberately. It is the one non-obvious
-    // decision in the tool — omitted, `stampAt` falls back to the pattern page's
-    // grid setting, i.e. whatever the user last clicked, which is not a length
-    // an agent can be said to have chosen. Left unasserted, deleting the field
-    // changed nothing that failed.
-    expect(
-      pattern?.events
-        .slice()
-        .sort((a, b) => a.startTick - b.startTick)
-        .map((event) => [event.stringIndex, event.fret, event.startTick, event.durationTicks]),
-    ).toEqual([
-      [0, 0, 0, PPQ],
-      [0, 3, PPQ, PPQ],
-      [0, 5, 2 * PPQ, PPQ],
-    ]);
-  });
-
-  it('hands the model back the ids it just created, not an empty success', () => {
-    const result = invoke({ name: 'Stub riff' }) as {
-      ok: true;
-      value: { patternId: string; name: string; notes: { id: string; startTick: number }[] };
-    };
-    // `toMatchObject({ ok: true })` alone would pass for `ok({})` — and a tool
-    // that reports nothing leaves the model unable to refer to what it made.
-    expect(result.value.patternId).toBe(getEditingPattern()?.id);
-    expect(result.value.patternId).not.toBe('');
-    expect(result.value.name).toBe('Stub riff');
-    expect(result.value.notes).toHaveLength(3);
-    expect(result.value.notes.map((note) => note.startTick)).toEqual([0, PPQ, 2 * PPQ]);
-    for (const note of result.value.notes) expect(note.id).not.toBe('');
-  });
-
-  it('rejects a blank name at the schema, rather than storing an unlabelled pattern', () => {
-    // The lib names a pattern by DEFAULT PARAMETER, so `''` is not replaced —
-    // it is stored verbatim. `minLength: 1` is what stops the model spending a
-    // call on it, and the harness's validator enforces it before `run` is
-    // reached (see `AgentToolRegistry.test.ts`, which compiles this schema).
-    const properties = SKETCH_STUB_RIFF.parameters.properties;
-    expect(properties?.name.minLength).toBe(1);
-  });
-
-  it('pushes no undo step when the library refuses to create the pattern', () => {
-    // A pattern has to be OPEN first, and this is not incidental setup: with
-    // nothing open `beginEditGesture` snapshots nothing, so the bracket closes
-    // over an empty slot and `changed` cannot be observed at all — the guard
-    // would look pinned while being unpinnable.
-    openPattern('Something the user was working on');
-    clearPatternHistory();
-
-    // The only way in: the seam refuses when `createPattern` hands back no id.
-    const createPattern = vi
-      .spyOn(usePatternsStore.getState(), 'createPattern')
-      .mockReturnValue('');
-
-    const result = invoke({ name: 'Doomed' });
-    expect(result).toMatchObject({ ok: false });
-    expect(createPattern).toHaveBeenCalled();
-    // `endEditGesture(false)`. A step pushed here would restore a state nothing
-    // ever left — and worse, the user's next undo would spend itself on it
-    // instead of reaching the edit they actually want back.
-    expect(canUndo()).toBe(false);
-    createPattern.mockRestore();
-  });
-
-  it('collapses to ONE undo step', () => {
-    invoke();
-    expect(getEditingPattern()?.events).toHaveLength(3);
-    expect(canUndo()).toBe(true);
-    // Once. Four writes (a create and three stamps) inside one bracket, so one
-    // press has to reach the state the agent found — an empty pattern.
-    patternUndo();
-    expect(getEditingPattern()?.events).toEqual([]);
-    expect(canUndo()).toBe(false);
-  });
-
-  it('is the only tool the composer offers', () => {
-    expect(COMPOSER_AGENT.tools.map((tool) => tool.name)).toEqual(['sketch_stub_riff']);
   });
 });

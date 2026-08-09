@@ -31,16 +31,17 @@
  * `collapsedRacks` in `App`), "Amp stage for Lead" folds one section of it
  * (`collapsedRackSections`, beside it, for the same reason).
  *
- * `VoiceSection` is the pattern page's component for that disclosure and is NOT
- * reused, which is a call worth recording rather than leaving to be rediscovered.
- * It hard-codes its landmark name as `${label} stage`, and the whole reason the
- * stages here are landmarks is that up to eight racks are on screen at once and
- * the TRACK is what tells eight "Drive" sliders apart (see the banner below). It
- * takes no override for that name. Its status vocabulary is the pane's, too
- * ("Not on this preset" where a rack says nothing and goes dark). So this file
- * keeps mounting `RackFace` — the chassis `VoiceSection` itself mounts — and
- * adds the same disclosure markup around a track-scoped name. If `VoiceSection`
- * ever grows a `regionName` prop, this becomes a straight substitution.
+ * BOTH DISCLOSURES ARE `shell/Section`, which is the shared one — this file used
+ * to hand-roll the stage's, and the note here used to explain why. That reason
+ * is gone: it was that `VoiceSection` hard-codes its landmark as `${label} stage`
+ * and carries the pane's status vocabulary ("Not on this preset", where a rack
+ * says nothing and goes dark). `VoiceSection` no longer owns the disclosure at
+ * all. `Section` builds the button and the region, a `chassis` render prop
+ * decides what they are bolted to — `RackFace`, here as there — and `buttonLabel`
+ * is the track-scoped name. Both of the old blockers are things this file now
+ * simply passes in. What stays local is what was always particular: the
+ * `regionName`, because up to eight racks are on screen at once and the TRACK is
+ * what tells eight "Drive" sliders apart (see the banner below).
  *
  * ── This is chrome. The table is `paramSchema` ───────────────────────────────
  *
@@ -109,6 +110,7 @@ import {
   useTrackVoiceWorkingPreset,
 } from '../voice/trackVoiceDrafts';
 import { PowerLamp, RackFace } from '../voice/rack/RackFace';
+import { Section } from '../shell/Section';
 import { AmpHead } from '../voice/rack/AmpHead';
 import { CabinetGraphic } from '../voice/rack/CabinetGraphic';
 import { Knob } from '../voice/controls/Knob';
@@ -396,69 +398,55 @@ export function TrackVoiceRack({
   const renderStage = (section: ParamSection) => {
     const presence = sectionPresence(preset, section);
     const open = !collapsedSections.includes(section.id);
-    const regionId = domId(track.id, `${section.id}-stage`);
     return (
-      <RackFace
+      <Section
         key={section.id}
-        // The landmark name is what disambiguates eight racks' identically
-        // named controls — see the banner. Track first, because that is the
-        // axis a listener is navigating.
-        regionName={`${track.name} ${section.label}`}
-        name={
-          <button
-            type="button"
-            aria-expanded={open}
-            aria-controls={regionId}
-            // Deliberately NOT the landmark's name, and deliberately not the
-            // rack's either: three things are foldable on this page and they
-            // have to be tellable apart by name alone — "Voice rack for Lead"
-            // is the whole rack, this is one stage of it, and the region it
-            // controls is "Lead Amp".
-            aria-label={`${section.label} stage for ${track.name}`}
-            onClick={() => toggleSection(section.id)}
-            className="-mx-1 flex flex-none items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-ink-mut hover:text-brass-hi"
-          >
-            <span aria-hidden className="flex-none font-mono text-[9px]">
-              {open ? '▾' : '▸'}
-            </span>
-            <span className="font-mono text-[9px] font-semibold tracking-[0.16em] uppercase">
-              {section.label}
-            </span>
-          </button>
-        }
-        note={presence === 'bypassed' ? 'Bypassed' : null}
-        lit={presence === 'active'}
+        label={section.label}
+        // Deliberately NOT the landmark's name, and deliberately not the rack's
+        // either: three things are foldable on this page and they have to be
+        // tellable apart by name alone — "Voice rack for Lead" is the whole
+        // rack, this is one stage of it, and the region it controls is
+        // "Lead Amp".
+        buttonLabel={`${section.label} stage for ${track.name}`}
+        open={open}
+        onToggle={() => toggleSection(section.id)}
         actions={stageActions(section, presence !== 'absent')}
+        bodyClassName="flex flex-col gap-1 px-1.5 py-1"
+        chassis={(parts) => (
+          <RackFace
+            // The landmark name is what disambiguates eight racks' identically
+            // named controls — see the banner. Track first, because that is the
+            // axis a listener is navigating.
+            regionName={`${track.name} ${section.label}`}
+            // The chassis owns the material, and this one's engraved names are
+            // muted where the pattern pane's are not.
+            name={<span className="text-ink-mut">{parts.name}</span>}
+            note={presence === 'bypassed' ? 'Bypassed' : null}
+            lit={presence === 'active'}
+            actions={parts.actions}
+          >
+            {parts.region}
+          </RackFace>
+        )}
       >
-        {/* Mounted when folded, hidden — `aria-controls` has to point at an
-            element that exists, and there is nothing expensive in here to
-            unmount. `VoiceSection` says the same and for the same reasons;
-            `hidden` alone would lose to the `flex` utility, so the class carries
-            the hiding and the attribute carries the semantics. */}
-        <div
-          id={regionId}
-          hidden={!open}
-          className={`flex-col gap-1 px-1.5 py-1 ${open ? 'flex' : 'hidden'}`}
-        >
-          {presence === 'absent' ? (
-            <p className="max-w-[26ch] font-mono text-[8.5px] leading-snug text-ink-mut">
-              {section.removableBranch
-                ? `No ${section.label.toLowerCase()} stage on this voice.`
-                : /* Samples has no removable branch: a non-sampler source is a
-                     pluck synth, and synth params are a later slice. */
-                  'This voice is not sampler-based.'}
-            </p>
-          ) : section.id === 'amp' ? (
-            renderAmp(section)
-          ) : section.id === 'cabinet' ? (
-            renderCabinet(section)
-          ) : (
-            <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
-              {section.params.map((param) => renderParam(section, param))}
-            </div>
-          )}
-        </div>
-      </RackFace>
+        {presence === 'absent' ? (
+          <p className="max-w-[26ch] font-mono text-[8.5px] leading-snug text-ink-mut">
+            {section.removableBranch
+              ? `No ${section.label.toLowerCase()} stage on this voice.`
+              : /* Samples has no removable branch: a non-sampler source is a
+                   pluck synth, and synth params are a later slice. */
+                'This voice is not sampler-based.'}
+          </p>
+        ) : section.id === 'amp' ? (
+          renderAmp(section)
+        ) : section.id === 'cabinet' ? (
+          renderCabinet(section)
+        ) : (
+          <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
+            {section.params.map((param) => renderParam(section, param))}
+          </div>
+        )}
+      </Section>
     );
   };
 

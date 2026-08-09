@@ -73,10 +73,12 @@ const PATTERN_COMMANDS: readonly Command[] = [
         help: 'The smallest note value the tidied part should use.',
       },
     ],
-    tools: ['read_pattern', 'pattern_move_note', 'pattern_resize_note'],
+    tools: ['read_pattern', 'pattern_move_notes', 'pattern_resize_notes'],
     template: `Tidy the timing of the pattern that is open.
 
 Read the pattern first. Then for every note: move its start to the nearest multiple of {grid} ticks, and round its duration to the nearest whole multiple of {grid} ticks, never shorter than {grid}.
+
+Send ALL the moves in one call and ALL the lengths in one call. The tools take a whole batch, a batch is one undo step, and a pattern corrected one note per call runs out of turns before it is finished.
 
 Keep every note on the string it is already on, keep the notes in the order they are already in, and do not add, delete or re-fret anything. Where rounding would put two notes on the same string on top of each other, leave the later one where it is rather than stacking them.
 
@@ -166,11 +168,13 @@ Stay inside {key} {scale}. Keep it playable by one pair of hands: never two note
       'read_pattern',
       'pattern_stamp_notes',
       'pattern_delete_notes',
-      'pattern_resize_note',
+      'pattern_resize_notes',
     ],
     template: `Make the pattern that is open {direction}, and change nothing else about it.
 
 Read the pattern first. Keep its key, its length, the strings it uses and its character recognisably the same — this is a rewrite of the rhythm, not a new idea. Busier means subdividing what is there and adding passing notes between the notes that already exist. Sparser means removing notes and letting the ones that remain ring longer.
+
+Send everything you add in ONE stamp call, everything you remove in ONE delete call, and every new length in ONE resize call. The tools take whole batches, a batch is one undo step, and a rewrite done one note per call runs out of turns before it is finished.
 
 Aim for about a third more or a third fewer notes, not double or half. Say what you added or removed.`,
   },
@@ -184,10 +188,10 @@ Aim for about a third more or a third fewer notes, not double or half. Say what 
       { kind: 'choice', id: 'key', source: 'key', label: 'Key', defaultFrom: 'pattern-key' },
       { kind: 'choice', id: 'scale', source: 'scale', label: 'Scale', defaultFrom: 'pattern-scale' },
     ],
-    tools: ['read_pattern', 'pattern_set_note_fret'],
+    tools: ['read_pattern', 'pattern_set_note_frets'],
     template: `Move the notes of the pattern that is open so every one of them belongs to {key} {scale}.
 
-Read the pattern first — it gives you each note's string and fret, and how far the neck goes. Shift each out-of-key note by the smallest number of frets that lands it on a degree of {key} {scale}; when up and down are equally close, go down.
+Read the pattern first — it gives you each note's string and fret, and how far the neck goes. Shift each out-of-key note by the smallest number of frets that lands it on a degree of {key} {scale}; when up and down are equally close, go down. Send every re-fretting in ONE call: the tool takes a whole batch, and a pattern corrected one note per call runs out of turns before it is finished.
 
 Keep every note on the string it is already on, keep every start tick and duration exactly as they are, and do not add or delete notes. Report which notes you moved and by how much.`,
   },
@@ -214,12 +218,12 @@ Keep every note on the string it is already on, keep every start tick and durati
     tools: [
       'read_pattern',
       'pattern_set_articulations',
-      'pattern_set_pitch',
-      'pattern_set_dynamic',
+      'pattern_set_pitches',
+      'pattern_set_dynamics',
     ],
     template: `Add articulations to the pattern that is open so it plays back {style}. Do not move, add, delete or re-fret a single note — this pass only marks how the notes that are already there get played.
 
-Read the pattern first. Hammer-ons and pull-offs only between notes that are next to each other on the same string. Palm mutes only on the lower strings. Slides only where both notes sit on the same string.
+Read the pattern first, then mark every note in one call per tool — each of these takes a whole batch, and marking one note per call runs out of turns before the pass is finished. Hammer-ons and pull-offs only between notes that are next to each other on the same string. Palm mutes only on the lower strings. Slides only where both notes sit on the same string.
 
 Do NOT set tieToNext. A tie swallows the note after it, and every articulation on the swallowed note stops sounding — a tie added here quietly deletes your own work.
 

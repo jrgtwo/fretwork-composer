@@ -1,22 +1,19 @@
-import { useEffect, useId, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
   CONNECTOR_STORAGE_KEY,
   EMPTY_CONNECTOR_SETTINGS,
-  getConnectorSettings,
   isConfigured,
   setConnectorSettings,
-  subscribeToConnectorSettings,
   type ConnectorSettings,
 } from './connectorSettings';
+import { useConnectorSettings } from './connectorView';
 import {
   chatCompletionsUrl,
   normalizeBaseUrl,
   runConnectionTest,
   type ConnectionOutcome,
 } from './testConnection';
-import { runAgentTask } from './agentService';
-import { COMPOSER_AGENT, COMPOSER_SMOKE_INPUT } from './composerAgent';
 
 /**
  * The connector surface — where the provider URL and token are entered, and
@@ -52,31 +49,17 @@ const fieldLabelClass =
 const buttonClass =
   'pressable control rounded-[7px] px-2.5 py-1.5 font-mono text-[9.5px] font-bold tracking-[0.12em] uppercase';
 
-/** Longer than the connection probe's 15 s: this one is waiting on a model, and
- *  a local one on CPU can take a while to answer three notes. Long enough to be
- *  patient, short enough that the tab is not stuck for the day. */
-const RUN_TIMEOUT_MS = 60_000;
-
-/** The React view of the settings store. It lives here rather than beside the
- *  store because `src/ai/*.ts` may import only the seams — see the note at the
- *  top of `connectorSettings.ts`. */
-function useConnectorSettings(): ConnectorSettings {
-  return useSyncExternalStore(
-    subscribeToConnectorSettings,
-    getConnectorSettings,
-    getConnectorSettings,
-  );
-}
-
 /** The header affordance. Owns whether the dialog is open — nothing above needs
  *  to know, and a connector panel that survived a page switch would be chrome
  *  left hanging over a surface nobody was configuring.
  *
- *  `onDidWrite` is the provisional trigger's, not the connector's — see
- *  {@link ComposerSmokeTest}. It is threaded through rather than given to a
- *  second header component because the two are one affordance for as long as
- *  AG-06 has not replaced the trigger. */
-export function ConnectorControl({ onDidWrite }: { onDidWrite?: () => void } = {}) {
+ *  It CONFIGURES and nothing else. AG-03's provisional "Run composer" trigger
+ *  stood beside it and is gone: running an agent is a page's business, and the
+ *  pattern page's `CommandPanel` is where it now lives. The `onDidWrite` prop
+ *  that used to come down from `AppShell` went with it — it existed only to
+ *  navigate to the page the stub's write landed on, and a command run started
+ *  from a page is already on it. */
+export function ConnectorControl() {
   const settings = useConnectorSettings();
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -103,7 +86,6 @@ export function ConnectorControl({ onDidWrite }: { onDidWrite?: () => void } = {
             reader, which cannot see it. */}
         <span className="sr-only">{configured ? '— configured' : '— not configured'}</span>
       </button>
-      <ComposerSmokeTest onDidWrite={onDidWrite} />
       {open && (
         <ConnectorDialog
           onClose={() => {
@@ -114,120 +96,6 @@ export function ConnectorControl({ onDidWrite }: { onDidWrite?: () => void } = {
           }}
         />
       )}
-    </>
-  );
-}
-
-/**
- * ⚠ PROVISIONAL — AG-03's end-to-end trigger, and nothing else.
- *
- * It exists so the loop can be run by hand once: press it, watch a pattern
- * appear, press undo once and watch it go away whole. **AG-06 deletes it** and
- * replaces it with the command panel, where the user picks a command and fills
- * its slots. Nothing should be built on top of this in the meantime — it sends
- * one hardcoded string to one stub agent.
- *
- * It lives beside the Connector control because that is the only app-scoped
- * chrome there is, and because the two are the same story: this is the button
- * that uses what that panel configures. Plain `control` rather than
- * `control-accent`, so it does not read as a primary action.
- *
- * NOT disabled when no provider is configured. The refusal is a thing worth
- * seeing — "the app still works with nothing configured" is an acceptance
- * criterion, and a greyed-out button proves it by never running the code.
- *
- * `onDidWrite` fires only when the run actually called a tool. The button is in
- * the shared header, so it is pressable from the composition page — where the
- * stub's write (`openBlankPattern`) changes what is open for editing and NOTHING
- * ON SCREEN MOVES. Navigating to where the pattern is is the whole of the fix:
- * the acceptance criterion is "a pattern appears", and on the wrong page it does
- * not.
- */
-function ComposerSmokeTest({ onDidWrite }: { onDidWrite?: () => void }) {
-  const [running, setRunning] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  /** The run in flight, if any. Doubles as the re-entrancy guard. */
-  const inFlightRef = useRef<AbortController | null>(null);
-  const liveRef = useRef(true);
-
-  useEffect(() => {
-    liveRef.current = true;
-    return () => {
-      liveRef.current = false;
-      // Unlike the connection probe, a run has SIDE EFFECTS — it can still be
-      // holding an edit gesture open — so an orphaned one is cancelled rather
-      // than left to finish into a component that is gone.
-      inFlightRef.current?.abort();
-    };
-  }, []);
-
-  const run = () => {
-    // Guarded here rather than with `disabled`. Disabling the button under the
-    // pointer drops focus to <body> — the trap `ConnectorDialog` goes out of its
-    // way to avoid — and a second press is a no-op either way.
-    if (inFlightRef.current) return;
-    const controller = new AbortController();
-    inFlightRef.current = controller;
-    let timedOut = false;
-    // `runConnectionTest`'s rule restated, because it is the same failure:
-    // without a deadline a firewalled host leaves the button spinning for as
-    // long as the tab is open.
-    const deadline = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, RUN_TIMEOUT_MS);
-    setRunning(true);
-    setMessage(null);
-    void runAgentTask(COMPOSER_AGENT, COMPOSER_SMOKE_INPUT, { signal: controller.signal })
-      .then((result) => {
-        if (!liveRef.current) return;
-        if (!result.ok) {
-          setMessage(result.reason);
-          return;
-        }
-        // An abort comes back as a SUCCESS with `stoppedReason: 'aborted'`,
-        // which read plainly says the user cancelled. Nobody cancelled this one.
-        if (timedOut) {
-          setMessage(`Gave up after ${RUN_TIMEOUT_MS / 1000}s — the provider never finished.`);
-          return;
-        }
-        // The tool names are the useful half: a model that answers without
-        // calling anything is the commonest way for this to "work" and change
-        // nothing.
-        setMessage(
-          `${result.value.toolCalls.length === 0 ? 'No tools called' : result.value.toolCalls.join(', ')} — ${result.value.content || result.value.stoppedReason}`,
-        );
-        if (result.value.toolCalls.length > 0) onDidWrite?.();
-      })
-      .finally(() => {
-        window.clearTimeout(deadline);
-        inFlightRef.current = null;
-        if (liveRef.current) setRunning(false);
-      });
-  };
-
-  return (
-    <>
-      <button type="button" onClick={run} className={`${buttonClass} ${running ? 'opacity-60' : ''}`}>
-        {running ? 'Running…' : 'Run composer'}
-      </button>
-      {/* Always mounted for the same reason as the dialog's: a live region that
-          appears with its content is announced inconsistently. Truncated because
-          this sits in the header — the whole sentence is on the title.
-
-          `aria-live` WITHOUT `role="status"`, which would otherwise be the
-          obvious spelling: the connector dialog already owns a `status` region,
-          and a second one in the same tree makes "the status region" ambiguous
-          to a screen reader user moving by role and to `getByRole('status')`.
-          The live behaviour is identical; only the landmark is dropped, and this
-          is the provisional one. */}
-      <span
-        aria-live="polite"
-        title={message ?? undefined}
-        className="max-w-[22ch] truncate font-mono text-[9.5px] text-ink-mut"
-      >
-        {message}
-      </span>
     </>
   );
 }

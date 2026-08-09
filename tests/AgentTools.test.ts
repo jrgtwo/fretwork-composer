@@ -289,6 +289,20 @@ const schemaOf = (name: string): JsonSchema => {
   return tool.parameters;
 };
 
+/**
+ * The schema of ONE entry in a batching tool's array argument.
+ *
+ * Every per-note write is a batch, so the interesting schema — the enums, the
+ * ranges, the required `noteId` — sits one level down inside `items`. A check
+ * written against the top level would pass by asserting nothing about the
+ * values a model actually sends.
+ */
+const entryOf = (name: string, key: string): JsonSchema => {
+  const property = schemaOf(name).properties?.[key];
+  if (!property?.items) throw new Error(`${name}.${key} is not an array of entries`);
+  return property.items;
+};
+
 describe('schemas constrain values to the lib’s own lists', () => {
   it('offers exactly the instruments the lib has, and rejects one it has not', () => {
     for (const schema of [
@@ -326,10 +340,10 @@ describe('schemas constrain values to the lib’s own lists', () => {
     // chosen. The two lists are pinned together HERE rather than by an import,
     // because the labels are the editor's and the semitone values are musical.
     expect(DEPTHS.map((depth) => depth.semitones)).toEqual([...BEND_SEMITONES]);
-    const bend = schemaOf('pattern_set_pitch').properties?.bend;
+    const bend = entryOf('pattern_set_pitches', 'pitches').properties?.bend;
     expect(bend?.properties?.semitones?.enum).toEqual([...BEND_SEMITONES]);
     expect(bend?.properties?.kind?.enum).toEqual([...BEND_KINDS]);
-    expect(schemaOf('pattern_set_articulations').properties?.vibrato?.enum).toEqual([
+    expect(entryOf('pattern_set_articulations', 'notes').properties?.vibrato?.enum).toEqual([
       ...VIBRATOS,
       null,
     ]);
@@ -346,19 +360,68 @@ describe('schemas constrain values to the lib’s own lists', () => {
     ] as const) {
       expect(schemaOf(tool).properties?.[key]?.minLength).toBe(1);
     }
-    expect(schemaViolations(schemaOf('pattern_move_note'), { tick: 0 })).toContain(
+    expect(schemaViolations(entryOf('pattern_move_notes', 'moves'), { tick: 0 })).toContain(
       'missing noteId',
     );
+    expect(schemaViolations(schemaOf('pattern_move_notes'), {})).toContain('missing moves');
   });
 
   it('allows null where null means "clear", and only there', () => {
     // `nullable` has to widen the enum as well as the type, or a validator that
     // checks both refuses the clear it just accepted.
-    const dynamic = schemaOf('pattern_set_dynamic').properties?.dynamic;
+    const dynamic = entryOf('pattern_set_dynamics', 'dynamics').properties?.dynamic;
     expect(dynamic?.type).toEqual(['string', 'null']);
     expect(dynamic?.enum).toContain(null);
     expect(dynamic?.enum).toContain('mf');
-    expect(schemaOf('pattern_set_note_fret').properties?.fret?.type).toBe('integer');
+    expect(entryOf('pattern_set_note_frets', 'frets').properties?.fret?.type).toBe('integer');
+  });
+
+  /**
+   * The defect this whole change was made against: `pattern-fix-timing` has to
+   * correct EVERY note, and one call per note runs the harness out of iterations
+   * half-way and reports `max_iters`, which reads as a model failure and is not
+   * one. Asserted as a property of the registry rather than of four names, so a
+   * future singular write tool fails here rather than in a run.
+   */
+  it('takes every per-note write as a batch, with no singular twin', () => {
+    // The mark of an id-addressed write: a PROPERTY named `noteId`/`noteIds`
+    // exists somewhere in the schema. Matched structurally rather than by
+    // searching the serialised schema for the substring, which a tool whose
+    // description merely mentions note ids would trip, and which a tool that
+    // named its argument `id` would slip past. `pattern_open_blank`,
+    // `pattern_stamp_notes`, `pattern_set_playback` and `pattern_set_instrument`
+    // address no note by id and are not in scope.
+    const namesANote = (schema: JsonSchema | undefined): boolean =>
+      Object.entries(schema?.properties ?? {}).some(
+        ([key, property]) =>
+          key === 'noteId' ||
+          key === 'noteIds' ||
+          namesANote(property) ||
+          namesANote(property.items),
+      );
+    const perNote = AGENT_TOOLS.filter((tool) => namesANote(tool.parameters));
+    expect(perNote.map((tool) => tool.name)).toEqual([
+      'pattern_move_notes',
+      'pattern_resize_notes',
+      'pattern_set_note_frets',
+      'pattern_delete_notes',
+      'pattern_set_articulations',
+      'pattern_set_dynamics',
+      'pattern_set_pitches',
+    ]);
+
+    for (const tool of perNote) {
+      // `noteId` at the TOP level is the singular write this rules out. A second
+      // top-level argument is NOT ruled out — a batch tool that also took, say,
+      // a shared `snapToGrid` would be legitimate — so the assertion is about
+      // where the note id lives, not about how many arguments there are.
+      const properties = Object.entries(tool.parameters.properties ?? {});
+      const singular = properties.some(([key]) => key === 'noteId');
+      expect(`${tool.name}: ${singular ? 'singular' : 'batch'}`).toBe(`${tool.name}: batch`);
+      const batch = properties.find(([, property]) => property.type === 'array');
+      expect(`${tool.name}: ${batch?.[1].type}`).toBe(`${tool.name}: array`);
+      expect(tool.parameters.required).toContain(batch?.[0]);
+    }
   });
 });
 
@@ -396,14 +459,22 @@ describe('reading', () => {
 // -------------------------------------------------------------- refusals ---
 
 describe('refusals reach the caller as sentences', () => {
-  it('refuses an unknown note id', () => {
+  it('refuses an unknown note id, and says WHICH id it could not find', () => {
     seedPattern('Riff');
-    expect(reason(call('pattern_move_note', { noteId: 'ev_nope', tick: 0 }))).toBe(
-      'No such note.',
-    );
-    expect(reason(call('pattern_set_dynamic', { noteId: 'ev_nope', dynamic: 'f' }))).toBe(
-      'No such note.',
-    );
+    // The id is in the sentence. A batch of twenty that comes back "No such
+    // note." tells the model nothing it can act on — which of the twenty? — and
+    // naming them is the whole product of this layer.
+    for (const refused of [
+      reason(call('pattern_move_notes', { moves: [{ noteId: 'ev_nope', tick: 0 }] })),
+      reason(call('pattern_set_dynamics', { dynamics: [{ noteId: 'ev_nope', dynamic: 'f' }] })),
+      reason(call('pattern_resize_notes', { resizes: [{ noteId: 'ev_nope', durationTicks: PPQ }] })),
+      reason(call('pattern_set_note_frets', { frets: [{ noteId: 'ev_nope', fret: 3 }] })),
+      reason(call('pattern_set_articulations', { notes: [{ noteId: 'ev_nope', ghost: true }] })),
+      reason(call('pattern_set_pitches', { pitches: [{ noteId: 'ev_nope' }] })),
+    ]) {
+      expect(refused).toContain('ev_nope');
+      expect(refused).toContain('No such note.');
+    }
   });
 
   it('refuses an unknown track and an unknown block', () => {
@@ -494,11 +565,12 @@ describe('refusals reach the caller as sentences', () => {
     expect(value(call('read_pattern')).frets).toBe(ukulele?.fretCount);
     expect(value(call('read_pattern')).notesAboveTheNeck).toBe(1);
 
-    const raised = value(call('pattern_set_note_fret', {
-      noteId: rows(value(call('read_pattern')).notes)[0].noteId,
-      fret: 20,
-    }));
-    expect(raised.aboveTheNeck).toBe(true);
+    const raised = value(
+      call('pattern_set_note_frets', {
+        frets: [{ noteId: rows(value(call('read_pattern')).notes)[0].noteId, fret: 20 }],
+      }),
+    );
+    expect(rows(raised.applied)[0].aboveTheNeck).toBe(true);
   });
 
   it('refuses an instrument the lib has not got, without relying on the validator', () => {
@@ -671,7 +743,9 @@ describe('one tool call is one undo step', () => {
     )[0].noteId as string;
     clearPatternHistory();
 
-    expect(reason(call('pattern_move_note', { noteId: second, tick: 0 }))).toContain('overlap');
+    expect(reason(call('pattern_move_notes', { moves: [{ noteId: second, tick: 0 }] }))).toContain(
+      'overlap',
+    );
     expect(canUndoPattern()).toBe(false);
   });
 
@@ -744,29 +818,35 @@ describe('editing notes by id', () => {
       ).placed,
     )[0].noteId as string;
 
-    const moved = value(call('pattern_move_note', { noteId: second, tick: PPQ * 4 }));
-    expect(moved.startTick).toBe(PPQ * 4);
-    expect(moved.stringIndex).toBe(0);
+    const moved = value(call('pattern_move_notes', { moves: [{ noteId: second, tick: PPQ * 4 }] }));
+    expect(rows(moved.applied)[0]).toEqual({
+      noteId: second,
+      startTick: PPQ * 4,
+      stringIndex: 0,
+    });
 
     // Onto the seeded note. The lib REJECTS this (the group move clamps, this
     // one does not), leaving the note where it was — which is only visible by
     // reading it back.
-    const refused = reason(call('pattern_move_note', { noteId: second, tick: 0 }));
+    const refused = reason(call('pattern_move_notes', { moves: [{ noteId: second, tick: 0 }] }));
     expect(refused).toContain('overlap');
     const notes = rows(value(call('read_pattern')).notes);
     expect(notes.find((note) => note.noteId === second)?.tick).toBe(PPQ * 4);
 
     // A move to another string is a move, not a refusal.
-    const across = value(call('pattern_move_note', { noteId: second, tick: 0, stringIndex: 3 }));
-    expect(across).toEqual({ startTick: 0, stringIndex: 3 });
+    const across = value(
+      call('pattern_move_notes', { moves: [{ noteId: second, tick: 0, stringIndex: 3 }] }),
+    );
+    expect(rows(across.applied)[0]).toEqual({ noteId: second, startTick: 0, stringIndex: 3 });
   });
 
   it('reports the duration a resize actually kept', () => {
     seedPattern('Riff');
     const noteId = rows(value(call('read_pattern')).notes)[0].noteId as string;
-    expect(value(call('pattern_resize_note', { noteId, durationTicks: PPQ * 2 })).durationTicks).toBe(
-      PPQ * 2,
-    );
+    expect(
+      rows(value(call('pattern_resize_notes', { resizes: [{ noteId, durationTicks: PPQ * 2 }] }))
+        .applied)[0].durationTicks,
+    ).toBe(PPQ * 2);
 
     // Clamped against the next note on the same string, so the request is
     // honoured in part and the reply says by how much.
@@ -776,7 +856,8 @@ describe('editing notes by id', () => {
       }),
     );
     expect(
-      value(call('pattern_resize_note', { noteId, durationTicks: PPQ * 16 })).durationTicks,
+      rows(value(call('pattern_resize_notes', { resizes: [{ noteId, durationTicks: PPQ * 16 }] }))
+        .applied)[0].durationTicks,
     ).toBe(PPQ * 4);
   });
 
@@ -784,7 +865,7 @@ describe('editing notes by id', () => {
     seedPattern('Riff');
     const noteId = rows(value(call('read_pattern')).notes)[0].noteId as string;
 
-    value(call('pattern_set_articulations', { noteId, palmMute: true, ghost: true }));
+    value(call('pattern_set_articulations', { notes: [{ noteId, palmMute: true, ghost: true }] }));
     const first = rows(value(call('read_pattern')).notes)[0].articulations as string[];
     expect(first).toContain('palmMute');
     expect(first).toContain('ghost');
@@ -792,12 +873,12 @@ describe('editing notes by id', () => {
     // An ABSENT key leaves the field alone; `null` clears one. Sending every
     // field unconditionally would wipe `palmMute` here, which is the whole
     // reason the patch is built by conditional spread.
-    value(call('pattern_set_articulations', { noteId, ghost: null }));
+    value(call('pattern_set_articulations', { notes: [{ noteId, ghost: null }] }));
     const second = rows(value(call('read_pattern')).notes)[0].articulations as string[];
     expect(second).toContain('palmMute');
     expect(second).not.toContain('ghost');
 
-    value(call('pattern_set_articulations', { noteId, vibrato: 'wide' }));
+    value(call('pattern_set_articulations', { notes: [{ noteId, vibrato: 'wide' }] }));
     expect(rows(value(call('read_pattern')).notes)[0].articulations).toContain('vibrato:wide');
   });
 
@@ -806,10 +887,8 @@ describe('editing notes by id', () => {
     const noteId = rows(value(call('read_pattern')).notes)[0].noteId as string;
 
     value(
-      call('pattern_set_pitch', {
-        noteId,
-        slideIn: 'below',
-        bend: { kind: 'bend', semitones: 2 },
+      call('pattern_set_pitches', {
+        pitches: [{ noteId, slideIn: 'below', bend: { kind: 'bend', semitones: 2 } }],
       }),
     );
     const flags = rows(value(call('read_pattern')).notes)[0].articulations as string[];
@@ -817,17 +896,398 @@ describe('editing notes by id', () => {
     expect(flags.some((flag) => flag.startsWith('bend:'))).toBe(true);
 
     // The tool REPLACES rather than patches, so no movement means none.
-    value(call('pattern_set_pitch', { noteId }));
+    value(call('pattern_set_pitches', { pitches: [{ noteId }] }));
     expect(rows(value(call('read_pattern')).notes)[0].articulations).toBeUndefined();
   });
 
   it('sets a dynamic and clears it', () => {
     seedPattern('Riff');
     const noteId = rows(value(call('read_pattern')).notes)[0].noteId as string;
-    value(call('pattern_set_dynamic', { noteId, dynamic: 'ff' }));
+    value(call('pattern_set_dynamics', { dynamics: [{ noteId, dynamic: 'ff' }] }));
     expect(rows(value(call('read_pattern')).notes)[0].dynamic).toBe('ff');
-    value(call('pattern_set_dynamic', { noteId, dynamic: null }));
+    value(call('pattern_set_dynamics', { dynamics: [{ noteId, dynamic: null }] }));
     expect(rows(value(call('read_pattern')).notes)[0].dynamic).toBe(null);
+  });
+});
+
+// -------------------------------------------------------- batched editing ---
+
+/**
+ * The reason the per-note writes are plural at all: `pattern-fix-timing` and
+ * `pattern-fit-key` have to touch EVERY note, and one call per note runs the
+ * harness out of iterations half-way through. These check the three things a
+ * batch has to get right — one undo step, partial application, and a refusal
+ * that names the notes it is about.
+ */
+describe('editing many notes in one call', () => {
+  /** Four notes on four strings, one per beat, and the ids in that order. */
+  function seedFour(): string[] {
+    seedPattern('Riff');
+    value(
+      call('pattern_stamp_notes', {
+        notes: [1, 2, 3].map((index) => ({
+          stringIndex: index,
+          fret: 3 + index,
+          tick: PPQ * index,
+          durationTicks: PPQ,
+        })),
+      }),
+    );
+    const notes = rows(value(call('read_pattern')).notes);
+    expect(notes).toHaveLength(4);
+    return notes.map((note) => note.noteId as string);
+  }
+
+  it('applies a whole batch of moves as ONE undo step', () => {
+    const ids = seedFour();
+    clearPatternHistory();
+
+    const moved = value(
+      call('pattern_move_notes', {
+        moves: ids.map((noteId, index) => ({ noteId, tick: PPQ * (index + 8) })),
+      }),
+    );
+    expect(rows(moved.applied)).toHaveLength(4);
+    expect(rows(moved.refused)).toHaveLength(0);
+    const after = rows(value(call('read_pattern')).notes);
+    expect(after.map((note) => note.tick).sort((a, b) => Number(a) - Number(b))).toEqual([
+      PPQ * 8,
+      PPQ * 9,
+      PPQ * 10,
+      PPQ * 11,
+    ]);
+
+    // ONE press, not four. Four steps here is the defect that the depth count in
+    // `patternService` and the single bracket per tool call exist to prevent.
+    patternUndo();
+    const restored = rows(value(call('read_pattern')).notes);
+    expect(restored.map((note) => note.tick).sort((a, b) => Number(a) - Number(b))).toEqual([
+      0,
+      PPQ,
+      PPQ * 2,
+      PPQ * 3,
+    ]);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  /**
+   * The configuration that `seedFour` cannot reach, and the only one where the
+   * ORDER of a batch can decide whether it works: several notes on ONE string.
+   *
+   * The lib rejects a move onto a span another note still occupies, judged
+   * against the pattern as it stands at that instant — so a phrase nudged LATER
+   * on one string refuses every note but the last if the batch is applied in a
+   * single pass, which is precisely the job `pattern-fix-timing` sends and
+   * precisely the order `read_pattern` hands the notes back in.
+   */
+  it('applies a batch on ONE string whatever order it arrives in', () => {
+    value(call('pattern_open_blank', { name: 'Rushed' }));
+    value(
+      call('pattern_stamp_notes', {
+        notes: [1, 2, 3, 4].map((beat) => ({
+          stringIndex: 0,
+          fret: 5,
+          // Ten ticks ahead of the beat, back to back — the note behind each one
+          // is what blocks it, and a single pass would land only the last.
+          tick: PPQ * beat - 10,
+          durationTicks: PPQ,
+        })),
+      }),
+    );
+    const ids = rows(value(call('read_pattern')).notes).map((note) => note.noteId as string);
+    expect(ids).toHaveLength(4);
+    clearPatternHistory();
+
+    const moved = value(
+      call('pattern_move_notes', {
+        moves: ids.map((noteId, index) => ({ noteId, tick: PPQ * (index + 1) })),
+      }),
+    );
+    expect(rows(moved.refused)).toHaveLength(0);
+    expect(rows(moved.applied)).toHaveLength(4);
+    expect(rows(value(call('read_pattern')).notes).map((note) => note.tick)).toEqual([
+      PPQ,
+      PPQ * 2,
+      PPQ * 3,
+      PPQ * 4,
+    ]);
+
+    // Retried passes are still inside the one bracket.
+    patternUndo();
+    expect(rows(value(call('read_pattern')).notes).map((note) => note.tick)).toEqual([
+      PPQ - 10,
+      PPQ * 2 - 10,
+      PPQ * 3 - 10,
+      PPQ * 4 - 10,
+    ]);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  it('applies the edits it can and names the ones it could not', () => {
+    // THE PARTIAL-FAILURE RULE, which is the design decision this batching
+    // forced: the seventeen that work land, and the three that do not come back
+    // by id with the seam's own sentence. Refusing the whole call would cost the
+    // round trips the batch exists to save, and (LIB-GAP(20)) could only be
+    // implemented by writing and rolling back.
+    const ids = seedFour();
+    clearPatternHistory();
+
+    const result = value(
+      call('pattern_set_note_frets', {
+        frets: [
+          { noteId: ids[0], fret: 9 },
+          { noteId: 'ev_nope', fret: 9 },
+          { noteId: ids[2], fret: 11 },
+        ],
+      }),
+    );
+
+    const applied = rows(result.applied);
+    expect(applied.map((entry) => entry.noteId)).toEqual([ids[0], ids[2]]);
+    expect(applied.map((entry) => entry.fret)).toEqual([9, 11]);
+
+    const refused = rows(result.refused);
+    expect(refused).toHaveLength(1);
+    expect(refused[0].noteId).toBe('ev_nope');
+    expect(refused[0].reason).toBe('No such note.');
+
+    // The two that landed really landed, and undo takes both back together.
+    const frets = new Map(
+      rows(value(call('read_pattern')).notes).map((note) => [note.noteId, note.fret]),
+    );
+    expect(frets.get(ids[0])).toBe(9);
+    expect(frets.get(ids[2])).toBe(11);
+    patternUndo();
+    expect(rows(value(call('read_pattern')).notes).map((note) => note.fret)).toEqual([5, 4, 5, 6]);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  /**
+   * The other half of the partial-failure rule. The `ev_nope` case above is
+   * refused at the id check, BEFORE anything is written; this one is declined by
+   * the lib AFTER `capture()` and after the store write (LIB-GAP(20): the op
+   * returns the pattern unchanged), which is where "a step was pushed and the
+   * refused note is untouched" actually has to hold.
+   */
+  it('applies the rest when the LIB declines a move, and leaves that note alone', () => {
+    const ids = seedFour();
+    clearPatternHistory();
+
+    const result = value(
+      call('pattern_move_notes', {
+        moves: [
+          // Onto string 1, where ids[1] sits at PPQ and is not going anywhere in
+          // this batch — so no number of retries can free it.
+          { noteId: ids[0], tick: PPQ, stringIndex: 1 },
+          { noteId: ids[2], tick: PPQ * 8 },
+          { noteId: ids[3], tick: PPQ * 9 },
+        ],
+      }),
+    );
+
+    expect(rows(result.applied).map((entry) => entry.noteId)).toEqual([ids[2], ids[3]]);
+    const refused = rows(result.refused);
+    expect(refused).toHaveLength(1);
+    expect(refused[0].noteId).toBe(ids[0]);
+    expect(refused[0].reason).toContain('overlap');
+
+    const before = new Map(
+      rows(value(call('read_pattern')).notes).map((note) => [note.noteId, note.tick]),
+    );
+    // Untouched: still on string 0 at 0, not half-moved.
+    expect(before.get(ids[0])).toBe(0);
+    expect(before.get(ids[2])).toBe(PPQ * 8);
+
+    patternUndo();
+    expect(
+      rows(value(call('read_pattern')).notes)
+        .map((note) => Number(note.tick))
+        .sort((a, b) => a - b),
+    ).toEqual([0, PPQ, PPQ * 2, PPQ * 3]);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  it('refuses — rather than reporting an empty success — when nothing applied', () => {
+    // `ok` with an empty `applied` is the unrecoverable answer: it reads to a
+    // model as "done". A batch where every entry was refused is a refusal, and
+    // it carries every note and every reason.
+    const ids = seedFour();
+    clearPatternHistory();
+
+    const refused = reason(
+      call('pattern_move_notes', {
+        // Both onto notes that are already sounding there — the lib declines the
+        // move and leaves each note where it was.
+        moves: [
+          { noteId: ids[0], tick: PPQ, stringIndex: 1 },
+          { noteId: ids[2], tick: PPQ * 3, stringIndex: 3 },
+        ],
+      }),
+    );
+    expect(refused).toContain(ids[0]);
+    expect(refused).toContain(ids[2]);
+    expect(refused).toContain('overlap');
+
+    // Nothing moved, so nothing to undo. A step here would restore a state the
+    // pattern never left, and would cost the user a press to discover that.
+    expect(rows(value(call('read_pattern')).notes).map((note) => note.tick)).toEqual([
+      0,
+      PPQ,
+      PPQ * 2,
+      PPQ * 3,
+    ]);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  it('marks a whole articulation pass in one call, one step', () => {
+    const ids = seedFour();
+    clearPatternHistory();
+
+    const marked = value(
+      call('pattern_set_articulations', {
+        notes: ids.map((noteId) => ({ noteId, palmMute: true })),
+      }),
+    );
+    expect(rows(marked.applied)).toHaveLength(4);
+    for (const note of rows(value(call('read_pattern')).notes)) {
+      expect(note.articulations).toContain('palmMute');
+    }
+
+    patternUndo();
+    for (const note of rows(value(call('read_pattern')).notes)) {
+      expect(note.articulations).toBeUndefined();
+    }
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  // Asserted on its own, and with its own undo: `pattern_set_dynamics` and
+  // `pattern_set_pitches` had NO gesture at all before they became batches, so
+  // "four steps instead of one" is a live mutation here and is invisible if the
+  // undo is shared with a later call's step.
+  it('shapes every dynamic in one call, one step', () => {
+    const ids = seedFour();
+    clearPatternHistory();
+
+    value(
+      call('pattern_set_dynamics', {
+        dynamics: ids.map((noteId, index) => ({ noteId, dynamic: index < 2 ? 'p' : 'ff' })),
+      }),
+    );
+    expect(rows(value(call('read_pattern')).notes).map((note) => note.dynamic)).toEqual([
+      'p',
+      'p',
+      'ff',
+      'ff',
+    ]);
+
+    expect(canUndoPattern()).toBe(true);
+    patternUndo();
+    expect(rows(value(call('read_pattern')).notes).map((note) => note.dynamic)).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  it('sets pitch movement on every note in one call, one step', () => {
+    const ids = seedFour();
+    clearPatternHistory();
+
+    const set = value(
+      call('pattern_set_pitches', {
+        pitches: ids.map((noteId) => ({ noteId, slideOut: 'down' })),
+      }),
+    );
+    expect(rows(set.applied)).toHaveLength(4);
+    for (const note of rows(value(call('read_pattern')).notes)) {
+      expect(note.articulations).toContain('slideOut:down');
+    }
+
+    patternUndo();
+    for (const note of rows(value(call('read_pattern')).notes)) {
+      expect(note.articulations).toBeUndefined();
+    }
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  it('sets every length in one call, one step', () => {
+    const ids = seedFour();
+    clearPatternHistory();
+
+    const resized = value(
+      call('pattern_resize_notes', {
+        resizes: ids.map((noteId) => ({ noteId, durationTicks: PPQ / 2 })),
+      }),
+    );
+    expect(rows(resized.applied).map((entry) => entry.durationTicks)).toEqual([
+      PPQ / 2,
+      PPQ / 2,
+      PPQ / 2,
+      PPQ / 2,
+    ]);
+
+    expect(canUndoPattern()).toBe(true);
+    patternUndo();
+    expect(rows(value(call('read_pattern')).notes).map((note) => note.durationTicks)).toEqual([
+      PPQ,
+      PPQ,
+      PPQ,
+      PPQ,
+    ]);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  /**
+   * A stamp has no id to name an entry by, so the refusal names the string and
+   * tick the model itself sent — EVERY one of them. One reason out of a phrase
+   * that failed end to end leaves the model re-sending blind, which is the same
+   * unrecoverable answer the plural writes exist to avoid.
+   */
+  it('names every entry of a stamp that placed nothing at all', () => {
+    seedPattern('Riff');
+    value(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 1, fret: 7, tick: 0, durationTicks: PPQ }],
+      }),
+    );
+    clearPatternHistory();
+
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [
+          { stringIndex: 0, fret: 3, tick: 0, durationTicks: PPQ },
+          { stringIndex: 1, fret: 3, tick: 0, durationTicks: PPQ },
+        ],
+      }),
+    );
+    expect(refused).toContain('string 0 tick 0');
+    expect(refused).toContain('string 1 tick 0');
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(2);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  /**
+   * The seam's own sentence, not the tools'. With nothing open every id lookup
+   * fails, and answering "No such note." twenty times told the model twenty
+   * notes had vanished — unrecoverable — rather than that there was nothing to
+   * edit, which it can act on by opening a pattern.
+   */
+  it('says the pattern is not open rather than that the notes do not exist', () => {
+    for (const [tool, args] of [
+      ['pattern_move_notes', { moves: [{ noteId: 'ev_1', tick: 0 }] }],
+      ['pattern_resize_notes', { resizes: [{ noteId: 'ev_1', durationTicks: PPQ }] }],
+      ['pattern_set_note_frets', { frets: [{ noteId: 'ev_1', fret: 3 }] }],
+      ['pattern_set_articulations', { notes: [{ noteId: 'ev_1', ghost: true }] }],
+      ['pattern_set_dynamics', { dynamics: [{ noteId: 'ev_1', dynamic: 'f' }] }],
+      ['pattern_set_pitches', { pitches: [{ noteId: 'ev_1' }] }],
+      ['pattern_delete_notes', { noteIds: ['ev_1'] }],
+    ] as const) {
+      // The batch tools wrap the seam's sentence per entry; `pattern_delete_notes`
+      // is all-or-nothing and passes it straight through.
+      expect(`${tool}: ${reason(call(tool, args))}`).toContain('No pattern is open.');
+    }
   });
 });
 

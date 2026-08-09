@@ -24,6 +24,50 @@
  *     open. `pattern_open_blank` is the agent's way to get one.
  *   - **Pattern length.** There is none to set: the lib auto-fits a pattern's
  *     duration to its content on every edit (`fitPatternDuration`).
+ *
+ * ── Every write here is a BATCH, and why ───────────────────────────────────
+ *
+ * There is no singular `pattern_move_note`. A corrective command — "fix the
+ * timing", "fit this to a key" — has to touch EVERY note, and one tool call per
+ * note runs a twenty-note pattern into `runAgentTask`'s iteration ceiling and
+ * stops half-done reporting `max_iters`, which reads as a model failure and is
+ * not one. `pattern_delete_notes` was already plural; the singular tools were
+ * the inconsistency, and they are gone rather than doubled up — two tools that
+ * do one thing is a worse surface for a model, not a better one.
+ *
+ * ── Partial failure: APPLY WHAT CAN BE APPLIED, and name what could not ────
+ *
+ * When 3 of 20 edits are refused, the other 17 land and the reply carries the
+ * three by note id with the seam's own sentence for each. The alternative —
+ * refusing the whole call — was rejected for three reasons:
+ *
+ *   1. It would cost the round trips this batching exists to save. The model's
+ *      only recovery from an all-or-nothing refusal is to re-send nineteen
+ *      identical edits with one changed, which is the loop we started from.
+ *   2. Refusing whole is not even *cheap* here. Every refusal these seams
+ *      produce is discoverable only AFTER the write (LIB-GAP(20): the lib's ops
+ *      decline by returning the pattern unchanged), so "all or nothing" would
+ *      mean writing and then rolling back, and this layer has no rollback that
+ *      is not the user's own undo. Contrast `pattern_delete_notes`, which stays
+ *      all-or-nothing precisely because a missing id IS checkable up front.
+ *   3. Each edit here is independent. One note that will not move says nothing
+ *      about the other nineteen — unlike a delete, where a caller that cannot
+ *      see the pattern must not be left guessing which half went.
+ *
+ * A batch in which NOTHING applied is a refusal, not an empty success: `ok`
+ * with zero applied is the unrecoverable answer this layer exists to avoid, so
+ * that case comes back as `{ok:false}` naming every note and reason.
+ *
+ * ── And ORDER is not the model's problem ───────────────────────────────────
+ *
+ * Some refusals are about the pattern at that instant rather than about the
+ * edit: the lib rejects a move onto a slot a note LATER in the same batch is
+ * about to vacate. Left alone, a phrase nudged later on one string — the exact
+ * job `pattern-fix-timing` sends, in the exact order `read_pattern` returns —
+ * would refuse every note but the last, and the model's only recovery would be
+ * the re-send this batching exists to remove. So `eachNote` retries the refused
+ * entries while a pass keeps unblocking something. Sorting by target tick would
+ * not do: it breaks on swaps.
  */
 import {
   DYNAMICS,
@@ -78,6 +122,7 @@ import {
   str,
   type AgentTool,
   type JsonValue,
+  type ToolResult,
 } from './types';
 
 // The enumerable values, taken from the seam (which takes them from the lib's
@@ -128,6 +173,89 @@ function oneUndoStep<T>(write: () => T, changed: (value: T) => boolean): T {
  *  one field on the way out, because nothing else will ever mention it. */
 const neckReport = (fret: number): { aboveTheNeck?: true } =>
   fret > fretCount() ? { aboveTheNeck: true } : {};
+
+/** How many refusals a refusal sentence names before it stops. A 200-entry
+ *  batch that fails end to end is one sentence per note otherwise, which is
+ *  prompt budget spent restating the same thing. */
+const REFUSALS_NAMED = 10;
+
+/**
+ * The refusals, named. A model can only recover from a refusal it can act on,
+ * and "some of them are wrong" is not one — these sentences are the seam's
+ * product and are passed on verbatim, one per entry.
+ */
+function namedRefusals(refused: readonly { label: string; reason: string }[]): string {
+  const named = refused
+    .slice(0, REFUSALS_NAMED)
+    .map((entry) => `${entry.label}: ${entry.reason}`)
+    .join(' ');
+  const rest = refused.length - REFUSALS_NAMED;
+  return rest > 0 ? `${named} …and ${rest} more.` : named;
+}
+
+/**
+ * Apply one id-addressed edit per note, as ONE undo step, reporting each
+ * outcome separately. The partial-failure rule this implements is argued at the
+ * top of the file.
+ *
+ * PASSES, not one loop. Some of these refusals are about the pattern as it
+ * stands at that instant rather than about the edit: the lib REJECTS a move
+ * onto a slot still held by a note that a later entry in the same batch is
+ * about to vacate, so a phrase nudged later on one string would refuse every
+ * note but the last — exactly the job `pattern-fix-timing` sends. Retrying only
+ * what was refused, and only while a pass unblocks something, makes array order
+ * irrelevant and handles swaps, which sorting by target tick does not. It is
+ * bounded by `edits.length` passes and it happens inside the one bracket, so
+ * undo is unaffected. Entries that already applied are never re-run.
+ *
+ * The `applied` list rather than a count decides whether an undo step is
+ * pushed. A batch every entry of which was refused wrote nothing worth
+ * restoring — not because the refusals all precede the snapshot (they do not:
+ * `moveNote` learns of an overlap only by reading the note back AFTER
+ * `capture()`), but because `history.capture` is a no-op while a gesture is
+ * open, so the bracket swallows it either way and the lib's op left the pattern
+ * unchanged.
+ */
+function eachNote<E extends { readonly noteId: string }>(
+  edits: readonly E[],
+  apply: (edit: E) => ToolResult,
+): ToolResult {
+  return oneUndoStep(
+    () => {
+      const applied: JsonValue[] = [];
+      let pending: readonly E[] = edits;
+      let refused: { noteId: string; reason: string }[] = [];
+      while (pending.length > 0) {
+        const stillPending: E[] = [];
+        const reasons: { noteId: string; reason: string }[] = [];
+        for (const edit of pending) {
+          const result = apply(edit);
+          if (result.ok) applied.push(result.value);
+          else {
+            stillPending.push(edit);
+            reasons.push({ noteId: edit.noteId, reason: result.reason });
+          }
+        }
+        refused = reasons;
+        // No progress: every entry still refused is refused for its own sake,
+        // and running it again would only produce the same sentence.
+        pending = stillPending.length < pending.length ? stillPending : [];
+      }
+      if (applied.length > 0) return ok({ applied, refused });
+      return fail(
+        refused.length === 0
+          ? 'No edits were sent.'
+          : `Nothing changed. ${namedRefusals(
+              refused.map((entry) => ({ label: entry.noteId, reason: entry.reason })),
+            )}`,
+      );
+    },
+    (result) => result.ok,
+  );
+}
+
+const NOTE_ID =
+  'The note to change, from read_pattern. One entry per note — a note named twice is edited twice.';
 
 // ------------------------------------------------------------------ notes ---
 
@@ -192,83 +320,124 @@ const stampNotes = defineTool<StampArgs>({
         // Partial success is reported as success WITH the casualties, because
         // half a phrase that landed is a state the model has to know about
         // before it tries again. Nothing landing at all is a refusal, and it
-        // carries the first reason — an empty "ok" is the unrecoverable answer
-        // this whole layer exists to avoid.
+        // carries EVERY reason — an empty "ok" is the unrecoverable answer this
+        // whole layer exists to avoid, and one reason out of twenty leaves the
+        // model re-sending blind. A stamp has no id yet, so an entry is named by
+        // the string and tick the model itself sent.
         return placed.length === 0 && refused.length > 0
-          ? fail(`No note could be placed. ${refused[0].reason}`)
+          ? fail(
+              `No note could be placed. ${namedRefusals(
+                refused.map((entry) => ({
+                  label: `string ${notes[entry.index].stringIndex} tick ${notes[entry.index].tick}`,
+                  reason: entry.reason,
+                })),
+              )}`,
+            )
           : ok({ placed, refused });
       },
       (result) => result.ok,
     ),
 });
 
-const moveNoteTool = defineTool<{ noteId: string; tick: number; stringIndex?: number }>({
-  name: 'pattern_move_note',
+interface MoveEdit {
+  noteId: string;
+  tick: number;
+  stringIndex?: number;
+}
+
+const moveNotesTool = defineTool<{ moves: readonly MoveEdit[] }>({
+  name: 'pattern_move_notes',
   description:
-    'Move one note in time, and optionally to another string. Reports where it actually ended up — a move onto a string that is already sounding at that moment is refused and the note stays put.',
+    'Move notes in time, and optionally onto other strings. Send every move you want in one call — they land as a single undo step, and the order you list them in does not matter: a move blocked by a note that another move in the same call clears out of the way is retried once that note has gone. Each note reports where it actually ended up; a move onto a string that is still sounding at that moment when nothing else can free it is refused, that note stays put, and the rest of the batch still applies.',
   parameters: obj(
     {
-      noteId: str('The note to move, from read_pattern.'),
-      tick: int(`Where the note should start. ${TICKS}`, { min: 0 }),
-      stringIndex: int(`${STRING_INDEX} Omit to keep the note on its string.`, { min: 0 }),
+      moves: arr(
+        obj(
+          {
+            noteId: str(NOTE_ID),
+            tick: int(`Where the note should start. ${TICKS}`, { min: 0 }),
+            stringIndex: int(`${STRING_INDEX} Omit to keep the note on its string.`, { min: 0 }),
+          },
+          ['noteId', 'tick'],
+        ),
+        'The moves to make.',
+      ),
     },
-    ['noteId', 'tick'],
+    ['moves'],
   ),
-  // Bracketed like the batching tools even though it is one write: the seam
-  // snapshots BEFORE it knows the lib will reject the move, so an unbracketed
-  // refusal would hand back `{ok:false}` and still grow the user's undo stack
-  // with a step that restores the state it never left.
-  run: ({ noteId, tick, stringIndex }) =>
-    oneUndoStep(
-      () => fromResult(moveNote(noteId, tick, stringIndex), (at) => ({ ...at })),
-      (result) => result.ok,
+  // The bracket is `eachNote`'s, and it matters even for a batch of one: the
+  // seam snapshots BEFORE it knows the lib will reject the move, so an
+  // unbracketed refusal would hand back `{ok:false}` and still grow the user's
+  // undo stack with a step that restores the state it never left.
+  run: ({ moves }) =>
+    eachNote(moves, (move) =>
+      fromResult(moveNote(move.noteId, move.tick, move.stringIndex), (at) => ({
+        noteId: move.noteId,
+        ...at,
+      })),
     ),
 });
 
-const resizeNoteTool = defineTool<{ noteId: string; durationTicks: number }>({
-  name: 'pattern_resize_note',
+interface ResizeEdit {
+  noteId: string;
+  durationTicks: number;
+}
+
+const resizeNotesTool = defineTool<{ resizes: readonly ResizeEdit[] }>({
+  name: 'pattern_resize_notes',
   description:
-    'Change how long one note sounds. The value that stuck comes back — a note is clamped so it cannot run into the next one on its string.',
+    'Change how long notes sound. Send every length you want in one call — they land as a single undo step. The value that stuck comes back for each note, because a note is clamped so it cannot run into the next one on its string.',
   parameters: obj(
     {
-      noteId: str('The note to resize, from read_pattern.'),
-      durationTicks: int(TICKS, { min: 1 }),
+      resizes: arr(
+        obj({ noteId: str(NOTE_ID), durationTicks: int(TICKS, { min: 1 }) }, [
+          'noteId',
+          'durationTicks',
+        ]),
+        'The new lengths.',
+      ),
     },
-    ['noteId', 'durationTicks'],
+    ['resizes'],
   ),
-  run: ({ noteId, durationTicks }) =>
-    oneUndoStep(
+  run: ({ resizes }) =>
+    eachNote(resizes, (resize) =>
       // An object, like every other reply here: a bare number gives the model
       // nothing to check it against.
-      () =>
-        fromResult(resizeNote(noteId, durationTicks), (applied) => ({
-          noteId,
-          durationTicks: applied,
-        })),
-      (result) => result.ok,
+      fromResult(resizeNote(resize.noteId, resize.durationTicks), (applied) => ({
+        noteId: resize.noteId,
+        durationTicks: applied,
+      })),
     ),
 });
 
-const setNoteFretTool = defineTool<{ noteId: string; fret: number }>({
-  name: 'pattern_set_note_fret',
+interface FretEdit {
+  noteId: string;
+  fret: number;
+}
+
+const setNoteFretsTool = defineTool<{ frets: readonly FretEdit[] }>({
+  name: 'pattern_set_note_frets',
   description:
-    "Change which fret one note is played at — its pitch on its own string. A fret past the end of this instrument's neck is accepted and comes back marked aboveTheNeck, which means the note will never sound.",
+    "Change which fret notes are played at — their pitch on the strings they are already on. Send the whole re-fretting in one call; it lands as a single undo step. A fret past the end of this instrument's neck is accepted and that note comes back marked aboveTheNeck, which means it will never sound.",
   parameters: obj(
     {
-      noteId: str('The note to change, from read_pattern.'),
-      fret: int(FRET, { min: 0, max: MAX_FRET }),
+      frets: arr(
+        obj({ noteId: str(NOTE_ID), fret: int(FRET, { min: 0, max: MAX_FRET }) }, [
+          'noteId',
+          'fret',
+        ]),
+        'The frets to set.',
+      ),
     },
-    ['noteId', 'fret'],
+    ['frets'],
   ),
-  run: ({ noteId, fret }) =>
-    oneUndoStep(
-      () =>
-        fromResult(setNoteFret(noteId, fret), (applied) => ({
-          noteId,
-          fret: applied,
-          ...neckReport(applied),
-        })),
-      (result) => result.ok,
+  run: ({ frets }) =>
+    eachNote(frets, (edit) =>
+      fromResult(setNoteFret(edit.noteId, edit.fret), (applied) => ({
+        noteId: edit.noteId,
+        fret: applied,
+        ...neckReport(applied),
+      })),
     ),
 });
 
@@ -289,7 +458,7 @@ const deleteNotesTool = defineTool<{ noteIds: readonly string[] }>({
 
 // ---------------------------------------------------------- articulations ---
 
-interface ArticulationArgs {
+interface ArticulationEdit {
   noteId: string;
   hammerOn?: boolean | null;
   pullOff?: boolean | null;
@@ -301,68 +470,99 @@ interface ArticulationArgs {
   tieToNext?: boolean | null;
 }
 
-const setArticulationsTool = defineTool<ArticulationArgs>({
+/**
+ * An ABSENT key leaves the field alone; a key present with `undefined` clears
+ * it — that is the lib's `key in patch` rule, and it is why each field is
+ * spread conditionally instead of being written as `field ?? undefined`
+ * unconditionally, which would clear every field the model didn't send.
+ */
+const articulationPatch = (edit: ArticulationEdit) => ({
+  ...(edit.hammerOn !== undefined && { hammerOn: edit.hammerOn ?? undefined }),
+  ...(edit.pullOff !== undefined && { pullOff: edit.pullOff ?? undefined }),
+  ...(edit.palmMute !== undefined && { palmMute: edit.palmMute ?? undefined }),
+  ...(edit.ghost !== undefined && { ghost: edit.ghost ?? undefined }),
+  ...(edit.dead !== undefined && { dead: edit.dead ?? undefined }),
+  ...(edit.tap !== undefined && { tap: edit.tap ?? undefined }),
+  ...(edit.vibrato !== undefined && { vibrato: edit.vibrato ?? undefined }),
+  ...(edit.tieToNext !== undefined && { tieToNext: edit.tieToNext ?? undefined }),
+});
+
+const setArticulationsTool = defineTool<{ notes: readonly ArticulationEdit[] }>({
   name: 'pattern_set_articulations',
   description:
-    'Set how one note is played. Send only the fields you want to change; send null to clear one. Hammer-on and pull-off are kept mutually exclusive. NOTE about tieToNext: tying a note DISCARDS the following note entirely, so anything set on that note — its articulations, its dynamic — stops sounding.',
+    'Set how notes are played. Send a whole articulation pass in one call — it lands as a single undo step. For each note send only the fields you want to change; send null to clear one. Hammer-on and pull-off are kept mutually exclusive. NOTE about tieToNext: tying a note DISCARDS the following note entirely, so anything set on that note — its articulations, its dynamic — stops sounding.',
   parameters: obj(
     {
-      noteId: str('The note to change, from read_pattern.'),
-      hammerOn: nullable(bool('Hammered on from the previous note.')),
-      pullOff: nullable(bool('Pulled off from the previous note.')),
-      palmMute: nullable(bool('Muted with the palm at the bridge.')),
-      ghost: nullable(bool('Ghost note — felt, barely pitched.')),
-      dead: nullable(bool('Dead / muted string click.')),
-      tap: nullable(bool('Tapped with the fretting hand.')),
-      vibrato: nullable(str('Vibrato width.', VIBRATOS)),
-      tieToNext: nullable(
-        bool('Tie into the next note on this string. The next note is discarded, not merged.'),
+      notes: arr(
+        obj(
+          {
+            noteId: str(NOTE_ID),
+            hammerOn: nullable(bool('Hammered on from the previous note.')),
+            pullOff: nullable(bool('Pulled off from the previous note.')),
+            palmMute: nullable(bool('Muted with the palm at the bridge.')),
+            ghost: nullable(bool('Ghost note — felt, barely pitched.')),
+            dead: nullable(bool('Dead / muted string click.')),
+            tap: nullable(bool('Tapped with the fretting hand.')),
+            vibrato: nullable(str('Vibrato width.', VIBRATOS)),
+            tieToNext: nullable(
+              bool(
+                'Tie into the next note on this string. The next note is discarded, not merged.',
+              ),
+            ),
+          },
+          ['noteId'],
+        ),
+        'The notes to mark, one entry each.',
       ),
     },
-    ['noteId'],
+    ['notes'],
   ),
-  // An ABSENT key leaves the field alone; a key present with `undefined` clears
-  // it — that is the lib's `key in patch` rule, and it is why each field is
-  // spread conditionally instead of being written as `field ?? undefined`
-  // unconditionally, which would clear every field the model didn't send.
-  run: ({ noteId, ...fields }) =>
-    fromResult(
-      setArticulations(noteId, {
-        ...(fields.hammerOn !== undefined && { hammerOn: fields.hammerOn ?? undefined }),
-        ...(fields.pullOff !== undefined && { pullOff: fields.pullOff ?? undefined }),
-        ...(fields.palmMute !== undefined && { palmMute: fields.palmMute ?? undefined }),
-        ...(fields.ghost !== undefined && { ghost: fields.ghost ?? undefined }),
-        ...(fields.dead !== undefined && { dead: fields.dead ?? undefined }),
-        ...(fields.tap !== undefined && { tap: fields.tap ?? undefined }),
-        ...(fields.vibrato !== undefined && { vibrato: fields.vibrato ?? undefined }),
-        ...(fields.tieToNext !== undefined && { tieToNext: fields.tieToNext ?? undefined }),
-      }),
-      () => ({ noteId }),
+  run: ({ notes }) =>
+    eachNote(notes, (edit) =>
+      fromResult(setArticulations(edit.noteId, articulationPatch(edit)), () => ({
+        noteId: edit.noteId,
+      })),
     ),
 });
 
-const setDynamicTool = defineTool<{ noteId: string; dynamic: string | null }>({
-  name: 'pattern_set_dynamic',
+interface DynamicEdit {
+  noteId: string;
+  dynamic: string | null;
+}
+
+const setDynamicsTool = defineTool<{ dynamics: readonly DynamicEdit[] }>({
+  name: 'pattern_set_dynamics',
   description:
-    'Set how hard one note is struck, or null to leave it at the default. The mark and the velocity playback reads are written together, so they cannot disagree.',
+    'Set how hard notes are struck, or null to leave one at the default. Send the whole shape of a phrase in one call — it lands as a single undo step. The mark and the velocity playback reads are written together, so they cannot disagree.',
   parameters: obj(
     {
-      noteId: str('The note to change, from read_pattern.'),
-      // The list is `DYNAMIC_VELOCITY`'s own keys, ordered softest to loudest by
-      // the curve rather than by how the lib's literal happens to be written.
-      dynamic: nullable(
-        str(`Softest to loudest: ${DYNAMICS.join(', ')}. Null clears it.`, DYNAMICS),
+      dynamics: arr(
+        obj(
+          {
+            noteId: str(NOTE_ID),
+            // The list is `DYNAMIC_VELOCITY`'s own keys, ordered softest to
+            // loudest by the curve rather than by how the lib's literal happens
+            // to be written.
+            dynamic: nullable(
+              str(`Softest to loudest: ${DYNAMICS.join(', ')}. Null clears it.`, DYNAMICS),
+            ),
+          },
+          ['noteId', 'dynamic'],
+        ),
+        'The dynamics to set.',
       ),
     },
-    ['noteId', 'dynamic'],
+    ['dynamics'],
   ),
-  run: ({ noteId, dynamic }) =>
-    fromResult(
-      setNoteDynamic(
-        noteId,
-        dynamic === null ? undefined : (dynamic as (typeof DYNAMICS)[number]),
+  run: ({ dynamics }) =>
+    eachNote(dynamics, (edit) =>
+      fromResult(
+        setNoteDynamic(
+          edit.noteId,
+          edit.dynamic === null ? undefined : (edit.dynamic as (typeof DYNAMICS)[number]),
+        ),
+        () => ({ noteId: edit.noteId, dynamic: edit.dynamic }),
       ),
-      () => ({ noteId, dynamic }),
     ),
 });
 
@@ -370,47 +570,57 @@ const setDynamicTool = defineTool<{ noteId: string; dynamic: string | null }>({
 // field already means "not this one" and a clear is the call with no fields.
 // Declaring a null the schema does not allow would only produce a validation
 // error the model cannot act on.
-interface PitchArgs {
+interface PitchEdit {
   noteId: string;
   slideIn?: SlideIn;
   slideOut?: SlideOut;
   bend?: { kind: BendKind; semitones: number };
 }
 
-const setPitchTool = defineTool<PitchArgs>({
-  name: 'pattern_set_pitch',
+const setPitchesTool = defineTool<{ pitches: readonly PitchEdit[] }>({
+  name: 'pattern_set_pitches',
   description:
-    "Set a note's pitch movement — slides into or out of it, and bends. This REPLACES whatever movement the note had; send it with no movement fields to clear.",
+    "Set notes' pitch movement — slides into or out of them, and bends. Send them all in one call; it lands as a single undo step. Each entry REPLACES whatever movement that note had, so an entry with no movement fields clears it.",
   parameters: obj(
     {
-      noteId: str('The note to change, from read_pattern.'),
-      slideIn: str('Slide into the note from below or above.', SLIDE_INS),
-      slideOut: str('Slide off the note downward or upward.', SLIDE_OUTS),
-      bend: obj(
-        {
-          kind: str('Bend shape.', BEND_KINDS),
-          // The depths the editor offers, and the only ones it can DRAW: it
-          // matches a note's depth against this exact list, so 1.5 renders as a
-          // bend with no depth selected. A range with invented ends is the
-          // free-text mistake these schemas exist to prevent.
-          semitones: numFrom(
-            `How far the bend travels: ${BEND_SEMITONES.join(', ')} semitones (2 is a full step).`,
-            BEND_SEMITONES,
-          ),
-        },
-        ['kind', 'semitones'],
+      pitches: arr(
+        obj(
+          {
+            noteId: str(NOTE_ID),
+            slideIn: str('Slide into the note from below or above.', SLIDE_INS),
+            slideOut: str('Slide off the note downward or upward.', SLIDE_OUTS),
+            bend: obj(
+              {
+                kind: str('Bend shape.', BEND_KINDS),
+                // The depths the editor offers, and the only ones it can DRAW:
+                // it matches a note's depth against this exact list, so 1.5
+                // renders as a bend with no depth selected. A range with
+                // invented ends is the free-text mistake these schemas exist to
+                // prevent.
+                semitones: numFrom(
+                  `How far the bend travels: ${BEND_SEMITONES.join(', ')} semitones (2 is a full step).`,
+                  BEND_SEMITONES,
+                ),
+              },
+              ['kind', 'semitones'],
+            ),
+          },
+          ['noteId'],
+        ),
+        'The movements to set, one entry per note.',
       ),
     },
-    ['noteId'],
+    ['pitches'],
   ),
-  run: ({ noteId, slideIn, slideOut, bend }) => {
-    const pitch: NotePitch = {
-      ...(slideIn ? { slideIn } : {}),
-      ...(slideOut ? { slideOut } : {}),
-      ...(bend ? { bend } : {}),
-    };
-    return fromResult(setNotePitch(noteId, pitch), () => ({ noteId }));
-  },
+  run: ({ pitches }) =>
+    eachNote(pitches, (edit) => {
+      const pitch: NotePitch = {
+        ...(edit.slideIn ? { slideIn: edit.slideIn } : {}),
+        ...(edit.slideOut ? { slideOut: edit.slideOut } : {}),
+        ...(edit.bend ? { bend: edit.bend } : {}),
+      };
+      return fromResult(setNotePitch(edit.noteId, pitch), () => ({ noteId: edit.noteId }));
+    }),
 });
 
 // --------------------------------------------------------------- pattern ---
@@ -501,13 +711,13 @@ const setInstrument = defineTool<{ instrumentId: string }>({
 export const PATTERN_TOOLS: readonly AgentTool[] = [
   openBlank,
   stampNotes,
-  moveNoteTool,
-  resizeNoteTool,
-  setNoteFretTool,
+  moveNotesTool,
+  resizeNotesTool,
+  setNoteFretsTool,
   deleteNotesTool,
   setArticulationsTool,
-  setDynamicTool,
-  setPitchTool,
+  setDynamicsTool,
+  setPitchesTool,
   setPlayback,
   setInstrument,
 ];

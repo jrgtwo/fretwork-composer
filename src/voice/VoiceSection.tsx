@@ -1,24 +1,24 @@
 import type { ReactNode } from 'react';
+import { Section } from '../shell/Section';
 import { RackFace } from './rack/RackFace';
 
 /**
  * A collapsible stage of the voice chain — one unit of the rack.
  *
- * The chassis is `RackFace`; this owns the disclosure and the three-state vocabulary
- * that is particular to a voice stage. It used to draw its own `.well` with a brass dot
- * for "active"; that dot is now the unit's power lamp, which is the same fact in the
- * idiom the rest of the pane has moved to.
+ * The disclosure is `shell/Section`, which was generalised OUT of this file:
+ * the button, the `aria-expanded` / `aria-controls` wiring, the region and the
+ * rule that a hidden body stays mounted are all there now, along with the
+ * reasons for each. What is left here is what is particular to a voice stage,
+ * and the split is deliberate — a shared section that knew what a bypassed
+ * effects branch was would not be shared, it would be relocated.
  *
- * Deliberately NOT `PaneStack`. These nest inside a pane that already drags, resizes
- * and enforces min/max; a second layer of all three would be four more things to
- * mis-drag and a height model fighting the pane's own. What a section needs is one
- * disclosure button and a region, which is all this is.
+ * So this file keeps exactly two things:
  *
- * The body stays mounted when closed (`hidden`) rather than being unmounted the way
- * `PaneStack` unmounts a pane's. Two reasons: `aria-controls` has to point at an element
- * that exists, and there is nothing expensive in here to unmount — no observers, no
- * measurement, ~30 inert form controls. That is exactly the opposite of the pane's
- * situation, which is why the two differ.
+ * THE CHASSIS. `RackFace` — a thin raised faceplate with the unit's name
+ * engraved at the left and a power lamp at the right. `Section` builds the
+ * pieces and hands them back; where they are bolted is this component's call.
+ * The lamp is `lit` when the stage is really in the chain, which is a fact
+ * about a voice and about nothing else in the app.
  *
  * THREE STATES, and they are not the same:
  *   `active`   — the branch is on the preset and in the chain.
@@ -26,6 +26,11 @@ import { RackFace } from './rack/RackFace';
  *   `absent`   — no branch at all. `ACOUSTIC_GUITAR_PRESET` ships with no `effects`
  *                object whatsoever, so this is reachable from a stock built-in and not
  *                merely a state the editor can create.
+ *
+ * The status goes to `RackFace`'s own `note` slot rather than through
+ * `Section`'s, because `RackFace` places a note to the LEFT of the faceplate
+ * where the rail's chassis right-aligns it. Both are outside the disclosure
+ * button, which is the part `Section` guarantees and the part that matters.
  */
 export type SectionStatus = 'active' | 'bypassed' | 'absent';
 
@@ -36,7 +41,6 @@ const STATUS_NOTE: Record<SectionStatus, string | null> = {
 };
 
 export function VoiceSection({
-  id,
   label,
   status,
   open,
@@ -44,56 +48,40 @@ export function VoiceSection({
   actions,
   children,
 }: {
-  id: string;
   label: string;
   status: SectionStatus;
   open: boolean;
   onToggle: () => void;
-  /** Add / Remove — the branch controls. Outside the disclosure button so pressing
-   *  one doesn't also fold the section it just changed. */
+  /** Add / Remove — the branch controls. `Section` keeps them outside the
+   *  disclosure button so pressing one doesn't also fold the section it just
+   *  changed. */
   actions?: ReactNode;
   children: ReactNode;
 }) {
-  const regionId = `${id}-region`;
-  const note = STATUS_NOTE[status];
-
   return (
-    <RackFace
-      lit={status === 'active'}
-      regionName={`${label} stage`}
-      // Outside the disclosure button on purpose: inside, the status would be read as
-      // part of its name ("Amp, not on this preset, collapsed"), and the lamp would be
-      // the only thing distinguishing two identically-named buttons in a pane that has
-      // thirty controls.
-      note={note}
+    <Section
+      label={label}
+      open={open}
+      onToggle={onToggle}
       actions={actions}
-      name={
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={regionId}
-          onClick={onToggle}
-          className="-mx-1 flex flex-none items-center gap-1.5 rounded-md px-1 py-0.5 text-left hover:text-brass-hi"
+      bodyClassName="flex flex-col gap-1.5 px-2 py-1.5"
+      chassis={(parts) => (
+        <RackFace
+          lit={status === 'active'}
+          regionName={`${label} stage`}
+          // Outside the disclosure button on purpose: inside, the status would be read as
+          // part of its name ("Amp, not on this preset, collapsed"), and the lamp would be
+          // the only thing distinguishing two identically-named buttons in a pane that has
+          // thirty controls.
+          note={STATUS_NOTE[status]}
+          actions={parts.actions}
+          name={parts.name}
         >
-          <span aria-hidden className="flex-none font-mono text-[9px] text-ink-mut">
-            {open ? '▾' : '▸'}
-          </span>
-          <span className="font-mono text-[9px] font-semibold tracking-[0.16em] uppercase">
-            {label}
-          </span>
-        </button>
-      }
+          {parts.region}
+        </RackFace>
+      )}
     >
-      {/* `hidden` alone is not enough: the attribute's `display: none` comes from the UA
-          stylesheet, so a `flex` utility class outranks it and the region would stay
-          visible. The class carries the hiding; the attribute carries the semantics. */}
-      <div
-        id={regionId}
-        hidden={!open}
-        className={`flex-col gap-1.5 px-2 py-1.5 ${open ? 'flex' : 'hidden'}`}
-      >
-        {children}
-      </div>
-    </RackFace>
+      {children}
+    </Section>
   );
 }

@@ -725,6 +725,22 @@ export function stampNote({
 }
 
 /**
+ * The note, or the sentence saying why there is not one.
+ *
+ * With no pattern open every id lookup fails, and answering "No such note." to
+ * each one tells an agent that sent a batch of twenty that twenty notes
+ * vanished — when the recoverable truth is that there is nothing open to edit.
+ * {@link stampNote} has always distinguished the two; the id-addressed writes
+ * below have to as well, because they are the ones that arrive twenty at a time.
+ */
+function requireEvent(id: string): Result<PatternEvent> {
+  if (!getEditingPattern()) return refuse('No pattern is open.');
+  const event = findEvent(id);
+  if (!event) return refuse('No such note.');
+  return ok(event);
+}
+
+/**
  * Move a note, reporting where it actually ended up.
  *
  * The lib REJECTS a move that would overlap another note on the target string
@@ -738,8 +754,9 @@ export function moveNote(
   startTick: Tick,
   stringIndex?: number,
 ): Result<{ startTick: Tick; stringIndex: number }> {
-  const before = findEvent(id);
-  if (!before) return refuse('No such note.');
+  const found = requireEvent(id);
+  if (!found.ok) return found;
+  const before = found.value;
   if (stringIndex !== undefined) {
     const onNeck = checkString(stringIndex);
     if (!onNeck.ok) return onNeck;
@@ -764,7 +781,8 @@ export function moveNote(
 /** Resize a note, reporting the duration that stuck — the lib clamps it against
  *  the next note on the same string, so a request can be honoured in part. */
 export function resizeNote(id: string, durationTicks: Tick): Result<Tick> {
-  if (!findEvent(id)) return refuse('No such note.');
+  const found = requireEvent(id);
+  if (!found.ok) return found;
   capture();
   store().resizeEvent(id, durationTicks);
   return ok(findEvent(id)?.durationTicks ?? durationTicks);
@@ -773,7 +791,8 @@ export function resizeNote(id: string, durationTicks: Tick): Result<Tick> {
 /** Set a note's fret, reporting the value that stuck — the lib floors it at 0
  *  and has no ceiling, so {@link checkFret} applies the app's own. */
 export function setNoteFret(id: string, fret: number): Result<number> {
-  if (!findEvent(id)) return refuse('No such note.');
+  const found = requireEvent(id);
+  if (!found.ok) return found;
   const inRange = checkFret(fret);
   if (!inRange.ok) return inRange;
   capture();
@@ -845,6 +864,7 @@ export function nudgeSelectedFret(delta: number): void {
  */
 export function deleteNotes(ids: readonly string[]): Result<number> {
   if (ids.length === 0) return ok(0);
+  if (!getEditingPattern()) return refuse('No pattern is open.');
   const unique = [...new Set(ids)];
   const missing = unique.filter((id) => !findEvent(id));
   if (missing.length > 0) return refuse(`No such note: ${missing.join(', ')}.`);
@@ -1011,7 +1031,8 @@ export function setArticulations(
   id: string,
   patch: Parameters<ReturnType<typeof store>['updateEventArticulations']>[1],
 ): Result {
-  if (!findEvent(id)) return refuse('No such note.');
+  const found = requireEvent(id);
+  if (!found.ok) return found;
   capture();
   store().updateEventArticulations(id, patch);
   return ok(undefined);
@@ -1019,7 +1040,8 @@ export function setArticulations(
 
 /** Replace the note's pitch movement — slides and bends. */
 export function setNotePitch(id: string, pitch: NotePitch): Result {
-  if (!findEvent(id)) return refuse('No such note.');
+  const found = requireEvent(id);
+  if (!found.ok) return found;
   capture();
   store().updateEventArticulations(id, toPitchPatch(pitch) as never);
   return ok(undefined);
@@ -1040,7 +1062,8 @@ export const DYNAMICS = Object.entries(DYNAMIC_VELOCITY)
  * the same reason.
  */
 export function setNoteDynamic(id: string, dynamic: DynamicMark | undefined): Result {
-  if (!findEvent(id)) return refuse('No such note.');
+  const found = requireEvent(id);
+  if (!found.ok) return found;
   capture();
   store().updateEventArticulations(id, {
     dynamic,

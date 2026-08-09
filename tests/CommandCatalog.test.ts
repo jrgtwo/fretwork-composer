@@ -820,7 +820,7 @@ const ADDED_COMMAND: Command = {
       fallback: 'keep the original note lengths',
     },
   ],
-  tools: ['read_pattern', 'pattern_move_note', 'pattern_resize_note'],
+  tools: ['read_pattern', 'pattern_move_notes', 'pattern_resize_notes'],
   template: `Rewrite the open pattern half-time: double every start tick and {ring}, snapping everything to a grid of {grid} ticks.
 
 Do not add, delete or re-fret anything.`,
