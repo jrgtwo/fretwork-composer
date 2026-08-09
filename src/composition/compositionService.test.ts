@@ -10,18 +10,28 @@ import {
 } from '@fretwork/lib';
 import { getEditingPattern, openBlankPattern } from '../patterns/patternService';
 import {
+  abortEditGesture,
   addPlacement,
   addTrack,
+  asJobWrite,
   beginEditGesture,
+  beginJob,
   clearHistory,
+  compositionGrooveId,
   duplicatePlacements,
   endEditGesture,
+  endJob,
   ensureComposition,
   findPlacement,
+  getEditingPlacementId,
   getSelectedPlacementIds,
   getSelectedTrackId,
+  isJobRunning,
+  JOB_LOCK_REASON,
+  moveTrack,
   movePlacement,
   openBlankComposition,
+  openPlacementForEditing,
   redo,
   removePlacement,
   removeTrack,
@@ -29,6 +39,7 @@ import {
   selectPlacements,
   selectTrack,
   setCompositionBpm,
+  setCompositionGroove,
   setCompositionLoop,
   setCompositionName,
   setCompositionTimeSignature,
@@ -46,10 +57,12 @@ import {
   undo,
   useEditingComposition,
   useHistoryState,
+  useIsJobRunning,
   useSelectedPlacementIds,
   useSelectedTrackId,
   useTotalDurationTicks,
   useTracks,
+  type Result,
 } from './compositionService';
 
 /**
@@ -112,6 +125,17 @@ beforeEach(() => {
     ...DEFAULT_PATTERNS_STATE,
     library: { patterns: [], compositions: [], collections: [] },
   });
+  // The job flag is module state and outlives a failing test, so a leaked one
+  // would refuse every write in every test that followed — with the seam's own
+  // sentence, which reads like a real refusal and would send someone hunting.
+  endJob();
+  // Bracket DEPTH is module state too, and `clearHistory` deliberately preserves
+  // it (see there). A test that threw between `beginEditGesture` and its close
+  // would leave the count raised, and every gesture after it would look nested
+  // and push no step — a failure landing nowhere near its cause. Nothing can read
+  // the depth and `endEditGesture` is a no-op at zero, so close generously:
+  // deeper than any test here nests.
+  for (let i = 0; i < 8; i += 1) endEditGesture(false);
   clearHistory();
   selectPlacements([]);
   selectTrack(null);
@@ -877,5 +901,450 @@ describe('gesture batching', () => {
 
     redo();
     expect(getSelectedTrackId()).toBeNull();
+  });
+});
+
+// ------------------------------------------------------------- rollback ---
+
+/**
+ * AG-07. The bracket-closer that puts the document back instead of recording a
+ * step — how a cancelled generation job stops being the user's problem.
+ *
+ * The assertions that matter are the two negatives: the arrangement is the one
+ * the bracket opened on, and NO undo step exists afterwards. The second is
+ * invisible in the document (a spurious step snapshots the state it restores),
+ * which is what `canUndo` is for.
+ */
+describe('abortEditGesture', () => {
+  let trackId = '';
+  let placementId = '';
+
+  beforeEach(() => {
+    ensureComposition();
+    trackId = storedTracks()[0].id;
+    const placed = addPlacement(seedPattern('Riff'), trackId, 0);
+    if (!placed.ok) throw new Error('placement refused');
+    placementId = placed.value;
+    clearHistory();
+  });
+
+  it('restores the arrangement and records no step', () => {
+    const before = storedPlacements();
+
+    beginEditGesture();
+    addTrack('Agent');
+    addPlacement(seedPattern('Chorus'), trackId, 16 * PPQ);
+    removePlacement(placementId);
+    expect(storedTracks()).toHaveLength(2);
+
+    abortEditGesture();
+
+    expect(storedTracks()).toHaveLength(1);
+    // Byte-for-byte, not merely "the right number of blocks": the placement is
+    // the object the snapshot held, ids and all.
+    expect(storedPlacements()).toEqual(before);
+    // The whole difference from `undo`. A step here would be a cancel the user
+    // could un-cancel into a half-built arrangement.
+    expect(canUndo()).toBe(false);
+  });
+
+  /**
+   * The one place this parts company with `undo`, and the reviewers' finding:
+   * `undo` merges the live settings FORWARD, because its caller is the user and
+   * the mix pushes no step of its own. A cancel cannot borrow that argument — the
+   * job lock refuses the user every field that merge carries, so the only writer
+   * of any of them during a job is the agent, and carrying them forward would
+   * mean cancelling a job that keeps the tempo and mix it chose.
+   */
+  it('restores the settings too, unlike undo', () => {
+    const beforeBpm = stored().bpm;
+    const beforeVolume = storedTracks()[0].volumeDb;
+
+    beginEditGesture();
+    addTrack('Agent');
+    setTrackVolumeDb(trackId, -6);
+    setCompositionBpm(132);
+    setTrackName(trackId, 'Rhythm');
+    setCompositionGroove('swing-8ths');
+
+    abortEditGesture();
+
+    expect(storedTracks()).toHaveLength(1);
+    expect(storedTracks()[0].volumeDb).toBe(beforeVolume);
+    expect(storedTracks()[0].name).not.toBe('Rhythm');
+    expect(stored().bpm).toBe(beforeBpm);
+    // `groove` was never in `mergeSettingsForward`'s list, so the merged restore
+    // half-reverted a single `composition_set_settings({bpm, groove})`. Verbatim
+    // is what makes the two agree.
+    expect(compositionGrooveId()).not.toBe('swing-8ths');
+  });
+
+  /** `undo` keeps merging them forward — that caller IS the user, and its
+   *  rationale is untouched by this. Asserted so the asymmetry is pinned on both
+   *  sides rather than only the new one. */
+  it('leaves undo merging the live settings forward', () => {
+    movePlacement(placementId, trackId, 2 * PPQ);
+    setTrackVolumeDb(trackId, -6);
+
+    undo();
+
+    expect(storedPlacements()[0].startTick).toBe(0);
+    expect(storedTracks()[0].volumeDb).toBe(-6);
+  });
+
+  it('closes a placement the restore has retracted', () => {
+    beginEditGesture();
+    const placed = addPlacement(seedPattern('Chorus'), trackId, 16 * PPQ);
+    if (!placed.ok) throw new Error('placement refused');
+    expect(openPlacementForEditing(placed.value).ok).toBe(true);
+    expect(getEditingPlacementId()).toBe(placed.value);
+
+    abortEditGesture();
+
+    // The lib nulls its pointer only when its OWN `removePlacement` runs, and a
+    // restore is a raw setState (LIB-GAP(1)). Left dangling, every note edit
+    // would silently hit nothing.
+    expect(getEditingPlacementId()).toBeNull();
+  });
+
+  it('leaves the stacks alone, so the user’s own last edit is still the undo target', () => {
+    movePlacement(placementId, trackId, 2 * PPQ);
+
+    beginEditGesture();
+    movePlacement(placementId, trackId, 6 * PPQ);
+    abortEditGesture();
+
+    expect(storedPlacements()[0].startTick).toBe(2 * PPQ);
+    undo();
+    expect(storedPlacements()[0].startTick).toBe(0);
+  });
+
+  it('drops a selection the restore has retracted', () => {
+    beginEditGesture();
+    const placed = addPlacement(seedPattern('Chorus'), trackId, 16 * PPQ);
+    expect(placed.ok).toBe(true);
+    if (!placed.ok) return;
+    // `addPlacement` selects what it created, so the selection now names a block
+    // the rollback is about to take away.
+    expect(getSelectedPlacementIds()).toEqual([placed.value]);
+
+    abortEditGesture();
+
+    expect(getSelectedPlacementIds()).toEqual([]);
+  });
+
+  it('drops a track focus the restore has retracted', () => {
+    beginEditGesture();
+    const added = addTrack('Agent');
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    selectTrack(added.value.id);
+
+    abortEditGesture();
+
+    expect(getSelectedTrackId()).toBeNull();
+  });
+
+  /**
+   * The documented degradation. Depth is honoured exactly as `endEditGesture`
+   * honours it — that symmetry is what keeps "one gesture, one step" true — so
+   * an abort inside an open inner bracket only decrements, and the outer close
+   * then records an ordinary step. One undo instead of an automatic rollback.
+   */
+  it('only decrements when an inner bracket is still open', () => {
+    beginEditGesture();
+    beginEditGesture();
+    movePlacement(placementId, trackId, 4 * PPQ);
+
+    abortEditGesture();
+
+    expect(storedPlacements()[0].startTick).toBe(4 * PPQ);
+    endEditGesture();
+    expect(canUndo()).toBe(true);
+    undo();
+    expect(storedPlacements()[0].startTick).toBe(0);
+  });
+
+  it('ignores an unmatched abort rather than swallowing the next gesture', () => {
+    // Same hazard `endEditGesture` guards: pushing the counter negative would
+    // make the next real close look nested and record nothing.
+    abortEditGesture();
+
+    beginEditGesture();
+    movePlacement(placementId, trackId, 3 * PPQ);
+    endEditGesture();
+
+    undo();
+    expect(storedPlacements()[0].startTick).toBe(0);
+  });
+});
+
+// ------------------------------------------------------------- job lock ---
+
+/**
+ * AG-07. While an agent job owns the document the USER's writes are refused and
+ * the job's own go through — because a cancel rolls the document back, and
+ * anything the user built meanwhile would be rolled back with it.
+ *
+ * `asJobWrite` stands in for a tool handler here, which is exactly what it is:
+ * `compositionTools` wraps every handler in it, and the handlers are synchronous
+ * so nothing of the user's can run inside one.
+ */
+describe('the job lock', () => {
+  let trackId = '';
+  let placementId = '';
+
+  beforeEach(() => {
+    ensureComposition();
+    trackId = storedTracks()[0].id;
+    const placed = addPlacement(seedPattern('Riff'), trackId, 0);
+    if (!placed.ok) throw new Error('placement refused');
+    placementId = placed.value;
+    clearHistory();
+  });
+
+  /** Every write the seam guards, as a thunk. The guard is one line copied into
+   *  each of them, which is the failure the lock's own header rejects for props
+   *  — so it is checked in one place rather than trusted twenty-odd times. The
+   *  day someone adds an unguarded write, this list is what fails. */
+  function guardedWrites(): readonly (readonly [string, () => Result<unknown>])[] {
+    const otherTrack = storedTracks()[0].id;
+    return [
+      ['openBlankComposition', () => openBlankComposition('X')],
+      ['addTrack', () => addTrack('Mine')],
+      ['removeTrack', () => removeTrack(trackId)],
+      ['moveTrack', () => moveTrack(trackId, 0)],
+      ['setTrackName', () => setTrackName(trackId, 'Mine')],
+      ['setTrackInstrument', () => setTrackInstrument(trackId, 'bass')],
+      ['setTrackVoiceRef', () => setTrackVoiceRef(trackId, { id: 'x' })],
+      ['setTrackVolumeDb', () => setTrackVolumeDb(trackId, -3)],
+      ['setTrackMuted', () => setTrackMuted(trackId, true)],
+      ['setTrackSoloed', () => setTrackSoloed(trackId, true)],
+      ['setMasterVolumeDb', () => setMasterVolumeDb(-3)],
+      ['addPlacement', () => addPlacement(seedPattern('Mine'), otherTrack, 32 * PPQ)],
+      ['movePlacement', () => movePlacement(placementId, trackId, 8 * PPQ)],
+      ['splitPlacement', () => splitPlacement(placementId, 2 * PPQ)],
+      ['resizePlacement', () => resizePlacement(placementId, 2 * PPQ)],
+      ['setPlacementTranspose', () => setPlacementTranspose(placementId, 2)],
+      ['removePlacement', () => removePlacement(placementId)],
+      ['duplicatePlacements', () => duplicatePlacements([placementId], 16 * PPQ)],
+      ['openPlacementForEditing', () => openPlacementForEditing(placementId)],
+      ['setCompositionName', () => setCompositionName('Mine')],
+      ['setCompositionBpm', () => setCompositionBpm(140)],
+      [
+        'setCompositionTimeSignature',
+        () => setCompositionTimeSignature({ numerator: 3, denominator: 4 }),
+      ],
+      ['setCompositionLoop', () => setCompositionLoop(true)],
+      ['setCompositionGroove', () => setCompositionGroove('swing-8ths')],
+    ];
+  }
+
+  it('refuses every user write it guards, with the same sentence', () => {
+    const before = stored();
+    beginJob();
+
+    for (const [name, write] of guardedWrites()) {
+      const result = write();
+      expect(`${name}: ${result.ok}`).toBe(`${name}: false`);
+      if (result.ok) continue;
+      // A sentence, not a silence: the five components that write here all
+      // render the seam's reason already, which is why the lock needs no new UI.
+      expect(result.reason).toBe(JOB_LOCK_REASON);
+    }
+
+    // Nothing landed, so the rollback cannot be taking anything of the user's.
+    expect(stored()).toEqual(before);
+  });
+
+  /** The other half, and deliberately about the REASON rather than success: the
+   *  list mutates the document as it runs (and `openBlankComposition` switches
+   *  it), so later entries legitimately refuse for their own reasons. What must
+   *  never appear with no job running is the lock's sentence. */
+  it('refuses none of them for the lock’s reason once the job hands it back', () => {
+    const held = beginJob();
+    if (!held.ok) throw new Error('job refused');
+    held.value();
+
+    for (const [name, write] of guardedWrites()) {
+      const result = write();
+      if (result.ok) continue;
+      expect(`${name}: ${result.reason}`).not.toBe(`${name}: ${JOB_LOCK_REASON}`);
+    }
+  });
+
+  it('reports itself running, and tells its subscribers', () => {
+    const seen: boolean[] = [];
+    const view = renderHook(() => useIsJobRunning());
+    expect(view.result.current).toBe(false);
+
+    act(() => {
+      beginJob();
+    });
+    seen.push(view.result.current);
+    act(() => {
+      endJob();
+    });
+    seen.push(view.result.current);
+    view.unmount();
+
+    // Without the notification the flag is unreadable from React, and the undo
+    // button stays enabled and dead for the length of the run.
+    expect(seen).toEqual([true, false]);
+    expect(isJobRunning()).toBe(false);
+  });
+
+  it('lets the job’s own writes through the same lock', () => {
+    beginJob();
+
+    const added = asJobWrite(() => addTrack('Agent'));
+
+    expect(added.ok).toBe(true);
+    expect(storedTracks()).toHaveLength(2);
+    // And the exemption is not left raised behind it.
+    expect(addTrack('Mine').ok).toBe(false);
+  });
+
+  it('refuses a second job rather than letting two roll back over each other', () => {
+    expect(beginJob().ok).toBe(true);
+    expect(beginJob().ok).toBe(false);
+  });
+
+  it('refuses a job with no document to own', () => {
+    usePatternsStore.setState({ editingCompositionId: null });
+
+    const started = beginJob();
+
+    // A job with nothing open would lock the user out while every one of its own
+    // writes answered "No composition is open."
+    expect(started.ok).toBe(false);
+    expect(isJobRunning()).toBe(false);
+  });
+
+  it('hands the release to the holder, and only the holder', () => {
+    const held = beginJob();
+    expect(held.ok).toBe(true);
+    if (!held.ok) return;
+
+    // The loser's own `finally` must not unlock the winner.
+    const refused = beginJob();
+    expect(refused.ok).toBe(false);
+    expect(isJobRunning()).toBe(true);
+
+    held.value();
+    expect(isJobRunning()).toBe(false);
+    // ...and a second release is a no-op rather than a lock the NEXT job loses.
+    const second = beginJob();
+    expect(second.ok).toBe(true);
+    held.value();
+    expect(isJobRunning()).toBe(true);
+  });
+
+  /**
+   * The agent's exemption deliberately does NOT reach this one.
+   * `openBlankComposition` clears the history, and `clearHistory` re-arms the
+   * open bracket on the NEW document — so the snapshot a cancel would restore
+   * becomes the blank composition and the pre-job one is never put back.
+   */
+  it('refuses a composition switch to the job itself, not only to the user', () => {
+    const openBefore = usePatternsStore.getState().editingCompositionId;
+    beginEditGesture();
+    beginJob();
+
+    const switched = asJobWrite(() => openBlankComposition('Stray'));
+
+    expect(switched.ok).toBe(false);
+    expect(usePatternsStore.getState().editingCompositionId).toBe(openBefore);
+    expect(usePatternsStore.getState().library.compositions).toHaveLength(1);
+    endJob();
+    abortEditGesture();
+  });
+
+  it('covers edit mode, so the pattern pointer cannot be repointed under a job', () => {
+    // A composition job creates patterns, and the lib keeps ONE pattern-editing
+    // pointer — the user opening a block mid-job would take it, and the agent's
+    // next note would land in the user's block.
+    beginJob();
+    expect(openPlacementForEditing(placementId).ok).toBe(false);
+
+    endJob();
+    expect(openPlacementForEditing(placementId).ok).toBe(true);
+  });
+
+  it('leaves undo and redo inert for the duration, and draws them inert', () => {
+    movePlacement(placementId, trackId, 2 * PPQ);
+    beginJob();
+
+    undo();
+
+    // Undoing into a document the agent is still writing would leave a hybrid
+    // neither side asked for; cancelling the job is the way out during one.
+    expect(storedPlacements()[0].startTick).toBe(2 * PPQ);
+    // These two are the only writes here with no channel to refuse through, so
+    // the buttons must not be left LOOKING alive — that is the one refusal in
+    // the design with no feedback at all.
+    expect(canUndo()).toBe(false);
+
+    endJob();
+    undo();
+    expect(storedPlacements()[0].startTick).toBe(0);
+
+    // And redo, which is a separate guard and would otherwise be asserted by
+    // nothing: deleting its `lockedOut()` line has to fail something.
+    beginJob();
+    redo();
+    expect(storedPlacements()[0].startTick).toBe(0);
+    endJob();
+    redo();
+    expect(storedPlacements()[0].startTick).toBe(2 * PPQ);
+  });
+
+  it('does not lock selection — the user can still look while they wait', () => {
+    beginJob();
+
+    selectPlacements([placementId]);
+    selectTrack(trackId);
+
+    expect(getSelectedPlacementIds()).toEqual([placementId]);
+    expect(getSelectedTrackId()).toBe(trackId);
+  });
+
+  /**
+   * THE PATH THAT WILL ACTUALLY HAPPEN: a job builds for a while, the user
+   * presses cancel, and everything the agent did goes away in one movement while
+   * the user is refused nothing they could have lost.
+   */
+  it('rolls a cancelled job back to the document it started from', () => {
+    const before = stored();
+
+    beginEditGesture();
+    const started = beginJob();
+    if (!started.ok) throw new Error('job refused');
+
+    asJobWrite(() => addTrack('Bass'));
+    const bassId = storedTracks()[1].id;
+    asJobWrite(() => addPlacement(seedPattern('Bassline'), bassId, 0));
+    asJobWrite(() => addPlacement(seedPattern('Bassline 2'), bassId, 16 * PPQ));
+    asJobWrite(() => removePlacement(placementId));
+    // The agent balanced the mix and renamed the piece on the way — SETTINGS,
+    // which push no undo step. They are the agent's, not the user's, because the
+    // lock refused the user every one of those fields for the duration.
+    asJobWrite(() => setTrackVolumeDb(trackId, -4));
+    asJobWrite(() => setCompositionName('Half a song'));
+    // ...and the user's own edit was refused the whole time, so the rollback
+    // below cannot be taking anything of theirs with it.
+    expect(addPlacement(seedPattern('Mine'), trackId, 32 * PPQ).ok).toBe(false);
+
+    started.value();
+    abortEditGesture();
+
+    // Byte-for-byte the document the bracket opened on — the mix and the title
+    // the agent chose included, since cancelling a job that keeps the tempo and
+    // name it picked is not what "cancel" means.
+    expect(stored()).toEqual(before);
+    // One cancel, no undo step — not "the agent's work, one Ctrl-Z away".
+    expect(canUndo()).toBe(false);
+    // And the seam is handed back: the next user write lands.
+    expect(addTrack('Mine').ok).toBe(true);
   });
 });

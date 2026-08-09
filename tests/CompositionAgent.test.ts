@@ -1,0 +1,119 @@
+import { describe, expect, it } from 'vitest';
+import { COMPOSITION_AGENT, COMPOSITION_WRITE_TOOLS } from '../src/ai/compositionAgent';
+import { PATTERN_AGENT } from '../src/ai/patternAgent';
+import { commandsForPage } from '../src/ai/commandCatalog';
+import { AGENT_TOOLS } from '../src/ai/tools';
+import { COMPOSITION_TOOLS } from '../src/ai/tools/compositionTools';
+import { PATTERN_TOOLS } from '../src/ai/tools/patternTools';
+import { READ_TOOLS } from '../src/ai/tools/readTools';
+import { VOICE_TOOLS } from '../src/ai/tools/voiceTools';
+
+/**
+ * AG-07 — the composition page's agent spec.
+ *
+ * There is no model here and no harness (see `AgentService.test.ts` for why an
+ * end-to-end run is not testable in jsdom). What is checked is the three
+ * decisions the spec makes, every one of which is silent when it goes wrong:
+ *
+ *   1. **The list is `AGENT_TOOLS` BY REFERENCE.** That is the only list
+ *      carrying `jobWrite`, which is what marks a tool's writes as the running
+ *      job's so the job lock lets them through. A re-concatenation of the four
+ *      modules looks identical, type-checks, and then has every write refused by
+ *      the run's own lock.
+ *   2. **It is ALL of them.** A composition job authors its parts as patterns
+ *      and picks voices; a narrower list is a job that cannot do what the
+ *      catalog's own rows say it does.
+ *   3. **Every command the page offers is runnable by the agent its `page`
+ *      names** — including the pattern rows edit mode borrows, which run on
+ *      `PATTERN_AGENT` and not on this one.
+ */
+
+const names = (tools: readonly { name: string }[]) => tools.map((tool) => tool.name);
+
+describe('the composition page agent', () => {
+  it('carries the job-lock-wrapped list itself, not an equal copy of it', () => {
+    // Reference equality per tool, which is the property that matters: a `run`
+    // rebuilt from `COMPOSITION_TOOLS` would pass a name comparison and then be
+    // refused by the lock the panel takes around it. A failure names the tool.
+    expect(COMPOSITION_AGENT.tools).toHaveLength(AGENT_TOOLS.length);
+    for (const [index, tool] of COMPOSITION_AGENT.tools.entries()) {
+      expect(`${tool.name}: ${tool === AGENT_TOOLS[index]}`).toBe(`${tool.name}: true`);
+    }
+  });
+
+  it('carries every tool the app has — reads, patterns, arrangement, voices', () => {
+    expect(names(COMPOSITION_AGENT.tools)).toEqual([
+      ...names(READ_TOOLS),
+      ...names(PATTERN_TOOLS),
+      ...names(COMPOSITION_TOOLS),
+      ...names(VOICE_TOOLS),
+    ]);
+    // Reads first: a model handed a tool list reaches for the first thing that
+    // fits, and every write needs an id a read returned.
+    expect(names(COMPOSITION_AGENT.tools).slice(0, READ_TOOLS.length)).toEqual(names(READ_TOOLS));
+  });
+
+  it('carries the PATTERN tools, because a part is authored as a pattern', () => {
+    // Not a duplicate of the list check above: this is the ticket's actual claim
+    // — nothing writes notes straight onto the arrangement, so a composition job
+    // that cannot open and stamp a pattern cannot build a bass line at all. The
+    // catalog says the same thing from the other side.
+    const carried = new Set(names(COMPOSITION_AGENT.tools));
+    expect(carried.has('pattern_open_blank')).toBe(true);
+    expect(carried.has('pattern_stamp_notes')).toBe(true);
+    const bassLine = commandsForPage('composition').find((c) => c.id === 'composition-bass-line');
+    expect(bassLine?.tools).toContain('pattern_open_blank');
+  });
+
+  it('can run every command the composition page offers', () => {
+    const carried = new Set(names(COMPOSITION_AGENT.tools));
+    for (const command of commandsForPage('composition')) {
+      for (const tool of command.tools) {
+        expect(`${command.id} needs ${tool}`).toBe(
+          carried.has(tool) ? `${command.id} needs ${tool}` : `${command.id}: ${tool} is missing`,
+        );
+      }
+    }
+  });
+
+  it('leaves edit mode to the pattern agent, which can still run those rows', () => {
+    // Edit mode borrows the pattern page's rows and they stay `page: 'pattern'`,
+    // so they are driven by `PATTERN_AGENT` against the pattern seam's history.
+    // Asserted here because it is the one place both specs are in view.
+    const carried = new Set(names(PATTERN_AGENT.tools));
+    for (const command of commandsForPage('pattern')) {
+      expect(command.page).toBe('pattern');
+      for (const tool of command.tools) expect(carried.has(tool)).toBe(true);
+    }
+  });
+
+  it('states the page’s standing instructions once, for all of its commands', () => {
+    // Asserted as substrings because the wording is meant to be edited — what
+    // must not vanish is the FACT.
+    const prompt = COMPOSITION_AGENT.systemPrompt;
+    expect(prompt).toContain('read_composition');
+    // The two facts a model reasoning from general musical knowledge gets wrong
+    // on this page: a part is a pattern, and a placed block is a deep copy.
+    expect(prompt).toContain('pattern_stamp_notes');
+    expect(prompt).toMatch(/deep COPY/i);
+    // LIB-GAP(15): a track carries no tuning, so a job must not promise how the
+    // arrangement sounds.
+    expect(prompt).toMatch(/how it will sound/i);
+    // The track cap is a memory limit and refusing is the normal path, not an
+    // error to retry.
+    expect(prompt).toMatch(/track limit|memory limit/i);
+    expect(prompt).toMatch(/"ok":false/);
+  });
+});
+
+describe('the write-tool set the run bracket uses', () => {
+  it('is every tool the agent carries except the reads, derived rather than retyped', () => {
+    expect([...COMPOSITION_WRITE_TOOLS].sort()).toEqual(
+      [...names(PATTERN_TOOLS), ...names(COMPOSITION_TOOLS), ...names(VOICE_TOOLS)].sort(),
+    );
+  });
+
+  it('excludes the reads, so a run that only read is not reported as a write', () => {
+    for (const read of READ_TOOLS) expect(COMPOSITION_WRITE_TOOLS.has(read.name)).toBe(false);
+  });
+});

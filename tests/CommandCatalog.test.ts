@@ -20,6 +20,7 @@ import {
   templateSlotIds,
   type ChoiceSource,
   type Command,
+  type CommandMode,
   type Slot,
   type SlotValue,
 } from '../src/ai/commandTypes';
@@ -39,6 +40,7 @@ import {
   setPatternGroove,
   stampNote,
 } from '../src/patterns/patternService';
+import { ARRANGEMENT_MODES, type ArrangementMode } from '../src/composition/arrangementMath';
 import {
   addPlacement,
   addTrack,
@@ -319,6 +321,152 @@ describe('page scoping', () => {
       command.tools.includes('pattern_stamp_notes'),
     );
     expect(buildsPatterns.length).toBeGreaterThan(0);
+  });
+});
+
+// ----------------------------------------------------------- mode scoping ---
+
+/**
+ * The pin on `CommandMode`'s second spelling.
+ *
+ * `commandTypes` may not import `arrangementMath` — `AgentTools.test.ts`'s
+ * tripwire holds `src/ai/**` to the seams and reads specifiers, so `import type`
+ * buys no exemption — and the header there says as much. A TEST is under no such
+ * rule, so the equivalence is checked here: this fails to COMPILE the moment the
+ * grid gains a mode the catalog does not know, or the catalog invents one the
+ * grid does not have. Either drift would otherwise show up as a rail that is
+ * silently empty.
+ */
+type MutuallyAssignable<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+const MODE_UNIONS_MATCH: MutuallyAssignable<ArrangementMode, CommandMode> = true;
+
+/**
+ * The modes every test below walks — the grid's OWN runtime list, never a copy.
+ *
+ * This is the half of the pin that survives `vitest run`, which transpiles
+ * without typechecking: a fourth mode added to `ARRANGEMENT_MODES` appears here
+ * at runtime and the slices below index the catalog's table with a key it does
+ * not have, so the suite fails whether or not `tsc -b` ran. The type above is
+ * still what fails first, and fails in the right place; the two are not
+ * redundant.
+ */
+const MODES: readonly ArrangementMode[] = ARRANGEMENT_MODES;
+
+describe('mode scoping', () => {
+  it('names the same modes the arrangement grid does', () => {
+    expect(MODE_UNIONS_MATCH).toBe(true);
+    // Every mode the grid has resolves to a real (frozen) slice rather than
+    // `undefined` — the runtime half of the equivalence, and the assertion that
+    // catches a mode the catalog was never told about.
+    for (const mode of MODES) {
+      for (const page of ['pattern', 'composition'] as const) {
+        expect(`${page}/${mode}: ${Array.isArray(commandsForPage(page, mode))}`).toBe(
+          `${page}/${mode}: true`,
+        );
+      }
+    }
+    expect(MODES.length).toBe(3);
+  });
+
+  it('gives every composition command a mode', () => {
+    // The composition rail shows ONE mode at a time. An untagged row would show
+    // in all three, which is how "the commands match what the mode is for"
+    // quietly stops being true — so the tag is required rather than optional
+    // for this page, and the failure names the row.
+    //
+    // Guarded against passing vacuously: an empty composition page would satisfy
+    // "every row is tagged" without offering anything.
+    expect(commandsForPage('composition').length).toBeGreaterThan(0);
+    for (const command of commandsForPage('composition')) {
+      expect(`${command.id}: ${command.mode ?? 'untagged'}`).not.toBe(`${command.id}: untagged`);
+    }
+  });
+
+  it('leaves the pattern page untouched by modes', () => {
+    // Two claims. The pattern page passes no mode, and its list is the same
+    // list it was before this axis existed — pinned LITERALLY rather than by
+    // re-running `offered`'s own predicate, which would move with any edit and
+    // could never fail. These six are also what edit mode is served by, so
+    // losing one is a hole in the composition page too.
+    const pattern = commandsForPage('pattern');
+    expect(pattern.map((c) => c.id)).toEqual([
+      'pattern-fix-timing',
+      'pattern-generate',
+      'pattern-density',
+      'pattern-fit-key',
+      'pattern-articulations',
+      'pattern-feel',
+    ]);
+    for (const command of pattern) expect(command.mode).toBeUndefined();
+    // …and because none of them is tagged, asking for one anyway returns all of
+    // them. That is the "no mode means every mode" rule, and it is what stops a
+    // new untagged row from being invisible.
+    for (const mode of MODES) {
+      expect(commandsForPage('pattern', mode).map((c) => c.id)).toEqual(pattern.map((c) => c.id));
+    }
+  });
+
+  it('offers each composition mode exactly the rows tagged for it', () => {
+    expect(commandsForPage('composition', 'pattern').map((command) => command.id)).toEqual([
+      'composition-backing-track',
+      'composition-bass-line',
+      'composition-harmony-track',
+      'composition-extend',
+      'composition-lay-down-pattern',
+    ]);
+    expect(commandsForPage('composition', 'voice').map((command) => command.id)).toEqual([
+      'composition-balance-mix',
+      'composition-track-tone',
+    ]);
+    // Empty ON PURPOSE, and this is the assertion most likely to be "fixed" by
+    // someone re-tagging the six pattern rows as composition ones. Do not: they
+    // drive `patternService`, and edit mode points the lib's pattern-editing
+    // pointer at the block so they already act on it. `page` picks the agent,
+    // the tools and the history; `mode` only picks what is offered.
+    expect(commandsForPage('composition', 'edit')).toEqual([]);
+  });
+
+  it('accounts for every composition row across the modes, with no row in two', () => {
+    const seen = MODES.flatMap((mode) => commandsForPage('composition', mode).map((c) => c.id));
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(new Set(seen)).toEqual(new Set(commandsForPage('composition').map((c) => c.id)));
+  });
+
+  it('returns the same array identity for a given page and mode', () => {
+    // The reason `BY_PAGE` exists at all — a fresh array per call is a new
+    // identity every render, a `useMemo` dependency that never matches and a
+    // list that rebuilds its children for nothing. Adding the mode axis had to
+    // keep that, so identity is asserted per SLICE, not just per page.
+    expect(commandsForPage('pattern')).toBe(commandsForPage('pattern'));
+    expect(commandsForPage('composition')).toBe(commandsForPage('composition'));
+    for (const page of ['pattern', 'composition'] as const) {
+      for (const mode of MODES) {
+        expect(commandsForPage(page, mode)).toBe(commandsForPage(page, mode));
+      }
+    }
+    // And the slices are distinct objects, so identity is not passing by every
+    // call returning one shared array.
+    expect(commandsForPage('composition', 'pattern')).not.toBe(
+      commandsForPage('composition', 'voice'),
+    );
+    // The pattern page is the deliberate exception: no row there is tagged, so
+    // every mode is handed back the SAME array as the mode-less call rather than
+    // an equal copy. A panel that normalises to always pass a mode must not see
+    // a new identity for an identical list.
+    for (const mode of MODES) {
+      expect(commandsForPage('pattern', mode)).toBe(commandsForPage('pattern'));
+    }
+  });
+
+  it('hands out frozen lists, so a caller cannot sort one in place', () => {
+    // Exactly that and no more: `Object.freeze` is shallow, so the ROWS and
+    // their `slots`/`tools` are still mutable through the list. The list is a
+    // render-time value handed to a component, and reordering it is the mishap
+    // this stops.
+    for (const mode of MODES) {
+      expect(Object.isFrozen(commandsForPage('composition', mode))).toBe(true);
+    }
+    expect(Object.isFrozen(commandsForPage('composition'))).toBe(true);
   });
 });
 

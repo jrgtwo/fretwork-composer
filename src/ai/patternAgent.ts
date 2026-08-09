@@ -38,6 +38,7 @@
 import { PATTERN_TOOLS } from './tools/patternTools';
 import { READ_TOOLS } from './tools/readTools';
 import type { AgentSpec } from './agentService';
+import { pagePrompt } from './agentRules';
 
 /**
  * The names of the page's tools that can CHANGE the pattern.
@@ -55,16 +56,29 @@ export const PATTERN_WRITE_TOOLS: ReadonlySet<string> = new Set(
   PATTERN_TOOLS.map((tool) => tool.name),
 );
 
+/**
+ * What is true of THIS page and not of the composition page.
+ *
+ * Everything general — ticks, batching, how to read a clamped result, that a
+ * pattern's length is its notes — is in `agentRules`, shared. What is left is
+ * the scope of a run and what the one read hands back.
+ *
+ * The scope line matters more than it looks: this same spec runs the six pattern
+ * commands on the COMPOSITION page's edit mode, where the "pattern" is a block's
+ * own copy. Naming the target as "the open pattern" rather than as a library
+ * pattern keeps that true without the model having to know which surface it is
+ * on — it is pointed at one document either way, and `read_pattern` is what says
+ * which.
+ */
+const PATTERN_PAGE = `# The pattern
+
+You are editing ONE guitar pattern. It is the only document you can reach: there is no tool here that opens another, and every write lands on whatever \`read_pattern\` last described.
+
+\`read_pattern\` is the only thing that tells you the ticks per quarter note, the time signature, the instrument, how many strings it has, how far up the neck you can go, and the id of every note. Note ids come from there.`;
+
 export const PATTERN_AGENT: AgentSpec = {
   name: 'pattern',
-  systemPrompt: [
-    'You are editing ONE guitar pattern inside a pattern editor. The user can see it; you cannot. You act only by calling tools — anything you merely describe did not happen.',
-    'Call read_pattern before you change anything. It is the only thing that tells you the ticks per quarter note, the time signature, the instrument, how many strings it has, how far up the neck you can go, and the id of every note. Note ids come from there; do not invent them.',
-    'String index 0 is the lowest-pitched string on a standard guitar — the low E. Higher indices go towards the high E. Times and durations are in ticks, never in bars or seconds.',
-    'The tools that take a list take the WHOLE list. Send one call per kind of edit rather than one call per note: a batch is a single step for the user to undo, and a pattern edited one note per call runs out of turns before it is finished.',
-    'A tool result of the form {"ok":false,"reason":"…"} is a refusal, not a crash. The reason says exactly what was wrong — read it, fix that, and do not repeat the identical call.',
-    'Stop when the command you were given is done, and finish with one or two sentences saying what you actually changed.',
-  ].join('\n'),
+  systemPrompt: pagePrompt(PATTERN_PAGE),
   // Reads first, for `AGENT_TOOLS`' reason: a model handed a tool list reaches
   // for the first thing that fits, and every write below needs an id a read
   // returned.

@@ -2,12 +2,36 @@ import { useEffect, useRef, useState } from 'react';
 import { useCompositionPlayback } from '../audio/playbackService';
 import { ArrangementGrid, type PatternDragStarter } from './ArrangementGrid';
 import type { ArrangementMode } from './arrangementMath';
-import { closePlacementEditing, ensureComposition } from './compositionService';
+import {
+  closePlacementEditing,
+  ensureComposition,
+  JOB_LOCK_REASON,
+  useIsJobRunning,
+} from './compositionService';
 import { NoteInspectorRail } from './NoteInspectorRail';
 import { PatternLibraryRail } from './PatternLibraryRail';
 import { TransportBar } from './TransportBar';
 import { VoiceRail } from './VoiceRail';
+import { CompositionCommandPanel } from '../ai/CompositionCommandPanel';
+import { Section } from '../shell/Section';
 import type { SectionId } from '../voice/paramSchema';
+
+/**
+ * The composition rail's sections, of which there is currently one.
+ *
+ * A list rather than a boolean for the reason `App` holds the pattern page's:
+ * the next section added must not have to change the shape of the state, and
+ * open-ids rather than collapsed-ids means a section nobody asked for is not
+ * open by default.
+ */
+export type CompositionRailSectionId = 'commands';
+
+/** What an uncontrolled render opens: nothing. Which sections START open is the
+ *  owner's policy and it lives with the owner, in `App` — see
+ *  `DEFAULT_OPEN_COMPOSITION_RAIL_SECTIONS` there. A module constant rather than
+ *  a `[]` in the parameter list, so a caller that passes nothing does not get a
+ *  new array identity on every render. */
+const NONE_OPEN: readonly CompositionRailSectionId[] = [];
 
 /**
  * The three modes are one surface, not three pages: the ruler, the track headers
@@ -64,6 +88,8 @@ export function CompositionPage({
   onCollapsedRacksChange,
   collapsedRackSections,
   onCollapsedRackSectionsChange,
+  openRailSections,
+  onOpenRailSectionsChange,
 }: {
   mode: ArrangementMode;
   onModeChange: (mode: ArrangementMode) => void;
@@ -82,8 +108,39 @@ export function CompositionPage({
   onCollapsedRackSectionsChange?: (
     collapsed: Readonly<Record<string, readonly SectionId[]>>,
   ) => void;
+  /** Which rail sections are unfolded — owned by `App` for the reason `mode` is:
+   *  this page unmounts on every visit to the pattern page, and a section that
+   *  refolded itself on the way back is the same broken promise as a mode that
+   *  forgets itself. */
+  openRailSections?: readonly CompositionRailSectionId[];
+  onOpenRailSectionsChange?: (
+    next: (open: readonly CompositionRailSectionId[]) => readonly CompositionRailSectionId[],
+  ) => void;
 }) {
   const [openFailure, setOpenFailure] = useState<string | null>(null);
+  /**
+   * The fallback for an UNCONTROLLED render — a caller that passes neither half
+   * of the pair.
+   *
+   * Without it the disclosure is dead: `openRailSections` would default to a
+   * constant and the toggle would call an absent handler, leaving a button that
+   * reports `aria-expanded="false"` forever and a section nothing can open. The
+   * optional pair is not just for tests — `App` passes both, but the props are
+   * optional the way `collapsedRacks` is, and an optional prop that silently
+   * breaks the control it names is worse than one that works locally.
+   */
+  const [ownRailSections, setOwnRailSections] =
+    useState<readonly CompositionRailSectionId[]>(NONE_OPEN);
+  const railSections = openRailSections ?? ownRailSections;
+  const toggleRailSection = (id: CompositionRailSectionId) => {
+    const next = (was: readonly CompositionRailSectionId[]) =>
+      was.includes(id) ? was.filter((open) => open !== id) : [...was, id];
+    if (onOpenRailSectionsChange) onOpenRailSectionsChange(next);
+    else setOwnRailSections(next);
+  };
+  /** A generation job owns the document — the mode bar goes with it. See the
+   *  buttons for why this one control is disabled rather than left to refuse. */
+  const jobRunning = useIsJobRunning();
   /**
    * The grid's drag-to-place entry point, published while the grid is mounted.
    *
@@ -148,8 +205,16 @@ export function CompositionPage({
             <button
               key={m.id}
               type="button"
-              disabled={m.disabled}
-              title={m.pending}
+              // ⚠ AND while a generation job holds the composition. The effect
+              // below closes an open placement on EVERY mode change, and the
+              // agent may be inside one — a switch would repoint the lib's one
+              // pattern pointer out from under it and land the job's next notes
+              // in the user's library pattern, which a cancel does not restore.
+              // The seam refuses `openPlacementForEditing` for the same reason,
+              // but `mode` lives in `App` and reaches no seam, so this is the
+              // only place it can be refused.
+              disabled={m.disabled || jobRunning}
+              title={m.pending ?? (jobRunning ? JOB_LOCK_REASON : undefined)}
               // The page nav also has a button reading "Pattern"; without this
               // the two are indistinguishable in a screen reader's button list
               // or to voice control, and only sighted users get the grouping.
@@ -216,6 +281,34 @@ export function CompositionPage({
           }
           className="rail flex min-h-0 flex-col"
         >
+          {/* COMMANDS, ALWAYS — then whatever the mode holds. The section is
+              persistent and sits above the mode-swapped region on purpose: a
+              generation job runs for minutes across mode switches, and its
+              progress and its Cancel button cannot live in a region that is
+              replaced when the user goes to look at what the agent just built.
+              No `grow`: it is as tall as its content, so opening it costs the
+              rail below it rows rather than half the column (see `PatternRail`
+              in `App.tsx` for the whole argument). */}
+          <Section
+            label="Commands"
+            open={railSections.includes('commands')}
+            onToggle={() => toggleRailSection('commands')}
+            // Visible whether the section is folded or not, because a folded
+            // section's body is `hidden` — this is the only thing telling a user
+            // who folded it that the agent is still working, and the mode bar
+            // being dead is otherwise unexplained.
+            note={jobRunning ? 'Running…' : undefined}
+            // The rail is a flex column with no scroller of its own and this
+            // section is `flex-none`, so anything unbounded inside it squeezes
+            // the mode rail below towards zero and overflows the aside. The
+            // panel bounds its own tallest region (the tool trace) and this is
+            // the belt: at worst the commands scroll rather than the column.
+            // Not assertable in jsdom, which has no layout.
+            bodyClassName="max-h-[50vh] overflow-y-auto"
+          >
+            <CompositionCommandPanel mode={mode} />
+          </Section>
+
           {mode === 'pattern' ? (
             <PatternLibraryRail
               onPatternPointerDown={(patternId, e) =>

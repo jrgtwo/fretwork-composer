@@ -44,6 +44,30 @@
 export type CommandPage = 'pattern' | 'composition';
 
 /**
+ * The composition page's arrangement modes, as the catalog needs to name them.
+ *
+ * ⚠ THIS IS A SECOND SPELLING OF `ArrangementMode` (`composition/arrangementMath`),
+ * and it is deliberate rather than an oversight. `AgentTools.test.ts`'s tripwire
+ * holds every module under `src/ai` to an ALLOW-LIST of imports — the four seams
+ * and siblings, nothing else — and it reads specifiers, so `import type` does
+ * not exempt anything. `arrangementMath` is not a seam, so the agent layer may
+ * not reach it even for a type. That rule is worth more than the import: it is
+ * what stops this layer growing a path to the lib.
+ *
+ * The single-source alternative was considered and REJECTED: `compositionService`
+ * is on the allow-list, so re-exporting `ArrangementMode` from it would satisfy
+ * the tripwire. But the seam does not use the type for anything of its own, so
+ * the re-export would exist solely to launder a forbidden import — which turns
+ * every seam into a hatch for arbitrary types from non-seam modules and costs
+ * the tripwire its meaning. A pinned copy is the cheaper price.
+ *
+ * The copy is therefore PINNED rather than trusted. `CommandCatalog.test.ts`
+ * asserts the two unions are mutually assignable, so drift in either direction
+ * is a compile error in the test rather than a mode with no commands.
+ */
+export type CommandMode = 'pattern' | 'edit' | 'voice';
+
+/**
  * Where a {@link ChoiceSlot}'s values come from. Every one of these is resolved
  * by `slotSources` through a seam — `compositionService.getTracks`,
  * `patternService.listGrooves`, and so on. The union exists so a source with no
@@ -146,6 +170,31 @@ export interface Command {
   /** Which page offers it. The two catalogs are disjoint by construction — a
    *  pattern command has no composition to act on and vice versa. */
   readonly page: CommandPage;
+  /**
+   * Which arrangement mode offers it — the composition page's `ArrangementMode`,
+   * spelled locally as {@link CommandMode} for the reason given there. Omitted
+   * means every mode.
+   *
+   * ⚠ THE STANDING RULE, and the whole reason this is a second field rather
+   * than a third `page`: **`page` picks the agent, the tool set and which
+   * history the run brackets against; `mode` only picks which commands are
+   * OFFERED.** They answer different questions and collapsing them loses one.
+   *
+   * The case that forces the split is edit mode, which has no rows of its own
+   * and needs none. `openPlacementForEditing` aims the lib's single
+   * pattern-editing pointer at the block (`compositionService.ts`) and
+   * `patternService.writePatternBack` routes writes to that placement's
+   * `patternSnapshot` while `editingPlacementId` is set, so the six
+   * `page: 'pattern'` rows act on the block being edited, unchanged. They drive
+   * `patternService`, so they stay `page: 'pattern'` — and the composition
+   * page's panel renders them in edit mode by asking for the PATTERN page's
+   * list. Re-tagging them `page: 'composition'` would point them at the wrong
+   * agent, the wrong tools and the wrong history to undo.
+   *
+   * Only the composition page has modes; the pattern page passes none, and a
+   * caller that passes none gets everything that page offers.
+   */
+  readonly mode?: CommandMode;
   /** What the button says. */
   readonly label: string;
   /** One sentence for the panel, describing the OUTCOME rather than the steps. */

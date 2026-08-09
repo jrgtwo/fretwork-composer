@@ -32,6 +32,7 @@
  *     agent works in strings, frets and ticks, which is what the app itself
  *     currently does.
  */
+import { asJobWrite } from '../../composition/compositionService';
 import { COMPOSITION_TOOLS } from './compositionTools';
 import { PATTERN_TOOLS } from './patternTools';
 import { READ_TOOLS } from './readTools';
@@ -39,6 +40,28 @@ import { VOICE_TOOLS } from './voiceTools';
 import type { AgentTool } from './types';
 
 export type { AgentTool, ToolResult, JsonSchema, JsonValue } from './types';
+
+/**
+ * Mark a tool's writes as the running job's, so `compositionService`'s job lock
+ * lets them through while it refuses the user's.
+ *
+ * Wrapped HERE, over every list, rather than inside `compositionTools` — because
+ * `voice_set_for_track` reaches the composition seam too (it writes
+ * `Track.voiceRef`, and the `composition-track-voice` command calls it), so a
+ * wrap that covered only `COMPOSITION_TOOLS` would refuse a composition command
+ * its own tool. One place, no list to remember, and the tool added next quarter
+ * cannot be the one that forgets — the same argument that put the lock at the
+ * seam instead of in five components. Wrapping the read and pattern lists costs
+ * a counter increment and buys the same guarantee for whatever they grow into.
+ *
+ * ⚠ Sound only because `AgentTool.run` is SYNCHRONOUS — the type says so, it
+ * returns `ToolResult` and never a promise. An `await` inside this scope would
+ * hand the user the agent's exemption for its duration.
+ */
+const jobWrite = (tool: AgentTool): AgentTool => ({
+  ...tool,
+  run: (args) => asJobWrite(() => tool.run(args)),
+});
 
 /** Reads first: a model that has just been handed a tool list tends to use the
  *  first thing that fits, and every write below needs an id one of these
@@ -48,7 +71,7 @@ export const AGENT_TOOLS: readonly AgentTool[] = [
   ...PATTERN_TOOLS,
   ...COMPOSITION_TOOLS,
   ...VOICE_TOOLS,
-];
+].map(jobWrite);
 
 /** Look a tool up by name — what a runner does with a model's tool call. */
 export function findTool(name: string): AgentTool | undefined {

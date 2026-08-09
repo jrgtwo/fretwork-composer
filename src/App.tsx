@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { AppShell, type PageId } from './shell/AppShell';
 import type { Pane } from './shell/PaneStack';
 import { applyVoicePreset, stop } from './audio/playbackService';
-import { CompositionPage } from './composition/CompositionPage';
+import { CompositionPage, type CompositionRailSectionId } from './composition/CompositionPage';
 import type { ArrangementMode } from './composition/arrangementMath';
 import { useEditingComposition } from './composition/compositionService';
 import { ReferencePane, type ReferenceViewId } from './reference/ReferencePane';
@@ -44,6 +44,20 @@ type RailSectionId = 'library' | 'commands';
  *  for a 300px column, and the library is the one you need to have a pattern to
  *  run a command against at all. */
 const DEFAULT_OPEN_RAIL_SECTIONS: readonly RailSectionId[] = ['library'];
+
+/**
+ * The COMPOSITION page's rail, whose one section opens OPEN — the opposite of
+ * the rule above, and deliberately.
+ *
+ * There, Commands is the second surface competing for a 300px column and the
+ * library is the one you need before a command has anything to act on. On the
+ * composition page the rail's other content is a per-selection detail view (the
+ * note inspector, the voice rack) and the commands are the only entry to a
+ * generation job. The deciding reason is the JOB: a run's Cancel button lives
+ * inside that section, and a section that starts folded is a job the user cannot
+ * stop without first discovering where it lives.
+ */
+const DEFAULT_OPEN_COMPOSITION_RAIL_SECTIONS: readonly CompositionRailSectionId[] = ['commands'];
 
 /** A switch that costs nothing: go ahead, and there is nothing to run after. */
 const NOTHING_STRANDED = () => {};
@@ -107,6 +121,15 @@ export function App() {
   // panes above, one surface across.
   const [openRailSections, setOpenRailSections] =
     useState<readonly RailSectionId[]>(DEFAULT_OPEN_RAIL_SECTIONS);
+
+  // And once more for the COMPOSITION page's rail, which is a different rail
+  // with a different section list — `CompositionPage` unmounts on every visit to
+  // the pattern page, so a folded Commands section would unfold itself on the
+  // way back. Held here rather than in `CompositionShell` for the same reason
+  // `mode` is: the shell is unmounted by the same round trip.
+  const [openCompositionRailSections, setOpenCompositionRailSections] = useState<
+    readonly CompositionRailSectionId[]
+  >(DEFAULT_OPEN_COMPOSITION_RAIL_SECTIONS);
 
   // Seed something to edit until saved patterns exist.
   //
@@ -201,6 +224,8 @@ export function App() {
         onCollapsedRacksChange={setCollapsedRacks}
         collapsedRackSections={collapsedRackSections}
         onCollapsedRackSectionsChange={setCollapsedRackSections}
+        openRailSections={openCompositionRailSections}
+        onOpenRailSectionsChange={setOpenCompositionRailSections}
       />
     );
   }
@@ -349,6 +374,8 @@ function CompositionShell({
   onCollapsedRacksChange,
   collapsedRackSections,
   onCollapsedRackSectionsChange,
+  openRailSections,
+  onOpenRailSectionsChange,
 }: {
   onPageChange: (page: PageId) => void;
   mode: ArrangementMode;
@@ -358,6 +385,12 @@ function CompositionShell({
   collapsedRackSections: Readonly<Record<string, readonly SectionId[]>>;
   onCollapsedRackSectionsChange: (
     collapsed: Readonly<Record<string, readonly SectionId[]>>,
+  ) => void;
+  openRailSections: readonly CompositionRailSectionId[];
+  /** An updater rather than a value, for the reason the panes' is one: two
+   *  toggles batched into a single render must not lose the first. */
+  onOpenRailSectionsChange: (
+    next: (open: readonly CompositionRailSectionId[]) => readonly CompositionRailSectionId[],
   ) => void;
 }) {
   const composition = useEditingComposition();
@@ -383,6 +416,8 @@ function CompositionShell({
         onCollapsedRacksChange={onCollapsedRacksChange}
         collapsedRackSections={collapsedRackSections}
         onCollapsedRackSectionsChange={onCollapsedRackSectionsChange}
+        openRailSections={openRailSections}
+        onOpenRailSectionsChange={onOpenRailSectionsChange}
       />
     </AppShell>
   );

@@ -49,12 +49,20 @@
  *     nothing;
  *   - transposition drops notes that fall off the neck.
  *
+ * ── Two axes, not one ──────────────────────────────────────────────────────
+ *
+ * A row carries a `page` AND, on the composition page, a `mode`. They are not
+ * the same knob: `page` picks the agent, the tool set and the history a run
+ * brackets against; `mode` only picks which rows are OFFERED. The full argument
+ * is on `Command.mode` in `commandTypes`, and it is the reason edit mode adds
+ * no rows here.
+ *
  * A slot's VALUE goes into the template, never its label — see `commandTypes`.
  * Numbers that belong to the lib (the tick grid, the track cap) are never
  * written out in prose here; they arrive through a slot or through the tool's
  * own description, so this file cannot drift from the lib by being edited.
  */
-import type { Command, CommandPage } from './commandTypes';
+import type { Command, CommandMode, CommandPage } from './commandTypes';
 
 // ---------------------------------------------------------- pattern page ---
 
@@ -270,6 +278,7 @@ const COMPOSITION_COMMANDS: readonly Command[] = [
   {
     id: 'composition-backing-track',
     page: 'composition',
+    mode: 'pattern',
     label: 'Create a backing track',
     summary: 'Build a whole arrangement — patterns, tracks and blocks — from a genre and a key.',
     slots: [
@@ -358,6 +367,7 @@ Tell me what each track is when you are done.`,
   {
     id: 'composition-bass-line',
     page: 'composition',
+    mode: 'pattern',
     label: 'Create a bass line',
     summary: 'Write a bass part that follows what the arrangement is already doing.',
     slots: [
@@ -400,6 +410,7 @@ Say which bars you covered and what the line is following.`,
   {
     id: 'composition-harmony-track',
     page: 'composition',
+    mode: 'pattern',
     label: 'Add a harmony track',
     summary: 'Double an existing track at an interval, on a track of its own.',
     slots: [
@@ -453,6 +464,7 @@ Transposition is applied at playback and silently drops any note that lands off 
   {
     id: 'composition-extend',
     page: 'composition',
+    mode: 'pattern',
     label: 'Extend the arrangement',
     summary: 'Carry the arrangement on past where it currently stops.',
     slots: [
@@ -494,6 +506,7 @@ Do not move, shorten or delete anything that is already there. Say what the new 
   {
     id: 'composition-lay-down-pattern',
     page: 'composition',
+    mode: 'pattern',
     label: 'Lay a pattern down the timeline',
     summary: 'Repeat one library pattern along a track, back to back.',
     slots: [
@@ -526,6 +539,13 @@ If a copy will not fit where you asked for it, the app lands it in the nearest f
   {
     id: 'composition-balance-mix',
     page: 'composition',
+    // Voice mode, and the one placement here that is a judgement rather than a
+    // reading of the row. A mix is not a voice: this sets track levels and the
+    // master, and touches no voice at all. It sits here because voice mode is
+    // the mode that puts the racks and the mixer side by side, so "balance the
+    // mix" is offered where a person is already thinking about how it sounds.
+    // If the mixer ever gets a mode of its own, this row moves with it.
+    mode: 'voice',
     label: 'Balance the mix',
     summary: 'Set the track levels so one part leads and nothing is buried.',
     slots: [
@@ -548,6 +568,7 @@ Leave the mutes and solos exactly as you found them. A mix balanced with somethi
   {
     id: 'composition-track-tone',
     page: 'composition',
+    mode: 'voice',
     label: 'Dial in a tone',
     summary: 'Pick the voice for a track that suits the part it is playing.',
     slots: [
@@ -589,24 +610,81 @@ export const COMMAND_CATALOG: readonly Command[] = [
 ];
 
 /**
+ * One (page, mode) slice, frozen. `mode: undefined` means the whole page.
+ *
+ * A row with no `mode` shows in EVERY mode — the pattern page's rows are all
+ * like that, and the property is what keeps a new row from being invisible
+ * because whoever added it did not know modes existed.
+ */
+function offered(page: CommandPage, mode?: CommandMode): readonly Command[] {
+  return Object.freeze(
+    COMMAND_CATALOG.filter(
+      (command) =>
+        command.page === page &&
+        (mode === undefined || command.mode === undefined || command.mode === mode),
+    ),
+  );
+}
+
+/**
  * The commands a page offers.
  *
  * Partitioned once at module load rather than filtered per call: the result is
  * a render-time value in the panel, and a fresh array every call is a new
  * identity every render — a `useMemo` dependency that never matches and a list
- * that rebuilds its children for nothing.
+ * that rebuilds its children for nothing. Adding the mode axis did not weaken
+ * that; it added a dimension to the SAME precomputed table, so every slice is
+ * still one stable array.
  *
- * Still derived from the single `COMMAND_CATALOG` rather than declared as two
- * exported arrays, so there is ONE list to add a row to and no command can be
- * reached from both pages by being listed twice.
+ * Still derived from the single `COMMAND_CATALOG` rather than declared as
+ * separate exported arrays, so there is ONE list to add a row to and no command
+ * can be reached from both pages by being listed twice.
  */
 const BY_PAGE: Readonly<Record<CommandPage, readonly Command[]>> = {
-  pattern: Object.freeze(COMMAND_CATALOG.filter((command) => command.page === 'pattern')),
-  composition: Object.freeze(COMMAND_CATALOG.filter((command) => command.page === 'composition')),
+  pattern: offered('pattern'),
+  composition: offered('composition'),
 };
 
-export function commandsForPage(page: CommandPage): readonly Command[] {
-  return BY_PAGE[page];
+/**
+ * The same table with the mode axis added.
+ *
+ * The type annotation is load-bearing: a fourth `CommandMode` is a compile
+ * error here until someone says what that mode offers, rather than a mode that
+ * silently shows an empty rail.
+ */
+const BY_PAGE_AND_MODE: Readonly<
+  Record<CommandPage, Readonly<Record<CommandMode, readonly Command[]>>>
+> = {
+  // Every mode gets the SAME array the mode-less call gets, not an equal copy.
+  // Correct because no pattern row carries a `mode` — `CommandCatalog.test.ts`
+  // ("leaves the pattern page untouched by modes") is what holds that — and it
+  // matters because a caller that normalises to always pass a mode would
+  // otherwise get a different identity for an identical list, which is the
+  // render churn this table exists to prevent.
+  pattern: {
+    pattern: BY_PAGE.pattern,
+    edit: BY_PAGE.pattern,
+    voice: BY_PAGE.pattern,
+  },
+  composition: {
+    pattern: offered('composition', 'pattern'),
+    // Empty, and correct. Edit mode is served by the pattern page's six rows —
+    // `openPlacementForEditing` aims the lib's pattern-editing pointer at the
+    // block and `patternService.writePatternBack` routes to that placement's
+    // snapshot — so the panel asks for `commandsForPage('pattern')` there. See
+    // the note on `Command.mode`: `page` picks the agent, the tools and the
+    // history; `mode` only picks what is offered.
+    edit: offered('composition', 'edit'),
+    voice: offered('composition', 'voice'),
+  },
+};
+
+/**
+ * `mode` is optional so the pattern page — which has no modes — is unaffected,
+ * and so a caller that wants everything a page has can still ask for it.
+ */
+export function commandsForPage(page: CommandPage, mode?: CommandMode): readonly Command[] {
+  return mode === undefined ? BY_PAGE[page] : BY_PAGE_AND_MODE[page][mode];
 }
 
 export function findCommand(id: string): Command | undefined {

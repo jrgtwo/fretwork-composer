@@ -106,6 +106,11 @@ import {
   type SlideIn,
   type SlideOut,
 } from '../../patterns/articulations';
+// The one reach past this file's own seam, and it is a read. `editingPlacementId`
+// lives in the pattern store but it is a COMPOSITION concept — which block the
+// note editor is aimed at — and `compositionService` is the module that owns
+// saying so. See `openBlank` for what it is for.
+import { getEditingPlacementId } from '../../composition/compositionService';
 import {
   arr,
   bool,
@@ -630,12 +635,37 @@ const openBlank = defineTool<{ name?: string }>({
   description:
     'Create an empty pattern and open it for editing. Everything else on the pattern side works on whatever pattern is open.',
   parameters: obj({ name: nameOf('What to call it.') }),
-  run: ({ name }) =>
-    fromResult(openBlankPattern(name), (pattern) => ({
+  run: ({ name }) => {
+    /**
+     * ⚠ REFUSED WHILE A COMPOSITION BLOCK IS OPEN, and this is the one place it
+     * can be.
+     *
+     * The lib keeps ONE pattern-editing pointer and `openPatternForEditing`
+     * nulls `editingPlacementId` outright, so opening a new pattern while a
+     * block is open silently repoints the editor: `writePatternBack` stops
+     * routing to the placement's snapshot, every later stamp lands in a library
+     * pattern the user is not looking at, and none of it is reached by the
+     * composition rollback. The commands the composition page's EDIT mode offers
+     * are the pattern page's, so this is a run away from happening —
+     * `pattern-generate` is withheld there for exactly this reason, and
+     * `Command.tools` is documented as not enforcement, so a model reaching for
+     * this tool from any of the other five has to be answered here too.
+     *
+     * The SEAM stays permissive: a user starting a new pattern with a block open
+     * is a legitimate move and `patternService` handles it (tests/EditMode).
+     * This is a rule about agent runs, so it lives with the agent's capability.
+     */
+    if (getEditingPlacementId() !== null) {
+      return fail(
+        'A composition block is open for editing — stamp your notes into the pattern that is already open rather than starting a new one.',
+      );
+    }
+    return fromResult(openBlankPattern(name), (pattern) => ({
       patternId: pattern.id,
       name: pattern.name,
       instrumentId: pattern.instrumentId,
-    })),
+    }));
+  },
 });
 
 interface PlaybackArgs {

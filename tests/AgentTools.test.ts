@@ -27,9 +27,16 @@ import {
   useHistoryState as usePatternHistory,
 } from '../src/patterns/patternService';
 import {
+  abortEditGesture as abortCompositionGesture,
+  addTrack as addTrackDirect,
   beginEditGesture as beginCompositionGesture,
+  beginJob,
   clearHistory as clearCompositionHistory,
+  closePlacementEditing,
   endEditGesture as endCompositionGesture,
+  endJob,
+  openPlacementForEditing,
+  setTrackVoiceRef as setTrackVoiceRefDirect,
   undo as compositionUndo,
   useHistoryState as useCompositionHistory,
 } from '../src/composition/compositionService';
@@ -110,6 +117,19 @@ beforeEach(() => {
     library: { patterns: [], compositions: [], collections: [] },
   });
   useVoiceStore.getState().reset();
+  // Module state on the seam, so a test that left a job open would refuse every
+  // write in every test after it — with the seam's own sentence, which reads
+  // like a real refusal. Gesture DEPTH is module state for the same reason and
+  // `clearHistory` deliberately preserves it, so drain that too: a test that
+  // threw inside a bracket would leave every later gesture looking nested and
+  // pushing no step. `endEditGesture` is a no-op at zero.
+  endJob();
+  // An open PLACEMENT is module state one document down: it repoints the lib's
+  // single pattern pointer, so a test that left one open would send the next
+  // test's pattern writes into a block.
+  closePlacementEditing();
+  for (let i = 0; i < 8; i += 1) endCompositionGesture(false);
+  for (let i = 0; i < 8; i += 1) endPatternGesture(false);
   clearPatternHistory();
   clearCompositionHistory();
 });
@@ -497,6 +517,44 @@ describe('refusals reach the caller as sentences', () => {
     expect(refused).toContain(`at most ${MAX_COMPOSITION_TRACKS} tracks`);
     // A memory limit someone can plan around, not an arbitrary number.
     expect(refused).toContain('sample bank');
+  });
+
+  /**
+   * ⚠ THE POINTER TRAP, refused at the tool rather than at the seam.
+   *
+   * The lib keeps ONE pattern-editing pointer and `openPatternForEditing` nulls
+   * `editingPlacementId`, so a run that opened a new pattern while a composition
+   * BLOCK was open would silently repoint the editor: `writePatternBack` stops
+   * routing to the placement's snapshot and every later stamp lands in a library
+   * pattern nobody is looking at, outside the composition rollback. The
+   * composition page's edit mode runs the pattern commands against a block, so
+   * this is one model decision away — `Command.tools` is documented as not
+   * enforcement.
+   *
+   * The SEAM stays permissive: a user starting a new pattern with a block open
+   * is a legitimate move (tests/EditMode). This is a rule about agent runs.
+   */
+  it('refuses to open a new pattern while a composition block is open', () => {
+    const patternId = seedPattern('Riff');
+    value(call('composition_open_blank', { name: 'Song' }));
+    const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+    const placed = rows(
+      value(call('composition_place_pattern', { patternId, trackId, atTicks: [0] })).placed,
+    );
+    const placementId = placed[0].placementId as string;
+    expect(openPlacementForEditing(placementId).ok).toBe(true);
+
+    const refused = reason(call('pattern_open_blank', { name: 'Somewhere else' }));
+    expect(refused).toContain('A composition block is open');
+    // Actionable, which is the whole product of a refusal: it names the route
+    // the model should have taken.
+    expect(refused).toContain('stamp your notes into the pattern that is already open');
+    // And the pointer is exactly where it was.
+    expect(usePatternsStore.getState().editingPlacementId).toBe(placementId);
+
+    closePlacementEditing();
+    // With the block closed it is an ordinary capability again.
+    value(call('pattern_open_blank', { name: 'Somewhere else' }));
   });
 
   it('refuses a write to a built-in voice, and says what to do instead', () => {
@@ -1572,5 +1630,128 @@ describe('settings', () => {
     // is read back rather than echoed.
     expect(value(call('pattern_set_playback', { bpm: null })).bpm).toBe(null);
     expect(value(call('pattern_set_playback', { loop: true })).groove).toBe('swing-8ths');
+  });
+});
+
+// ------------------------------------------------------------- the job lock ---
+
+/**
+ * AG-07. The seam refuses the USER's writes while a job owns the document, and
+ * these are what has to keep working through it — otherwise the lock refuses the
+ * job its own tools.
+ *
+ * The exemption is a per-handler flag rather than a flag held across the run,
+ * because the run is asynchronous and the user's clicks land between its tool
+ * calls. That is only sound while handlers are synchronous, which the `AgentTool`
+ * type enforces (`run` returns `ToolResult`, never a promise).
+ */
+describe('agent writes during a job', () => {
+  it('lets every composition tool through while refusing the user', () => {
+    value(call('composition_open_blank', { name: 'Song' }));
+    const patternId = seedPattern('Riff');
+    const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+
+    beginJob();
+
+    // A single-write tool. `oneUndoStep` wraps only the three batching tools, so
+    // an exemption hung there would refuse this one — which is why it is hung on
+    // every tool instead.
+    const added = value(call('composition_add_track', { name: 'Bass' }));
+    // A batching tool, whose bracket nests inside the job's.
+    value(call('composition_place_pattern', { patternId, trackId, atTicks: [0] }));
+    // A settings tool, which brackets nothing at all.
+    value(call('composition_set_settings', { bpm: 132 }));
+    // And edit mode, which the lock covers precisely so the user cannot repoint
+    // the lib's one pattern pointer under a job that is creating patterns.
+    const blocks = rows(rows(value(call('read_composition')).tracks)[0].blocks);
+    value(call('composition_edit_placement', { placementId: blocks[0].placementId }));
+
+    expect(rows(value(call('read_composition')).tracks)).toHaveLength(2);
+    expect(added.name).toBe('Bass');
+
+    // Meanwhile the same write reached the way a component reaches it — the
+    // seam, directly — is refused.
+    const refused = addTrackDirect('Mine');
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.reason).toMatch(/generation job/i);
+
+    endJob();
+    expect(addTrackDirect('Mine').ok).toBe(true);
+  });
+
+  /**
+   * The reason the exemption is wrapped over `AGENT_TOOLS` and not over
+   * `COMPOSITION_TOOLS`: `voice_set_for_track` is a VOICE tool that writes
+   * `Track.voiceRef` through the composition seam, and `composition-track-voice`
+   * is a composition command that calls it. Wrapping only the composition list
+   * would leave `setTrackVoiceRef` the one unlocked track write — or, once it was
+   * locked, refuse that command its own tool.
+   */
+  it('lets a voice tool through too, since it writes the composition', () => {
+    value(call('composition_open_blank', { name: 'Song' }));
+    const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+    // Two, and the track left pointing at the SECOND: `voiceService` returns ok
+    // without writing when the ref is already stored, so setting the one that is
+    // already on the track would pass whether the seam was locked or not.
+    const first = value(call('voice_save_as', { trackId, name: 'Agent lead' }))
+      .voiceKey as string;
+    value(call('voice_save_as', { trackId, name: 'Agent rhythm' }));
+
+    beginJob();
+
+    value(call('voice_set_for_track', { trackId, voiceKey: first }));
+    expect(rows(value(call('read_composition')).tracks)[0].voiceKey).toBe(first);
+    // And the user's hand on the same control is refused, which it was not
+    // before — `setTrackVoiceRef` used to be the one track write with no guard.
+    expect(setTrackVoiceRefDirect(trackId, null).ok).toBe(false);
+
+    endJob();
+    expect(setTrackVoiceRefDirect(trackId, null).ok).toBe(true);
+  });
+
+  /** The agent's exemption stops short of a composition SWITCH: `clearHistory`
+   *  re-arms the open bracket on the new document, so a job that switched would
+   *  have nothing left to roll back to. */
+  it('refuses the job a new composition, not just the user', () => {
+    value(call('composition_open_blank', { name: 'Song' }));
+    const openBefore = usePatternsStore.getState().editingCompositionId;
+
+    beginCompositionGesture();
+    beginJob();
+    const refused = call('composition_open_blank', { name: 'Stray' });
+
+    expect(refused.ok).toBe(false);
+    expect(usePatternsStore.getState().editingCompositionId).toBe(openBefore);
+    endJob();
+    abortCompositionGesture();
+  });
+
+  it('rolls the whole job back as one movement when it is cancelled', () => {
+    const patternId = seedPattern('Riff');
+    value(call('composition_open_blank', { name: 'Song' }));
+    const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+    value(call('composition_place_pattern', { patternId, trackId, atTicks: [0] }));
+    const before = rows(rows(value(call('read_composition')).tracks)[0].blocks);
+    clearCompositionHistory();
+
+    // The bracket belongs to the PANEL, not to `agentService`: a bracket has to
+    // name a history, and the panel is what knows which page it is on.
+    beginCompositionGesture();
+    beginJob();
+    value(call('composition_add_track', { name: 'Bass' }));
+    const bassId = rows(value(call('read_composition')).tracks)[1].trackId as string;
+    value(call('composition_place_pattern', { patternId, trackId: bassId, atTicks: [0, PPQ * 16] }));
+    value(call('composition_remove_placements', { placementIds: [before[0].placementId] }));
+    endJob();
+
+    abortCompositionGesture();
+
+    const tracks = rows(value(call('read_composition')).tracks);
+    expect(tracks).toHaveLength(1);
+    expect(rows(tracks[0].blocks)).toEqual(before);
+    // A cancel that left an undo step would be a cancel the user could
+    // un-cancel into a half-built arrangement.
+    expect(canUndoComposition()).toBe(false);
   });
 });

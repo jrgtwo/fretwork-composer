@@ -1,6 +1,7 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { commandsForPage } from './commandCatalog';
-import { defaultValues, fillForNow, resolveCommand, type ResolvedSlot } from './slotSources';
+import { COMMAND_BUTTON, SlotFields } from './commandSlots';
+import { defaultValues, fillForNow } from './slotSources';
 import type { Command, SlotValue } from './commandTypes';
 import { PATTERN_AGENT, PATTERN_WRITE_TOOLS } from './patternAgent';
 import { runAgentTask, type AgentEvent } from './agentService';
@@ -19,17 +20,15 @@ import { beginEditGesture, endEditGesture, useEditingPattern } from '../patterns
  * either a slot type is missing or the row does not belong in a catalog. Same
  * rule that keeps `VoicePane` a renderer of `paramSchema`.
  *
- * ── NO FREE TEXT ANYWHERE ───────────────────────────────────────────────────
+ * ── WHAT AG-07 TOOK, AND WHAT IT LEFT ───────────────────────────────────────
  *
- * That is the decision the whole feature rests on, and it is what makes a slot
- * bind to real state: a choice slot offers what `slotSources` says exists right
- * now, so it cannot name a groove the lib does not ship. The same constraint
- * that bounds misuse is the one that stops hallucination — see `commandTypes`.
- *
- * A number is therefore a stepper and not a typed field. The stride is the
- * catalog's `step` and the stops are its `min`/`max`, which is the same control
- * the timeline already uses for tempo (±1 over 20–300); a second, cleverer one
- * here would be a second answer to a question the app has already answered.
+ * The slot controls moved to `./commandSlots` when the composition page grew a
+ * panel of its own, because a slot's control is decided by `slot.kind` and by
+ * nothing else — neither page has an opinion about it. Everything below the
+ * fields stayed: what this panel BRACKETS, how long it lets a run take and what
+ * it does with a cancelled one are the pattern page's answers, and the
+ * composition page's are different in all three. See `commandSlots`' header for
+ * why that is two components rather than one with a `page` prop.
  *
  * ── THE RUN-LEVEL UNDO BRACKET ──────────────────────────────────────────────
  *
@@ -88,12 +87,6 @@ type RunView =
    *  itself: a slot that no longer fills, and the deadline above. */
   | { readonly kind: 'refused'; readonly tools: readonly string[]; readonly reason: string };
 
-const BUTTON =
-  'pressable control rounded-[7px] px-2.5 py-1.5 font-mono text-[9.5px] font-bold tracking-[0.12em] uppercase';
-
-const FIELD_LABEL =
-  'font-mono text-[9px] font-semibold tracking-[0.14em] text-ink-mut uppercase';
-
 export function CommandPanel() {
   const commands = commandsForPage('pattern');
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -128,10 +121,6 @@ export function CommandPanel() {
   }, []);
 
   const selected = commands.find((command) => command.id === selectedId) ?? null;
-  // Re-resolved every render rather than memoised: `slotOptions` reads the seams,
-  // and a memo keyed on the command alone would be a picker that stopped
-  // following the app the moment anything else changed it.
-  const resolved = selected ? resolveCommand(selected) : null;
 
   const select = (command: Command) => {
     setSelectedId(command.id);
@@ -283,24 +272,17 @@ export function CommandPanel() {
         ))}
       </ul>
 
-      {selected && resolved && (
+      {selected && (
         <div className="flex flex-col gap-2 border-t border-rim-dark pt-2">
           <p className="text-[10.5px] leading-relaxed text-ink-mut">{selected.summary}</p>
 
-          {resolved.slots.map((slot) => (
-            <SlotControl
-              key={slot.slot.id}
-              resolved={slot}
-              value={values[slot.slot.id]}
-              onChange={(next) => setValue(slot.slot.id, next)}
-            />
-          ))}
+          <SlotFields command={selected} values={values} onChange={setValue} />
 
           <div className="flex items-center gap-1.5">
             <button
               type="button"
               onClick={start}
-              className={`${BUTTON} ${running ? 'opacity-60' : 'control-accent'}`}
+              className={`${COMMAND_BUTTON} ${running ? 'opacity-60' : 'control-accent'}`}
             >
               {running ? 'Running…' : 'Run'}
             </button>
@@ -309,7 +291,7 @@ export function CommandPanel() {
                 DISAPPEARS under the pointer that just pressed it, dropping focus
                 to `<body>`; disabled while idle it is skipped by the keyboard
                 and cannot strand anyone. */}
-            <button type="button" onClick={cancel} disabled={!running} className={BUTTON}>
+            <button type="button" onClick={cancel} disabled={!running} className={COMMAND_BUTTON}>
               Cancel
             </button>
           </div>
@@ -332,129 +314,6 @@ export function CommandPanel() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-/**
- * One slot, as the control its KIND implies — and the only place in the panel
- * that branches on anything.
- *
- * `choice` and `enum` render identically on purpose. They are different in where
- * their values come from, which is `slotSources`' business and already settled
- * by the time a `ResolvedSlot` exists; a user picking a groove and a user picking
- * a direction of travel are doing the same thing and should not face two
- * different widgets to do it.
- */
-function SlotControl({
-  resolved,
-  value,
-  onChange,
-}: {
-  resolved: ResolvedSlot;
-  value: SlotValue | undefined;
-  onChange: (value: SlotValue) => void;
-}) {
-  const controlId = useId();
-  const { slot } = resolved;
-
-  return (
-    <div className="flex flex-col gap-1">
-      <label htmlFor={controlId} className={FIELD_LABEL}>
-        {slot.label}
-      </label>
-
-      {slot.kind === 'number' ? (
-        <NumberStepper
-          controlId={controlId}
-          label={slot.label}
-          min={slot.min}
-          max={slot.max}
-          step={slot.step}
-          unit={slot.unit}
-          value={typeof value === 'number' ? value : slot.fallback}
-          onChange={onChange}
-        />
-      ) : resolved.unavailable ? (
-        // A choice source with nothing to offer is a STATE the panel says out
-        // loud, not an empty picker that opens onto nothing.
-        <p className="text-[10px] leading-relaxed text-ink-mut">{resolved.unavailable}</p>
-      ) : (
-        <select
-          id={controlId}
-          value={typeof value === 'string' ? value : ''}
-          onChange={(event) => onChange(event.currentTarget.value)}
-          className="control w-full rounded-lg px-1.5 py-1 font-mono text-[10px] font-bold text-ink"
-        >
-          {resolved.options.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.hint ? `${option.label} — ${option.hint}` : option.label}
-            </option>
-          ))}
-        </select>
-      )}
-
-      {slot.help && <p className="text-[9.5px] leading-relaxed text-ink-mut">{slot.help}</p>}
-    </div>
-  );
-}
-
-/** ±`step` over the catalog's range, which is the control the timeline already
- *  uses for tempo. Clamped rather than wrapped, and the readout is the value
- *  itself so there is nothing to type. */
-function NumberStepper({
-  controlId,
-  label,
-  min,
-  max,
-  step,
-  unit,
-  value,
-  onChange,
-}: {
-  controlId: string;
-  label: string;
-  min: number;
-  max: number;
-  step: number;
-  unit?: string;
-  value: number;
-  onChange: (value: number) => void;
-}) {
-  const nudge = (delta: number) => onChange(Math.min(max, Math.max(min, value + delta)));
-
-  return (
-    <div className="flex items-center gap-1.5">
-      <button
-        type="button"
-        aria-label={`Decrease ${label}`}
-        onClick={() => nudge(-step)}
-        className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
-      >
-        –
-      </button>
-      {/* The readout carries the field's id so the `<label>` above names it —
-          there is no input to point at, by design. `tabIndex` is deliberately
-          absent: it is text, and the two buttons are what a keyboard drives. */}
-      <span
-        id={controlId}
-        className="min-w-8 text-center font-mono text-[11px] font-bold text-ink-hi"
-      >
-        {value}
-      </span>
-      {unit && (
-        <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-          {unit}
-        </span>
-      )}
-      <button
-        type="button"
-        aria-label={`Increase ${label}`}
-        onClick={() => nudge(step)}
-        className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
-      >
-        +
-      </button>
     </div>
   );
 }

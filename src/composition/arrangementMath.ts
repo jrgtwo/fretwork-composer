@@ -146,11 +146,24 @@ export function rulerMarks(
 // ------------------------------------------------------------------ lanes ---
 
 /**
+ * Every arrangement mode, in the order the grid's tabs read.
+ *
+ * The VALUE is the declaration and {@link ArrangementMode} is derived from it,
+ * rather than the other way round, so that anything needing to walk the modes
+ * walks a real list. A union alone can only be checked at compile time: a test
+ * that hand-writes `['pattern','edit','voice']` beside it is comparing two
+ * literals and passes forever, which is exactly how `CommandCatalog.test.ts`'s
+ * pin on the catalog's second spelling of this union was toothless under
+ * `vitest run` (no typecheck) before this existed.
+ */
+export const ARRANGEMENT_MODES = ['pattern', 'edit', 'voice'] as const;
+
+/**
  * What a lane draws. The grid itself — ruler, headers, time axis, scroll — is
  * identical in all three; only the lane content and the rail change
  * (`tickets/composition-page/README.md`).
  */
-export type ArrangementMode = 'pattern' | 'edit' | 'voice';
+export type ArrangementMode = (typeof ARRANGEMENT_MODES)[number];
 
 /**
  * The modes that have a TIME AXIS, and so the only ones with lane geometry.

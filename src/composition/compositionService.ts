@@ -107,6 +107,180 @@ const store = () => usePatternsStore.getState();
 const NO_TRACKS: readonly Track[] = [];
 const NO_IDS: readonly string[] = [];
 
+// --------------------------------------------------------------- job lock ---
+/**
+ * While an agent job owns the document, the USER's writes are refused and the
+ * job's own go through.
+ *
+ * ⚠ THIS IS DATA-LOSS PREVENTION, not tidiness. A generation job runs for
+ * minutes and can be cancelled, and cancelling rolls the document back to the
+ * snapshot taken when the job started ({@link abortEditGesture}). Anything the
+ * user edited while they waited would be rolled back WITH it — their work,
+ * destroyed by the agent's rollback. Refusing their writes for the duration is
+ * the only way "cancel" can mean "undo what the AGENT did" rather than "undo
+ * the last few minutes".
+ *
+ * Enforced at the SEAM rather than by disabling controls, which is `addTrack`'s
+ * argument turned around: five components write to the composition
+ * (`ArrangementGrid`, `PatternLibraryRail`, `TrackControls`, `TransportBar`,
+ * `TrackVoiceRack`, plus `useArrangementGestures` as the grid's gesture hub) and
+ * a `locked` prop threaded to five places is forgotten by the sixth. All five
+ * render a typed refusal already, so this needs no new UI.
+ *
+ * ── Why TWO flags and not one ───────────────────────────────────────────────
+ *
+ * `jobRunning` is a state that outlives any single call: the agent's run is
+ * asynchronous and the user's clicks land BETWEEN its tool calls, so a flag held
+ * across the whole run cannot tell the two apart. `jobWriteDepth` is what does —
+ * {@link asJobWrite} is raised and lowered inside ONE synchronous tool handler
+ * (`AgentTool.run` returns `ToolResult`, never a promise, and every composition
+ * handler is synchronous — checked against the handlers, not assumed), so
+ * nothing of the user's can run while it is up. It is a DEPTH and not a boolean
+ * because `src/ai/tools/index.ts` wraps EVERY tool list, and a composition tool
+ * reached from inside another wrap must nest rather than unlock early.
+ *
+ * ── What is deliberately NOT locked ─────────────────────────────────────────
+ *
+ *   - **Reads and selection.** Neither writes the document, and a user who
+ *     cannot click a block to look at it while the agent works is being punished
+ *     for waiting.
+ *   - **`playbackService`.** Play/stop is not a document write and listening
+ *     while the arrangement builds is the whole point of watching it build.
+ *     (`setCompositionBpm` and `setCompositionLoop` sit on the same transport bar
+ *     and ARE document writes, so those two do lock.)
+ *   - **The gesture brackets** (`beginEditGesture` and friends). They record
+ *     nothing on their own, and a user bracket opened during a job nests inside
+ *     the job's, so it closes having written nothing and pushes no step.
+ *   - **`ensureComposition` and `closePlacementEditing`.** Lifecycle, wired to
+ *     `CompositionPage`'s effects rather than to a control. Refusing the cleanup
+ *     one re-opens the CP-11 cross-page leak it exists to close — the pattern
+ *     page would keep drawing a placement's snapshot — and that is a worse
+ *     failure than the one the lock prevents.
+ *
+ *     ⚠ THE COST, and it is not only "navigating away": `CompositionPage` wires
+ *     that cleanup to a `mode` effect, so ANY mode switch closes an open
+ *     placement too — and `mode` lives in `App`, which reaches no seam and so
+ *     cannot be refused from here. Either exit, taken while the agent is inside a
+ *     placement, leaves its later `pattern_*` writes pointed at the LIBRARY
+ *     pattern — the user's own document, which {@link abortEditGesture} does not
+ *     restore. `openPlacementForEditing` being locked stops the user repointing
+ *     the editor INTO a block, but not out of one. The mode bar is therefore
+ *     disabled from {@link useIsJobRunning} (`CompositionPage`), which is the
+ *     only one of the two exits worth a control; leaving the page entirely is
+ *     rare enough, and destructive enough to interrupt, that it stays open.
+ *
+ * ── The pattern seam is a SEPARATE lock, and there isn't one ────────────────
+ *
+ * Everything here concerns the COMPOSITION document. `patternService` has its own
+ * history and its own writes, and a composition job creates patterns
+ * (`pattern_open_blank` is in three composition commands' tool lists). Two
+ * consequences, both deliberate for now and both in docs/FOLLOW-UPS.md:
+ * a cancelled job leaves every pattern it minted in the library, unreferenced and
+ * not undoable; and the pattern page's own writes are not refused during a
+ * composition job. Closing that needs a run-level bracket spanning both seams,
+ * which is a bigger change than this lock.
+ */
+
+let jobRunning = false;
+let jobWriteDepth = 0;
+/** Identity of the CURRENT holder, so a caller that was refused the job cannot
+ *  release the one that got it (its own `finally` would otherwise unlock the
+ *  winner). Compared by reference; never read for anything else. */
+let jobToken: object | null = null;
+const jobListeners = new Set<() => void>();
+
+const notifyJob = () => jobListeners.forEach((listener) => listener());
+
+function subscribeJob(listener: () => void): () => void {
+  jobListeners.add(listener);
+  return () => jobListeners.delete(listener);
+}
+
+/** The one authoring of the refusal, for `TRACK_CAP_REASON`'s reason: the panel
+ *  wants the same sentence for its banner that the seam returns to the control. */
+export const JOB_LOCK_REASON =
+  'A generation job is building this arrangement — wait for it to finish, or cancel it.' as const;
+
+/** True when this call is the USER's and a job holds the document. */
+const lockedOut = (): boolean => jobRunning && jobWriteDepth === 0;
+
+/**
+ * Take the document for an agent job. Returns the RELEASE — call it when the run
+ * ends, however it ends.
+ *
+ * A closure rather than a bare `endJob()` because this is an open bracket, and
+ * this repo has already been bitten by one: a release that only the holder can
+ * perform means a caller refused the job cannot unlock the job that got it, and
+ * calling it twice is a no-op. {@link endJob} remains as the unconditional escape
+ * hatch (and the tests' reset), which is the thing you want when a bracket HAS
+ * leaked — but nothing in the normal path should reach for it.
+ *
+ * Refused if a job already holds the document (two jobs would each roll back over
+ * the other's work) or if nothing is open — a job with no document would lock the
+ * user out while every one of its own writes answered "No composition is open."
+ *
+ * Does NOT open the undo bracket. That belongs to the caller, for the reason
+ * `CommandPanel` gives: a bracket has to name a history, and the panel is what
+ * knows which page it is on. The expected order is
+ * `beginEditGesture(); const release = beginJob();` … `release(); endEditGesture()`
+ * on success, or `release(); abortEditGesture()` on cancel.
+ */
+export function beginJob(): Result<() => void> {
+  if (jobRunning) return refuse('A generation job is already running.');
+  if (!getEditingComposition()) return refuse('No composition is open.');
+  const token = {};
+  jobToken = token;
+  jobRunning = true;
+  notifyJob();
+  return ok(() => {
+    if (jobToken !== token) return;
+    endJob();
+  });
+}
+
+/** Hand the document back unconditionally — the escape hatch for a leaked
+ *  bracket, and what the tests reset with. Idempotent. */
+export function endJob(): void {
+  if (!jobRunning) return;
+  jobRunning = false;
+  jobToken = null;
+  notifyJob();
+}
+
+/** Whether a job holds the document. Non-reactive, for event handlers and tests;
+ *  {@link useIsJobRunning} is the one a component wants. */
+export function isJobRunning(): boolean {
+  return jobRunning;
+}
+
+/**
+ * React hook: whether a job holds the document.
+ *
+ * The lock refuses through `Result`, and the two writes that cannot — `undo` and
+ * `redo` — are silently inert instead (see their comment). A control that would
+ * be dead needs to LOOK dead, which is what this is for: `useHistoryState` folds
+ * it in for those two, and `CompositionPage` disables the mode bar with it.
+ */
+export function useIsJobRunning(): boolean {
+  return useSyncExternalStore(subscribeJob, isJobRunning, isJobRunning);
+}
+
+/**
+ * Run one agent tool handler as the JOB's write, exempt from the lock.
+ *
+ * ⚠ Must wrap a SYNCHRONOUS call and nothing longer. The exemption is safe only
+ * because no user event can be dispatched while it is raised; wrapping an
+ * `await` would hand the user the agent's key.
+ */
+export function asJobWrite<T>(write: () => T): T {
+  jobWriteDepth++;
+  try {
+    return write();
+  } finally {
+    jobWriteDepth--;
+  }
+}
+
 // ---------------------------------------------------------------- reading ---
 
 /** React hook: the composition currently being arranged, or null. */
@@ -411,6 +585,21 @@ function pruneTrackSelection(): void {
   if (selectedTrackId !== null && !findTrack(selectedTrackId)) selectTrack(null);
 }
 
+/**
+ * And the EDITING pointer, which is the same hazard with teeth.
+ *
+ * The lib nulls `editingPlacementId` itself when its own `removePlacement` action
+ * runs — but a restore is a raw `storeComposition` setState (LIB-GAP(1)), so
+ * nothing nulls it there. Left dangling, `patternService.writePatternBack` finds
+ * no placement to write to and every note edit silently hits nothing, while the
+ * pattern page keeps drawing a retracted block's snapshot. Cheaper to close here
+ * than to explain later.
+ */
+function pruneEditingPlacement(): void {
+  const editing = getEditingPlacementId();
+  if (editing !== null && !findPlacement(editing)) closePlacementEditing();
+}
+
 export function getSelectedTrackId(): string | null {
   return selectedTrackId;
 }
@@ -495,10 +684,20 @@ function storeComposition(composition: Composition): void {
   }));
 }
 
-function writeCompositionBack(snapshot: Composition): void {
+/**
+ * Restore a snapshot over the live composition.
+ *
+ * `mergeSettings` is true for UNDO, whose caller is the user: the mix and the
+ * naming push no undo step of their own, so rolling them back would destroy an
+ * edit recorded nowhere. It is false for {@link abortEditGesture}, whose caller
+ * is a cancelled agent job — see there.
+ */
+function writeCompositionBack(snapshot: Composition, mergeSettings = true): void {
   const live = getEditingComposition();
   storeComposition(
-    live && live.id === snapshot.id ? mergeSettingsForward(snapshot, live) : snapshot,
+    mergeSettings && live && live.id === snapshot.id
+      ? mergeSettingsForward(snapshot, live)
+      : snapshot,
   );
 }
 
@@ -561,22 +760,108 @@ export function endEditGesture(changed?: boolean): void {
   history.endGesture({ changed: didChange });
 }
 
+/**
+ * Close the bracket WITHOUT pushing an undo step, putting the document back the
+ * way the bracket found it. The rollback half of the job lock.
+ *
+ * Not a new capability: `beginEditGesture` already snapshots, and `undo` already
+ * restores a whole `Composition` through `writeCompositionBack`. This is those
+ * two pieces meeting — which is why the whole-document reach stays the single
+ * `storeComposition` call it already was (LIB-GAP(1)) and no new one appears.
+ *
+ * ⚠ THE RESTORE IS VERBATIM, and that is the one place it parts company with
+ * `undo`. `undo` merges the live settings forward (`mergeSettingsForward`)
+ * because the mix and the naming push no undo step of their own, so reverting
+ * them would destroy an edit recorded nowhere. A cancel cannot borrow that
+ * argument: the job lock refuses the user EVERY field that merge carries — name,
+ * bpm, time signature, loop, master volume, and each track's name, instrument,
+ * voice, level, mute and solo — so by construction the only writer of any of them
+ * during the job is the AGENT, and carrying them forward would mean cancelling a
+ * job that keeps the tempo, the title and the mix it chose. (It was also
+ * incoherent: `groove` is not in the merge list, so a single
+ * `composition_set_settings({bpm, groove})` half-reverted.) The lock is what
+ * makes verbatim safe; if a field is ever unlocked, it belongs in a merge on this
+ * path too.
+ *
+ * ⚠ Nested aborts DEGRADE, they do not escalate. The depth is honoured exactly
+ * as `endEditGesture` honours it, because that symmetry is the only thing
+ * keeping "one gesture, one step" true regardless of the order callers reach the
+ * seam in. So an abort at depth > 1 decrements and does NOTHING ELSE — no
+ * restore — and the outer bracket's eventual `endEditGesture` then pushes an
+ * ordinary undo step for everything that was written. The user gets one undo
+ * instead of an automatic rollback, which is degraded but not wrong. It should
+ * not arise: the panel aborts after the run has RETURNED, and every tool bracket
+ * is closed in a `finally`, so depth is 1 there.
+ *
+ * ⚠ WHAT IT DOES NOT REACH — this restores the COMPOSITION and nothing else:
+ *
+ *   - **Patterns the job minted.** `pattern_open_blank` is in three composition
+ *     commands' tool lists, and `patternService` has its own history and its own
+ *     documents. A cancel leaves those in the library, unreferenced and not
+ *     undoable. Closing it needs a run-level bracket spanning both seams — see
+ *     the job lock's header and docs/FOLLOW-UPS.md.
+ *   - **A composition SWITCH inside the bracket.** `openBlankComposition` clears
+ *     the history and `clearHistory` re-arms the bracket on the NEW document, so
+ *     the snapshot this would restore is the blank one and the pre-job
+ *     composition is never put back. That is why `openBlankComposition` refuses
+ *     for the duration of a job outright — the agent's exemption does not reach
+ *     it — rather than being left to the caller to settle.
+ */
+export function abortEditGesture(): void {
+  if (gestureDepth === 0) return;
+  if (--gestureDepth > 0) return;
+  const snapshot = gestureSnapshot;
+  gestureSnapshot = null;
+  // `changed: false` is what makes this an abort rather than an undo: the
+  // gesture slot is released and no step is pushed, so the stacks are left
+  // exactly as the job found them and the user's own undo still reaches their
+  // own last edit.
+  history.endGesture({ changed: false });
+  if (!snapshot) return;
+  writeCompositionBack(snapshot, false);
+  // `undo`'s reason: a restore can retract tracks and placements the selection
+  // still names, and a stale id is invisible until something tries to drag it.
+  pruneEditingPlacement();
+  prunePlacementSelection();
+  pruneTrackSelection();
+}
+
+/**
+ * ⚠ Both of these are DEAD while a job holds the document, and this is the trap
+ * they are dead for. `history` keeps ONE gesture slot and the job's bracket is
+ * holding it, so an undo mid-job would pop a step from BEFORE the job and write
+ * it over a document the agent is still building — a hybrid neither side asked
+ * for, and a job whose rollback snapshot no longer describes anything that
+ * followed. The user's way out of a running job is CANCEL, which restores the
+ * very snapshot an undo would have been reaching past.
+ *
+ * Silently, because these two return `void` — the only writes here with no
+ * channel to refuse through. So they are not left LOOKING alive either:
+ * {@link useHistoryState} reports both unavailable while a job runs, which is
+ * what the ↶/↷ buttons and their ⌘Z twin already derive `disabled` from. A dead
+ * key with an enabled button beside it is the one refusal in this design with no
+ * channel at all.
+ */
 export function undo(): void {
+  if (lockedOut()) return;
   const current = getEditingComposition();
   if (!current) return;
   const previous = history.undo(current);
   if (!previous) return;
   writeCompositionBack(previous);
+  pruneEditingPlacement();
   prunePlacementSelection();
   pruneTrackSelection();
 }
 
 export function redo(): void {
+  if (lockedOut()) return;
   const current = getEditingComposition();
   if (!current) return;
   const next = history.redo(current);
   if (!next) return;
   writeCompositionBack(next);
+  pruneEditingPlacement();
   prunePlacementSelection();
   pruneTrackSelection();
 }
@@ -597,11 +882,19 @@ export function clearHistory(): void {
   if (gestureSnapshot) history.beginGesture(gestureSnapshot);
 }
 
-/** React hook: whether undo/redo are currently available. */
+/**
+ * React hook: whether undo/redo are currently available.
+ *
+ * A running job makes both unavailable — see {@link undo}. Folded in HERE rather
+ * than left to each caller because the ↶/↷ buttons already derive `disabled`
+ * from this hook, so a control that would be inert is drawn inert without a
+ * second code path to remember.
+ */
 export function useHistoryState(): { canUndo: boolean; canRedo: boolean } {
   const canUndo = useSyncExternalStore(history.subscribe, history.canUndo, history.canUndo);
   const canRedo = useSyncExternalStore(history.subscribe, history.canRedo, history.canRedo);
-  return { canUndo, canRedo };
+  const running = useIsJobRunning();
+  return { canUndo: canUndo && !running, canRedo: canRedo && !running };
 }
 
 // ------------------------------------------------------------- lifecycle ---
@@ -627,8 +920,20 @@ export function ensureComposition(): Result<Composition> {
   return ok(composition);
 }
 
-/** Create a fresh composition and open it for arranging. */
+/**
+ * Create a fresh composition and open it for arranging.
+ *
+ * ⚠ Guarded on `jobRunning` rather than `lockedOut()`, so the AGENT'S exemption
+ * does not reach it either — the one write in this module the job cannot make.
+ * Switching composition mid-job destroys the rollback: `forgetPerCompositionState`
+ * calls `clearHistory`, which re-arms the open bracket on the NEW document, so
+ * the snapshot a cancel would restore becomes the blank one and the pre-job
+ * composition is never put back or even reopened. No composition command lists
+ * this tool, but `Command.tools` is documented as not enforcement, so the model
+ * choosing it anyway has to be answered here rather than assumed away.
+ */
 export function openBlankComposition(name?: string): Result<Composition> {
+  if (jobRunning) return refuse(JOB_LOCK_REASON);
   // The lib's `createComposition` also nulls `editingPatternId`: it assumes the
   // two documents are separate PAGES, one closing as the other opens. Here they
   // are two views of one running app, and `App.tsx` re-seeds a demo pattern the
@@ -701,6 +1006,7 @@ function nextTrackName(tracks: readonly Track[]): string {
  * its own sample bank.
  */
 export function addTrack(name?: string, instrumentId?: FretInstrumentId): Result<Track> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const composition = getEditingComposition();
   if (!composition) return refuse('No composition is open.');
   if (composition.tracks.length >= MAX_COMPOSITION_TRACKS) {
@@ -731,6 +1037,7 @@ export function addTrack(name?: string, instrumentId?: FretInstrumentId): Result
 /** Remove a track and everything on it. The lib refuses to remove the last
  *  remaining one — the model's invariant is at least one track. */
 export function removeTrack(trackId: string): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const tracks = getTracks();
   if (!tracks.some((t) => t.id === trackId)) return refuse('No such track.');
   if (tracks.length === 1) return refuse("A composition can't have zero tracks.");
@@ -766,6 +1073,7 @@ export function removeTrack(trackId: string): Result {
  * See docs/FOLLOW-UPS.md.
  */
 export function moveTrack(trackId: string, toIndex: number): Result<number> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const composition = getEditingComposition();
   if (!composition) return refuse('No composition is open.');
   const from = composition.tracks.findIndex((track) => track.id === trackId);
@@ -809,6 +1117,7 @@ export function moveTrack(trackId: string, toIndex: number): Result<number> {
  * clearing a box and tabbing away does not mean "call it nothing".
  */
 export function setTrackName(trackId: string, name: string): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const track = findTrack(trackId);
   if (!track) return refuse('No such track.');
   const trimmed = name.trim();
@@ -857,6 +1166,7 @@ export function setTrackInstrument(
   trackId: string,
   instrumentId: FretInstrumentId,
 ): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const track = findTrack(trackId);
   if (!track) return refuse('No such track.');
   // Membership checked rather than trusted, as on the pattern side: an id the
@@ -879,8 +1189,15 @@ export function setTrackInstrument(
  * keeps its pattern model independent of the voices module and documents casting
  * at use. `src/voice/voiceService.ts` owns that cast — this seam stores and
  * returns it opaquely and must not narrow it.
+ *
+ * Locked like every other track write. It reaches the seam through a DIFFERENT
+ * tool group (`voice_set_for_track`, which the `composition-track-voice` command
+ * calls), which is why `src/ai/tools/index.ts` marks every list as the job's and
+ * not just `COMPOSITION_TOOLS` — otherwise this guard would refuse a composition
+ * command its own tool.
  */
 export function setTrackVoiceRef(trackId: string, voiceRef: unknown): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const track = findTrack(trackId);
   if (!track) return refuse('No such track.');
   // Reference equality, not a deep one: the value is opaque here by charter, so
@@ -903,6 +1220,7 @@ export function setTrackVoiceRef(trackId: string, voiceRef: unknown): Result {
  * a silent coercion.
  */
 export function setTrackVolumeDb(trackId: string, volumeDb: number): Result<number> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const track = findTrack(trackId);
   if (!track) return refuse('No such track.');
   if (!Number.isFinite(volumeDb)) return refuse('That is not a volume.');
@@ -913,6 +1231,7 @@ export function setTrackVolumeDb(trackId: string, volumeDb: number): Result<numb
 }
 
 export function setTrackMuted(trackId: string, muted: boolean): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const track = findTrack(trackId);
   if (!track) return refuse('No such track.');
   if (track.muted === muted) return ok(undefined);
@@ -921,6 +1240,7 @@ export function setTrackMuted(trackId: string, muted: boolean): Result {
 }
 
 export function setTrackSoloed(trackId: string, soloed: boolean): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const track = findTrack(trackId);
   if (!track) return refuse('No such track.');
   if (track.soloed === soloed) return ok(undefined);
@@ -933,6 +1253,7 @@ export function setTrackSoloed(trackId: string, soloed: boolean): Result {
  *  the same reason every other write here does, and returns the value actually
  *  stored for {@link setTrackVolumeDb}'s. */
 export function setMasterVolumeDb(masterVolumeDb: number): Result<number> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   if (!getEditingComposition()) return refuse('No composition is open.');
   if (!Number.isFinite(masterVolumeDb)) return refuse('That is not a volume.');
   const clamped = clampDb(masterVolumeDb);
@@ -955,6 +1276,7 @@ export function addPlacement(
   trackId: string,
   atTick?: Tick,
 ): Result<string> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   // Named separately from the pattern/track refusal below: the lib returns the
   // same `null` for "nothing is open" as for "no such id", and telling a caller
   // to check ids it got right is the unrecoverable kind of wrong answer.
@@ -996,6 +1318,7 @@ export function movePlacement(
   destTrackId: string,
   destStartTick: Tick,
 ): Result<{ trackId: string; startTick: Tick }> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   if (!findPlacement(placementId)) return refuse('No such block in this composition.');
   if (!findTrack(destTrackId)) return refuse('No such track.');
   commit(() => store().movePlacement(placementId, destTrackId, destStartTick));
@@ -1018,6 +1341,7 @@ export function movePlacement(
  * the diff rather than a trust in "it must have worked".
  */
 export function splitPlacement(placementId: string, atTick: Tick): Result<readonly string[]> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   if (!findPlacement(placementId)) return refuse('No such block in this composition.');
   const before = new Set(placementIds());
   commit(() => store().splitPlacement(placementId, atTick));
@@ -1035,6 +1359,7 @@ export function splitPlacement(placementId: string, atTick: Tick): Result<readon
  *  Clamped to at least one beat and at most the snapshot's own duration (and by
  *  the next block on the track); a legacy `repeat > 1` collapses to 1. */
 export function resizePlacement(placementId: string, lengthTicks: Tick): Result<Tick> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const found = findPlacement(placementId);
   if (!found) return refuse('No such block in this composition.');
   commit(() => store().resizePlacement(placementId, lengthTicks));
@@ -1058,6 +1383,7 @@ export function setPlacementTranspose(
   placementId: string,
   semitones: number,
 ): Result<{ semitones: number; droppedNotes: number }> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   if (!findPlacement(placementId)) return refuse('No such block in this composition.');
   if (!Number.isFinite(semitones)) return refuse('That is not a number of semitones.');
   commit(() => store().setPlacementTranspose(placementId, semitones));
@@ -1070,6 +1396,7 @@ export function setPlacementTranspose(
 }
 
 export function removePlacement(placementId: string): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   if (!findPlacement(placementId)) return refuse('No such block in this composition.');
   commit(() => store().removePlacement(placementId));
   prunePlacementSelection();
@@ -1092,6 +1419,7 @@ export function duplicatePlacements(
   deltaTicks: Tick,
   destTrackId?: string,
 ): Result<readonly string[]> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   if (ids.length === 0) return ok([]);
   const missing = ids.filter((id) => !findPlacement(id));
   if (missing.length > 0) return refuse(`No such block: ${missing.join(', ')}.`);
@@ -1183,8 +1511,18 @@ export function getEditingPlacementId(): string | null {
  * housekeeping: `history` is per-document, and `writePatternBack` writes to
  * WHICHEVER target is current — so an undo carried across a switch would stamp
  * one block's old notes into another block.
+ *
+ * ⚠ COVERED BY THE JOB LOCK, and this is the write that had to be. The lib keeps
+ * ONE pattern-editing pointer, and a composition job creates patterns
+ * (`pattern_open_blank` is in `composition-bass-line`'s tool list) — so a user
+ * entering edit mode mid-job would repoint that pointer out from under the job,
+ * and the agent's next note would be stamped into the user's block. Refusing it
+ * HERE is what makes "edit mode is unavailable during a job" fall out of the
+ * same mechanism as every other refusal, rather than being a special case
+ * someone has to remember to add to the grid.
  */
 export function openPlacementForEditing(placementId: string): Result<string> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const composition = getEditingComposition();
   if (!composition) return refuse('No composition is open.');
   if (!findPlacement(placementId)) return refuse('No such block in this composition.');
@@ -1238,6 +1576,7 @@ export function closePlacementEditing(): Result<void> {
  *  echoed its own argument back would be reporting a value the document does not
  *  hold. */
 export function setCompositionName(name: string): Result<string> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const composition = getEditingComposition();
   if (!composition) return refuse('No composition is open.');
   const trimmed = name.trim();
@@ -1248,9 +1587,17 @@ export function setCompositionName(name: string): Result<string> {
   return ok(trimmed);
 }
 
-/** The composition's tempo. Pushed into the metronome on play; not the
- *  metronome's live value until then. */
+/**
+ * The composition's tempo. Pushed into the metronome on play; not the
+ * metronome's live value until then.
+ *
+ * Locked during a job even though it sits on the transport bar next to play and
+ * stop, which are NOT: the tempo is stored on the document and the transport is
+ * not. Listening while the arrangement builds has to keep working; rewriting the
+ * document under the agent does not.
+ */
 export function setCompositionBpm(bpm: number): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const composition = getEditingComposition();
   if (!composition) return refuse('No composition is open.');
   if (!Number.isFinite(bpm) || bpm <= 0) return refuse('That is not a tempo.');
@@ -1261,6 +1608,7 @@ export function setCompositionBpm(bpm: number): Result {
 export function setCompositionTimeSignature(
   timeSignature: PatternTimeSignature,
 ): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const composition = getEditingComposition();
   if (!composition) return refuse('No composition is open.');
   store().setCompositionTimeSignature(composition.id, timeSignature);
@@ -1270,6 +1618,7 @@ export function setCompositionTimeSignature(
 /** Whether arrangement playback repeats. Stored on the composition rather than
  *  in transport state, so it survives reopening — as it is for patterns. */
 export function setCompositionLoop(loop: boolean): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const composition = getEditingComposition();
   if (!composition) return refuse('No composition is open.');
   store().setCompositionLoop(composition.id, loop);
@@ -1287,6 +1636,7 @@ export function setCompositionLoop(loop: boolean): Result {
  * here and be inaudible.
  */
 export function setCompositionGroove(grooveId: GrooveId): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
   if (!getEditingComposition()) return refuse('No composition is open.');
   const preset = GROOVE_PRESETS.find((candidate) => candidate.id === grooveId);
   if (!preset) return refuse(`No such groove: ${grooveId}.`);

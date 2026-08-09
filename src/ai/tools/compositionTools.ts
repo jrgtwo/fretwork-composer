@@ -25,7 +25,9 @@
  *     by id; a selection is what a pointer needs instead of ids. The seam
  *     already selects a block it just created, so the user's view follows the
  *     agent without the agent aiming it.
- *   - **Undo / redo** — the user's way out of what the agent did.
+ *   - **Undo / redo** — the user's way out of what the agent did. (Both are
+ *     inert while a job holds the document, and cancelling the job is the way
+ *     out during one; see the job lock in `compositionService`.)
  *   - **`ensureComposition`** — App lifecycle. `composition_open_blank` is how
  *     the agent gets one.
  *   - **The transport** (`playbackService`) — nothing here needs to make a
@@ -102,6 +104,16 @@ const TICKS = `Ticks. ${PPQ} ticks = one quarter note.`;
  * against the composition it snapshotted, which is a better answer than anything
  * this layer could compute — a batch where every write was refused wrote
  * nothing, and pushes nothing.
+ *
+ * ⚠ The JOB-LOCK exemption is deliberately NOT here, though this is the obvious
+ * place for it. Only three tools batch (`composition_place_pattern`,
+ * `composition_duplicate_placements`, `composition_remove_placements`); the
+ * remaining fifteen do not, and each would be refused by its own job's lock. Nor
+ * can this wrapper simply be put around all eighteen: bracketing a SETTING makes
+ * it undoable, and the mix, the naming and the tempo push no undo step by design.
+ * The exemption is applied to every tool the app ships instead — see `jobWrite`
+ * in `./index.ts`, which also covers `voice_set_for_track`, the one tool outside
+ * this file that reaches the composition seam.
  */
 function oneUndoStep<T>(write: () => T): T {
   beginEditGesture();
