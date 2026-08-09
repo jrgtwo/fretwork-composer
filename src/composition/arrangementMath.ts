@@ -115,7 +115,7 @@ export interface RulerMark extends GridLine {
  *
  * Constant meter only. `Composition.timeSignatureTrack` exists in the lib and its
  * import pipeline populates it, but nothing in this app writes it and no ticket
- * in `tickets/composition-page/` reads it; a meter map would have to be walked
+ * on the composition-page board reads it; a meter map would have to be walked
  * here (and in `arrangementBars`) exactly as guitar-tutor's `computeBarLines`
  * walks one, or every bar line after the first change lands on the wrong tick.
  */
