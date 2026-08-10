@@ -1755,3 +1755,96 @@ describe('agent writes during a job', () => {
     expect(canUndoComposition()).toBe(false);
   });
 });
+
+// ------------------------------------------- what a run could not find out ---
+
+/**
+ * Three gaps a real backing-track run fell into on 2026-08-09, each of which
+ * cost it the run and none of which it could diagnose from what it got back.
+ * The log is in the session notes; what follows is the shape of each.
+ */
+describe('the answers a run needs and used to have to guess', () => {
+  it('opens a pattern on the instrument it asked for, in one call', () => {
+    // THE POINT: a new pattern is a guitar, so this used to be two calls whose
+    // second — `pattern_set_instrument {"instrumentId":"bass"}` — was identical
+    // every time. Three bass parts made it three times, and the harness's loop
+    // detector cut the run short for repeating itself. The repeat was forced by
+    // this tool taking no instrument.
+    const opened = value(call('pattern_open_blank', { name: 'Bass part', instrumentId: 'bass' }));
+    expect(opened.instrumentId).toBe('bass');
+    // The string count comes back with it: it is what decides which
+    // `stringIndex` values are writable, and a bass has fewer than a guitar.
+    expect(opened.strings).toBe(4);
+  });
+
+  it('still opens a guitar when no instrument is named', () => {
+    const opened = value(call('pattern_open_blank', { name: 'Whatever' }));
+    expect(opened.instrumentId).toBe('guitar');
+    expect(opened.strings).toBe(6);
+  });
+
+  it('reports the length a stamp produced, rounded up to the whole bar', () => {
+    // THE POINT: `fitPatternDuration` rounds content UP to a whole bar. A run
+    // stamped 49 quarter notes for a twelve-bar part — one too many, the 49th
+    // landing on bar 13's downbeat — was told all 49 were placed, and found out
+    // only from a later library read that it had thirteen bars. It could see it
+    // was wrong and not why, so it deleted everything and stamped the identical
+    // notes again.
+    value(call('pattern_open_blank', { name: 'Twelve bars', instrumentId: 'bass' }));
+    const bar = PPQ * 4;
+
+    const twelve = value(
+      call('pattern_stamp_notes', {
+        notes: Array.from({ length: 48 }, (_, beat) => ({
+          stringIndex: 0,
+          fret: 0,
+          tick: beat * PPQ,
+          durationTicks: PPQ,
+        })),
+      }),
+    );
+    expect(twelve.bars).toBe(12);
+    expect(twelve.durationTicks).toBe(12 * bar);
+
+    // One note too many, and the whole pattern is a bar longer.
+    const thirteen = value(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 0, fret: 0, tick: 48 * PPQ, durationTicks: PPQ }],
+      }),
+    );
+    expect(thirteen.bars).toBe(13);
+  });
+
+  it('reports the length a delete produced, which can be shorter by a whole bar', () => {
+    value(call('pattern_open_blank', { name: 'Shrinking', instrumentId: 'guitar' }));
+    const stamped = value(
+      call('pattern_stamp_notes', {
+        notes: [
+          { stringIndex: 0, fret: 0, tick: 0, durationTicks: PPQ },
+          { stringIndex: 0, fret: 0, tick: PPQ * 4, durationTicks: PPQ },
+        ],
+      }),
+    );
+    expect(stamped.bars).toBe(2);
+
+    const placed = stamped.placed as { noteId: string }[];
+    const deleted = value(call('pattern_delete_notes', { noteIds: [placed[1].noteId] }));
+    expect(deleted.deleted).toBe(1);
+    // The second bar goes with the note that was holding it open — the same
+    // rounding seen from the other side, and just as invisible from the args.
+    expect(deleted.bars).toBe(1);
+  });
+
+  it('never reports a pattern shorter than one bar, however little is in it', () => {
+    // `fitPatternDuration`'s floor. An empty or nearly empty pattern is one bar,
+    // not zero — which is why "bars" is safe to compare against what was asked
+    // for without special-casing the empty case.
+    value(call('pattern_open_blank', { name: 'Tiny' }));
+    const stamped = value(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 0, fret: 0, tick: 0, durationTicks: 1 }],
+      }),
+    );
+    expect(stamped.bars).toBe(1);
+  });
+});

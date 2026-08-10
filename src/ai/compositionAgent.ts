@@ -84,7 +84,9 @@ const COMPOSITION_PAGE = `# The arrangement
 
 You are building a multi-track arrangement. \`read_composition\` tells you the tempo, the time signature, the ticks per quarter note, which tracks exist and their ids, and every block already placed with its own id and span. Ids come from there.
 
-A PART IS A PATTERN. Nothing writes notes straight onto the arrangement, because there is no such thing: author the notes with \`pattern_open_blank\` and \`pattern_stamp_notes\`, then put the result on a track with \`composition_place_pattern\`. Get the pattern right BEFORE you place it — a placed block is a deep COPY, so editing the pattern afterwards does not reach the block, and fixing a block means replacing it.
+A PART IS A PATTERN. Nothing writes notes straight onto the arrangement, because there is no such thing: author the notes with \`pattern_open_blank\` and \`pattern_stamp_notes\`, then put the result on a track with \`composition_place_pattern\`. Get the pattern right BEFORE you place it — a placed block is a deep COPY, so editing the pattern afterwards does not reach the block.
+
+IF YOU DO CHANGE A PATTERN AFTER PLACING IT, every block cut from it is now stale and none of them will catch up. Fix each one by \`composition_remove_placements\` and then \`composition_place_pattern\` again, at the tick it was at, on every track that has one. Do NOT place the pattern a second time further along the track to make up the difference: that appends the whole part again rather than correcting what is there, and leaves the arrangement longer than it should be with the old version still playing at the front.
 
 The TRACK LIMIT is a memory limit, not a preference — each track loads its own sample bank. When adding a track is refused, build what you can on the tracks that already exist and say so in your answer.
 

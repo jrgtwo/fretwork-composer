@@ -5,6 +5,8 @@ import { defaultValues, fillForNow } from './slotSources';
 import type { Command, SlotValue } from './commandTypes';
 import { PATTERN_AGENT, PATTERN_WRITE_TOOLS } from './patternAgent';
 import { runAgentTask, type AgentEvent } from './agentService';
+import { beginTranscript } from './runTranscript';
+import { RunTranscriptControl } from './RunTranscriptControl';
 import { isConfigured } from './connectorSettings';
 import { useConnectorSettings } from './connectorView';
 import { beginEditGesture, endEditGesture, useEditingPattern } from '../patterns/patternService';
@@ -76,16 +78,28 @@ const MAX_ITERS = 12;
 
 type RunView =
   | { readonly kind: 'idle' }
-  | { readonly kind: 'running'; readonly tools: readonly string[] }
+  | {
+      readonly kind: 'running';
+      readonly tools: readonly string[];
+      readonly transcriptId?: string;
+    }
   | {
       readonly kind: 'answered';
       readonly tools: readonly string[];
       readonly content: string;
       readonly stoppedReason: string;
+      readonly transcriptId?: string;
     }
   /** Everything that came back `{ok:false}`, plus the two the panel decides
    *  itself: a slot that no longer fills, and the deadline above. */
-  | { readonly kind: 'refused'; readonly tools: readonly string[]; readonly reason: string };
+  | {
+      readonly kind: 'refused';
+      readonly tools: readonly string[];
+      readonly reason: string;
+      /** Absent on the refusal decided BEFORE a run exists — there is no
+       *  transcript of a run that never started. */
+      readonly transcriptId?: string;
+    };
 
 export function CommandPanel() {
   const commands = commandsForPage('pattern');
@@ -178,24 +192,54 @@ export function CommandPanel() {
      */
     let wrote = false;
 
-    setRun({ kind: 'running', tools: [] });
+    /**
+     * The full record of the run, for handing to somebody else. Every field it
+     * keeps already reached `onEvent` here and was being dropped — see
+     * `runTranscript`.
+     */
+    const transcript = beginTranscript({
+      page: 'pattern',
+      command: selected.label,
+      agent: PATTERN_AGENT.name,
+      systemPrompt: PATTERN_AGENT.systemPrompt,
+      input: filled.value,
+    });
+
+    setRun({ kind: 'running', tools: [], transcriptId: transcript.id });
 
     void (async () => {
+      /** Filled at whichever exit is taken, written once in the `finally` — so
+       *  the exit that returns without calling `setRun`, the unmounted one,
+       *  still leaves a complete log. */
+      let outcome: { stoppedReason?: string; content?: string; error?: string } = {};
       beginEditGesture();
       try {
         const result = await runAgentTask(PATTERN_AGENT, filled.value, {
           signal: controller.signal,
           maxIters: MAX_ITERS,
           onEvent: (event: AgentEvent) => {
+            // First, and unconditionally: the transcript wants every event,
+            // including the ones the progress view returns early on.
+            transcript.record(event);
             if (event.type !== 'tool.started') return;
             started.push(event.name);
             if (PATTERN_WRITE_TOOLS.has(event.name)) wrote = true;
-            if (liveRef.current) setRun({ kind: 'running', tools: [...started] });
+            if (liveRef.current) {
+              setRun({ kind: 'running', tools: [...started], transcriptId: transcript.id });
+            }
           },
         });
+        outcome = result.ok
+          ? { stoppedReason: result.value.stoppedReason, content: result.value.content }
+          : { error: result.reason };
         if (!liveRef.current) return;
         if (!result.ok) {
-          setRun({ kind: 'refused', tools: started, reason: result.reason });
+          setRun({
+            kind: 'refused',
+            tools: started,
+            reason: result.reason,
+            transcriptId: transcript.id,
+          });
           return;
         }
         // An abort comes back as a SUCCESS with `stoppedReason: 'aborted'`,
@@ -206,6 +250,7 @@ export function CommandPanel() {
             kind: 'refused',
             tools: started,
             reason: `Gave up after ${RUN_TIMEOUT_MS / 1000}s — the provider never finished.`,
+            transcriptId: transcript.id,
           });
           return;
         }
@@ -214,24 +259,27 @@ export function CommandPanel() {
           tools: result.value.toolCalls,
           content: result.value.content,
           stoppedReason: result.value.stoppedReason,
+          transcriptId: transcript.id,
         });
       } catch (error) {
         // `runAgentTask` returns its failures rather than throwing, so arriving
         // here is a defect in this app — but the bracket below must close all
         // the same, and the panel must not be left saying "Running…" forever.
+        const message = error instanceof Error ? error.message : String(error);
+        outcome = { error: message };
         if (liveRef.current) {
           setRun({
             kind: 'refused',
             tools: started,
-            reason: `The agent run could not complete: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+            reason: `The agent run could not complete: ${message}`,
+            transcriptId: transcript.id,
           });
         }
       } finally {
         // THE BRACKET, closed on every path out of the try — including the two
         // early returns above and a throw from anywhere in the chain.
         endEditGesture(wrote);
+        transcript.finish(outcome);
         window.clearTimeout(deadline);
         inFlightRef.current = null;
       }
@@ -348,6 +396,14 @@ function RunReport({ run }: { run: RunView }) {
         <p className="mt-1 text-[10.5px] leading-relaxed text-ink">
           {run.content.trim() === '' ? `The run ended: ${run.stoppedReason}.` : run.content}
         </p>
+      )}
+
+      {/* On every ENDED run, not only the ones that went wrong: a command that
+          answered confidently and edited the wrong notes is the case a
+          failure-only affordance would miss. Withheld while running because the
+          log is still growing. */}
+      {run.kind !== 'running' && run.transcriptId !== undefined && (
+        <RunTranscriptControl transcriptId={run.transcriptId} />
       )}
     </div>
   );

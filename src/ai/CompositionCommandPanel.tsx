@@ -6,6 +6,8 @@ import type { Command, SlotValue } from './commandTypes';
 import { COMPOSITION_AGENT, COMPOSITION_WRITE_TOOLS } from './compositionAgent';
 import { PATTERN_AGENT, PATTERN_WRITE_TOOLS } from './patternAgent';
 import { runAgentTask, type AgentEvent, type AgentSpec } from './agentService';
+import { beginTranscript } from './runTranscript';
+import { RunTranscriptControl } from './RunTranscriptControl';
 import { isConfigured } from './connectorSettings';
 import { useConnectorSettings } from './connectorView';
 import {
@@ -119,6 +121,7 @@ type RunView =
       readonly command: string;
       readonly tools: readonly string[];
       readonly refusals: readonly string[];
+      readonly transcriptId?: string;
     }
   | {
       readonly kind: 'answered';
@@ -129,6 +132,7 @@ type RunView =
       readonly stoppedReason: string;
       readonly rolledBack: boolean;
       readonly keptPatterns: boolean;
+      readonly transcriptId?: string;
     }
   /** Everything that came back `{ok:false}`, plus the three the panel decides
    *  itself: a slot that no longer fills, a job it could not take, and the
@@ -141,6 +145,9 @@ type RunView =
       readonly reason: string;
       readonly rolledBack: boolean;
       readonly keptPatterns: boolean;
+      /** Absent on the refusals decided BEFORE a run exists — there is no
+       *  transcript of a run that never started. */
+      readonly transcriptId?: string;
     };
 
 /** A tool that returned `{ok:false, reason}` — a refusal the model was handed and
@@ -376,12 +383,45 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
      */
     let wrotePatterns = false;
 
-    setRun({ kind: 'running', command: label, tools: [], refusals: [] });
+    /**
+     * The full record of the run, for handing to somebody else.
+     *
+     * Everything below this line already reaches `onEvent` and was being dropped
+     * — the arguments, the results, the model's reasoning, the token spend. Two
+     * jobs in a row were debugged from a photograph of this panel because of it.
+     * `beginTranscript` never throws and never refuses, so nothing on the run
+     * path has to account for it failing.
+     */
+    const transcript = beginTranscript({
+      page: command.page,
+      command: label,
+      agent: agent.name,
+      systemPrompt: agent.systemPrompt,
+      input: filled.value,
+    });
+
+    setRun({
+      kind: 'running',
+      command: label,
+      tools: [],
+      refusals: [],
+      transcriptId: transcript.id,
+    });
 
     void (async () => {
       /** Did the loop finish of its own accord, having been asked to? Anything
        *  else is an incomplete arrangement — see the rollback below. */
       let completed = false;
+      /**
+       * What to close the transcript with, filled at whichever exit is taken and
+       * written once in the `finally`.
+       *
+       * There rather than beside each `setRun` because one of the exits below
+       * returns WITHOUT calling `setRun` — the unmounted case — and that is
+       * precisely the run somebody will want the log of: the panel went away
+       * mid-job and rolled the arrangement back.
+       */
+      let outcome: { stoppedReason?: string; content?: string; error?: string } = {};
 
       try {
         // Inside the `try` whose `finally` closes it, so a throw between here
@@ -396,6 +436,9 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
           signal: controller.signal,
           maxIters: MAX_ITERS,
           onEvent: (event: AgentEvent) => {
+            // First, and unconditionally: the transcript wants every event,
+            // including the ones the progress view below returns early on.
+            transcript.record(event);
             if (event.type === 'tool.started') {
               started.push(event.name);
               if (writeTools.has(event.name)) {
@@ -426,6 +469,10 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
         // there.
         const keptPatterns = rolledBack && wrotePatterns;
 
+        outcome = result.ok
+          ? { stoppedReason: result.value.stoppedReason, content: result.value.content }
+          : { error: result.reason };
+
         if (!liveRef.current) return;
         if (!result.ok) {
           setRun({
@@ -436,6 +483,7 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
             reason: result.reason,
             rolledBack,
             keptPatterns,
+            transcriptId: transcript.id,
           });
           return;
         }
@@ -451,6 +499,7 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
             reason: `Gave up after ${RUN_TIMEOUT_MS / 60_000} minutes — the provider never finished.`,
             rolledBack,
             keptPatterns,
+            transcriptId: transcript.id,
           });
           return;
         }
@@ -463,22 +512,24 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
           stoppedReason: result.value.stoppedReason,
           rolledBack,
           keptPatterns,
+          transcriptId: transcript.id,
         });
       } catch (error) {
         // `runAgentTask` returns its failures rather than throwing, so arriving
         // here is a defect in this app — but both brackets below must close all
         // the same, and the panel must not be left saying "Running…" forever.
+        const message = error instanceof Error ? error.message : String(error);
+        outcome = { error: message };
         if (liveRef.current) {
           setRun({
             kind: 'refused',
             command: label,
             tools: started,
             refusals,
-            reason: `The agent run could not complete: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+            reason: `The agent run could not complete: ${message}`,
             rolledBack: onComposition && wrote,
             keptPatterns: onComposition && wrote && wrotePatterns,
+            transcriptId: transcript.id,
           });
         }
       } finally {
@@ -486,6 +537,13 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
         // The lock goes back first: the rollback writes the composition, and
         // the seam's own writes are not what the lock is holding out.
         release();
+
+        // Closed here rather than beside each `setRun`, so the exits that never
+        // reach one — an unmount mid-run, above all — still leave a complete log.
+        transcript.finish({
+          ...outcome,
+          rolledBack: onComposition && !completed && wrote,
+        });
 
         if (!onComposition) {
           // AG-06's behaviour, kept deliberately for edit-mode rows: NO
@@ -723,6 +781,14 @@ function RunReport({ run }: { run: RunView }) {
             ? 'Cancelled.'
             : `The run was cut short: ${run.stoppedReason}.`}
         </p>
+      )}
+
+      {/* On every ENDED run, not only the ones that went wrong: a job that
+          answered confidently and built the wrong thing is the case a
+          failure-only affordance would miss, and it is the case that has come
+          up. Withheld while running because the log is still growing. */}
+      {run.kind !== 'running' && run.transcriptId !== undefined && (
+        <RunTranscriptControl transcriptId={run.transcriptId} />
       )}
     </div>
   );

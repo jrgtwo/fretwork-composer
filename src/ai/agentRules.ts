@@ -65,7 +65,15 @@ A read gives you \`ticksPerQuarterNote\` and \`timeSignature\`. From those:
     one beat = ticksPerQuarterNote x (4 / denominator)
     one bar  = one beat x numerator
 
-At the usual 4/4 with \`ticksPerQuarterNote: 480\`, a beat is 480 ticks and a bar is 1920. Work this out once from your first read and reuse it — it does not change under you.`;
+At the usual 4/4 with \`ticksPerQuarterNote: 480\`, a beat is 480 ticks and a bar is 1920. Work this out once from your first read and reuse it — it does not change under you.
+
+BARS ARE COUNTED FROM 1, TICKS FROM 0, so converting between them costs a bar if you do it by eye:
+
+    bar N starts at        (N - 1) x ticksPerBar
+    bar N ends at          N x ticksPerBar
+    an N-bar part ends at  N x ticksPerBar
+
+At 4/4 with a 1920-tick bar: bar 1 starts at 0, bar 12 starts at 21120 and ends at 23040, and a twelve-bar part occupies ticks 0 to 23040. Note that 12 x 1920 is where bar 12 ENDS, not where it begins — reaching for the bar number times the bar length puts you one bar late, and subtracting a bar from the current length puts you one bar early.`;
 
 /**
  * The subject the old prompts left out entirely.
@@ -78,7 +86,11 @@ At the usual 4/4 with \`ticksPerQuarterNote: 480\`, a beat is 480 ticks and a ba
  */
 const LENGTH = `# How long things are — read this before building anything
 
-A PATTERN HAS NO LENGTH SETTING, and no tool sets one. A pattern is exactly as long as the span of its notes, recalculated every time you edit it. To make a four-bar part, stamp notes that reach the end of the fourth bar. If it should end in silence, the last note has to sound into that space — otherwise the pattern simply ends where the last note does.
+A PATTERN HAS NO LENGTH SETTING, and no tool sets one. Its length is worked out from its notes every time you edit it, and **rounded UP to a whole bar** — minimum one bar. So the length is not where the last note ends; it is the end of the BAR that note ends in.
+
+That rounding is unforgiving in one direction. A twelve-bar part is notes ending by the end of bar 12 — at 4/4 with 480 ticks per quarter, the last beat of bar 12 STARTS at tick 22080 and the bar ENDS at 23040. A single note starting at 23040 begins bar 13, and the pattern becomes thirteen bars long. Check your last note before you write: one note too many costs a whole bar, and reading the length back afterwards tells you it is wrong without telling you why.
+
+If a part should end in silence, that is already what the rounding does — you do not need a note to hold the space open.
 
 A BLOCK CAN ONLY BE MADE SHORTER. \`composition_resize_placement\` truncates: it is clamped to at most the length of the pattern underneath it, so it can never stretch a block past those notes. Ask for more and the shorter length that stuck is what comes back.
 

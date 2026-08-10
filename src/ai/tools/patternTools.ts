@@ -23,7 +23,13 @@
  *   - **`ensurePattern`.** App lifecycle — `App.tsx` owns when a pattern is
  *     open. `pattern_open_blank` is the agent's way to get one.
  *   - **Pattern length.** There is none to set: the lib auto-fits a pattern's
- *     duration to its content on every edit (`fitPatternDuration`).
+ *     duration to its content on every edit (`fitPatternDuration`), and fits it
+ *     UP TO A WHOLE BAR — `Math.max(ticksPerBar, ceil(lastEnd / ticksPerBar) *
+ *     ticksPerBar)`. One note past the end of the last bar therefore costs a
+ *     whole extra bar, which a run on 2026-08-09 hit and could not diagnose: it
+ *     stamped 49 quarter notes for a 12-bar part, the 49th landed on bar 13's
+ *     downbeat, and the library reported 13 bars. Said in `pattern_stamp_notes`'
+ *     description and in `agentRules` because it is invisible from here.
  *
  * ── Every write here is a BATCH, and why ───────────────────────────────────
  *
@@ -78,6 +84,7 @@ import {
   endEditGesture,
   fretCount,
   getEditingPattern,
+  stringCount,
   listGrooves,
   listInstruments,
   moveNote,
@@ -135,6 +142,11 @@ import {
 // silently omits the instrument the lib added last week — and in a schema, that
 // is the model being told a real value is invalid.
 const INSTRUMENT_IDS = listInstruments().map((instrument) => instrument.id);
+/** The same catalog as a sentence, for the two schemas that name the choices
+ *  inline. Built once — `listInstruments` reads the lib's catalog. */
+const INSTRUMENT_LIST = listInstruments()
+  .map((instrument) => `${instrument.id} (${instrument.name})`)
+  .join(', ');
 const GROOVE_IDS = listGrooves().map((groove) => groove.id);
 
 const TICKS = `Ticks. ${PPQ} ticks = one quarter note.`;
@@ -276,7 +288,7 @@ interface StampArgs {
 const stampNotes = defineTool<StampArgs>({
   name: 'pattern_stamp_notes',
   description:
-    'Add notes to the open pattern. Send a whole phrase in one call — it lands as a single undo step, and each note is reported separately so a note that could not be placed does not cost you the rest. A string can only ring one note at a time, so a note that overlaps an existing one on the same string is refused. A note past the end of this instrument\'s neck is placed but comes back marked aboveTheNeck, which means it will never sound. The pattern grows to fit its content by itself; there is no length to set.',
+    'Add notes to the open pattern. Send a whole phrase in one call — it lands as a single undo step, and each note is reported separately so a note that could not be placed does not cost you the rest. A string can only ring one note at a time, so a note that overlaps an existing one on the same string is refused. A note past the end of this instrument\'s neck is placed but comes back marked aboveTheNeck, which means it will never sound. The pattern grows to fit its content by itself and there is no length to set — but it grows to a WHOLE BAR, so a single note starting one beat past the end of the last bar you meant makes the pattern a bar longer. The reply gives the length that resulted; check it against the length you intended.',
   parameters: obj(
     {
       notes: arr(
@@ -338,11 +350,40 @@ const stampNotes = defineTool<StampArgs>({
                 })),
               )}`,
             )
-          : ok({ placed, refused });
+          : ok({ placed, refused, ...patternLength() });
       },
       (result) => result.ok,
     ),
 });
+
+/**
+ * How long the pattern is NOW, in ticks and in bars.
+ *
+ * Returned by every tool that adds or removes notes, because the length is not
+ * something the caller can work out from what it sent: `fitPatternDuration`
+ * rounds the content UP to a whole bar, so a phrase ending one beat into a new
+ * bar produces a pattern a whole bar longer than the phrase.
+ *
+ * That gap cost a whole run. A job stamped 49 quarter notes for a twelve-bar
+ * bass part — one too many, the 49th landing on bar 13's downbeat — got back a
+ * plain `{placed, refused}` saying all 49 were fine, and only found out from a
+ * later library read that the pattern was thirteen bars. It could see it was
+ * wrong and not why, so it deleted everything and stamped the identical notes
+ * again. Reporting the length here closes that loop at the call that caused it.
+ *
+ * `bars` is given alongside the ticks rather than left as arithmetic: bars are
+ * what the command asked for, and the rounding is a statement ABOUT bars.
+ */
+function patternLength(): { durationTicks: number; bars: number } {
+  const pattern = getEditingPattern();
+  if (!pattern) return { durationTicks: 0, bars: 0 };
+  const { numerator, denominator } = pattern.timeSignature;
+  const ticksPerBar = numerator * ((4 / denominator) * PPQ);
+  return {
+    durationTicks: pattern.durationTicks,
+    bars: pattern.durationTicks / ticksPerBar,
+  };
+}
 
 interface MoveEdit {
   noteId: string;
@@ -456,7 +497,10 @@ const deleteNotesTool = defineTool<{ noteIds: readonly string[] }>({
   ),
   run: ({ noteIds }) =>
     oneUndoStep(
-      () => fromResult(deleteNotes(noteIds), (count) => ({ deleted: count })),
+      // The length comes back here too: deleting the last note in a bar shortens
+      // the pattern by a whole bar, which is the same rounding seen from the
+      // other side and just as invisible from the arguments.
+      () => fromResult(deleteNotes(noteIds), (count) => ({ deleted: count, ...patternLength() })),
       (result) => result.ok,
     ),
 });
@@ -630,12 +674,14 @@ const setPitchesTool = defineTool<{ pitches: readonly PitchEdit[] }>({
 
 // --------------------------------------------------------------- pattern ---
 
-const openBlank = defineTool<{ name?: string }>({
+const openBlank = defineTool<{ name?: string; instrumentId?: string }>({
   name: 'pattern_open_blank',
-  description:
-    'Create an empty pattern and open it for editing. Everything else on the pattern side works on whatever pattern is open.',
-  parameters: obj({ name: nameOf('What to call it.') }),
-  run: ({ name }) => {
+  description: `Create an empty pattern and open it for editing. Everything else on the pattern side works on whatever pattern is open. Give the instrument here — a new pattern is a guitar otherwise, and it decides how many strings you have to write on. ${INSTRUMENT_LIST}`,
+  parameters: obj({
+    name: nameOf('What to call it.'),
+    instrumentId: str(INSTRUMENT_LIST, INSTRUMENT_IDS),
+  }),
+  run: ({ name, instrumentId }) => {
     /**
      * ⚠ REFUSED WHILE A COMPOSITION BLOCK IS OPEN, and this is the one place it
      * can be.
@@ -660,11 +706,39 @@ const openBlank = defineTool<{ name?: string }>({
         'A composition block is open for editing — stamp your notes into the pattern that is already open rather than starting a new one.',
       );
     }
-    return fromResult(openBlankPattern(name), (pattern) => ({
-      patternId: pattern.id,
-      name: pattern.name,
-      instrumentId: pattern.instrumentId,
-    }));
+    return fromResult(openBlankPattern(name), (pattern) => {
+      /**
+       * ── WHY THE INSTRUMENT IS SET HERE AND NOT LEFT TO A SECOND CALL ───────
+       *
+       * A new pattern is a guitar, so authoring any other part used to be two
+       * calls whose second was `pattern_set_instrument {"instrumentId":"bass"}`
+       * — BYTE-IDENTICAL every time, because there is only one thing to say. A
+       * job that writes three bass parts made that exact call three times, and
+       * the harness's loop detector reads identical arguments with no progress
+       * as a stuck model and cuts the run short. It was not stuck; the run log
+       * for 2026-08-09 shows it changing strategy between each one. The repeat
+       * was forced by this tool taking no instrument.
+       *
+       * So this is not a convenience. Neither is it a new capability: both
+       * halves are seam functions already, and the app's own New Pattern button
+       * wants the two-step. What is fixed is the AGENT's surface.
+       *
+       * A refusal here is dropped on purpose — the pattern is open and usable,
+       * and the reply says which instrument it actually has. Failing the whole
+       * call would strand a created pattern in the library to make a point
+       * about its instrument.
+       */
+      if (instrumentId !== undefined) {
+        setEditingPatternInstrument(instrumentId as (typeof INSTRUMENT_IDS)[number]);
+      }
+      const opened = getEditingPattern() ?? pattern;
+      return {
+        patternId: opened.id,
+        name: opened.name,
+        instrumentId: opened.instrumentId,
+        strings: stringCount(),
+      };
+    });
   },
 });
 
