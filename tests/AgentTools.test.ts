@@ -10,6 +10,9 @@ import {
   useVoiceStore,
 } from '@fretwork/lib';
 import { AGENT_TOOLS, findTool } from '../src/ai/tools';
+// The read half of the registry, so "this one cannot write" can be asserted as a
+// property of the SET rather than of one tool's name.
+import { READ_TOOLS } from '../src/ai/tools/readTools';
 import type { JsonPrimitive, JsonSchema, JsonValue, ToolResult } from '../src/ai/tools/types';
 import {
   BEND_KINDS,
@@ -460,8 +463,11 @@ describe('reading', () => {
     expect(pattern.name).toBe('Riff');
     expect(pattern.ticksPerQuarterNote).toBe(PPQ);
     // The mistake that still looks plausible when it is backwards, so the read
-    // states it every time.
-    expect(pattern.strings).toMatch(/index 0 = lowest/);
+    // states it every time — WITH the reentrant caveat, because "index 0 is the
+    // lowest-pitched string" is false on a standard ukulele and a model that
+    // believes it reaches for the wrong end of a chord shape.
+    expect(pattern.strings).toMatch(/index 0 = the bottom string/);
+    expect(pattern.strings).toMatch(/reentrant ukulele/);
     const notes = rows(pattern.notes);
     expect(notes).toHaveLength(1);
     expect(notes[0].fret).toBe(7);
@@ -680,6 +686,10 @@ describe('refusals reach the caller as sentences', () => {
     const refused = rows(result.refused);
     expect(refused).toHaveLength(1);
     expect(refused[0].index).toBe(0);
+    expect(refused[0].tick).toBe(0);
+    // NO `repeatIndex` on a call that sent no repeat. A "1" here names a
+    // dimension the model never used, in the one field it has to act on.
+    expect(refused[0].repeatIndex).toBeUndefined();
     expect(refused[0].reason).toContain('already sounding');
   });
 });
@@ -1322,6 +1332,10 @@ describe('editing many notes in one call', () => {
     );
     expect(refused).toContain('string 0 tick 0');
     expect(refused).toContain('string 1 tick 0');
+    // And nothing about repeating, on a call that did not. `toContain` on the
+    // labels above is satisfied by a `repeat 1 ` prefix in front of them, so the
+    // absence has to be asserted separately.
+    expect(refused).not.toContain('repeat');
     expect(rows(value(call('read_pattern')).notes)).toHaveLength(2);
     expect(canUndoPattern()).toBe(false);
   });
@@ -1846,5 +1860,393 @@ describe('the answers a run needs and used to have to guess', () => {
       }),
     );
     expect(stamped.bars).toBe(1);
+  });
+});
+
+// -------------------------------------------------------- repeating a phrase ---
+
+/**
+ * AG-10. A backing-track run on 2026-08-09 emitted 1002 notes in ONE call —
+ * ticks 0 to 480000, some thirty thousand output tokens, a 251-bar pattern —
+ * because there was no way to say "this four-note phrase, twelve times". Every
+ * individual call in that run succeeded; what failed was what the surface let
+ * the model express. `repeat` is that sentence made sayable.
+ */
+describe('stamping the same phrase several times over', () => {
+  const BAR = PPQ * 4;
+
+  /** One bar of a bass ostinato: four notes, one per beat. */
+  const ostinato = [0, 1, 2, 3].map((beat) => ({
+    stringIndex: 0,
+    fret: beat,
+    tick: beat * PPQ,
+    durationTicks: PPQ,
+  }));
+
+  it('lays the phrase down once per pass, offset by everyTicks', () => {
+    value(call('pattern_open_blank', { name: 'Ostinato', instrumentId: 'bass' }));
+
+    const stamped = value(
+      call('pattern_stamp_notes', { notes: ostinato, repeat: { times: 12, everyTicks: BAR } }),
+    );
+    expect(stamped.placedCount).toBe(48);
+    // `toEqual` rather than a length through `rows()`, which maps a missing
+    // `refused` to `[]` and would pass just as happily if the key were dropped.
+    expect(stamped.refused).toEqual([]);
+    expect(stamped.refusedCount).toBe(0);
+    expect(stamped.aboveTheNeck).toBe(0);
+    // The length is unchanged by the repeat and is the only thing that tells the
+    // model how long the thing it just built came out.
+    expect(stamped.bars).toBe(12);
+    expect(stamped.durationTicks).toBe(12 * BAR);
+
+    // ITEMISING IS DROPPED, on purpose: 48 note objects hand back most of the
+    // tokens `repeat` exists to save, and `read_pattern` has the ids for the
+    // rare case where the model wants them.
+    expect(stamped.placed).toBeUndefined();
+
+    const ticks = rows(value(call('read_pattern')).notes)
+      .map((note) => Number(note.tick))
+      .sort((a, b) => a - b);
+    expect(ticks).toHaveLength(48);
+    // Every pass is the phrase again, a whole bar later — not a phrase stretched
+    // or re-spaced by whatever its own notes happened to span.
+    expect(ticks).toEqual(
+      Array.from({ length: 12 }, (_, pass) => ostinato.map((note) => note.tick + pass * BAR)).flat(),
+    );
+  });
+
+  it('makes times: 1 identical to sending no repeat at all', () => {
+    // Not merely "equivalent". The reply SHAPE has to match too, or the model
+    // learns a rule about `repeat` that is really a rule about the number 1.
+    const withoutIds = (reply: Record<string, JsonValue>) => ({
+      ...reply,
+      // The ids are minted per pattern and these are two patterns; everything
+      // else about a placed note is the model's own values read back.
+      placed: rows(reply.placed).map((note) =>
+        Object.fromEntries(Object.entries(note).filter(([key]) => key !== 'noteId')),
+      ),
+    });
+
+    value(call('pattern_open_blank', { name: 'Plain', instrumentId: 'bass' }));
+    const plain = value(call('pattern_stamp_notes', { notes: ostinato }));
+
+    value(call('pattern_open_blank', { name: 'Once', instrumentId: 'bass' }));
+    const once = value(
+      call('pattern_stamp_notes', { notes: ostinato, repeat: { times: 1, everyTicks: BAR } }),
+    );
+
+    // `toEqual` treats an absent key and an `undefined` one alike, so the keys
+    // are compared as well — a `placed` that had quietly gone missing would pass
+    // the comparison below on its own.
+    expect(Object.keys(once)).toEqual(Object.keys(plain));
+    expect(withoutIds(once)).toEqual(withoutIds(plain));
+    expect(rows(once.placed)).toHaveLength(4);
+    expect(once.placedCount).toBe(4);
+  });
+
+  it('refuses only the passes that collide, and lands the rest', () => {
+    value(call('pattern_open_blank', { name: 'Ostinato', instrumentId: 'bass' }));
+    // TWO notes in the phrase, and the obstacle sits where only the SECOND note
+    // of the THIRD pass wants to go. A one-note phrase cannot tell "refuses the
+    // note that collided" apart from "refuses the whole pass that collided", and
+    // the two are the difference between losing one note and losing a bar.
+    const phrase = [0, 1].map((beat) => ({
+      stringIndex: 0,
+      fret: beat + 3,
+      tick: beat * PPQ,
+      durationTicks: PPQ,
+    }));
+    value(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 0, fret: 7, tick: 2 * BAR + PPQ, durationTicks: PPQ }],
+      }),
+    );
+
+    const stamped = value(
+      call('pattern_stamp_notes', { notes: phrase, repeat: { times: 4, everyTicks: BAR } }),
+    );
+    // Seven of the eight. The first note of the third pass is untouched by its
+    // neighbour's collision.
+    expect(stamped.placedCount).toBe(7);
+    expect(stamped.refusedCount).toBe(1);
+
+    const refused = rows(stamped.refused);
+    expect(refused).toHaveLength(1);
+    // 1-BASED, like the bar numbers in `agentRules`. A model holding two
+    // counting conventions at once looks at the wrong pass.
+    expect(refused[0].repeatIndex).toBe(3);
+    // `index` is into the phrase as SENT, not a running count across passes.
+    expect(refused[0].index).toBe(1);
+    // The tick it was actually tried at, so the model does not have to
+    // reconstruct it from index × spacing.
+    expect(refused[0].tick).toBe(2 * BAR + PPQ);
+    expect(refused[0].reason).toContain('already sounding');
+
+    // And the passes that did not collide are all there, obstacle included.
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(8);
+  });
+
+  /**
+   * The failure case must not undo the reply-size decision the success case
+   * makes. `refused` is `notes.length × times` entries, each carrying a whole
+   * seam sentence — up to 64 times the array the model sent — in the one call
+   * added to stop a thirty-thousand-token reply.
+   */
+  it('names only the first ten casualties of a repeat, and counts the rest', () => {
+    value(call('pattern_open_blank', { name: 'Ostinato', instrumentId: 'bass' }));
+    // Nineteen downbeats already taken; the twentieth is free.
+    value(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 0, fret: 7, tick: 0, durationTicks: PPQ }],
+        repeat: { times: 19, everyTicks: BAR },
+      }),
+    );
+
+    const stamped = value(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 0, fret: 0, tick: 0, durationTicks: PPQ }],
+        repeat: { times: 20, everyTicks: BAR },
+      }),
+    );
+    expect(stamped.placedCount).toBe(1);
+    expect(stamped.refusedCount).toBe(19);
+    expect(rows(stamped.refused)).toHaveLength(10);
+    // The ones it does name are the earliest, which is where a model looking for
+    // the shape of the problem starts.
+    expect(rows(stamped.refused)[0].repeatIndex).toBe(1);
+  });
+
+  /**
+   * A note the neck cannot reach is placed, is silent, and — once `placed` is
+   * gone — has nothing else in the reply to mention it. Losing that with a
+   * repeat would hide exactly the failure this layer exists to surface.
+   */
+  it('still counts the silent notes when it stops naming them', () => {
+    value(call('pattern_open_blank', { name: 'Ostinato', instrumentId: 'bass' }));
+
+    const stamped = value(
+      call('pattern_stamp_notes', {
+        // Past the end of a bass neck (21 frets) but inside the app's ceiling.
+        notes: [{ stringIndex: 0, fret: 24, tick: 0, durationTicks: PPQ }],
+        repeat: { times: 3, everyTicks: BAR },
+      }),
+    );
+    expect(stamped.placed).toBeUndefined();
+    expect(stamped.placedCount).toBe(3);
+    // Every copy is silent, and the count is all the model gets here —
+    // `read_pattern` is what names which.
+    expect(stamped.aboveTheNeck).toBe(3);
+    expect(value(call('read_pattern')).notesAboveTheNeck).toBe(3);
+  });
+
+  it('names the pass and the real tick when a whole repeat is refused', () => {
+    value(call('pattern_open_blank', { name: 'Ostinato', instrumentId: 'bass' }));
+    value(
+      call('pattern_stamp_notes', {
+        notes: [0, 1].map((pass) => ({
+          stringIndex: 0,
+          fret: 7,
+          tick: pass * BAR,
+          durationTicks: PPQ,
+        })),
+      }),
+    );
+    clearPatternHistory();
+
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 0, fret: 0, tick: 0, durationTicks: PPQ }],
+        repeat: { times: 2, everyTicks: BAR },
+      }),
+    );
+    // The tick named is where the note was ACTUALLY attempted, which for a
+    // repeat is not the tick that was sent.
+    expect(refused).toContain('repeat 1 string 0 tick 0');
+    expect(refused).toContain(`repeat 2 string 0 tick ${BAR}`);
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(2);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  it('collapses a whole repeat into ONE undo step', () => {
+    value(call('pattern_open_blank', { name: 'Ostinato', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    value(call('pattern_stamp_notes', { notes: ostinato, repeat: { times: 12, everyTicks: BAR } }));
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(48);
+
+    // ONE press. Forty-eight would be the same defect the batching exists to
+    // prevent, arrived at from the other direction.
+    patternUndo();
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  it('declares repeat as an all-or-nothing pair with a bounded count', () => {
+    // The stand-in above reads `required` and `enum` and nothing else — it
+    // evaluates neither `minimum` nor `maximum`, so the bounds below are
+    // assertions that the schema DECLARES them. That a declared bound is
+    // ENFORCED is `ajv`'s job and is asserted against the real registry in
+    // `AgentToolRegistry.test.ts`; both halves are needed and neither implies
+    // the other.
+    const repeat = schemaOf('pattern_stamp_notes').properties?.repeat;
+    if (!repeat) throw new Error('pattern_stamp_notes declares no repeat argument');
+    expect(repeat.type).toBe('object');
+    // Half a repeat is not a repeat: a `times` with no spacing has no meaning
+    // that is not the derivation this argument exists to refuse.
+    expect(repeat.required).toEqual(['times', 'everyTicks']);
+    expect(schemaViolations(repeat, { times: 12 })).toContain('missing everyTicks');
+    expect(schemaViolations(repeat, { times: 12, everyTicks: BAR })).toEqual([]);
+    expect(repeat.additionalProperties).toBe(false);
+    // `times: 0` is not "no repeat", it is a call that asks for nothing, and the
+    // ceiling is a schema-level backstop rather than a limit on notes.
+    expect(repeat.properties?.times?.minimum).toBe(1);
+    expect(repeat.properties?.times?.maximum).toBe(64);
+    // A pass on top of the pass before it is a pile, not a repeat.
+    expect(repeat.properties?.everyTicks?.minimum).toBe(1);
+    // `notes` alone stays required — a repeat with nothing to repeat is not a
+    // call.
+    expect(schemaOf('pattern_stamp_notes').required).toEqual(['notes']);
+  });
+});
+
+// ------------------------------------------- asking where a chord is on the neck ---
+
+/**
+ * AG-09. The other half of the same 2026-08-09 failure `repeat` answers: a
+ * twelve-bar part over five changes is some seventy fret numbers worked out by
+ * hand, on whichever neck the part is on, and nothing in the surface would tell
+ * the model what they were.
+ *
+ * It is a READ, and every test here is about that as much as about the frets. A
+ * tool that stamped the chord would have removed the arithmetic AND the
+ * authorship, and turned every backing track into block chords on the downbeat.
+ */
+describe('looking a chord up on the open instrument', () => {
+  const voicings = (result: ToolResult) => rows(value(result).voicings);
+
+  it('gives frets and strings for a whole progression in one call', () => {
+    value(call('pattern_open_blank', { name: 'Blues', instrumentId: 'guitar' }));
+
+    const reply = value(call('read_chord_voicings', { symbols: ['A7', 'D7', 'E7'] }));
+    // Which end of the string axis this is, on the reply itself: cells read
+    // against the wrong end put every note on the wrong string and still look
+    // like a chord. The reentrant caveat rides along, because this is the tool
+    // that invites "take the root off index 0 for the bass note" and on a
+    // ukulele index 0 is the high G.
+    expect(reply.strings).toMatch(/index 0 = the bottom string/);
+    expect(reply.strings).toMatch(/reentrant ukulele/);
+    expect(reply.instrumentId).toBe('guitar');
+
+    const answers = rows(reply.voicings);
+    // In order, one per symbol — the model addresses them by position in the
+    // progression it sent.
+    expect(answers.map((entry) => entry.symbol)).toEqual(['A7', 'D7', 'E7']);
+    // The chord's own facts reach the model as well as the frets: which tones
+    // the shape is made of is what a line written OUT of it is chosen against,
+    // and `notes` is the only place the reply says so.
+    expect(answers[0].root).toBe('A');
+    expect(answers[0].quality).toBe('dominant seventh');
+    expect(answers[0].notes).toEqual(['A', 'C#', 'E', 'G']);
+    // x02020 — the open A7 and not a barre somewhere plausible.
+    expect(answers[0].cells).toEqual([
+      { stringIndex: 1, fret: 0 },
+      { stringIndex: 2, fret: 2 },
+      { stringIndex: 3, fret: 0 },
+      { stringIndex: 4, fret: 2 },
+      { stringIndex: 5, fret: 0 },
+    ]);
+    for (const answer of answers) expect(rows(answer.cells).length).toBeGreaterThan(0);
+  });
+
+  it('answers for the instrument the pattern is on — a bass never gets a six-string grip', () => {
+    // Acceptance criterion 2, and the values are pinned for the reason
+    // `patternService.test.ts` argues at length: a guitar grip trimmed to four
+    // strings passes every bound this could otherwise state, so bounds cannot be
+    // what catches a wrong tuning source.
+    value(call('pattern_open_blank', { name: 'Bass part', instrumentId: 'bass' }));
+
+    const answers = voicings(call('read_chord_voicings', { symbols: ['A7'] }));
+    expect(answers[0].cells).toEqual([
+      { stringIndex: 0, fret: 5 },
+      { stringIndex: 1, fret: 4 },
+      { stringIndex: 2, fret: 5 },
+      { stringIndex: 3, fret: 6 },
+    ]);
+  });
+
+  it('names the symbol it could not read, and still answers the others', () => {
+    value(call('pattern_open_blank', { name: 'Mixed', instrumentId: 'guitar' }));
+
+    const answers = voicings(call('read_chord_voicings', { symbols: ['G', 'H7', 'C'] }));
+    expect(answers).toHaveLength(3);
+    expect(answers[1].symbol).toBe('H7');
+    expect(answers[1].refused as string).toContain('H7');
+    // The partial-failure rule, from the read side: one bad symbol does not cost
+    // the caller the round trip for the other eleven.
+    expect(rows(answers[0].cells).length).toBeGreaterThan(0);
+    expect(rows(answers[2].cells).length).toBeGreaterThan(0);
+  });
+
+  it('refuses the whole call when nothing at all parsed, carrying every reason', () => {
+    value(call('pattern_open_blank', { name: 'Nonsense' }));
+
+    const refused = reason(call('read_chord_voicings', { symbols: ['H7', 'zzz'] }));
+    expect(refused).toContain('H7');
+    expect(refused).toContain('zzz');
+  });
+
+  it('refuses in the words the other reads use when no pattern is open', () => {
+    expect(reason(call('read_chord_voicings', { symbols: ['A7'] }))).toBe('No pattern is open.');
+  });
+
+  it('changes nothing and pushes no undo step', () => {
+    // THE POINT OF THE TICKET, executed. `pattern_open_blank` clears the pattern
+    // history, so an undo step appearing after this can only have come from the
+    // lookup — and an undo step that was never pushed is invisible in the
+    // document, which is why the history is asked rather than the notes alone.
+    value(call('pattern_open_blank', { name: 'Untouched', instrumentId: 'guitar' }));
+    expect(canUndoPattern()).toBe(false);
+    const before = JSON.stringify(value(call('read_pattern')));
+
+    value(call('read_chord_voicings', { symbols: ['A7', 'D7', 'E7', 'G', 'C'] }));
+
+    expect(canUndoPattern()).toBe(false);
+    expect(JSON.stringify(value(call('read_pattern')))).toBe(before);
+  });
+
+  it('caps a refusal that names every symbol, like every other batch does', () => {
+    // Twelve nonsense symbols is twelve copies of one ~120-character sentence,
+    // and the tenth says nothing the first nine did not. The same cap
+    // `pattern_stamp_notes` applies, which is why it lives in `types.ts` rather
+    // than beside one caller.
+    value(call('pattern_open_blank', { name: 'Nonsense', instrumentId: 'guitar' }));
+
+    const refused = reason(
+      call('read_chord_voicings', {
+        symbols: Array.from({ length: 13 }, (_, index) => `H${index}`),
+      }),
+    );
+    expect(refused).toContain('H0');
+    expect(refused).toContain('H9');
+    expect(refused).not.toContain('H10');
+    expect(refused).toContain('…and 3 more.');
+  });
+
+  it('offers no way to write a chord, only to read one', () => {
+    // A `pattern_stamp_chord` would be the same knowledge with the authorship
+    // taken away. If one is ever added it should be argued for on its own
+    // ticket, and this line is where that argument has to start.
+    const names = AGENT_TOOLS.map((tool) => tool.name);
+    expect(names).toContain('read_chord_voicings');
+    expect(names.filter((toolName) => toolName.includes('chord'))).toEqual([
+      'read_chord_voicings',
+    ]);
+    // Name-shaped on its own, which a `pattern_stamp_grip` would walk straight
+    // past — so the SET is asserted too: everything the read module exports is
+    // named as a read, which is how the model tells a read from a write before
+    // it calls one.
+    expect(READ_TOOLS.map((tool) => tool.name)).toContain('read_chord_voicings');
+    for (const tool of READ_TOOLS) expect(tool.name.startsWith('read_')).toBe(true);
   });
 });

@@ -109,6 +109,53 @@ describe('the adapter against the real ToolRegistry', () => {
     expect(registry.validate('pattern_move_notes', { moves: [] }).ok).toBe(false);
   });
 
+  /**
+   * AG-10's `repeat`, which is the other nested shape — an OBJECT argument
+   * rather than an array of them, with numeric bounds on both of its fields.
+   * `ajv` is the only thing in the project that evaluates `minimum`/`maximum`
+   * at all: the stand-in in `AgentTools.test.ts` reads `required` and `enum`,
+   * so `times: 0` is rejected here or nowhere.
+   */
+  it('enforces the bounds on a repeat, not just the keys', () => {
+    const registry = new ToolRegistry();
+    registry.register(ALL.map(toToolDef));
+    const notes = [{ stringIndex: 0, fret: 0, tick: 0, durationTicks: 480 }];
+
+    expect(registry.validate('pattern_stamp_notes', { notes })).toEqual({ ok: true });
+    expect(
+      registry.validate('pattern_stamp_notes', { notes, repeat: { times: 12, everyTicks: 1920 } }),
+    ).toEqual({ ok: true });
+    // `times: 0` is not "no repeat", it is a call asking for nothing to happen.
+    expect(
+      registry.validate('pattern_stamp_notes', { notes, repeat: { times: 0, everyTicks: 1920 } }).ok,
+    ).toBe(false);
+    // The backstop on the far end. (The ceiling on total NOTES is AG-12's, and
+    // this is not it.)
+    expect(
+      registry.validate('pattern_stamp_notes', { notes, repeat: { times: 65, everyTicks: 1920 } })
+        .ok,
+    ).toBe(false);
+    // Half a repeat: spacing is never derived from the phrase, so a `times`
+    // alone has no meaning to fall back on.
+    expect(registry.validate('pattern_stamp_notes', { notes, repeat: { times: 12 } }).ok).toBe(
+      false,
+    );
+    expect(registry.validate('pattern_stamp_notes', { notes, repeat: { everyTicks: 1920 } }).ok).toBe(
+      false,
+    );
+    // A pass on top of the pass before it is a pile, not a repeat.
+    expect(
+      registry.validate('pattern_stamp_notes', { notes, repeat: { times: 12, everyTicks: 0 } }).ok,
+    ).toBe(false);
+    // And `additionalProperties: false` reaches inside the object too.
+    expect(
+      registry.validate('pattern_stamp_notes', {
+        notes,
+        repeat: { times: 12, everyTicks: 1920, evryTicks: 1920 },
+      }).ok,
+    ).toBe(false);
+  });
+
   it('marks every tool as running without consent, which is what `mode` records', () => {
     const registry = new ToolRegistry();
     registry.register(ALL.map(toToolDef));

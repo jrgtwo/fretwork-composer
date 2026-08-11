@@ -126,11 +126,13 @@ import {
   fromResult,
   int,
   name as nameOf,
+  namedRefusals,
   nullable,
   num,
   numFrom,
   obj,
   ok,
+  REFUSALS_NAMED,
   str,
   type AgentTool,
   type JsonValue,
@@ -186,29 +188,12 @@ function oneUndoStep<T>(write: () => T, changed: (value: T) => boolean): T {
   }
 }
 
-/** A note the instrument's neck cannot reach — kept, edited, never heard. Worth
- *  one field on the way out, because nothing else will ever mention it. */
+/** A note the instrument's neck cannot reach — kept, edited, never heard. */
+const isAboveTheNeck = (fret: number): boolean => fret > fretCount();
+
+/** Worth one field on the way out, because nothing else will ever mention it. */
 const neckReport = (fret: number): { aboveTheNeck?: true } =>
-  fret > fretCount() ? { aboveTheNeck: true } : {};
-
-/** How many refusals a refusal sentence names before it stops. A 200-entry
- *  batch that fails end to end is one sentence per note otherwise, which is
- *  prompt budget spent restating the same thing. */
-const REFUSALS_NAMED = 10;
-
-/**
- * The refusals, named. A model can only recover from a refusal it can act on,
- * and "some of them are wrong" is not one — these sentences are the seam's
- * product and are passed on verbatim, one per entry.
- */
-function namedRefusals(refused: readonly { label: string; reason: string }[]): string {
-  const named = refused
-    .slice(0, REFUSALS_NAMED)
-    .map((entry) => `${entry.label}: ${entry.reason}`)
-    .join(' ');
-  const rest = refused.length - REFUSALS_NAMED;
-  return rest > 0 ? `${named} …and ${rest} more.` : named;
-}
+  isAboveTheNeck(fret) ? { aboveTheNeck: true } : {};
 
 /**
  * Apply one id-addressed edit per note, as ONE undo step, reporting each
@@ -283,12 +268,13 @@ interface StampArgs {
     tick: number;
     durationTicks: number;
   }[];
+  repeat?: { times: number; everyTicks: number };
 }
 
 const stampNotes = defineTool<StampArgs>({
   name: 'pattern_stamp_notes',
   description:
-    'Add notes to the open pattern. Send a whole phrase in one call — it lands as a single undo step, and each note is reported separately so a note that could not be placed does not cost you the rest. A string can only ring one note at a time, so a note that overlaps an existing one on the same string is refused. A note past the end of this instrument\'s neck is placed but comes back marked aboveTheNeck, which means it will never sound. The pattern grows to fit its content by itself and there is no length to set — but it grows to a WHOLE BAR, so a single note starting one beat past the end of the last bar you meant makes the pattern a bar longer. The reply gives the length that resulted; check it against the length you intended.',
+    'Add notes to the open pattern. Send a whole phrase in one call — it lands as a single undo step, and each note is reported separately so a note that could not be placed does not cost you the rest. To lay the same phrase down again and again, send it ONCE with `repeat` rather than typing out every copy: a twelve-bar ostinato is four notes and a repeat, not forty-eight notes. A string can only ring one note at a time, so a note that overlaps an existing one on the same string is refused. A note past the end of this instrument\'s neck is placed but comes back marked aboveTheNeck, which means it will never sound; a repeat only COUNTS those rather than naming them. The pattern grows to fit its content by itself and there is no length to set — but it grows to a WHOLE BAR, so a single note starting one beat past the end of the last bar you meant makes the pattern a bar longer. The reply gives placedCount, refusedCount and the length that resulted; check the length against the length you intended. Every note is listed individually, EXCEPT when you repeat: then the counts come back without the list, because one entry per copy would hand straight back the tokens the repeat just saved, and refused names only the first ten casualties while refusedCount still counts them all. read_pattern has the ids, the durations that stuck and the notes above the neck whenever you need them.',
   parameters: obj(
     {
       notes: arr(
@@ -298,7 +284,7 @@ const stampNotes = defineTool<StampArgs>({
             fret: int(`Fret. ${FRET}`, { min: 0, max: MAX_FRET }),
             tick: int(`Where the note starts. ${TICKS}`, { min: 0 }),
             durationTicks: int(
-              `How long the note sounds. ${TICKS} May be shortened so it does not run into the next note on the same string; the value that stuck comes back.`,
+              `How long the note sounds. ${TICKS} May be shortened so it does not run into the next note on the same string; the value that stuck comes back — except with a repeat, which reports no per-note detail, so read_pattern is where to check it.`,
               { min: 1 },
             ),
           },
@@ -306,11 +292,39 @@ const stampNotes = defineTool<StampArgs>({
         ),
         'The notes to add.',
       ),
+      repeat: obj(
+        {
+          // `obj()` carries no description of its own, and the container is the
+          // first thing a model reads, so what a repeat IS is stated here.
+          times: int(
+            'A repeat stamps the notes you sent again and again, each pass a fixed distance after the one before it. This is how many passes there are in total, COUNTING the first one. 1 means no repeat at all. Twelve bars of a one-bar riff is 12, not 11.',
+            { min: 1, max: 64 },
+          ),
+          everyTicks: int(
+            `How far apart the passes are: the gap from the START of one pass to the start of the next, which for a one-bar phrase is one bar. ${TICKS} Say it explicitly — it is NEVER worked out from the notes you sent, because a phrase whose last note is short does not reach the end of its bar, and the pattern's length rounds up to whole bars afterwards, so a spacing guessed from the notes would give you a different rhythm from the one you meant. Make it at least as long as the phrase itself spans: a shorter one lands each pass on top of the one before it, and the notes that collide are refused as "already sounding" against your OWN previous pass, not against anything that was already there.`,
+            { min: 1 },
+          ),
+        },
+        ['times', 'everyTicks'],
+      ),
     },
     ['notes'],
   ),
-  run: ({ notes }) =>
-    oneUndoStep(
+  run: ({ notes, repeat }) => {
+    const times = repeat?.times ?? 1;
+    const everyTicks = repeat?.everyTicks ?? 0;
+    /**
+     * ITEMISE ONLY WHEN THERE IS NOTHING TO REPEAT.
+     *
+     * Listing 48 placed notes hands back most of the tokens `repeat` exists to
+     * save. The model does not need 48 ids to build an ostinato — it needs the
+     * count, the length that resulted and the casualties — and `read_pattern`
+     * gives out ids on demand for the rare case where it does. Keeping the list
+     * for `times: 1` is what makes "times: 1 is no repeat" literally true:
+     * identical reply, plus a redundant count.
+     */
+    const itemise = times === 1;
+    return oneUndoStep(
       () => {
         // `durationTicks` is passed explicitly for every note and the schema
         // requires it: the seam's parameter is optional, and omitting it makes
@@ -318,42 +332,97 @@ const stampNotes = defineTool<StampArgs>({
         // "whatever the user last picked" is not something a caller by value can
         // mean.
         const placed: JsonValue[] = [];
-        const refused: { index: number; reason: string }[] = [];
-        for (const [index, note] of notes.entries()) {
-          const result = stampNote(note);
-          if (result.ok) {
-            placed.push({
-              noteId: result.value.id,
-              stringIndex: result.value.stringIndex,
-              fret: result.value.fret,
-              tick: result.value.startTick,
-              durationTicks: result.value.durationTicks,
-              ...neckReport(result.value.fret),
-            });
-          } else {
-            refused.push({ index, reason: result.reason });
+        let placedCount = 0;
+        // Counted even when the notes are itemised, because with `placed` gone
+        // this is the ONLY mention a silent note gets, and a count that appears
+        // only sometimes is a shape the model has to learn twice.
+        let aboveTheNeck = 0;
+        const refused: {
+          index: number;
+          repeatIndex?: number;
+          tick: number;
+          reason: string;
+        }[] = [];
+        // Pass by pass, in order, so a collision is reported where it actually
+        // happened rather than against the phrase as it was sent.
+        for (let pass = 0; pass < times; pass += 1) {
+          const offset = pass * everyTicks;
+          for (const [index, note] of notes.entries()) {
+            const result = stampNote({ ...note, tick: note.tick + offset });
+            if (result.ok) {
+              placedCount += 1;
+              if (isAboveTheNeck(result.value.fret)) aboveTheNeck += 1;
+              if (itemise) {
+                placed.push({
+                  noteId: result.value.id,
+                  stringIndex: result.value.stringIndex,
+                  fret: result.value.fret,
+                  tick: result.value.startTick,
+                  durationTicks: result.value.durationTicks,
+                  ...neckReport(result.value.fret),
+                });
+              }
+            } else {
+              refused.push({
+                index,
+                // 1-based, like the bar numbers in `agentRules` — a model
+                // holding two counting conventions at once mis-locates the
+                // pass. ABSENT without a repeat: a `repeatIndex: 1` on a call
+                // that sent no `repeat` names a dimension the model never used.
+                ...(itemise ? {} : { repeatIndex: pass + 1 }),
+                // Where the note was ACTUALLY attempted, which for a repeat is
+                // not the tick that was sent. Without it, and with `placed`
+                // gone, locating a casualty is arithmetic in a reply whose
+                // whole point is to spare the model arithmetic.
+                tick: note.tick + offset,
+                reason: result.reason,
+              });
+            }
           }
         }
         // Partial success is reported as success WITH the casualties, because
         // half a phrase that landed is a state the model has to know about
-        // before it tries again. Nothing landing at all is a refusal, and it
-        // carries EVERY reason — an empty "ok" is the unrecoverable answer this
-        // whole layer exists to avoid, and one reason out of twenty leaves the
-        // model re-sending blind. A stamp has no id yet, so an entry is named by
-        // the string and tick the model itself sent.
-        return placed.length === 0 && refused.length > 0
+        // before it tries again — and with a repeat, a pass that collided says
+        // WHICH pass rather than costing the eleven that did not. Nothing
+        // landing at all is a refusal, and it carries EVERY reason — an empty
+        // "ok" is the unrecoverable answer this whole layer exists to avoid, and
+        // one reason out of twenty leaves the model re-sending blind. A stamp
+        // has no id yet, so an entry is named by the string and the tick it was
+        // actually attempted at, which for a repeat is not the tick that was
+        // sent.
+        return placedCount === 0 && refused.length > 0
           ? fail(
               `No note could be placed. ${namedRefusals(
                 refused.map((entry) => ({
-                  label: `string ${notes[entry.index].stringIndex} tick ${notes[entry.index].tick}`,
+                  label: `${
+                    entry.repeatIndex === undefined ? '' : `repeat ${entry.repeatIndex} `
+                  }string ${notes[entry.index].stringIndex} tick ${entry.tick}`,
                   reason: entry.reason,
                 })),
               )}`,
             )
-          : ok({ placed, refused, ...patternLength() });
+          : ok({
+              ...(itemise ? { placed } : {}),
+              placedCount,
+              // CAPPED with a repeat. `refused` is `notes.length × times` here —
+              // up to 64 times the array the model sent — and every entry
+              // carries a whole seam sentence, which would hand back the tokens
+              // the repeat was called to save. Without a repeat it stays whole:
+              // it is bounded by the array the model typed out itself, and that
+              // has always been the deal.
+              refused: itemise ? refused : refused.slice(0, REFUSALS_NAMED),
+              refusedCount: refused.length,
+              // Silent notes. Named per note when itemising and only counted
+              // otherwise, but never left out — read_pattern names which.
+              aboveTheNeck,
+              // Unchanged by the repeat, and with one it is the ONLY way the
+              // model learns how long the thing it just built actually is.
+              ...patternLength(),
+            });
       },
       (result) => result.ok,
-    ),
+    );
+  },
 });
 
 /**

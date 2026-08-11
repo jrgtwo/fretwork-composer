@@ -26,9 +26,12 @@ import {
   PPQ,
   SCALES,
   getInstrument,
+  getTuning,
+  parseChordSymbol,
   presetMatching,
   usePatternsStore,
   selectEditingPattern,
+  voiceChordPreferred,
   type DynamicMark,
   type EventDragSnapshot,
   type FretInstrumentId,
@@ -216,6 +219,98 @@ export function listScales(): readonly { id: string; name: string }[] {
 
 /** The scale a picker opens on when nothing has been chosen — the lib's own. */
 export { DEFAULT_SCALE_ID };
+
+/**
+ * Where a named chord sits on THIS pattern's neck — a read, and only a read.
+ *
+ * Beside `listKeys`/`listScales` for their reason: it re-exports a lib catalog
+ * (here `parseChordSymbol` + `voiceChordPreferred`) so a caller does not have to
+ * reach past the seam for it. AG-09 is why it exists at all — a caller working
+ * by value has to compute every fret of a twelve-bar progression by hand, and
+ * that arithmetic is what a run gets wrong long before its musical judgement
+ * does.
+ *
+ * It hands back the VOICING and not the tuning, deliberately. The tuning list
+ * would let a caller voice chords itself, which is the lib's job done twice and
+ * differently; and the agent's tools cannot reach the lib at all
+ * (`tests/AgentTools.test.ts`'s seam tripwire), so a grip is the only shape this
+ * answer can take on that side of the wall.
+ *
+ * ⚠ The tuning is the instrument's DECLARED DEFAULT, resolved through
+ * `getTuning` — the same convention `reference/tabLayout.ts`'s `openStrings`
+ * uses, and for its reason: this grip has to agree with the string labels and
+ * note names already on screen. `getTuningsForInstrument(id)[0]` agrees with
+ * that only because of the order `TUNINGS` happens to be written in. Nothing in
+ * this app owns instrument/tuning/capo yet (docs/FOLLOW-UPS.md §3), so a chord
+ * asked for here is a chord on the instrument's default tuning and there is no
+ * other answer to give.
+ *
+ * `stringIndex` is `PatternEvent.stringIndex` — 0 is the physically lowest
+ * string — because `TuningDef.strings`, which the voicer indexes, is in that
+ * same bottom-to-top order. No remapping, and no cell on a string this
+ * instrument has not got.
+ */
+export function chordGrip(symbol: string): Result<{
+  symbol: string;
+  root: string;
+  type: string;
+  notes: readonly string[];
+  cells: readonly { stringIndex: number; fret: number }[];
+}> {
+  const pattern = getEditingPattern();
+  if (!pattern) return refuse('No pattern is open, so there is no instrument to voice a chord on.');
+
+  const chord = parseChordSymbol(symbol);
+  if (chord === null) {
+    return refuse(
+      `"${symbol}" is not a chord symbol this app can read. Write it as a root and a quality — "A7", "Cmaj7", "F#m", "G/B".`,
+    );
+  }
+
+  // `patternInstrumentId` has already resolved the id against the lib's catalog,
+  // so the instrument is there; the TUNING it names is the half that can go
+  // missing, when a lib version adds an instrument before its tunings.
+  const instrumentId = patternInstrumentId(pattern);
+  const instrument = getInstrument(instrumentId);
+  const tuning = instrument === undefined ? undefined : getTuning(instrument.defaultTuningId);
+  if (tuning === undefined) {
+    return refuse(
+      `This pattern's instrument (${instrumentId}) has no tuning in the catalog, so there is nothing to voice ${chord.symbol} against.`,
+    );
+  }
+
+  const grip = voiceChordPreferred(chord, tuning);
+  if (grip === null) {
+    return refuse(
+      `${chord.symbol} cannot be voiced on ${instrumentId} in ${tuning.name} — no shape reaches all of ${chord.notes.join(', ')} within one hand span. Try a simpler quality, or write the notes yourself.`,
+    );
+  }
+
+  // Belt and braces. Every tuning in the catalog is as wide as its instrument
+  // today, so this drops nothing and neither branch below is reachable — but a
+  // mismatch would put a note on a string that is drawn by nothing and played by
+  // nothing, which is exactly the failure `checkString` exists to make
+  // impossible from the write side. What the trim must NOT do is hand back an
+  // empty shape as an answer: `ok` with no cells is the reply a caller cannot
+  // act on, so a grip that survives none of it is a refusal.
+  const strings = stringCount();
+  const cells = grip.cells
+    .filter((cell) => cell.stringIndex < strings)
+    .map((cell) => ({ stringIndex: cell.stringIndex, fret: cell.fret }));
+  if (cells.length === 0) {
+    return refuse(
+      `${chord.symbol} voices onto strings ${instrumentId} has not got, so there is no shape to give you.`,
+    );
+  }
+
+  return ok({
+    symbol: chord.symbol,
+    root: chord.root,
+    type: chord.type,
+    notes: [...chord.notes],
+    cells,
+  });
+}
 
 // ------------------------------------------------------------------ undo ---
 // LIB-GAP(1): the lib has no history support and no way to write a whole

@@ -140,6 +140,11 @@ Finish by saying how many notes you moved and how many you re-lengthened.`,
     ],
     tools: [
       'read_pattern',
+      // Chords are one of the five characters this row offers, and an arpeggio
+      // is a chord played one note at a time — both are fret arithmetic on a
+      // neck the model has to hold in its head, and getting it from the app is
+      // the difference between a wrong voicing and a right one.
+      'read_chord_voicings',
       'pattern_open_blank',
       'pattern_set_instrument',
       'pattern_stamp_notes',
@@ -147,6 +152,8 @@ Finish by saying how many notes you moved and how many you re-lengthened.`,
     template: `Write a new {character} for {instrument}, about {bars} bars long, in {key} {scale}.
 
 Open a blank pattern, set its instrument, then stamp the notes. Read the pattern once before you choose fret numbers: it tells you the ticks per quarter note, the time signature, how many strings the instrument has and how far up the neck you can go. Frets past the end of the neck are refused.
+
+Where the part is built on chords, ask read_chord_voicings for them once the instrument is set rather than working the frets out yourself — then choose which notes of each shape to play and when.
 
 The pattern's length is not something you set — it auto-fits whatever you stamp. "About {bars} bars" means stamp that much music, not resize anything afterwards.
 
@@ -345,6 +352,11 @@ const COMPOSITION_COMMANDS: readonly Command[] = [
     tools: [
       'read_composition',
       'read_pattern_library',
+      // The row this ticket was written for. A {bars}-bar track over a
+      // progression is a few dozen fret numbers per part, on whatever neck the
+      // part is on, and every backing-track run that failed on 2026-08-09 failed
+      // at that arithmetic rather than at the music.
+      'read_chord_voicings',
       'composition_set_settings',
       'composition_add_track',
       'composition_set_track_instrument',
@@ -356,6 +368,8 @@ const COMPOSITION_COMMANDS: readonly Command[] = [
     template: `Build a {genre} backing track in the open composition: {bars} bars in {key} {scale} at {bpm} bpm, with the groove preset {groove}.
 
 Read the composition first. Set its tempo and groove, then work in this order for each part — write it as a pattern in the library (open a blank pattern, set its instrument, stamp the notes), then add the track it belongs on, then place the pattern along that track.
+
+Decide the chord progression before you write anything, then ask read_chord_voicings for the whole progression once each pattern's instrument is set — the shapes come back for that instrument's neck. Play a part OUT of those shapes rather than stamping them whole on the downbeat.
 
 Get each pattern right BEFORE you place it. A block on a track is a deep copy taken at placement time: editing the pattern afterwards does not reach blocks you have already placed.
 
@@ -386,6 +400,10 @@ Tell me what each track is when you are done.`,
     ],
     tools: [
       'read_composition',
+      // Every feel this row offers is built on the changes, and the bass's frets
+      // for a chord are not the guitar's — a four-string neck in bass-standard
+      // is exactly where a voicing carried over from a guitar goes wrong.
+      'read_chord_voicings',
       'composition_add_track',
       'composition_set_track_instrument',
       'pattern_open_blank',
@@ -401,6 +419,8 @@ Tell me what each track is when you are done.`,
     template: `Write a bass line for the open composition — {feel}.
 
 Read the composition first and work out the harmony from the blocks that are already on it. Then write the line as one or more patterns on the bass instrument, add a bass track if there is not one already, and place the patterns so the line covers the same span as the rest of the arrangement.
+
+Once the pattern is on the bass, name the changes to read_chord_voicings and take the line's notes from what comes back — a bass neck's frets for a chord are not a guitar's, and the shapes come back for the instrument the open pattern is on.
 
 Follow the existing parts rather than competing with them: land where they land, and stay out of the upper register.
 
@@ -487,6 +507,13 @@ Transposition is applied at playback and silently drops any note that lands off 
       'read_pattern_library',
       'composition_place_pattern',
       'composition_duplicate_placements',
+      // Close call, and it went in: most of this row's work is repetition, which
+      // needs no chords at all. But the part it writes FRESH is a new section
+      // over a harmony that has to agree with what precedes it, and that is the
+      // same fret arithmetic `composition-backing-track` gets this for.
+      // `composition-harmony-track` is the row that does NOT get it — it
+      // transposes existing blocks and never chooses a fret.
+      'read_chord_voicings',
       'pattern_open_blank',
       // A new pattern written for a bass or ukulele track lands on the default
       // instrument unless this is called, and `read_composition` then reports it
@@ -498,7 +525,7 @@ Transposition is applied at playback and silently drops any note that lands off 
     ],
     template: `Extend the open composition by {bars} more bars past where it currently ends.
 
-Read the composition first to find where that is. Carry every track that is currently playing into the new section — a track that was busy going silent reads as a mistake, not as an arrangement choice. Reuse the patterns that are already in the library where the section should repeat; write new ones only where it should actually change, and set each new pattern's instrument to match the track it is going on.
+Read the composition first to find where that is. Carry every track that is currently playing into the new section — a track that was busy going silent reads as a mistake, not as an arrangement choice. Reuse the patterns that are already in the library where the section should repeat; write new ones only where it should actually change, and set each new pattern's instrument to match the track it is going on. Where a new pattern moves to different chords, ask read_chord_voicings for them after setting its instrument.
 
 Do not move, shorten or delete anything that is already there. Say what the new section does.`,
   },

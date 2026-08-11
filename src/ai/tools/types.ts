@@ -169,6 +169,30 @@ export type ToolResult =
 export const ok = (value: JsonValue): ToolResult => ({ ok: true, value });
 export const fail = (reason: string): ToolResult => ({ ok: false, reason });
 
+/** How many refusals a refusal sentence names before it stops. A 200-entry
+ *  batch that fails end to end is one sentence per entry otherwise, which is
+ *  prompt budget spent restating the same thing. */
+export const REFUSALS_NAMED = 10;
+
+/**
+ * The refusals, named. A model can only recover from a refusal it can act on,
+ * and "some of them are wrong" is not one — these sentences are the seam's
+ * product and are passed on verbatim, one per entry.
+ *
+ * Lives HERE rather than beside its first caller because it is the batch rule
+ * itself and not one tool's formatting: every batching tool caps the same way,
+ * and a cap a new call site has to remember to opt into is a cap that reads as
+ * house style until the first uncapped reply.
+ */
+export function namedRefusals(refused: readonly { label: string; reason: string }[]): string {
+  const named = refused
+    .slice(0, REFUSALS_NAMED)
+    .map((entry) => `${entry.label}: ${entry.reason}`)
+    .join(' ');
+  const rest = refused.length - REFUSALS_NAMED;
+  return rest > 0 ? `${named} …and ${rest} more.` : named;
+}
+
 /** The seams' `Result<T>`, as this module sees it. Structural rather than
  *  imported so `types.ts` stays dependency-free; it is the same type. */
 type SeamResult<T> =

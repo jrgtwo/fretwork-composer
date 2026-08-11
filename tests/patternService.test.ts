@@ -1,8 +1,20 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { INSTRUMENTS, PPQ, usePatternsStore, type Pattern } from '@fretwork/lib';
+import {
+  DEFAULT_PATTERNS_STATE,
+  INSTRUMENTS,
+  PPQ,
+  getTuning,
+  noteAt as pitchAtFret,
+  parseChordSymbol,
+  pitchClass,
+  usePatternsStore,
+  type Pattern,
+} from '@fretwork/lib';
 import {
   beginEditGesture,
+  chordGrip,
   patternInstrumentId,
+  setEditingPatternInstrument,
   deleteNotes,
   endEditGesture,
   getEditingPattern,
@@ -389,5 +401,166 @@ describe('fret entry', () => {
 
     nudgeSelectedFret(-1);
     expect(getEditingPattern()!.events[0].fret).toBe(29);
+  });
+});
+
+/**
+ * AG-09 — the seam answers "where is this chord on this neck?".
+ *
+ * The claim under test is not that the lib can voice a chord (it can; that is
+ * `voiceChordPreferred`'s test, not ours) but that the answer comes back for the
+ * neck the OPEN PATTERN is on, from the voicer that gives idiomatic shapes.
+ *
+ * ⚠ These assert EXACT grips, and that is deliberate. Bounds are not enough to
+ * state either claim: `getTuningsForInstrument(id)[0]` happens to equal every
+ * instrument's `defaultTuningId` in today's catalog — which is exactly WHY that
+ * shortcut is a trap and why no test can catch it — but a wrong tuning of the
+ * right WIDTH (`drop-d`, `ukulele-low-g`), or the algorithmic `voiceChord` in
+ * place of `voiceChordPreferred`, all produce plausible-looking cells that pass
+ * every bound. A pinned shape is what actually fails when the source moves. The
+ * pitch-class check below is the same claim stated tuning-first, so it survives
+ * the lib changing its preferred shapes.
+ */
+describe('chordGrip', () => {
+  const grip = (symbol: string) => {
+    const result = chordGrip(symbol);
+    if (!result.ok) throw new Error(`refused: ${result.reason}`);
+    return result.value;
+  };
+
+  const refusal = (symbol: string) => {
+    const result = chordGrip(symbol);
+    if (result.ok) throw new Error('expected a refusal');
+    return result.reason;
+  };
+
+  /** Every cell sounds a note OF the chord, on the strings this tuning actually
+   *  has. Derived from the tuning rather than from a remembered shape, so it
+   *  states "these frets are this chord on this neck" without also pinning which
+   *  voicing the lib prefers. */
+  const soundsTheChord = (symbol: string, tuningId: string) => {
+    const voicing = grip(symbol);
+    const strings = getTuning(tuningId)!.strings;
+    const wanted = parseChordSymbol(symbol)!.pitchClasses;
+    expect(voicing.cells.length).toBeGreaterThan(0);
+    for (const cell of voicing.cells) {
+      expect(cell.stringIndex).toBeLessThan(strings.length);
+      expect(wanted).toContain(pitchClass(pitchAtFret(strings[cell.stringIndex], cell.fret)));
+    }
+  };
+
+  it('names the symbol it could not read', () => {
+    // The symbol is IN the sentence: a caller sending a whole progression can
+    // only respell the one that failed if it is told which one that was.
+    expect(refusal('H7')).toContain('H7');
+    expect(refusal('')).toContain('chord symbol');
+  });
+
+  it('refuses when no pattern is open, because there is no neck to answer about', () => {
+    usePatternsStore.setState({
+      ...DEFAULT_PATTERNS_STATE,
+      library: { patterns: [], compositions: [], collections: [] },
+    });
+    expect(refusal('A7')).toContain('No pattern is open');
+  });
+
+  it('answers on the guitar with the open shape a guitarist would play', () => {
+    const voicing = grip('A7');
+
+    expect(voicing.symbol).toBe('A7');
+    expect(voicing.root).toBe('A');
+    // Tonal's vocabulary, passed through rather than re-spelled here — the model
+    // reads it, and inventing a second name for a quality the lib already names
+    // is how the two drift.
+    expect(voicing.type).toBe('dominant seventh');
+    expect(voicing.notes).toEqual(['A', 'C#', 'E', 'G']);
+    // x02020 — the open A7. The ALGORITHMIC voicer answers this chord with a
+    // six-string barre at the fifth fret, so this is also what pins
+    // `voiceChordPreferred` as the voicer in use.
+    expect(voicing.cells).toEqual([
+      { stringIndex: 1, fret: 0 },
+      { stringIndex: 2, fret: 2 },
+      { stringIndex: 3, fret: 0 },
+      { stringIndex: 4, fret: 2 },
+      { stringIndex: 5, fret: 0 },
+    ]);
+    soundsTheChord('A7', 'standard');
+  });
+
+  it('gives the open G shape rather than the algorithmic one', () => {
+    // The two differ only on strings 3 and 4 (open/open against fret 4/3), which
+    // is the whole point: both are playable G chords and only one is the shape a
+    // player means by "G".
+    expect(grip('G').cells).toEqual([
+      { stringIndex: 0, fret: 3 },
+      { stringIndex: 1, fret: 2 },
+      { stringIndex: 2, fret: 0 },
+      { stringIndex: 3, fret: 0 },
+      { stringIndex: 4, fret: 0 },
+      { stringIndex: 5, fret: 3 },
+    ]);
+  });
+
+  it('answers on a bass with a four-string grip, never a six-string one', () => {
+    // Acceptance criterion 2. A guitar grip filtered down to four strings is
+    // still four plausible-looking cells with plausible frets, so the SHAPE has
+    // to be pinned: `standard` filtered would give [1,0][2,2][3,0], which passes
+    // every bound this test could otherwise state.
+    const set = setEditingPatternInstrument('bass');
+    expect(set.ok).toBe(true);
+
+    expect(grip('A7').cells).toEqual([
+      { stringIndex: 0, fret: 5 },
+      { stringIndex: 1, fret: 4 },
+      { stringIndex: 2, fret: 5 },
+      { stringIndex: 3, fret: 6 },
+    ]);
+    soundsTheChord('A7', 'bass-standard');
+  });
+
+  it('answers on a ukulele too, on the four strings a ukulele has', () => {
+    // Reentrant (G4 C4 E4 A4), and the lib's voicer anchors "the bass" by string
+    // INDEX rather than by pitch — so the anchor lands on the high-G string and
+    // cell 0 here is C5, the TOP note of the chord. Noted rather than worked
+    // around: the grip is still four real cells on four real strings, which is
+    // what this seam promises. `read_chord_voicings` says so in its reply.
+    expect(setEditingPatternInstrument('ukulele').ok).toBe(true);
+
+    expect(grip('C').cells).toEqual([
+      { stringIndex: 0, fret: 5 },
+      { stringIndex: 1, fret: 4 },
+      { stringIndex: 2, fret: 3 },
+      { stringIndex: 3, fret: 3 },
+    ]);
+    soundsTheChord('C', 'ukulele-standard');
+  });
+
+  it('changes its answer when the pattern changes instrument', () => {
+    // Same chord, both necks, values pinned — a seam that answered from a fixed
+    // tuning would give the same cells twice, or the same cells trimmed.
+    const onGuitar = grip('G').cells;
+    expect(setEditingPatternInstrument('bass').ok).toBe(true);
+    const onBass = grip('G').cells;
+
+    expect(onGuitar).toHaveLength(6);
+    expect(onBass).toEqual([
+      { stringIndex: 0, fret: 3 },
+      { stringIndex: 1, fret: 2 },
+      { stringIndex: 2, fret: 0 },
+      { stringIndex: 3, fret: 4 },
+    ]);
+    // NOT the guitar's first four cells: a shared low E, A and D make [0..2]
+    // identical, and string 3 is where a trimmed guitar grip gives itself away.
+    expect(onBass[3]).not.toEqual(onGuitar[3]);
+  });
+
+  it('changes nothing about the pattern', () => {
+    stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ });
+    const before = JSON.stringify(getEditingPattern());
+
+    grip('A7');
+    grip('D9');
+
+    expect(JSON.stringify(getEditingPattern())).toBe(before);
   });
 });

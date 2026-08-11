@@ -98,7 +98,7 @@ A BLOCK PLAYS ITS NOTES ONCE. It is as long as the pattern under it and no longe
 
 (This is not the composition's \`loop\` setting, which is a playback option — whether the transport starts over when it reaches the end — and has nothing to do with how long anything is.)
 
-Together those are one rule: **length lives in the notes.** If something is not as long as you want it, the answer is always more notes — never a resize.`;
+Together those are one rule: **length lives in the notes.** If something is not as long as you want it, the answer is always more notes — never a resize. Those notes are cheap to ask for: \`pattern_stamp_notes\` takes a \`repeat\`, so twelve bars of a one-bar riff is that one bar sent once and told how often to come round again.`;
 
 /**
  * How to read a result, including the two failure modes that end runs.
