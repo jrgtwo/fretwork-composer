@@ -60,6 +60,15 @@
  *      about the other nineteen — unlike a delete, where a caller that cannot
  *      see the pattern must not be left guessing which half went.
  *
+ * ONE EXCEPTION, and it is reason 2 read the other way round. `pattern_stamp_notes`
+ * refuses WHOLE, before it writes anything, when the notes it was SENT overlap
+ * each other on one string — see `unplayableAsSent`. That refusal is not the
+ * seam's, discovered after the write: it is arithmetic on the arguments, true
+ * whatever the pattern already holds, so it costs no write and no rollback and
+ * lands in the same category as `pattern_delete_notes`' missing id. Collisions
+ * with notes ALREADY in the pattern are not checkable up front and stay exactly
+ * as described above: per note, partial, itemised.
+ *
  * A batch in which NOTHING applied is a refusal, not an empty success: `ok`
  * with zero applied is the unrecoverable answer this layer exists to avoid, so
  * that case comes back as `{ok:false}` naming every note and reason.
@@ -271,6 +280,130 @@ interface StampArgs {
   repeat?: { times: number; everyTicks: number };
 }
 
+type StampNote = StampArgs['notes'][number];
+
+const endsAt = (note: StampNote): number => note.tick + note.durationTicks;
+
+const byTick = (a: StampNote, b: StampNote): number => a.tick - b.tick;
+
+/** The sent notes grouped by the string they are on — the only axis on which
+ *  two of them can ever be in each other's way. */
+function perString(notes: readonly StampNote[]): StampNote[][] {
+  const strings = new Map<number, StampNote[]>();
+  for (const note of notes) {
+    const onString = strings.get(note.stringIndex);
+    if (onString) onString.push(note);
+    else strings.set(note.stringIndex, [note]);
+  }
+  return [...strings.values()];
+}
+
+/**
+ * The notes that overlap ANOTHER NOTE IN THE SAME PASS, and a few of the pairs
+ * by name.
+ *
+ * Pass-invariant, which is why it looks at the notes as sent rather than at the
+ * expansion: every pass is the same list moved sideways by the same amount, so
+ * an overlap inside the list is an overlap in every pass, and one inside no pass.
+ *
+ * Sorted by tick, a note is in something's way if it starts before the furthest
+ * anything earlier reaches, OR if it reaches past the note that follows it — the
+ * successor being the earliest of everything after it, so a note that clears its
+ * successor clears all of them. Both halves are needed: the second is the only
+ * thing that sees a note whose only casualty is later than itself.
+ */
+function samePassOverlaps(notes: readonly StampNote[]): {
+  involved: number;
+  pairs: { label: string; reason: string }[];
+} {
+  let involved = 0;
+  const pairs: { label: string; reason: string }[] = [];
+  for (const onString of perString(notes)) {
+    const sorted = [...onString].sort(byTick);
+    // The note reaching furthest so far, which is not always the previous one.
+    let furthest: StampNote | undefined;
+    for (const [index, note] of sorted.entries()) {
+      const next = sorted[index + 1];
+      const hitsSomethingEarlier = furthest !== undefined && note.tick < endsAt(furthest);
+      const hitsSomethingLater = next !== undefined && endsAt(note) > next.tick;
+      if (hitsSomethingEarlier || hitsSomethingLater) involved += 1;
+      if (furthest !== undefined && hitsSomethingEarlier) {
+        // Named the way the whole-refusal sentence names a stamp — by string and
+        // tick, because a note being sent has no id yet — and BOTH ends, so the
+        // model can see which of the two it meant to put somewhere else.
+        pairs.push({
+          label: `string ${note.stringIndex} tick ${note.tick}`,
+          reason: `the note you sent at tick ${furthest.tick} on that string is still sounding until ${endsAt(furthest)}.`,
+        });
+      }
+      if (furthest === undefined || endsAt(note) > endsAt(furthest)) furthest = note;
+    }
+  }
+  return { involved, pairs };
+}
+
+/**
+ * Whether any pass lands on another pass, given that no pass lands on itself.
+ *
+ * Checked on the EXPANSION rather than by comparing `everyTicks` against the
+ * phrase's span, because a phrase longer than its spacing does not necessarily
+ * collide — a bass note and a top-string fill can overlap in time and never
+ * touch. It is the same sorted sweep: with the same-pass case already excluded,
+ * any adjacent overlap here is between two different passes.
+ */
+function passesCollide(
+  notes: readonly StampNote[],
+  times: number,
+  everyTicks: number,
+): boolean {
+  if (times < 2) return false;
+  for (const onString of perString(notes)) {
+    const expanded: StampNote[] = [];
+    for (let pass = 0; pass < times; pass += 1) {
+      for (const note of onString) expanded.push({ ...note, tick: note.tick + pass * everyTicks });
+    }
+    expanded.sort(byTick);
+    for (const [index, note] of expanded.entries()) {
+      const next = expanded[index + 1];
+      if (next !== undefined && endsAt(note) > next.tick) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The refusal a stamp can PROVE from its own arguments — or null, which is the
+ * normal answer.
+ *
+ * ⚠ RUNS BEFORE `oneUndoStep` OPENS ITS BRACKET. Nothing is written, so nothing
+ * is there to restore, and a step pushed here would be one that undoes a state
+ * the pattern never left — the defect `oneUndoStep`'s `changed` predicate exists
+ * to prevent.
+ *
+ * The two cases are different mistakes with different recoveries, so they get
+ * different sentences. The first is the one a real run hit on 2026-08-10: it
+ * wrote every bar of a twelve-bar line into ONE `notes` array, each bar at
+ * bar-local ticks 0/480/960/1440, and expected `repeat` to walk the groups
+ * forward a bar at a time. Twenty-seven of its thirty-three notes were on top of
+ * another one it had sent in the same call; we stamped seventy-eight of the four
+ * hundred and twenty-nine attempts and answered `ok`.
+ */
+function unplayableAsSent(
+  notes: readonly StampNote[],
+  times: number,
+  everyTicks: number,
+): string | null {
+  const { involved, pairs } = samePassOverlaps(notes);
+  if (involved > 0) {
+    return `These notes land on top of each other: ${involved} of the ${notes.length} you sent overlap another note in the same list, on the same string, and a string can only ring one note at a time. Nothing was written. If those are meant to be successive bars, send ONE bar and let repeat lay the rest down — repeat copies the whole list forward by everyTicks, it does not deal your notes out a bar at a time. ${namedRefusals(pairs)}`;
+  }
+  if (passesCollide(notes, times, everyTicks)) {
+    const reach = Math.max(...notes.map(endsAt)) - Math.min(...notes.map((note) => note.tick));
+    return `Every pass would land on the one before it: these notes span ${reach} ticks but repeat starts a pass every ${everyTicks}. Nothing was written. Send an everyTicks of at least ${reach}, or make the phrase shorter.`;
+  }
+  return null;
+}
+
 const stampNotes = defineTool<StampArgs>({
   name: 'pattern_stamp_notes',
   description:
@@ -290,7 +423,7 @@ const stampNotes = defineTool<StampArgs>({
           },
           ['stringIndex', 'fret', 'tick', 'durationTicks'],
         ),
-        'The notes to add.',
+        'The notes to add. With a repeat this is ONE pass and nothing more — a single copy of the phrase, which repeat then lays down again and again; do not write the other copies out here as well.',
       ),
       repeat: obj(
         {
