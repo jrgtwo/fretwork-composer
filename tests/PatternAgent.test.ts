@@ -64,6 +64,14 @@ describe('the pattern page agent', () => {
     expect(prompt).toContain('read_pattern');
     // The single likeliest way for an agent edit to land on the wrong string.
     expect(prompt).toMatch(/String index 0/i);
+    // A chord's frets are a LOOKUP. Stated up here rather than left to
+    // `read_chord_voicings`'s description, because a description is read after
+    // the tool has been chosen and the tool that never gets chosen is exactly
+    // the failure this covers. The claim is asserted as well as the name: a
+    // paragraph saying to work the shapes out and check them afterwards would
+    // satisfy the name alone and be the opposite instruction.
+    expect(prompt).toContain('read_chord_voicings');
+    expect(prompt).toMatch(/LOOKUP, NOT ARITHMETIC/i);
     // A refusal is text to act on, not a crash — the seams author those
     // sentences and AG-04 hands them to the model.
     expect(prompt).toMatch(/"ok":false/);

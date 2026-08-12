@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { COMPOSITION_AGENT, COMPOSITION_WRITE_TOOLS } from '../src/ai/compositionAgent';
+import { SHARED_RULES } from '../src/ai/agentRules';
 import { PATTERN_AGENT } from '../src/ai/patternAgent';
 import { commandsForPage } from '../src/ai/commandCatalog';
 import { AGENT_TOOLS } from '../src/ai/tools';
@@ -103,6 +104,27 @@ describe('the composition page agent', () => {
     // error to retry.
     expect(prompt).toMatch(/track limit|memory limit/i);
     expect(prompt).toMatch(/"ok":false/);
+    // A chord's frets are a LOOKUP, not arithmetic. This page is where it was
+    // got wrong: a backing-track run never called the tool, hand-computed bass
+    // frets and got them wrong, with the tool named in the command's own
+    // template. A template is not a standing rule. The claim, not just the
+    // tool's name — "work them out and then check with read_chord_voicings"
+    // would name the tool and invert the rule.
+    expect(prompt).toContain('read_chord_voicings');
+    expect(prompt).toMatch(/LOOKUP, NOT ARITHMETIC/i);
+    // Both instruments of a backing track need the same symbols looked up
+    // again, and `RESULTS` forbids a repeated call in absolute terms.
+    expect(prompt).toMatch(/not a repeated call/i);
+  });
+
+  it('takes the chord rule from the shared rules, so the pattern page has it too', () => {
+    // The decision the fix actually made: chord voicings are reachable from both
+    // pages, so by `agentRules`' own rule the fact belongs there and not in a
+    // page section. Asserted against `SHARED_RULES` because both prompts above
+    // would still pass if the paragraph were copied into each page spec — which
+    // is the drift this module exists to stop.
+    expect(SHARED_RULES).toMatch(/LOOKUP, NOT ARITHMETIC/i);
+    expect(SHARED_RULES).toContain('read_chord_voicings');
   });
 });
 

@@ -121,11 +121,37 @@ A SUCCESS CAN STILL NOT BE WHAT YOU ASKED FOR. Many operations clamp, and they r
 
 NEVER MAKE THE SAME CALL TWICE with the same arguments, reads included. A second identical read returns exactly what the first one did, and re-reading to check whether a write worked is not progress — the write's own result already told you. If you cannot see how to proceed, say so and stop. Stopping early with an explanation is a useful answer; looping is not.`;
 
-/** True of every instrument the app has, and the one fact about the fretboard
- *  that is not visible from any tool schema. */
-const STRINGS = `# Strings
+/**
+ * The two facts about the neck that no tool schema shows, and that a model
+ * reasoning from general musical knowledge gets wrong in the same way: it
+ * assumes a guitar.
+ *
+ * The chord paragraph is here rather than in `read_chord_voicings`'s
+ * description for the reason the header states — a description is read AFTER a
+ * tool has been chosen, which is no use for a tool that never gets chosen. In
+ * the 2026-08-10 backing-track run the tool was in the command's list and named
+ * in its template, was called zero times, and the model hand-computed bass frets
+ * instead ("F: F3 (D string, open)" — open D on a bass is D2). Both pages can
+ * reach it, so by this file's own rule it belongs here and not in a page spec.
+ *
+ * Its two clauses past the first sentence are there to survive `RESULTS`, which
+ * is read as absolutes. The precondition, because the tool answers for the OPEN
+ * pattern: asked with none open it refuses, and "never send the identical call
+ * again" then forbids the retry that opening one would have fixed — leaving
+ * hand-computed frets as the only route left. The last clause, because a backing
+ * track asks the same symbols once per instrument, and "NEVER MAKE THE SAME CALL
+ * TWICE … reads included" would otherwise suppress the bass lookup and build the
+ * bass from the guitar's shapes. That ordering is in the tool's own description
+ * too, which is exactly the place this incident proved does not get read.
+ *
+ * One section rather than two because it is one subject: where a note physically
+ * sits, and that where depends on the instrument the pattern is on.
+ */
+const NECK = `# The neck
 
-String index 0 is the LOWEST-pitched string — the low E on a standard guitar. Higher indices go towards the high E.`;
+String index 0 is the LOWEST-pitched string — the low E on a standard guitar. Higher indices go towards the high E.
+
+THE FRETS FOR A NAMED CHORD ARE A LOOKUP, NOT ARITHMETIC. Once a pattern is open and its instrument is set, ask \`read_chord_voicings\` for the whole progression at once instead of working the shapes out: a shape belongs to the instrument the pattern is on, and one carried over from a guitar lands on the wrong notes on a bass or a ukulele. The answer is for THAT pattern's neck as it stands, so ask again after opening a pattern on a different instrument — same chords, different frets, and that is not a repeated call.`;
 
 /**
  * The shared preamble, in reading order: how to act, then the units, then the
@@ -135,7 +161,7 @@ String index 0 is the LOWEST-pitched string — the low E on a standard guitar. 
  * shared rules read the same on both pages and a page-specific rule is always
  * found in one place.
  */
-export const SHARED_RULES = [METHOD, TIME, LENGTH, RESULTS, STRINGS].join('\n\n');
+export const SHARED_RULES = [METHOD, TIME, LENGTH, RESULTS, NECK].join('\n\n');
 
 /** Join the shared rules with a page's own section. */
 export function pagePrompt(pageSection: string): string {

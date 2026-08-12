@@ -299,19 +299,32 @@ describe('what the seam hands the harness', () => {
     harness.runAgent.mockResolvedValue(runResult());
   });
 
-  it('builds the model from the connector settings, and only from those', async () => {
+  it('builds the model from the connector settings, plus the reply cap, and nothing else', async () => {
     await runAgentTask(PATTERN_AGENT, INPUT);
     expect(harness.profiles).toEqual([
       // Normalized: the panel renders `<base>/chat/completions` from the same
       // helper, so a trailing slash handled in one and not the other makes that
       // display a lie.
-      { baseUrl: 'http://localhost:5174/v1', model: DEFAULT_MODEL_ID, apiKey: 'sk-test' },
+      {
+        baseUrl: 'http://localhost:5174/v1',
+        model: DEFAULT_MODEL_ID,
+        // NOT from the connector settings — the one field here the user does not
+        // choose. It bounds what a single reply may cost: the run that prompted
+        // it spent 51593 completion tokens on one call. Written out rather than
+        // imported so changing the number costs an edit against its
+        // justification in the seam.
+        maxTokens: 8192,
+        apiKey: 'sk-test',
+      },
     ]);
   });
 
-  it('honours an explicit model id', async () => {
+  it('honours an explicit model id, and still caps the reply', async () => {
     await runAgentTask(PATTERN_AGENT, INPUT, { modelId: 'qwen' });
-    expect(harness.profiles[0]).toMatchObject({ model: 'qwen' });
+    // The cap asserted on THIS route and not only on the default one: the model
+    // id is the one profile field a caller can set, and it is applied by spread
+    // over the same object literal the cap lives in.
+    expect(harness.profiles[0]).toMatchObject({ model: 'qwen', maxTokens: 8192 });
   });
 
   it('passes the agent, the input and the cancellation signal', async () => {

@@ -73,6 +73,51 @@ export type { AgentEvent };
 export const DEFAULT_MODEL_ID = 'local-model';
 
 /**
+ * The ceiling on ONE model reply, in completion tokens.
+ *
+ * ── What it is a bound on ───────────────────────────────────────────────────
+ *
+ * ONE `pattern_stamp_notes` call carrying one pass of a phrase plus its
+ * `repeat`, AND the reasoning that precedes it. Both halves, because a ceiling
+ * is on COMPLETION tokens and this model's `reasoning_content` is billed to the
+ * same budget — the harness streams it apart from the content (`onThinking`) but
+ * the provider does not budget it apart.
+ *
+ * The stamp half is what AG-10's `repeat` was built to bound: twelve bars of a
+ * one-bar riff is one bar of notes and a count, not twelve bars of notes. A note
+ * costs roughly 25-40 tokens (`{"stringIndex":2,"fret":5,"tick":480,
+ * "durationTicks":240}`), so the widest legitimate call — a through-composed
+ * pass, say a 48-note walking line, which `repeat` cannot compress — is about
+ * 2000. The reasoning half is measured, not guessed: the largest iteration that
+ * SUCCEEDED in the 2026-08-10 backing-track run cost 1610 completion tokens and
+ * was mostly reasoning (the other four cost 173, 292, 416 and 736). So a real
+ * worst case is around 4000, and this is that doubled.
+ *
+ * The headroom is deliberate and asymmetric. Overshooting costs tokens on a run
+ * that was already failing; undershooting truncates a legitimate call mid-JSON,
+ * which is not degradation but the very failure below — a cap set tight enough
+ * to bite manufactures what it exists to bound. The harness's history
+ * `summarizeMessages` reuses this same client, so the cap applies to a summary
+ * too; a summary is far smaller than this and never bumps it.
+ *
+ * ── What it does NOT do ─────────────────────────────────────────────────────
+ *
+ * It does not prevent a runaway, and it does not change what one looks like. A
+ * tool call truncated at a token ceiling is malformed JSON whichever ceiling
+ * stopped it, so the provider still answers "Failed to parse tool call arguments
+ * as JSON … unexpected end of input" and the run still ends in error and rolls
+ * back. What changes is the PRICE: the run this came from burned 51593
+ * completion tokens in one call (65536 for the iteration) before dying, and this
+ * bounds that at 8192 — the same ending, roughly a sixth of the cost and of the
+ * wait. Damage control, nothing more. What actually PREVENTS this class is
+ * refusing the impossible call up front, in the tool.
+ *
+ * Deliberately not a `RunAgentTaskOptions` field. It is a property of what this
+ * app's tools can be asked for, not a per-caller preference.
+ */
+const MAX_COMPLETION_TOKENS = 8192;
+
+/**
  * An agent, described WITHOUT naming a harness type.
  *
  * Same reason `./tools/types` does not name one: an agent is a prompt and a set
@@ -180,12 +225,20 @@ export function toHarnessAgent(spec: AgentSpec): Agent {
  * The token is passed as `apiKey` and touched nowhere else. It is omitted rather
  * than sent empty: a bare `Bearer ` is a malformed credential and a local server
  * that wants none will reject it.
+ *
+ * `maxTokens` is set unconditionally — see {@link MAX_COMPLETION_TOKENS} for the
+ * number and what it is a bound on. VERIFIED, not assumed: it is declared on the
+ * harness's `ModelProfile`, and `OpenAICompatibleClient.chat` writes
+ * `body.max_tokens` from it when it is not null, so this reaches the provider
+ * rather than sitting unread on the profile. Cited by symbol on purpose — the
+ * dist file it lives in is content-hashed and renamed on every harness build.
  */
 function modelFor(settings: ConnectorSettings, modelId: string): ModelClient {
   const apiKey = settings.token.trim();
   return new OpenAICompatibleClient({
     baseUrl: normalizeBaseUrl(settings.baseUrl),
     model: modelId,
+    maxTokens: MAX_COMPLETION_TOKENS,
     ...(apiKey === '' ? {} : { apiKey }),
   });
 }

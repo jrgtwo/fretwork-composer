@@ -2068,6 +2068,272 @@ describe('stamping the same phrase several times over', () => {
     expect(canUndoPattern()).toBe(false);
   });
 
+  /**
+   * AG-13. The 2026-08-10 run, reduced to two bars.
+   *
+   * It wrote every bar of a twelve-bar line into ONE `notes` array — each bar at
+   * bar-local ticks 0/480/960/1440 — and expected `repeat` to walk the groups
+   * forward a bar at a time. Twenty-seven of its thirty-three notes were on top
+   * of another note in the SAME call; 429 attempts placed 78 and came back `ok`.
+   * Unlike a collision with the pattern, that one is arithmetic on the arguments,
+   * so it is refused before anything is written.
+   */
+  it('refuses notes that land on each other, before it writes a thing', () => {
+    value(call('pattern_open_blank', { name: 'Blues', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    /** One bar of a walking line, at BAR-LOCAL ticks — which is the mistake. */
+    const barGroup = (frets: readonly number[]) =>
+      frets.map((fret, beat) => ({
+        stringIndex: 0,
+        fret,
+        tick: beat * PPQ,
+        durationTicks: PPQ,
+      }));
+
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [...barGroup([3, 0, 2, 3]), ...barGroup([0, 5, 7, 5])],
+        repeat: { times: 12, everyTicks: BAR },
+      }),
+    );
+    // How many of its own notes are shut out, so the model can tell "one typo"
+    // from "the whole list is doubled up". FOUR: the second bar-group is the one
+    // that cannot land, and counting the notes it lands on as well would double
+    // every number the model is trying to reason about.
+    expect(refused).toContain('4 of the 8');
+    // The misunderstanding named, not just the symptom.
+    expect(refused).toContain('send ONE bar');
+    // A concrete pair, so the model can see which one it meant to move. These
+    // two are on the very same tick, and saying "still sounding until 480" of a
+    // note that starts at 480 would give it nothing to tell the ends apart with.
+    expect(refused).toContain('string 0 tick 0');
+    expect(refused).toContain('another note at that same tick');
+
+    // NOTHING was written, and no step was pushed to undo it with.
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  it('refuses passes that would land on the pass before, naming both numbers', () => {
+    value(call('pattern_open_blank', { name: 'Ostinato', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    // The phrase is a whole bar long and the passes are half a bar apart, so
+    // every pass sits on top of the second half of the one before it.
+    const refused = reason(
+      call('pattern_stamp_notes', { notes: ostinato, repeat: { times: 4, everyTicks: BAR / 2 } }),
+    );
+    // BOTH numbers: the spacing it sent is only wrong relative to a span it never
+    // computed, and naming one without the other leaves it guessing again. The
+    // span is the STRING's, not the call's — see the accept case below.
+    expect(refused).toContain('on string 0');
+    expect(refused).toContain(`span ${BAR} ticks`);
+    expect(refused).toContain(`every ${BAR / 2}`);
+
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  /**
+   * Without a repeat there is no repeat to steer the model towards, and the
+   * fault is a different one: ticks counted from the top of a bar instead of
+   * from the top of the pattern. The whole-refusal applies here just the same,
+   * and this is the commoner call shape.
+   */
+  it('refuses a phrase that overlaps itself with no repeat at all', () => {
+    value(call('pattern_open_blank', { name: 'Blues', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [
+          { stringIndex: 0, fret: 3, tick: 0, durationTicks: PPQ },
+          { stringIndex: 0, fret: 5, tick: 0, durationTicks: PPQ },
+        ],
+      }),
+    );
+    expect(refused).toContain('1 of the 2');
+    expect(refused).toContain('start of the PATTERN');
+    // Advice about a parameter it did not use buries the fault it did make.
+    expect(refused).not.toContain('send ONE bar');
+
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  /**
+   * The 2026-08-10 call produced eighty-four colliding pairs. Naming them all
+   * would undo the reply-size decision every other refusal sentence here makes.
+   */
+  it('names ten of the pairs and counts the rest', () => {
+    value(call('pattern_open_blank', { name: 'Blues', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    // Twelve distinct beats, sent twice — twelve notes shut out, ten named.
+    const line = Array.from({ length: 12 }, (_, beat) => ({
+      stringIndex: 0,
+      fret: 3,
+      tick: beat * PPQ,
+      durationTicks: PPQ,
+    }));
+
+    const refused = reason(call('pattern_stamp_notes', { notes: [...line, ...line] }));
+    expect(refused).toContain('12 of the 24');
+    expect(refused).toContain('…and 2 more.');
+  });
+
+  /**
+   * The premise "two notes that overlap on one string cannot both be placed" is
+   * FALSE against the lib, and a check built on it refuses calls that work.
+   * `stampEvent` declines only a note whose start tick is already sounding;
+   * anything else it places and CLAMPS. A pedal or sustained note written after
+   * the shorter note it reaches over is the everyday shape of that, and it must
+   * still land — shortened, with the length that stuck coming back.
+   */
+  it('still accepts a long note written after the note it reaches over', () => {
+    value(call('pattern_open_blank', { name: 'Pedal', instrumentId: 'bass' }));
+
+    const stamped = value(
+      call('pattern_stamp_notes', {
+        notes: [
+          { stringIndex: 0, fret: 5, tick: PPQ, durationTicks: PPQ },
+          // Overlaps the note above by three beats — and lands, clamped to one.
+          { stringIndex: 0, fret: 3, tick: 0, durationTicks: BAR },
+        ],
+      }),
+    );
+    expect(stamped.placedCount).toBe(2);
+    expect(stamped.refusedCount).toBe(0);
+    expect(rows(stamped.placed)[1].durationTicks).toBe(PPQ);
+  });
+
+  /**
+   * The check is narrow ON PURPOSE, and these are the two shapes an over-broad
+   * one silently bans: every chord, and every legato line.
+   */
+  it('still accepts a chord, and notes that merely abut', () => {
+    value(call('pattern_open_blank', { name: 'Chord', instrumentId: 'bass' }));
+
+    // Same tick, DIFFERENT strings. Four fingers, one moment.
+    const chord = value(
+      call('pattern_stamp_notes', {
+        notes: [0, 1, 2].map((stringIndex) => ({
+          stringIndex,
+          fret: 3,
+          tick: 0,
+          durationTicks: PPQ,
+        })),
+      }),
+    );
+    expect(chord.placedCount).toBe(3);
+    expect(chord.refusedCount).toBe(0);
+
+    // One string, back to back: each note starts exactly where the last ended,
+    // and so does each PASS. An off-by-one in the comparison bans both.
+    const legato = value(
+      call('pattern_stamp_notes', {
+        notes: [0, 1, 2, 3].map((beat) => ({
+          stringIndex: 3,
+          fret: 5,
+          tick: beat * PPQ,
+          durationTicks: PPQ,
+        })),
+        repeat: { times: 2, everyTicks: BAR },
+      }),
+    );
+    expect(legato.placedCount).toBe(8);
+    expect(legato.refusedCount).toBe(0);
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(11);
+  });
+
+  /**
+   * And the third shape: a phrase that reaches further than its own spacing and
+   * still never touches itself, because the two ends of it are on DIFFERENT
+   * strings. Comparing the call's span against everyTicks — which is what the
+   * refusal sentence talks about, and the obvious thing to implement — bans a
+   * bass note under a top-string fill, which is most of what a repeat is for.
+   */
+  it('still accepts passes that overlap in time on different strings', () => {
+    value(call('pattern_open_blank', { name: 'Riff', instrumentId: 'bass' }));
+
+    const stamped = value(
+      call('pattern_stamp_notes', {
+        notes: [
+          { stringIndex: 0, fret: 3, tick: 0, durationTicks: PPQ },
+          // Three beats after the note above, so the phrase spans a whole bar
+          // while the passes are half a bar apart. Neither string collides.
+          { stringIndex: 1, fret: 5, tick: 3 * PPQ, durationTicks: PPQ },
+        ],
+        repeat: { times: 4, everyTicks: BAR / 2 },
+      }),
+    );
+    expect(stamped.placedCount).toBe(8);
+    expect(stamped.refusedCount).toBe(0);
+  });
+
+  /**
+   * The other half of the same rule. A collision with a note ALREADY in the
+   * pattern is not provable from the arguments — it is the seam's answer, known
+   * only after the write — so it stays what it was: per note, partial, itemised.
+   */
+  it('leaves collisions with the pattern itself partial, as they were', () => {
+    value(call('pattern_open_blank', { name: 'Riff', instrumentId: 'bass' }));
+    value(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 0, fret: 7, tick: 0, durationTicks: PPQ }],
+      }),
+    );
+
+    const stamped = value(
+      call('pattern_stamp_notes', {
+        notes: [
+          // Onto the note that is already there — refused by the seam.
+          { stringIndex: 0, fret: 3, tick: 0, durationTicks: PPQ },
+          // And this one lands, which is the whole point of not refusing whole.
+          { stringIndex: 1, fret: 3, tick: 0, durationTicks: PPQ },
+        ],
+      }),
+    );
+    expect(stamped.placedCount).toBe(1);
+    const refused = rows(stamped.refused);
+    expect(refused).toHaveLength(1);
+    expect(refused[0].index).toBe(0);
+    expect(refused[0].reason).toContain('already sounding');
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(2);
+  });
+
+  /**
+   * What this can and cannot catch. It catches a refusal that leaves an undo
+   * step behind, which is the user-visible defect. It does NOT catch the check
+   * being moved inside `oneUndoStep`'s bracket: `changed` is `result.ok`, so a
+   * refusal returned from inside the bracket pushes nothing either, and the two
+   * orderings are indistinguishable from out here. Running the check first is
+   * still the right construction — it is what makes "no write, no step" true
+   * rather than true by accident of another predicate — but it is not assertable
+   * through this seam.
+   */
+  it('pushes no undo step when it refuses a call whole', () => {
+    value(call('pattern_open_blank', { name: 'Ostinato', instrumentId: 'bass' }));
+    clearPatternHistory();
+    value(call('pattern_stamp_notes', { notes: ostinato }));
+    expect(canUndoPattern()).toBe(true);
+
+    reason(
+      call('pattern_stamp_notes', {
+        notes: [...ostinato, ...ostinato],
+        repeat: { times: 4, everyTicks: BAR },
+      }),
+    );
+
+    // ONE press takes the pattern back past the phrase that DID land. A step
+    // pushed by the refusal would swallow that press restoring a state the
+    // pattern never left, and leave the notes sitting there.
+    patternUndo();
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+    expect(canUndoPattern()).toBe(false);
+  });
+
   it('collapses a whole repeat into ONE undo step', () => {
     value(call('pattern_open_blank', { name: 'Ostinato', instrumentId: 'bass' }));
     clearPatternHistory();

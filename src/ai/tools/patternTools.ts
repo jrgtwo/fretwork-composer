@@ -61,13 +61,21 @@
  *      see the pattern must not be left guessing which half went.
  *
  * ONE EXCEPTION, and it is reason 2 read the other way round. `pattern_stamp_notes`
- * refuses WHOLE, before it writes anything, when the notes it was SENT overlap
- * each other on one string — see `unplayableAsSent`. That refusal is not the
- * seam's, discovered after the write: it is arithmetic on the arguments, true
- * whatever the pattern already holds, so it costs no write and no rollback and
- * lands in the same category as `pattern_delete_notes`' missing id. Collisions
- * with notes ALREADY in the pattern are not checkable up front and stay exactly
- * as described above: per note, partial, itemised.
+ * refuses WHOLE, before it writes anything, when the notes it was SENT cannot
+ * all be placed — either because two of them want the same string at the same
+ * moment, or because a `repeat` starts each pass before the pass before it has
+ * finished. See `unplayableAsSent`. That refusal is not the seam's, discovered
+ * after the write: it is the stamp order replayed on the arguments, so it costs
+ * no write and no rollback and lands in the same category as
+ * `pattern_delete_notes`' missing id.
+ *
+ * It is NOT the claim that the lib could not place two overlapping notes — it
+ * often can, by clamping, and `blockedByThisCall` models that exactly rather
+ * than assuming otherwise. It is a claim about the CALL: a call whose own notes
+ * shut each other out is not the call its author meant to make, and stamping
+ * the survivors of it produces a pattern nobody asked for. Collisions with notes
+ * ALREADY in the pattern are not checkable up front and stay exactly as
+ * described above: per note, partial, itemised.
  *
  * A batch in which NOTHING applied is a refusal, not an empty success: `ok`
  * with zero applied is the unrecoverable answer this layer exists to avoid, so
@@ -284,91 +292,172 @@ type StampNote = StampArgs['notes'][number];
 
 const endsAt = (note: StampNote): number => note.tick + note.durationTicks;
 
-const byTick = (a: StampNote, b: StampNote): number => a.tick - b.tick;
+/** One note of the call as it is actually attempted: which entry of `notes` it
+ *  came from, which pass it belongs to, and the tick that pass puts it at. */
+interface Attempt {
+  readonly index: number;
+  readonly pass: number;
+  readonly tick: number;
+}
 
-/** The sent notes grouped by the string they are on — the only axis on which
- *  two of them can ever be in each other's way. */
-function perString(notes: readonly StampNote[]): StampNote[][] {
-  const strings = new Map<number, StampNote[]>();
-  for (const note of notes) {
-    const onString = strings.get(note.stringIndex);
-    if (onString) onString.push(note);
-    else strings.set(note.stringIndex, [note]);
-  }
-  return [...strings.values()];
+/** An attempt another note in the SAME CALL is already sounding through. */
+interface Blocked {
+  readonly attempt: Attempt;
+  readonly blocker: Attempt;
+  /** How far the blocker reaches once the lib has clamped it — the number one
+   *  end of the pair has to be moved past, and not always its `durationTicks`. */
+  readonly soundingUntil: number;
 }
 
 /**
- * The notes that overlap ANOTHER NOTE IN THE SAME PASS, and a few of the pairs
- * by name.
+ * The notes of a stamp that another note IN THE SAME CALL will keep out, worked
+ * out from the arguments alone.
  *
- * Pass-invariant, which is why it looks at the notes as sent rather than at the
- * expansion: every pass is the same list moved sideways by the same amount, so
- * an overlap inside the list is an overlap in every pass, and one inside no pass.
+ * ⚠ THIS MODELS THE LIB, so it has to match it rather than merely resemble it,
+ * and the obvious rule — "two notes that overlap on one string cannot both be
+ * placed" — IS WRONG. `stampEvent` declines only a note whose START TICK an
+ * existing note's interval already covers; anything else it places and CLAMPS,
+ * shortening it so it stops at the next note on that string. `patternService`
+ * says the same from the app's side ("the lib clamps a note so it cannot run
+ * into the next one on its string") and applies the clamp a second time through
+ * `resizeEvent`. So a long note sent AFTER the short one it would have swallowed
+ * lands, shortened — an ordinary shape, and refusing it would be this layer
+ * lying about what the seam does.
  *
- * Sorted by tick, a note is in something's way if it starts before the furthest
- * anything earlier reaches, OR if it reaches past the note that follows it — the
- * successor being the earliest of everything after it, so a note that clears its
- * successor clears all of them. Both halves are needed: the second is the only
- * thing that sees a note whose only casualty is later than itself.
+ * Hence a replay rather than a comparison: the call is walked in the order `run`
+ * stamps it — pass by pass, array order within a pass — against a string with
+ * nothing else on it, and only what that walk actually declines is reported.
+ * Notes already in the PATTERN are deliberately not modelled: those refusals are
+ * the seam's, discoverable only after the write, and they stay per-note and
+ * partial (see the file header). Leaving them out is what keeps this an answer
+ * about the arguments.
+ *
+ * Each string's placed notes stay sorted by tick and, because of the clamp,
+ * never overlap one another — which is why one binary search answers both of the
+ * lib's questions: the entry before the insertion point is the only one that can
+ * be covering this tick, and the entry after it is the clamp.
  */
-function samePassOverlaps(notes: readonly StampNote[]): {
-  involved: number;
-  pairs: { label: string; reason: string }[];
-} {
-  let involved = 0;
-  const pairs: { label: string; reason: string }[] = [];
-  for (const onString of perString(notes)) {
-    const sorted = [...onString].sort(byTick);
-    // The note reaching furthest so far, which is not always the previous one.
-    let furthest: StampNote | undefined;
-    for (const [index, note] of sorted.entries()) {
-      const next = sorted[index + 1];
-      const hitsSomethingEarlier = furthest !== undefined && note.tick < endsAt(furthest);
-      const hitsSomethingLater = next !== undefined && endsAt(note) > next.tick;
-      if (hitsSomethingEarlier || hitsSomethingLater) involved += 1;
-      if (furthest !== undefined && hitsSomethingEarlier) {
-        // Named the way the whole-refusal sentence names a stamp — by string and
-        // tick, because a note being sent has no id yet — and BOTH ends, so the
-        // model can see which of the two it meant to put somewhere else.
-        pairs.push({
-          label: `string ${note.stringIndex} tick ${note.tick}`,
-          reason: `the note you sent at tick ${furthest.tick} on that string is still sounding until ${endsAt(furthest)}.`,
-        });
-      }
-      if (furthest === undefined || endsAt(note) > endsAt(furthest)) furthest = note;
-    }
-  }
-  return { involved, pairs };
-}
-
-/**
- * Whether any pass lands on another pass, given that no pass lands on itself.
- *
- * Checked on the EXPANSION rather than by comparing `everyTicks` against the
- * phrase's span, because a phrase longer than its spacing does not necessarily
- * collide — a bass note and a top-string fill can overlap in time and never
- * touch. It is the same sorted sweep: with the same-pass case already excluded,
- * any adjacent overlap here is between two different passes.
- */
-function passesCollide(
+function blockedByThisCall(
   notes: readonly StampNote[],
   times: number,
   everyTicks: number,
-): boolean {
-  if (times < 2) return false;
-  for (const onString of perString(notes)) {
-    const expanded: StampNote[] = [];
-    for (let pass = 0; pass < times; pass += 1) {
-      for (const note of onString) expanded.push({ ...note, tick: note.tick + pass * everyTicks });
-    }
-    expanded.sort(byTick);
-    for (const [index, note] of expanded.entries()) {
-      const next = expanded[index + 1];
-      if (next !== undefined && endsAt(note) > next.tick) return true;
+): Blocked[] {
+  const blocked: Blocked[] = [];
+  const placed = new Map<number, { tick: number; endsAt: number; attempt: Attempt }[]>();
+  for (let pass = 0; pass < times; pass += 1) {
+    for (const [index, note] of notes.entries()) {
+      const tick = note.tick + pass * everyTicks;
+      const attempt: Attempt = { index, pass, tick };
+      let onString = placed.get(note.stringIndex);
+      if (onString === undefined) {
+        onString = [];
+        placed.set(note.stringIndex, onString);
+      }
+      // The first note starting strictly after this one — by binary search,
+      // because a long phrase repeated 64 times walks this list tens of
+      // thousands of times.
+      let low = 0;
+      let high = onString.length;
+      while (low < high) {
+        const mid = (low + high) >> 1;
+        if (onString[mid].tick > tick) high = mid;
+        else low = mid + 1;
+      }
+      const covering = onString[low - 1];
+      if (covering !== undefined && covering.endsAt > tick) {
+        blocked.push({ attempt, blocker: covering.attempt, soundingUntil: covering.endsAt });
+        continue;
+      }
+      const next = onString[low];
+      const room =
+        next === undefined ? note.durationTicks : Math.min(note.durationTicks, next.tick - tick);
+      onString.splice(low, 0, { tick, endsAt: tick + Math.max(1, room), attempt });
     }
   }
-  return false;
+  return blocked;
+}
+
+/** How far the notes on one string reach, first start to last end — which is the
+ *  spacing a repeat of them needs. Written as a fold rather than
+ *  `Math.max(...notes.map(…))`: `notes` has no ceiling here (AG-12 is a separate
+ *  ticket) and a spread long enough overflows the argument list. */
+function spanOnString(notes: readonly StampNote[], stringIndex: number): number {
+  let first = Infinity;
+  let last = 0;
+  for (const note of notes) {
+    if (note.stringIndex !== stringIndex) continue;
+    if (note.tick < first) first = note.tick;
+    if (endsAt(note) > last) last = endsAt(note);
+  }
+  return last - first;
+}
+
+/**
+ * The phrase is in its own way. The mistake a real run made on 2026-08-10: it
+ * wrote every bar of a twelve-bar line into ONE `notes` array, each bar at
+ * bar-local ticks 0/480/960/1440, and expected `repeat` to walk the groups
+ * forward a bar at a time. Twenty-seven of its thirty-three notes started where
+ * another note it had sent in the same call was already sounding; we stamped
+ * seventy-eight of the four hundred and twenty-nine attempts and answered `ok`.
+ */
+function crowdedPhrase(
+  notes: readonly StampNote[],
+  samePass: readonly Blocked[],
+  times: number,
+): string {
+  // ONE pair per note of the phrase, however many passes repeat it. The same
+  // mistake named twelve times is twelve times the tokens and not one more fact
+  // — and what is left is capped like every other refusal sentence.
+  const firstPerNote = new Map<number, Blocked>();
+  for (const entry of samePass) {
+    if (!firstPerNote.has(entry.attempt.index)) firstPerNote.set(entry.attempt.index, entry);
+  }
+  const pairs = [...firstPerNote.values()].map((entry) => ({
+    // Named by string and tick, because a note being sent has no id yet, and
+    // BOTH ends of the pair, so the model can see which of the two it meant to
+    // put somewhere else.
+    label: `string ${notes[entry.attempt.index].stringIndex} tick ${entry.attempt.tick}`,
+    reason:
+      entry.blocker.tick === entry.attempt.tick
+        ? 'you sent another note at that same tick on that string.'
+        : `the note you sent at tick ${entry.blocker.tick} on that string is still sounding until ${entry.soundingUntil}.`,
+  }));
+  // The recovery is not the same sentence with a repeat and without one, because
+  // the mistake is not: bar-local ticks are what a repeat is FOR, and are simply
+  // wrong without one. Steering a model towards a parameter it did not use hides
+  // the fault it did make.
+  const steer =
+    times > 1
+      ? 'If those are meant to be successive bars, send ONE bar and let repeat lay the rest down — repeat copies the whole list forward by everyTicks, it does not deal your notes out a bar at a time.'
+      : 'If those are meant to be successive bars, their ticks count from the start of the PATTERN and not from the start of each bar — or send one bar and add a repeat.';
+  return `These notes land on top of each other: ${firstPerNote.size} of the ${notes.length} you sent start where another note in the same list is still sounding, on the same string, and a string can only ring one note at a time. Nothing was written. ${steer} ${namedRefusals(pairs)}`;
+}
+
+/** Each pass starts before the one before it has finished. `everyTicks`' own
+ *  description warns about this in prose; this is it as a refusal. */
+function passesTooClose(
+  notes: readonly StampNote[],
+  blocked: readonly Blocked[],
+  everyTicks: number,
+): string {
+  // The WIDEST of the strings that actually collide, not the span of the call:
+  // a wider gap can only ever move passes further apart, so clearing the worst
+  // colliding string clears every one of them, while a string that does not
+  // collide cannot be made to by a bigger gap however far its own notes reach.
+  // Quoting the whole call's span instead would inflate `everyTicks`, and the
+  // pattern's length auto-fits, so that lands as bars the model then has to
+  // diagnose.
+  let span = 0;
+  let widest = -1;
+  for (const entry of blocked) {
+    const stringIndex = notes[entry.attempt.index].stringIndex;
+    const onString = spanOnString(notes, stringIndex);
+    if (onString > span) {
+      span = onString;
+      widest = stringIndex;
+    }
+  }
+  return `Every pass would land on the one before it: on string ${widest} these notes span ${span} ticks but repeat starts a pass every ${everyTicks}. Nothing was written. Send an everyTicks of at least ${span}, or make the phrase shorter.`;
 }
 
 /**
@@ -378,36 +467,32 @@ function passesCollide(
  * ⚠ RUNS BEFORE `oneUndoStep` OPENS ITS BRACKET. Nothing is written, so nothing
  * is there to restore, and a step pushed here would be one that undoes a state
  * the pattern never left — the defect `oneUndoStep`'s `changed` predicate exists
- * to prevent.
+ * to prevent. (The predicate would in fact swallow it either way, so the
+ * ordering is not observable from outside; it is still the construction that
+ * makes the rule true rather than incidentally satisfied.)
  *
  * The two cases are different mistakes with different recoveries, so they get
- * different sentences. The first is the one a real run hit on 2026-08-10: it
- * wrote every bar of a twelve-bar line into ONE `notes` array, each bar at
- * bar-local ticks 0/480/960/1440, and expected `repeat` to walk the groups
- * forward a bar at a time. Twenty-seven of its thirty-three notes were on top of
- * another one it had sent in the same call; we stamped seventy-eight of the four
- * hundred and twenty-nine attempts and answered `ok`.
+ * different sentences, and which one it is falls straight out of the replay:
+ * a note kept out by a note from its OWN pass is a phrase that overlaps itself,
+ * and one kept out by an earlier pass is a `repeat` spaced too tightly.
  */
 function unplayableAsSent(
   notes: readonly StampNote[],
   times: number,
   everyTicks: number,
 ): string | null {
-  const { involved, pairs } = samePassOverlaps(notes);
-  if (involved > 0) {
-    return `These notes land on top of each other: ${involved} of the ${notes.length} you sent overlap another note in the same list, on the same string, and a string can only ring one note at a time. Nothing was written. If those are meant to be successive bars, send ONE bar and let repeat lay the rest down — repeat copies the whole list forward by everyTicks, it does not deal your notes out a bar at a time. ${namedRefusals(pairs)}`;
-  }
-  if (passesCollide(notes, times, everyTicks)) {
-    const reach = Math.max(...notes.map(endsAt)) - Math.min(...notes.map((note) => note.tick));
-    return `Every pass would land on the one before it: these notes span ${reach} ticks but repeat starts a pass every ${everyTicks}. Nothing was written. Send an everyTicks of at least ${reach}, or make the phrase shorter.`;
-  }
-  return null;
+  const blocked = blockedByThisCall(notes, times, everyTicks);
+  if (blocked.length === 0) return null;
+  const samePass = blocked.filter((entry) => entry.blocker.pass === entry.attempt.pass);
+  return samePass.length > 0
+    ? crowdedPhrase(notes, samePass, times)
+    : passesTooClose(notes, blocked, everyTicks);
 }
 
 const stampNotes = defineTool<StampArgs>({
   name: 'pattern_stamp_notes',
   description:
-    'Add notes to the open pattern. Send a whole phrase in one call — it lands as a single undo step, and each note is reported separately so a note that could not be placed does not cost you the rest. To lay the same phrase down again and again, send it ONCE with `repeat` rather than typing out every copy: a twelve-bar ostinato is four notes and a repeat, not forty-eight notes. A string can only ring one note at a time, so a note that overlaps an existing one on the same string is refused. A note past the end of this instrument\'s neck is placed but comes back marked aboveTheNeck, which means it will never sound; a repeat only COUNTS those rather than naming them. The pattern grows to fit its content by itself and there is no length to set — but it grows to a WHOLE BAR, so a single note starting one beat past the end of the last bar you meant makes the pattern a bar longer. The reply gives placedCount, refusedCount and the length that resulted; check the length against the length you intended. Every note is listed individually, EXCEPT when you repeat: then the counts come back without the list, because one entry per copy would hand straight back the tokens the repeat just saved, and refused names only the first ten casualties while refusedCount still counts them all. read_pattern has the ids, the durations that stuck and the notes above the neck whenever you need them.',
+    'Add notes to the open pattern. Send a whole phrase in one call — it lands as a single undo step, and each note is reported separately so a note that could not be placed does not cost you the rest. To lay the same phrase down again and again, send it ONCE with `repeat` rather than typing out every copy: a twelve-bar ostinato is four notes and a repeat, not forty-eight notes. A string can only ring one note at a time, so a note that overlaps one ALREADY in the pattern is refused on its own and the rest of the call still lands — but if the notes you send would land on top of EACH OTHER on one string, or a repeat would start a pass before the pass before it had finished, the WHOLE call is refused and nothing at all is written, because that much is provable from what you sent. A note past the end of this instrument\'s neck is placed but comes back marked aboveTheNeck, which means it will never sound; a repeat only COUNTS those rather than naming them. The pattern grows to fit its content by itself and there is no length to set — but it grows to a WHOLE BAR, so a single note starting one beat past the end of the last bar you meant makes the pattern a bar longer. The reply gives placedCount, refusedCount and the length that resulted; check the length against the length you intended. Every note is listed individually, EXCEPT when you repeat: then the counts come back without the list, because one entry per copy would hand straight back the tokens the repeat just saved, and refused names only the first ten casualties while refusedCount still counts them all. read_pattern has the ids, the durations that stuck and the notes above the neck whenever you need them.',
   parameters: obj(
     {
       notes: arr(
@@ -417,7 +502,7 @@ const stampNotes = defineTool<StampArgs>({
             fret: int(`Fret. ${FRET}`, { min: 0, max: MAX_FRET }),
             tick: int(`Where the note starts. ${TICKS}`, { min: 0 }),
             durationTicks: int(
-              `How long the note sounds. ${TICKS} May be shortened so it does not run into the next note on the same string; the value that stuck comes back — except with a repeat, which reports no per-note detail, so read_pattern is where to check it.`,
+              `How long the note sounds. ${TICKS} May be shortened so it does not run into a note that is already there — one already in the pattern, or one earlier in this same call; the value that stuck comes back, except with a repeat, which reports no per-note detail, so read_pattern is where to check it.`,
               { min: 1 },
             ),
           },
@@ -434,7 +519,7 @@ const stampNotes = defineTool<StampArgs>({
             { min: 1, max: 64 },
           ),
           everyTicks: int(
-            `How far apart the passes are: the gap from the START of one pass to the start of the next, which for a one-bar phrase is one bar. ${TICKS} Say it explicitly — it is NEVER worked out from the notes you sent, because a phrase whose last note is short does not reach the end of its bar, and the pattern's length rounds up to whole bars afterwards, so a spacing guessed from the notes would give you a different rhythm from the one you meant. Make it at least as long as the phrase itself spans: a shorter one lands each pass on top of the one before it, and the notes that collide are refused as "already sounding" against your OWN previous pass, not against anything that was already there.`,
+            `How far apart the passes are: the gap from the START of one pass to the start of the next, which for a one-bar phrase is one bar. ${TICKS} Say it explicitly — it is NEVER worked out from the notes you sent, because a phrase whose last note is short does not reach the end of its bar, and the pattern's length rounds up to whole bars afterwards, so a spacing guessed from the notes would give you a different rhythm from the one you meant. Make it at least as long as the phrase itself spans: a shorter one lands each pass on top of the one before it, and the whole call is refused before anything is written.`,
             { min: 1 },
           ),
         },
@@ -446,6 +531,10 @@ const stampNotes = defineTool<StampArgs>({
   run: ({ notes, repeat }) => {
     const times = repeat?.times ?? 1;
     const everyTicks = repeat?.everyTicks ?? 0;
+    // BEFORE the bracket, and before any write: a call whose own notes cannot
+    // coexist is refused whole and leaves no undo step. See `unplayableAsSent`.
+    const impossible = unplayableAsSent(notes, times, everyTicks);
+    if (impossible !== null) return fail(impossible);
     /**
      * ITEMISE ONLY WHEN THERE IS NOTHING TO REPEAT.
      *
