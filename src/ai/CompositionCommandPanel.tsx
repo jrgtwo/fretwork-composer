@@ -83,36 +83,48 @@ import type { ArrangementMode } from '../composition/arrangementMath';
  */
 
 /**
+ * Model round trips per run.
+ *
+ * The harness default is 8 and the pattern page allows 12. Forty was sized when
+ * a backing track was three or four patterns; the standing rules now correctly
+ * say ONE PATTERN PER CHORD, so the same job is a dozen patterns — open, stamp,
+ * place, three calls each — plus the read, the tracks, the settings, the chord
+ * lookup and an answer at the end: thirty to fifty. A run on 2026-08-11 did the
+ * job RIGHT and hit forty exactly, so the ceiling was binding on the behaviour
+ * we ask for. Sixty leaves room for a handful of recoveries on top of that
+ * without leaving a run that will plainly never finish running for an hour.
+ *
+ * Running out of them mid-arrangement is not a partial success, and it is one of
+ * the things the rollback below exists to catch.
+ */
+const MAX_ITERS = 60;
+
+/** How long one round trip is allowed to take, on average, before the wall
+ *  clock rather than the step budget is what ends the run. Measured, not
+ *  chosen: on the local llama-server this design targets, a single round trip
+ *  with the whole tool set in the prompt is tens of seconds. */
+const SECONDS_PER_ITER = 15;
+
+/**
  * Outer bound on the wall clock of a single run.
  *
  * Sized for the job and not for the command. AG-06 allows 180 s, which is right
- * for one read and one batched write; a backing track is four tracks each of
- * which is a pattern authored, stamped and placed, and on the local
- * llama-server this design targets a single round trip with thirty-seven tool
- * schemas in the prompt is tens of seconds. Ten minutes is
- * {@link MAX_ITERS} × ~15 s, which is the same bound counted the other way.
+ * for one read and one batched write; a backing track is a pattern per chord,
+ * each authored, stamped and placed.
+ *
+ * ⚠ DERIVED, so the two bounds cannot drift apart. It is {@link MAX_ITERS}
+ * counted the other way: leaving this behind a raised step budget would make the
+ * wall clock bind first and the extra steps unreachable, which is the failure
+ * the budget was raised to fix — and writing the product out as a literal is how
+ * that happens, because the next person to move the budget updates the number
+ * and not the arithmetic.
  *
  * It is a CEILING, not a budget: an edit-mode run started from this panel gets
  * the same one and finishes in seconds. What the deadline actually bounds is how
  * long a dead provider can hold the document lock while the user waits, and
  * Cancel is mounted the whole time for anyone unwilling to wait that long.
  */
-const RUN_TIMEOUT_MS = 600_000;
-
-/**
- * Model round trips per run.
- *
- * The harness default is 8 and the pattern page allows 12. A four-track backing
- * track is one read plus roughly four calls per track — open a pattern, stamp
- * it, add a track, place it — plus the settings, plus room to act on a refusal
- * and an answer at the end: around thirty. Forty leaves margin for one recovery
- * per track without leaving a run that will plainly never finish running for an
- * hour.
- *
- * Running out of them mid-arrangement is not a partial success, and it is one of
- * the things the rollback below exists to catch.
- */
-const MAX_ITERS = 40;
+const RUN_TIMEOUT_MS = MAX_ITERS * SECONDS_PER_ITER * 1_000;
 
 type RunView =
   | { readonly kind: 'idle' }
@@ -804,11 +816,13 @@ function ToolTrace({ tools, running }: { tools: readonly string[]; running: bool
     );
   }
   return (
-    // CAPPED AND SCROLLED, not left to grow: `MAX_ITERS` is 40 and a backing
-    // track is around four calls a track, so a full run is thirty-odd lines —
+    // CAPPED AND SCROLLED, not left to grow: `MAX_ITERS` is 60 and a backing
+    // track is around three calls a chord, so a full run is fifty-odd lines —
     // and this section is `flex-none` in a rail with no scroller of its own, so
     // an uncapped trace squeezes the mode rail below it towards zero and
-    // overflows the column. Not assertable in jsdom, which has no layout.
+    // overflows the column. The cap is a HEIGHT (`max-h-40`) and not a count,
+    // so it did not have to move when the budget did. Not assertable in jsdom,
+    // which has no layout.
     <ol className="mt-1 flex max-h-40 flex-col overflow-y-auto font-mono text-[9.5px] text-ink-mut">
       {tools.map((name, index) => {
         // `tool.started` arrives before the call runs, so while the run is live

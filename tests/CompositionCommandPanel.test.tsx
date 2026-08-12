@@ -407,17 +407,23 @@ describe('a run in flight', () => {
 
   /**
    * `RUN_TIMEOUT_MS` and `MAX_ITERS` are sized for a JOB rather than for a
-   * command — ten minutes and forty round trips, against AG-06's three and
+   * command — fifteen minutes and sixty round trips, against AG-06's three and
    * twelve — and both are argued at length in the panel. Pinned here so the
    * argument and the numbers cannot drift apart.
+   *
+   * They are one bound counted two ways, and what holds THAT together is the
+   * panel deriving the timeout from the budget rather than these two tests: a
+   * pinning test catches a changed constant, not a broken ratio, so a budget
+   * raised to eighty with the pin updated to match would have kept both of
+   * these green while the wall clock silently stayed at fifteen minutes.
    */
-  it('gives the run forty round trips and an abort signal', async () => {
+  it('gives the run sixty round trips and an abort signal', async () => {
     ensureComposition();
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
 
-    expect(harness.live?.maxIters).toBe(40);
+    expect(harness.live?.maxIters).toBe(60);
     expect(harness.live?.signal).toBeInstanceOf(AbortSignal);
 
     await finishRun();
@@ -638,13 +644,13 @@ describe('a cancelled job', () => {
       callTool('composition_add_track', { name: 'Drums' });
 
       await act(async () => {
-        // Ten minutes — `RUN_TIMEOUT_MS`, sized for a job rather than for one
-        // batched write.
-        vi.advanceTimersByTime(600_000);
+        // Fifteen minutes — `RUN_TIMEOUT_MS`, sized for a job rather than for
+        // one batched write, and DERIVED as `MAX_ITERS` × ~15 s.
+        vi.advanceTimersByTime(900_000);
         await Promise.resolve();
       });
 
-      expect(within(report()).getByText(/Gave up after 10 minutes/)).toBeInTheDocument();
+      expect(within(report()).getByText(/Gave up after 15 minutes/)).toBeInTheDocument();
       // NOT "Cancelled": nobody cancelled this one.
       expect(within(report()).queryByText(/^Cancelled\.$/)).not.toBeInTheDocument();
       expect(getTracks()).toHaveLength(before);

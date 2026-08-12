@@ -44,6 +44,9 @@ import {
   compositionGrooveId,
   duplicatePlacements,
   endEditGesture,
+  findPlacement,
+  findTrack,
+  getEditingComposition,
   listGrooves,
   listTrackInstruments,
   mismatchedPlacements,
@@ -51,6 +54,7 @@ import {
   movePlacement,
   openBlankComposition,
   openPlacementForEditing,
+  placementEndTick,
   removePlacement,
   removeTrack,
   resizePlacement,
@@ -68,10 +72,11 @@ import {
   setTrackVolumeDb,
   splitPlacement,
   strandedByInstrument,
-  findTrack,
+  ticksPerBar,
   type GrooveId,
 } from '../../composition/compositionService';
-import { PPQ } from '../../patterns/patternService';
+import { PPQ, findLibraryPattern } from '../../patterns/patternService';
+import { barConverter, type BarConverter } from './barMath';
 import {
   arr,
   bool,
@@ -80,6 +85,7 @@ import {
   fromResult,
   int,
   name as nameOf,
+  namedRefusals,
   num,
   obj,
   ok,
@@ -281,38 +287,425 @@ const setMasterVolume = defineTool<{ volumeDb: number }>({
 
 // ------------------------------------------------------------- placements ---
 
+/**
+ * `atBars` vs `atTicks` — exactly one, enforced HERE and not in the schema.
+ *
+ * `JsonSchema` has no `oneOf`/`anyOf` on purpose (see its header): a schema the
+ * validator cannot check is not enforcing anything, and widening the subset for
+ * one tool would make that guarantee conditional. So the exclusivity is a
+ * returned refusal like any other seam refusal — and, like any other, it names
+ * the argument it wants rather than reporting that something was wrong.
+ *
+ * Both forms stay. A placement that does not begin on a barline is legitimate —
+ * a pickup, a part entering on the and-of-four — and is unsayable in bars.
+ */
+const PICK_ONE_POSITION =
+  'You sent neither `atBars` nor `atTicks`, so there is nowhere to put this. Send exactly one: `atBars` for blocks that start on barlines, or `atTicks` for a start that falls between them.';
+const NOT_BOTH_POSITIONS =
+  'You sent both `atBars` and `atTicks`. Send exactly one: `atBars` if the blocks start on barlines, `atTicks` if they do not.';
+
+/** The unit the caller asked in, which every sentence below answers in. */
+type Unit = 'bar' | 'tick';
+
+/** A stretch of a track that is already spoken for, named as a refusal names it. */
+interface Occupied {
+  readonly label: string;
+  readonly start: number;
+  readonly end: number;
+}
+
+/** The earliest tick at or after this one that the caller can actually SAY. A
+ *  bar-form caller can only start on a barline, so a tick part-way through a bar
+ *  costs the whole of it — the bar the previous block is still sounding in is
+ *  not an answer to "where next". */
+function sayableStart(tick: number, unit: Unit, bars: BarConverter | null): number {
+  if (unit === 'tick' || !bars) return tick;
+  const into = bars.ticksIntoBar(tick);
+  return into === 0 ? tick : tick + (bars.ticksPerBar - into);
+}
+
+/** When a block ending at `endTick` frees the ground up, in the caller's unit. */
+function freesUpAt(endTick: number, unit: Unit, bars: BarConverter | null): number {
+  const tick = sayableStart(endTick, unit, bars);
+  return unit === 'bar' && bars ? bars.toBar(tick) : tick;
+}
+
+/**
+ * Where the next copy may actually go, in the caller's unit: past the copy in
+ * front of it, past anything ALREADY on the track, and on a barline if the
+ * caller is counting in bars.
+ *
+ * ⚠ The track is WALKED, not stepped over once. Advice that clears the copies
+ * and then lands on an existing block is a second refusal — it costs the exact
+ * round trip this whole feature exists to save, and it is the common case: a
+ * track being filled with a second pattern. (The lib walks the same gaps in
+ * `clampStartToFreeSlot`, which is `movePlacement`'s and is not re-exported
+ * through the seams, so this is hand-rolled because it has to be.)
+ */
+function nextFreeSlot(
+  from: number,
+  length: number,
+  occupied: readonly Occupied[],
+  unit: Unit,
+  bars: BarConverter | null,
+): number {
+  let tick = sayableStart(from, unit, bars);
+  // Each pass jumps to the end of a block strictly later than the last, so one
+  // pass per block is the most this can need and it cannot cycle.
+  for (let i = 0; i <= occupied.length; i += 1) {
+    const blocking = occupied.find((block) => block.start < tick + length && block.end > tick);
+    if (!blocking) break;
+    tick = sayableStart(blocking.end, unit, bars);
+  }
+  return unit === 'bar' && bars ? bars.toBar(tick) : tick;
+}
+
+/** The pattern's length as a SPACING — the number the caller has to step BY, in
+ *  the unit it is stepping in. Null where that unit cannot say it: a 1920-tick
+ *  pattern in 1440-tick bars is a bar and a third, and "space the copies 1920
+ *  ticks apart" is not actionable by a caller whose only vocabulary is `atBars`.
+ *  The free-slot half of the sentence is bar-valued either way and carries it
+ *  alone there. */
+function spacingPhrase(length: number, unit: Unit, bars: BarConverter | null): string | null {
+  if (unit === 'tick') return `${length} ticks`;
+  if (!bars || length % bars.ticksPerBar !== 0) return null;
+  const inBars = length / bars.ticksPerBar;
+  return `${inBars} bar${inBars === 1 ? '' : 's'}`;
+}
+
+/** The pattern's length as a STATEMENT. A tick count is honest even for a caller
+ *  that cannot step by it, which is why this has no null. */
+function lengthPhrase(length: number, unit: Unit, bars: BarConverter | null): string {
+  return spacingPhrase(length, unit, bars) ?? `${length} ticks`;
+}
+
+/**
+ * The refusal a placement can PROVE from its own arguments — or null, the
+ * normal answer.
+ *
+ * ⚠ RUNS BEFORE `oneUndoStep` OPENS ITS BRACKET, for `unplayableAsSent`'s
+ * reason in `patternTools`: nothing is written, so there is nothing to restore
+ * and no step to push. Same category, too — `addPlacementToTrack` writes
+ * `startTick` verbatim and only re-sorts (`clampStartToFreeSlot` is
+ * `movePlacement`'s behaviour and is not on this path), so where a block will
+ * land is known before the call, and so is the length of everything already on
+ * the track. Both collisions are therefore decidable up front, unlike the
+ * stamp's collisions with notes ALREADY in the pattern.
+ *
+ * The 2026-08-11 run is what this is for. It sent a four-bar pattern to bars
+ * [1, 2, 3, 4], got four stacked blocks and an after-the-fact warning, removed
+ * every block on the track and thought again — three to five steps a cycle,
+ * twice, and it ran out of budget. The warning was true and too late: the fix
+ * is a sentence that says what to do BEFORE the mess exists, in the units the
+ * caller used and with the pattern's own length in it.
+ *
+ * NOT a LIB-GAP. Placements have to be expressible anywhere the caller points
+ * and the arrangement grid relies on that; this refuses a CALL, it does not
+ * mask a defect, so there is no deletion condition to write down.
+ */
+function wouldStack(
+  asked: readonly { asked: number; tick: number }[],
+  occupied: readonly Occupied[],
+  length: number,
+  unit: Unit,
+  bars: BarConverter | null,
+): string | null {
+  // Sorted so "what is in front of this one" is the question the loop asks. The
+  // caller's order is not touched anywhere else — the labels below carry the
+  // numbers it sent, not indices into a list it did not sort.
+  const order = [...asked].sort((a, b) => a.tick - b.tick);
+  const collisions: { label: string; reason: string }[] = [];
+  // The copies still standing, which is what a later copy is measured against.
+  // ⚠ Chaining off a REJECTED one names ground nothing will ever occupy: for
+  // bars [1, 2, 3, 4] under a four-bar pattern, bar 3 measured against bar 2
+  // reads "not free until bar 6", and bar 2 is never placed. Measured against
+  // what survives instead, every reason points at a copy that will really be
+  // there — and the surviving subset is itself a placement that would be
+  // accepted, so following the list is progress rather than another guess.
+  const kept: { asked: number; tick: number }[] = [];
+  let selfCollisions = 0;
+  let trackCollisions = 0;
+  for (const position of order) {
+    const start = position.tick;
+    const end = start + length;
+    const reasons: string[] = [];
+    // Against the surviving copies in THIS call: every copy is the same length,
+    // so the nearest earlier one also reaches furthest, but the filter compares
+    // against all of them rather than resting on that.
+    const covering = kept.filter((earlier) => earlier.tick + length > start);
+    if (covering.length > 0) {
+      const worst = covering[covering.length - 1];
+      selfCollisions += 1;
+      reasons.push(
+        `the copy you asked for at ${unit} ${worst.asked} is not free until ${unit} ${freesUpAt(worst.tick + length, unit, bars)}`,
+      );
+    }
+    // …and then against what is already there — BOTH, never one or the other. A
+    // position told only about the copy in front of it re-spaces, lands on the
+    // block it was never told about and is refused a second time, for something
+    // that was decidable in the first call. Overlap is STRICT on both sides: a
+    // block that starts exactly where another ends abuts it, which is what a
+    // normal arrangement is made of.
+    const blocking = occupied.find((block) => block.start < end && block.end > start);
+    if (blocking) {
+      trackCollisions += 1;
+      reasons.push(
+        `${blocking.label} is already on this track until ${unit} ${freesUpAt(blocking.end, unit, bars)}`,
+      );
+    }
+    if (reasons.length === 0) {
+      kept.push(position);
+      continue;
+    }
+    collisions.push({ label: `${unit} ${position.asked}`, reason: `${reasons.join(', and ')}.` });
+  }
+  if (collisions.length === 0) return null;
+
+  const size = lengthPhrase(length, unit, bars);
+  // Phrased so it reads for one collision as well as for twenty — the sentence
+  // is the product here, and a plural that does not agree with the list under
+  // it is the kind of thing a reader stops trusting the rest of.
+  const what =
+    trackCollisions === 0
+      ? 'the copies you asked for would land on top of each other'
+      : selfCollisions === 0
+        ? 'what you asked for would land on top of a block already on this track'
+        : 'the copies you asked for would land on top of each other and on top of blocks already on this track';
+  // The spacing is only worth saying when the copies are the problem: told to
+  // space them when the obstacle is somebody else's block, a caller re-spaces a
+  // list that was already correctly spaced and is refused again.
+  const step = spacingPhrase(length, unit, bars);
+  let spacing = '';
+  if (selfCollisions > 0) {
+    // Stepped off a SURVIVOR — a self collision needs one in front of it, so
+    // `kept` is not empty here. `order[0]` would not do: the earliest position
+    // asked for may itself be one of the refused ones.
+    const from = kept[0];
+    const slot = nextFreeSlot(from.tick + length, length, occupied, unit, bars);
+    const free = `${unit} ${from.asked} the next free ${unit} is ${slot}.`;
+    // Without a step the caller can take, the free slot carries the sentence on
+    // its own — see `spacingPhrase`.
+    spacing =
+      step === null ? ` From ${free}` : ` Space the copies ${step} apart: from ${free}`;
+  }
+  return `This pattern is ${size} long and a block is never nudged aside, so ${what}. Nothing was placed.${spacing} ${namedRefusals(collisions)}`;
+}
+
+/**
+ * Blocks placed on top of each other, reported after the fact — the ONE call
+ * `wouldStack` cannot see coming.
+ *
+ * A built-in pattern. The lib's `addPlacementToTrack` resolves an id against
+ * the user's library and then against `BUILTIN_PATTERNS`, while `patternService`
+ * deliberately does not merge the built-ins into `getLibraryPatterns` (see its
+ * header), so a built-in id places successfully and has no length this layer
+ * can read — and with no length there is no overlap to compute. No tool hands
+ * such an id out (`read_pattern_library` says so in as many words), so the
+ * agent cannot reach this; a caller holding one can, and a placement whose
+ * length is unknown is exactly where a silent stack would go unreported.
+ *
+ * ⚠ SCOPED TO THIS CALL, via `newIds`. Counting every overlap on the track
+ * would blame a correct call for a collision that was already there — and,
+ * since the blocks stay put, blame every later call to that track for it too.
+ * A model told a true reply is a lie stops trusting replies, which is the
+ * failure this whole feature exists to prevent.
+ *
+ * Compared against EVERY earlier block rather than the immediate predecessor:
+ * one long block can bury several later ones, and pairwise-adjacent counting
+ * sees that as a single overlap.
+ */
+function overlapsInvolving(trackId: string, newIds: ReadonlySet<string>): number {
+  const placements = findTrack(trackId)?.placements ?? [];
+  let overlapping = 0;
+  for (let i = 1; i < placements.length; i += 1) {
+    const covering = placements
+      .slice(0, i)
+      .filter((earlier) => placementEndTick(earlier) > placements[i].startTick);
+    if (covering.length === 0) continue;
+    if (newIds.has(placements[i].id) || covering.some((earlier) => newIds.has(earlier.id))) {
+      overlapping += 1;
+    }
+  }
+  return overlapping;
+}
+
 const placePattern = defineTool<{
   patternId: string;
   trackId: string;
-  atTicks: readonly number[];
+  atTicks?: readonly number[];
+  atBars?: readonly number[];
 }>({
   name: 'composition_place_pattern',
   description:
-    'Place a library pattern onto a track, at one or more points in time — all of it one undo step. Each block is a deep COPY of the pattern taken at placement time: editing the pattern afterwards does not change the blocks, and editing a block does not change the pattern.',
+    'Place a library pattern onto a track, at one or more points in time — all of it one undo step. Say where with `atBars` or with `atTicks`, exactly one of the two. BARS ARE COUNTED FROM 1 — bar 1 is the start of the composition — and `atBars` is how a pattern is laid out over a form: the seven bars a C7 covers in a twelve-bar blues are one call, `atBars: [1, 2, 3, 4, 7, 8, 11]`. Bar length comes from the composition\'s own time signature, so a 6/8 bar is not a 4/4 one. `atTicks` is for a start that is not on a barline — a pickup, a part entering on the and-of-four. A block starts exactly where it is put and is as long as its pattern; nothing is ever nudged aside to make room. Two positions closer together than the pattern is long, or one landing on a block already on the track, refuse the WHOLE call before anything is written — the refusal names the length and a spacing that works. Blocks that merely touch are fine: one may start exactly where the one before it ends. Each block is a deep COPY of the pattern taken at placement time: editing the pattern afterwards does not change the blocks, and editing a block does not change the pattern. Every block that lands comes back with its tick and the `endTick` to space the next one from, plus its bar wherever bars convert exactly in this signature.',
   parameters: obj(
     {
       patternId: str('From read_pattern_library.'),
       trackId: str('From read_composition.'),
       atTicks: arr(
         int(`Where the block starts. ${TICKS}`, { min: 0 }),
-        'One entry per copy. A block that will not fit at the tick asked for lands in the nearest free slot.',
+        'One entry per copy, for starts that are not on barlines — use atBars for the ones that are. The block starts exactly here; it is never nudged aside to avoid a block already there, so a start that would land on one is refused along with the whole call.',
+      ),
+      atBars: arr(
+        int('Which bar the block starts on, counted FROM 1.', { min: 1 }),
+        'One entry per copy — the bars this pattern STARTS on, which for a pattern longer than a bar is not every bar it covers. A two-bar pattern filling bars 1 to 8 is [1, 3, 5, 7]; sending [1, 2, 3, 4] would stack four two-bar blocks a bar apart, so the whole call is refused and nothing is placed.',
       ),
     },
-    ['patternId', 'trackId', 'atTicks'],
+    ['patternId', 'trackId'],
   ),
-  run: ({ patternId, trackId, atTicks }) =>
-    oneUndoStep(() => {
+  run: ({ patternId, trackId, atTicks, atBars }) => {
+    // Exclusivity FIRST. `positions` below prefers `atBars`, so an empty
+    // `atBars` alongside a full `atTicks` would otherwise be answered "you sent
+    // neither" — a sentence that is simply untrue, from the one check whose
+    // whole job is naming the argument it wants.
+    if (atBars !== undefined && atTicks !== undefined) return fail(NOT_BOTH_POSITIONS);
+    const positions = atBars ?? atTicks;
+    // `minItems: 1` in the schema stops an empty list reaching here in the app;
+    // a direct call can still make one, and a silent `ok({ placed: [] })` is the
+    // one reply shape this feature exists to abolish.
+    if (positions === undefined || positions.length === 0) return fail(PICK_ONE_POSITION);
+    // Hoisted out of the loop, and out of the gesture, for the bar maths: the
+    // conversion needs the OPEN composition's signature, and the sentence is the
+    // seam's own — `addPlacement` returns this exact one, because the lib gives
+    // the same null for an empty editor as for an id that does not exist.
+    const composition = getEditingComposition();
+    if (!composition) return fail('No composition is open.');
+    const bars = barConverter(composition.timeSignature);
+    const inBars = atBars !== undefined;
+    // `composition_set_settings` takes ANY denominator from 1 to 32, not just the
+    // powers of two that are real note values, and `ticksPerBar` is
+    // `numerator * (PPQ * 4 / denominator)` — so a 4/7 bar is 1097.142... ticks
+    // and no bar after the first starts on one, which is the null `barConverter`
+    // returns. Refused rather than rounded, because rounding poisons the reply as
+    // well as the write: bar 3 rounded DOWN to 2194 sits a fraction short of the
+    // barline and reads back as bar 2 almost-ended. Only the BAR INPUT is
+    // refused — a tick is a tick in any signature — but the bar fields of the
+    // REPLY go with it, below, or the tick form would answer in a unit this
+    // signature has just been told does not convert.
+    if (inBars && !bars) {
+      const { numerator, denominator } = composition.timeSignature;
+      const barTicks = ticksPerBar(composition.timeSignature);
+      return fail(
+        `A ${numerator}/${denominator} bar is ${barTicks.toFixed(3)} ticks, which is not a whole number, so bar numbers do not convert exactly here. Say where in ticks with \`atTicks\`.`,
+      );
+    }
+
+    // Bar N starts at (N - 1) x barTicks — exact, given the guard above. This is
+    // the off-by-one `agentRules` spends a section warning about, done once here
+    // instead of by eye.
+    const asked = positions.map((n) => ({
+      asked: n,
+      tick: inBars && bars ? bars.toTick(n) : n,
+    }));
+
+    // BEFORE the bracket, and before any write: a call whose blocks would sit on
+    // top of each other, or on top of what is already there, is refused whole
+    // and leaves no undo step. See `wouldStack`.
+    //
+    // Both lookups have to succeed or there is nothing to check against, and
+    // failing THEM is not this refusal's business: an unknown track or a
+    // built-in pattern (no length here — see `overlapsInvolving`) falls through
+    // to the seam, which either places it or names the id it could not resolve.
+    const source = findLibraryPattern(patternId);
+    const blockLength = source && source.durationTicks > 0 ? source.durationTicks : null;
+    const track = findTrack(trackId);
+    if (blockLength !== null && track) {
+      const stacked = wouldStack(
+        asked,
+        track.placements.map((placement) => ({
+          label: placement.id,
+          start: placement.startTick,
+          end: placementEndTick(placement),
+        })),
+        blockLength,
+        inBars ? 'bar' : 'tick',
+        bars,
+      );
+      if (stacked !== null) return fail(stacked);
+    }
+
+    return oneUndoStep(() => {
       const placed: JsonValue[] = [];
-      const refused: { atTick: number; reason: string }[] = [];
-      for (const atTick of atTicks) {
-        const result = addPlacement(patternId, trackId, atTick);
-        if (result.ok) placed.push({ placementId: result.value, atTick });
-        else refused.push({ atTick, reason: result.reason });
+      const refused: { reason: string }[] = [];
+      const newIds = new Set<string>();
+      for (const position of asked) {
+        const result = addPlacement(patternId, trackId, position.tick);
+        if (result.ok) {
+          // Read the START BACK rather than echoing what was asked for. Purely
+          // defensive, and no test can tell it from an echo: `addPlacementToTrack`
+          // writes `startTick` verbatim, so `landed` always IS what was asked.
+          // It stays because the reply's job is to report the position the
+          // document holds and not the one the caller intended.
+          const found = findPlacement(result.value);
+          const landed = found?.placement.startTick ?? position.tick;
+          newIds.add(result.value);
+          // ⚠ `atBar`/`atTick` here, `startBar`/`startTick` in `read_composition`
+          // for the same number. The keys deliberately echo the ARGUMENT the
+          // caller just used (`atBars` → `atBar`), which is the association that
+          // matters at the moment of use; a read of the whole document has no
+          // such argument behind it and says `start…` instead. Renaming either
+          // side would break the echo or the read; the divergence is noted here
+          // so nobody has to discover it by correlating two replies.
+          placed.push({
+            placementId: result.value,
+            // Omitted entirely where a bar is not a whole number of ticks —
+            // `read_composition` makes the same call about the same block, and
+            // two replies that disagree about whether bars exist are worse than
+            // one that says nothing.
+            ...(bars
+              ? {
+                  atBar: bars.toBar(landed),
+                  // 0 means on the barline. Without it `atTicks: [0]` and
+                  // `atTicks: [1440]` both come back `atBar: 1`, and a caller
+                  // cannot tell a downbeat from a pickup — which is the one
+                  // direction the tick form exists for.
+                  ticksIntoBar: bars.ticksIntoBar(landed),
+                }
+              : {}),
+            atTick: landed,
+            // Where the next block may start. `wouldStack` refuses a call that
+            // ignores it, but a refusal costs a round trip and this is the
+            // number that saves it.
+            endTick: found ? placementEndTick(found.placement) : landed,
+          });
+        } else {
+          refused.push({ reason: result.reason });
+        }
       }
-      return placed.length === 0 && refused.length > 0
-        ? fail(refused[0].reason)
-        : ok({ placed, refused });
-    }),
+      if (placed.length === 0 && refused.length > 0) {
+        // Every refusal `addPlacement` can return is position-INDEPENDENT — the
+        // job lock, nothing open, an unknown pattern or track — so `refused` is
+        // all-or-nothing and this is the only branch a caller ever sees. The
+        // positions go into the sentence in the units the CALLER used: a refusal
+        // about tick 21120 sent to a caller that asked for bar 12 has to be
+        // converted backwards before it can be acted on.
+        const unit = inBars ? 'bar' : 'tick';
+        const where = asked.map((position) => position.asked).join(', ');
+        return fail(
+          `${refused[0].reason} Nothing was placed, at ${unit}${asked.length === 1 ? '' : 's'} ${where} or anywhere else.`,
+        );
+      }
+      // Only where the up-front check could not run — see `overlapsInvolving`.
+      // Everywhere else it is provably 0, and computing it would be a second
+      // answer to a question already settled before the write.
+      const overlapping = blockLength === null ? overlapsInvolving(trackId, newIds) : 0;
+      return ok({
+        placed,
+        // Only when it has something in it. By the argument above `refused` is
+        // empty in every reachable ok reply, so a field that is always `[]`
+        // would be prompt budget spent on nothing — but it is emitted rather
+        // than dropped, because "all-or-nothing" is an argument about today's
+        // seam and a silently discarded refusal would be the worst way to learn
+        // it had changed.
+        ...(refused.length === 0 ? {} : { refused }),
+        ...(overlapping === 0
+          ? {}
+          : {
+              warning: `${overlapping} block${overlapping === 1 ? '' : 's'} on this track now start${overlapping === 1 ? 's' : ''} before the one in front of it has finished, so they sound on top of each other. Nothing moves blocks apart — space each copy by the one before it, from its \`endTick\`.`,
+            }),
+      });
+    });
+  },
 });
 
 const movePlacementTool = defineTool<{
@@ -394,7 +787,7 @@ const duplicatePlacementsTool = defineTool<{
 }>({
   name: 'composition_duplicate_placements',
   description:
-    'Copy blocks to a later (or earlier) point, as one undo step — how a section is repeated. The new ids come back, but in the arrangement\'s own order (track by track, then by time) rather than the order you listed the originals in, so pair them by position and not by index.',
+    'Copy blocks to a later (or earlier) point, as one undo step — how a section is repeated. UNLIKE composition_place_pattern, a copy does not necessarily land at `startTick + deltaTicks`: copies never overlap, so one that would lands in the nearest free slot instead. Each new block therefore comes back in `copies` with the start and end it ACTUALLY has — check them against the offset you asked for. They arrive in the arrangement\'s own order (track by track, then by time) rather than the order you listed the originals in, so pair them by position and not by index.',
   parameters: obj(
     {
       placementIds: arr(str('A block id from read_composition.'), 'The blocks to copy.'),
@@ -403,10 +796,23 @@ const duplicatePlacementsTool = defineTool<{
     },
     ['placementIds', 'deltaTicks'],
   ),
+  // The lib's `duplicatePlacements` inserts each clone and then routes it
+  // through `movePlacement`, which runs `clampStartToFreeSlot` — so a copy
+  // offset onto occupied ground is silently relocated. The op reports only the
+  // ids, so the position it actually took is read back here: without it the
+  // reply is unfalsifiable, and `RESULTS` ("compare what stuck against what you
+  // asked for") has nothing to compare.
   run: ({ placementIds, deltaTicks, trackId }) =>
     oneUndoStep(() =>
       fromResult(duplicatePlacements(placementIds, deltaTicks, trackId), (ids) => ({
-        placementIds: ids,
+        copies: ids.map((id): JsonValue => {
+          const found = findPlacement(id);
+          return {
+            placementId: id,
+            startTick: found?.placement.startTick ?? null,
+            endTick: found ? placementEndTick(found.placement) : null,
+          };
+        }),
       })),
     ),
 });

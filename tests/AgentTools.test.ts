@@ -1,6 +1,11 @@
 import { renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  // The read-only first-party patterns. Imported for ONE test: they are
+  // placeable by id and are deliberately absent from the library the tools
+  // read, which is the single path `composition_place_pattern` cannot check a
+  // placement against before it writes it.
+  BUILTIN_PATTERNS,
   DEFAULT_PATTERNS_STATE,
   GROOVE_PRESETS,
   INSTRUMENTS,
@@ -27,6 +32,9 @@ import {
   clearHistory as clearPatternHistory,
   endEditGesture as endPatternGesture,
   undo as patternUndo,
+  // The unknown-neck sentence is the SEAM's. Imported rather than retyped so the
+  // test pins "passed through verbatim" instead of pinning a second copy of it.
+  unknownInstrumentRefusal,
   useHistoryState as usePatternHistory,
 } from '../src/patterns/patternService';
 import {
@@ -332,11 +340,27 @@ describe('schemas constrain values to the lib’s own lists', () => {
       schemaOf('pattern_set_instrument'),
       schemaOf('composition_add_track'),
       schemaOf('composition_set_track_instrument'),
+      // The READ takes one too, and it is the one that used to answer about
+      // whichever pattern happened to be open. Its enum comes from the same
+      // catalog, so an instrument the lib adds is askable on day one.
+      schemaOf('read_chord_voicings'),
     ]) {
       expect(schema.properties?.instrumentId?.enum).toEqual(
         INSTRUMENTS.map((instrument) => instrument.id),
       );
     }
+    // REQUIRED, not defaulted: a default is a guess about which neck, and
+    // guessing is the whole defect.
+    expect(schemaOf('read_chord_voicings').required).toEqual(['symbols', 'instrumentId']);
+    // THE DESCRIPTION TOO, and not only `agentRules`. The description is what
+    // the model reads at the moment it chooses the call, and it used to say to
+    // open the pattern and set its instrument BEFORE asking — the ordering that
+    // produced three patterns opened up front and three byte-identical asks.
+    // Both prompt tests guard the rules file against that sentence; nothing
+    // guarded this one, so pasting it back left the suite green.
+    const description = findTool('read_chord_voicings')!.description;
+    expect(description).toMatch(/Nothing needs to be open/i);
+    expect(description).not.toMatch(/open the pattern/i);
     expect(
       schemaViolations(schemaOf('pattern_set_instrument'), { instrumentId: 'theremin' }),
     ).toHaveLength(1);
@@ -1386,6 +1410,647 @@ describe('arranging', () => {
     expect(moved.startTick).toBe(first?.endTick);
   });
 
+  /**
+   * `atBars`. A run on 2026-08-11 built a twelve-bar blues and placed every part
+   * with `atTicks: [0]` — a one-element array, three times, on a tool that has
+   * always taken a list — because the sentence it wanted was "bars 1, 2, 3, 4, 7,
+   * 8 and 11" and there was no way to say it. The conversion is the one
+   * `agentRules` devotes a section to warning about, so the assertions below are
+   * on the TICKS and not on the count: an off-by-one bar is exactly the failure
+   * a count would not see.
+   */
+  describe('placing by bar', () => {
+    /** A pattern four bars long. The length auto-fits to the content and rounds
+     *  UP to a whole bar, so one note in bar 4 is what makes it four. */
+    const fourBarPattern = (name: string): string => {
+      const patternId = seedPattern(name);
+      value(
+        call('pattern_stamp_notes', {
+          notes: [{ stringIndex: 0, fret: 7, tick: PPQ * 12, durationTicks: PPQ }],
+        }),
+      );
+      return patternId;
+    };
+
+    const openWithTrack = (): { patternId: string; trackId: string } => {
+      const patternId = seedPattern('Riff');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      return { patternId, trackId };
+    };
+
+    it('counts bars from 1, so bar 1 is tick 0 and bar 5 is four bars along', () => {
+      const { patternId, trackId } = openWithTrack();
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 5, 9] })).placed,
+      );
+
+      expect(placed.map((block) => block.atTick)).toEqual([0, PPQ * 16, PPQ * 32]);
+      // Both units in the reply, for the stamp reply's reason: the conversion is
+      // confirmed rather than assumed, in whichever direction the caller needs.
+      expect(placed.map((block) => block.atBar)).toEqual([1, 5, 9]);
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks).map((b) => b.startTick))
+        .toEqual([0, PPQ * 16, PPQ * 32]);
+    });
+
+    /**
+     * ONE composition and two tracks, so the comparison can actually fail. The
+     * earlier shape of this test opened two compositions and asserted
+     * `byBar.atTick === byTick.atTick` next to `byBar.atTick === 0` — with both
+     * constants asserted directly, the comparison between them added nothing.
+     * Here the positions are read back out of the DOCUMENT, so the two forms are
+     * compared where it counts rather than in the replies.
+     */
+    it('puts a bar-1 block exactly where a tick-0 block goes', () => {
+      const { patternId, trackId } = openWithTrack();
+      const other = value(call('composition_add_track', { name: 'Second' })).trackId as string;
+
+      const byBar = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1] })).placed,
+      )[0];
+      const byTick = rows(
+        value(
+          call('composition_place_pattern', { patternId, trackId: other, atTicks: [0] }),
+        ).placed,
+      )[0];
+      expect(byBar.atTick).toBe(byTick.atTick);
+      expect(byBar.atBar).toBe(byTick.atBar);
+
+      const tracks = rows(value(call('read_composition')).tracks);
+      const startOf = (id: string): JsonValue =>
+        rows(tracks.find((track) => track.trackId === id)?.blocks)[0].startTick;
+      expect(startOf(trackId)).toBe(startOf(other));
+    });
+
+    it('asks for one of the two units rather than guessing which was meant', () => {
+      const { patternId, trackId } = openWithTrack();
+
+      // `JsonSchema` has no oneOf/anyOf on purpose, so this is a typed refusal
+      // and not a validation error — and it has to name what it wants, because
+      // "invalid arguments" is not something a caller can act on.
+      const neither = reason(call('composition_place_pattern', { patternId, trackId }));
+      expect(neither).toContain('atBars');
+      expect(neither).toContain('atTicks');
+      expect(neither).toContain('exactly one');
+
+      const both = reason(
+        call('composition_place_pattern', { patternId, trackId, atBars: [1], atTicks: [0] }),
+      );
+      expect(both).toContain('atBars');
+      expect(both).toContain('atTicks');
+      expect(both).toContain('exactly one');
+
+      // The two must be DISTINGUISHABLE. Every assertion above is satisfied by a
+      // single shared sentence, so without these the "each says which it wants,
+      // do not silently prefer one" requirement has no coverage at all.
+      expect(neither).toContain('neither');
+      expect(both).toContain('both');
+      expect(neither).not.toBe(both);
+
+      // …and an EMPTY `atBars` alongside a full `atTicks` is "both", not
+      // "neither". The tool prefers `atBars` when picking a list to work from,
+      // so a check on that list ordered first answers a caller that sent two
+      // arguments with a sentence saying it sent none — which is exactly the
+      // untrue-refusal failure the check above exists to avoid. `minItems: 1`
+      // keeps this off the app's path; a direct call is the reason the emptiness
+      // check exists at all.
+      const emptyBars = reason(
+        call('composition_place_pattern', { patternId, trackId, atBars: [], atTicks: [0] }),
+      );
+      expect(emptyBars).toBe(both);
+
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(0);
+    });
+
+    it('takes the bar length from the composition, not from 4/4', () => {
+      const { patternId, trackId } = openWithTrack();
+      // 6/8: six eighth notes, so 1440 ticks a bar and not 1920. Bar 5 is 5760,
+      // which is where a 4/4 assumption would put bar 4 — the whole point.
+      value(call('composition_set_settings', { timeSignature: { numerator: 6, denominator: 8 } }));
+
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 5] })).placed,
+      );
+      expect(placed.map((block) => block.atTick)).toEqual([0, 5760]);
+      expect(placed.map((block) => block.atBar)).toEqual([1, 5]);
+      expect(placed.map((block) => block.ticksIntoBar)).toEqual([0, 0]);
+    });
+
+    /**
+     * `composition_set_settings` takes any denominator 1..32, not just the powers
+     * of two that are real note values, and `ticksPerBar` divides by it — so a
+     * 4/7 bar is 1097.142... ticks and only bar 1 starts on a whole one. Every
+     * other tick in the app is an integer; rounding would put a block a fraction
+     * short of its barline and then read it back as the PREVIOUS bar. Refused, in
+     * the bar form only — the tick form needs no conversion and still works.
+     */
+    it('refuses bar numbers when the signature makes a bar a fraction of a tick', () => {
+      const { patternId, trackId } = openWithTrack();
+      value(call('composition_set_settings', { timeSignature: { numerator: 4, denominator: 7 } }));
+
+      const refused = reason(call('composition_place_pattern', { patternId, trackId, atBars: [3] }));
+      expect(refused).toContain('4/7');
+      expect(refused).toContain('atTicks');
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(0);
+
+      // The tick form is untouched: a tick means the same thing in any signature.
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atTicks: [PPQ * 4] })).placed,
+      )[0];
+      expect(placed.atTick).toBe(PPQ * 4);
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(1);
+
+      // …but the REPLY says nothing about bars either. The bar form was just
+      // refused here as not converting exactly; answering the tick form in bars
+      // anyway would hand back `atBar: 4, ticksIntoBar: 548.571` — a fractional
+      // tick in a document whose every tick is an integer — and would contradict
+      // `read_composition`, which omits bar numbers for this same block.
+      expect(placed.atBar).toBeUndefined();
+      expect(placed.ticksIntoBar).toBeUndefined();
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)[0].startBar)
+        .toBeUndefined();
+    });
+
+    /**
+     * The reply's whole argument is that it CONFIRMS a unit conversion rather
+     * than leaving it assumed, so the conversion it reports has to be right in
+     * the direction the tick form exists for. `atBar` alone rounds a mid-bar
+     * tick down and reads as a barline: tick 0 and tick 1440 both come back
+     * `atBar: 1`, and a caller cannot tell a downbeat from a pickup.
+     * `ticksIntoBar` is the disambiguator, and 0 means "on the barline".
+     *
+     * This is also the only test that can tell `Math.floor` from `Math.ceil` in
+     * that conversion — every bar-form test places on a barline, where the two
+     * agree.
+     */
+    it('reports how far into the bar an off-barline tick actually is', () => {
+      const { patternId, trackId } = openWithTrack();
+      // Bar 9 starts at 15360 in 4/4; three beats past it is an and-of-four
+      // pickup, not bar 9's downbeat and not bar 10's.
+      const placed = rows(
+        value(
+          call('composition_place_pattern', {
+            patternId,
+            trackId,
+            atTicks: [PPQ * 32 + PPQ * 3],
+          }),
+        ).placed,
+      )[0];
+
+      expect(placed.atBar).toBe(9);
+      expect(placed.ticksIntoBar).toBe(PPQ * 3);
+      expect(placed.atTick).toBe(PPQ * 35);
+    });
+
+    it('collapses a multi-bar drop into a single undo step, as the tick form does', () => {
+      const { patternId, trackId } = openWithTrack();
+      clearCompositionHistory();
+
+      value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 5, 9] }));
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(3);
+
+      compositionUndo();
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(0);
+      expect(canUndoComposition()).toBe(false);
+    });
+
+    /**
+     * Every refusal `addPlacement` can return is position-INDEPENDENT (job lock,
+     * nothing open, unknown pattern or track), so the per-entry `refused` list
+     * is all-or-nothing and the only refusal a caller ever sees is the top-level
+     * sentence. That sentence therefore has to carry the positions itself, in
+     * the units the caller used — a model told "tick 21120 was refused" after
+     * asking for bar 12 has to convert backwards before it can act.
+     */
+    it('names the refused positions in the units they were asked in', () => {
+      const { patternId } = openWithTrack();
+
+      const inBars = reason(
+        call('composition_place_pattern', { patternId, trackId: 'tr_nope', atBars: [3, 7] }),
+      );
+      expect(inBars).toContain('unknown pattern or track');
+      expect(inBars).toContain('bars 3, 7');
+      expect(inBars).not.toContain('tick');
+
+      const inTicks = reason(
+        call('composition_place_pattern', { patternId, trackId: 'tr_nope', atTicks: [PPQ * 8] }),
+      );
+      expect(inTicks).toContain('tick 3840');
+      expect(inTicks).not.toContain('bar');
+    });
+
+    it('says the composition is not open rather than converting bars against nothing', () => {
+      const patternId = seedPattern('Riff');
+      // Before any gesture is opened: the bar maths has no signature to read.
+      expect(
+        reason(call('composition_place_pattern', { patternId, trackId: 'anything', atBars: [3] })),
+      ).toBe('No composition is open.');
+    });
+
+    /**
+     * THE CYCLE THIS REFUSAL EXISTS TO BREAK.
+     *
+     * `addPlacementToTrack` writes `startTick` verbatim and only re-sorts;
+     * `clampStartToFreeSlot` is `movePlacement`'s behaviour and is not on this
+     * path. So a four-bar pattern sent to bars [1, 2, 3, 4] used to land four
+     * blocks a bar apart — every one of them `placed`, at exactly the bar asked
+     * for, with an after-the-fact warning. That is what the 2026-08-11 run did,
+     * twice: place, warn, remove EVERY block on the track, think again. Three
+     * to five steps a cycle, and it ran out of budget.
+     *
+     * Nothing about it is discoverable only after the write. The pattern's
+     * length and everything already on the track are both readable before the
+     * call, which puts it in `unplayableAsSent`'s category — refuse whole,
+     * write nothing, and say what to do instead.
+     */
+    it('refuses copies spaced closer than the pattern is long, before writing anything', () => {
+      const patternId = fourBarPattern('Four bar pad');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      clearCompositionHistory();
+
+      const refused = reason(
+        call('composition_place_pattern', { patternId, trackId, atBars: [1, 2, 3, 4] }),
+      );
+      // The length, so any spacing can be worked out from it…
+      expect(refused).toContain('4 bars long');
+      // …and one that works, so it does not have to be.
+      expect(refused).toContain('next free bar is 5');
+      // In the unit the caller asked in. A refusal about tick 5760 sent to a
+      // caller that said `atBars: [4]` has to be converted backwards before it
+      // can be acted on, which is the conversion `agentRules` warns about.
+      expect(refused).toContain('bar 2: the copy you asked for at bar 1 is not free until bar 5.');
+      expect(refused).not.toContain('tick');
+
+      // Nothing written, and no undo step. Note what this does and does not
+      // pin: `endEditGesture` defaults to a reference test, so a bracket that
+      // wrote nothing pushes nothing either way, and these two assertions would
+      // still hold if the check moved INSIDE `oneUndoStep`. That ordering is a
+      // structural preference with no behaviour behind it, so nothing here
+      // claims to test it — what is tested is that a refusal costs the caller
+      // neither a block nor an undo it did not ask for.
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(0);
+      expect(canUndoComposition()).toBe(false);
+    });
+
+    it('places the same call at the spacing the pattern asks for', () => {
+      const patternId = fourBarPattern('Four bar pad');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 5, 9] })).placed,
+      );
+      expect(placed.map((block) => block.atTick)).toEqual([0, PPQ * 16, PPQ * 32]);
+      expect(placed.map((block) => block.endTick)).toEqual([PPQ * 16, PPQ * 32, PPQ * 48]);
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(3);
+    });
+
+    /**
+     * The other half of the check, and the one the old warning could only
+     * describe after the fact: the obstacle is somebody else's block. The
+     * recovery is different — the copies in this call are correctly spaced —
+     * so the refusal names the block and where it frees up rather than
+     * re-spacing a list that was never the problem.
+     */
+    it('refuses a position that lands on a block already there, and names that block', () => {
+      const pad = fourBarPattern('Four bar pad');
+      const stab = seedPattern('One bar stab');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      const padId = rows(
+        value(call('composition_place_pattern', { patternId: pad, trackId, atBars: [1] })).placed,
+      )[0].placementId as string;
+
+      const refused = reason(
+        call('composition_place_pattern', { patternId: stab, trackId, atBars: [2, 3] }),
+      );
+      expect(refused).toContain(padId);
+      expect(refused).toContain(`bar 2: ${padId} is already on this track until bar 5.`);
+      // Both of them, not just the first: one long block buries several, and a
+      // caller told about bar 2 alone retries bar 3 and is refused again.
+      expect(refused).toContain(`bar 3: ${padId} is already on this track until bar 5.`);
+      // The stabs are a bar apart and a bar long, so their own spacing is
+      // right; telling the caller to re-space them would send it round a loop.
+      expect(refused).not.toContain('Space the copies');
+
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(1);
+    });
+
+    /**
+     * NOT OVER-BROAD, and this is where an off-by-one would show. Twelve
+     * one-bar blocks at twelve consecutive bars is the commonest arrangement
+     * there is: each starts exactly where the last ends, which is abutting and
+     * not overlapping. A `>=` in either comparison bans it.
+     */
+    it('accepts blocks that touch, which is what a bar-by-bar arrangement is', () => {
+      const patternId = seedPattern('One bar riff');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+
+      const twelve = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: twelve })).placed,
+      );
+      expect(placed.map((block) => block.atBar)).toEqual(twelve);
+      expect(placed[0].endTick).toBe(placed[1].atTick);
+
+      // And the same against a block that is ALREADY there: bar 13 starts on
+      // the tick bar 12's block ends on.
+      const abutting = value(
+        call('composition_place_pattern', { patternId, trackId, atBars: [13] }),
+      );
+      expect(rows(abutting.placed)[0].atTick).toBe(PPQ * 48);
+      expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(13);
+    });
+
+    it('says it in ticks when the caller asked in ticks', () => {
+      const patternId = fourBarPattern('Four bar pad');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+
+      const refused = reason(
+        call('composition_place_pattern', { patternId, trackId, atTicks: [0, PPQ * 4] }),
+      );
+      expect(refused).toContain('7680 ticks long');
+      expect(refused).toContain('next free tick is 7680');
+      expect(refused).toContain('tick 1920: the copy you asked for at tick 0 is not free until tick 7680.');
+      // The bar form is not smuggled into a tick-form answer — a tick means the
+      // same thing in any signature, a bar does not.
+      expect(refused).not.toContain('bar');
+    });
+
+    /**
+     * THE CHECK IS ABOUT THE BLOCKS THIS CALL WOULD WRITE, not about the state
+     * of the track. A track can already hold overlapping blocks — editing a
+     * block's own copy grows it over its neighbour, and the 2026-08-11
+     * composition held a stale block from an earlier failed run — and refusing
+     * a correct call because of one is the "a true reply is a lie" failure this
+     * whole feature exists to prevent.
+     */
+    it('accepts a clean call onto a track that already holds an overlap', () => {
+      const patternId = seedPattern('One bar riff');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 2] })).placed,
+      );
+
+      // Grow the FIRST block over the second by editing its own copy: a block's
+      // length is its snapshot's, and the snapshot auto-fits to its content.
+      value(call('composition_edit_placement', { placementId: placed[0].placementId }));
+      value(
+        call('pattern_stamp_notes', {
+          notes: [{ stringIndex: 0, fret: 7, tick: PPQ * 4, durationTicks: PPQ }],
+        }),
+      );
+      value(call('composition_stop_editing_placement', {}));
+      const blocks = rows(rows(value(call('read_composition')).tracks)[0].blocks);
+      expect(blocks[0].endTick).toBeGreaterThan(blocks[1].startTick as number);
+
+      // Onto empty ground, well clear of the mess: not this call's to answer for.
+      const later = value(call('composition_place_pattern', { patternId, trackId, atBars: [9] }));
+      expect(rows(later.placed)).toHaveLength(1);
+      expect(later.warning).toBeUndefined();
+    });
+
+    /**
+     * THE ONE PATH THE UP-FRONT CHECK CANNOT SEE, which is why the after-the-
+     * fact warning survives for it and only for it.
+     *
+     * The lib's `addPlacementToTrack` resolves an id against the user's library
+     * and then against `BUILTIN_PATTERNS`; `patternService` deliberately does
+     * not merge the built-ins into `getLibraryPatterns`, so a built-in places
+     * fine and has no length this layer can read — and with no length there is
+     * no overlap to prove. No tool hands a built-in id out, so the agent cannot
+     * get here; a caller holding one can.
+     */
+    it('warns after the fact for a pattern whose length it cannot read', () => {
+      const builtin = BUILTIN_PATTERNS[0];
+      const half = Math.floor(builtin.durationTicks / 2);
+      expect(half).toBeGreaterThan(0);
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      // The reason the length is unreadable, stated as a fact about the reads
+      // rather than left implicit: the built-ins are not in the library.
+      expect(rows(value(call('read_pattern_library')).patterns)).toHaveLength(0);
+
+      const stacked = value(
+        call('composition_place_pattern', {
+          patternId: builtin.id,
+          trackId,
+          atTicks: [0, half],
+        }),
+      );
+      expect(rows(stacked.placed)).toHaveLength(2);
+      expect(stacked.warning).toContain('1 block');
+      expect(stacked.warning).toContain('sound on top of each other');
+    });
+
+    /**
+     * THE SURVIVING WARNING IS SCOPED TO THIS CALL, and that scoping is the part
+     * worth pinning: a track can already hold an overlap — a block grown over
+     * its neighbour by editing its own copy — and blaming a call that landed
+     * nowhere near it for one is the "a true reply is a lie" failure. Without
+     * this, `newIds.has(...)` could be replaced with `true` and nothing would
+     * notice.
+     */
+    it('does not blame a built-in placement for an overlap that was already there', () => {
+      const patternId = seedPattern('One bar riff');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 2] })).placed,
+      );
+      value(call('composition_edit_placement', { placementId: placed[0].placementId }));
+      value(
+        call('pattern_stamp_notes', {
+          notes: [{ stringIndex: 0, fret: 7, tick: PPQ * 4, durationTicks: PPQ }],
+        }),
+      );
+      value(call('composition_stop_editing_placement', {}));
+      const blocks = rows(rows(value(call('read_composition')).tracks)[0].blocks);
+      expect(blocks[0].endTick).toBeGreaterThan(blocks[1].startTick as number);
+
+      // A built-in, so the up-front check cannot run and the after-the-fact
+      // count does — well clear of the mess, on ground nothing else touches.
+      const later = value(
+        call('composition_place_pattern', {
+          patternId: BUILTIN_PATTERNS[0].id,
+          trackId,
+          atTicks: [PPQ * 32],
+        }),
+      );
+      expect(rows(later.placed)).toHaveLength(1);
+      expect(later.warning).toBeUndefined();
+    });
+
+    /**
+     * COUNTED AGAINST EVERY EARLIER BLOCK, not against the immediate
+     * predecessor. One long block can bury several later ones, and pairwise
+     * counting sees that as a single overlap — so the number in the sentence
+     * would understate what the caller has to fix.
+     */
+    it('counts every block a single long one buries, not just the one next to it', () => {
+      const short = BUILTIN_PATTERNS.find((pattern) => pattern.durationTicks === PPQ * 4);
+      const long = BUILTIN_PATTERNS.find((pattern) => pattern.durationTicks === PPQ * 8);
+      expect(short && long).toBeTruthy();
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+
+      // Two short built-ins that ABUT — the second starts on the tick the first
+      // ends on — so nothing here overlaps and no warning is due yet.
+      const abutting = value(
+        call('composition_place_pattern', {
+          patternId: short!.id,
+          trackId,
+          atTicks: [PPQ * 2, PPQ * 6],
+        }),
+      );
+      expect(abutting.warning).toBeUndefined();
+
+      // Then one twice as long, from tick 0, which reaches over BOTH of them —
+      // but only overlaps the second one pairwise-adjacently.
+      const buried = value(
+        call('composition_place_pattern', { patternId: long!.id, trackId, atTicks: [0] }),
+      );
+      expect(buried.warning).toContain('2 blocks');
+    });
+
+    /**
+     * THE ADVICE HAS TO SURVIVE THE TRACK IT IS GIVEN ABOUT.
+     *
+     * Spacing the copies by the pattern's length clears the copies and says
+     * nothing about what is already down. A track being filled with a SECOND
+     * pattern is the common case, and advice that walks the caller straight
+     * onto an existing block costs the exact round trip this feature deletes —
+     * refuse, re-space, refuse again with a different sentence.
+     */
+    it('suggests a bar that is free of the track as well as of the other copies', () => {
+      const patternId = fourBarPattern('Four bar pad');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      // Bars 5 to 8 are spoken for before the call under test.
+      const sitting = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [5] })).placed,
+      )[0].placementId as string;
+
+      const refused = reason(
+        call('composition_place_pattern', { patternId, trackId, atBars: [1, 2] }),
+      );
+      // NOT bar 5 — that is where spacing alone would land, and it is occupied.
+      expect(refused).toContain('Space the copies 4 bars apart: from bar 1 the next free bar is 9.');
+      // Bar 2 is in the way of BOTH, and hears about both: told only about the
+      // copy in front of it, a caller re-spaces onto the block it was never
+      // told about and is refused a second time for something decidable here.
+      expect(refused).toContain(
+        `bar 2: the copy you asked for at bar 1 is not free until bar 5, and ${sitting} is already on this track until bar 9.`,
+      );
+      expect(refused).toContain(
+        'would land on top of each other and on top of blocks already on this track',
+      );
+
+      // And the advice is worth following: it is accepted first time.
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 9] })).placed,
+      );
+      expect(placed.map((block) => block.atTick)).toEqual([0, PPQ * 32]);
+    });
+
+    /**
+     * THE POSITIONS ARE SORTED BEFORE "what is in front of this one" is asked,
+     * and the caller is under no obligation to send them in order. Without the
+     * sort, bar 1 would be compared against bar 5 as though bar 5 came first
+     * and a perfectly good call would be refused.
+     */
+    it('reads the positions in time order however they were sent', () => {
+      const patternId = fourBarPattern('Four bar pad');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+
+      // Correctly spaced, wrongly ordered: accepted, and each block lands where
+      // the CALLER listed it rather than where the sort put it.
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [9, 1, 5] })).placed,
+      );
+      expect(placed.map((block) => block.atTick)).toEqual([PPQ * 32, 0, PPQ * 16]);
+      value(call('composition_remove_placements', {
+        placementIds: placed.map((block) => block.placementId as string),
+      }));
+
+      // And a genuine collision sent out of order still reads forwards in time:
+      // bar 2 is refused because of bar 1, never bar 1 because of bar 5.
+      const refused = reason(
+        call('composition_place_pattern', { patternId, trackId, atBars: [5, 1, 2] }),
+      );
+      expect(refused).toContain('bar 2: the copy you asked for at bar 1 is not free until bar 5.');
+      expect(refused).not.toContain('bar 1: ');
+      expect(refused).toContain('from bar 1 the next free bar is 5');
+    });
+
+    /**
+     * THE REASONS CHAIN OFF COPIES THAT WILL SURVIVE, never off ones that are
+     * themselves refused. Measured against the nearest earlier REQUESTED copy,
+     * bar 3 under a four-bar pattern reads "the copy at bar 2 is not free until
+     * bar 6" — but bar 2 is refused and never exists, so bar 6 is an answer to
+     * nothing and it contradicts the spacing sentence above it.
+     *
+     * The cap comes with it: sixteen bars under a four-bar pattern is twelve
+     * collisions, and `namedRefusals` names ten and counts the rest.
+     */
+    it('names ten collisions and counts the rest, each against a copy that survives', () => {
+      const patternId = fourBarPattern('Four bar pad');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+
+      const refused = reason(
+        call('composition_place_pattern', {
+          patternId,
+          trackId,
+          atBars: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        }),
+      );
+      // Bars 1, 5, 9 and 13 fit; the twelve between them do not.
+      expect(refused).toContain('…and 2 more.');
+      expect(refused.match(/bar \d+: /g)).toHaveLength(10);
+      // Bar 3 is measured against bar 1, which survives — not against bar 2,
+      // which does not.
+      expect(refused).toContain('bar 3: the copy you asked for at bar 1 is not free until bar 5.');
+      expect(refused).toContain('bar 7: the copy you asked for at bar 5 is not free until bar 9.');
+      expect(refused).not.toContain('at bar 2 is not free');
+    });
+
+    /**
+     * A PATTERN IS FITTED TO WHOLE BARS OF ITS OWN 4/4, and the composition need
+     * not be in 4/4. A one-bar 4/4 pattern is 1920 ticks; a 6/8 bar is 1440, so
+     * the pattern is a bar and a third and there is no number of bars to step
+     * by. "Space the copies 1920 ticks apart" is unactionable for a caller whose
+     * only vocabulary is `atBars`, so that half of the sentence is dropped and
+     * the bar-valued half carries it alone.
+     */
+    it('drops the spacing clause when the length is not a whole number of bars', () => {
+      const { patternId, trackId } = openWithTrack();
+      value(call('composition_set_settings', { timeSignature: { numerator: 6, denominator: 8 } }));
+
+      const refused = reason(
+        call('composition_place_pattern', { patternId, trackId, atBars: [1, 2] }),
+      );
+      // The length is still stated — a tick count is honest even where it is
+      // not a step the caller can take.
+      expect(refused).toContain('This pattern is 1920 ticks long');
+      expect(refused).not.toContain('Space the copies');
+      // Bar 2 starts at 1440 and the pattern runs to 1920, part-way through it,
+      // so the next bar a copy may START on is 3 and not 2.
+      expect(refused).toContain('From bar 1 the next free bar is 3.');
+      expect(refused).toContain('bar 2: the copy you asked for at bar 1 is not free until bar 3.');
+
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 3] })).placed,
+      );
+      expect(placed.map((block) => block.atTick)).toEqual([0, 2880]);
+    });
+  });
+
   it('trims a block, removes blocks and duplicates them, each as one step', () => {
     const patternId = seedPattern('Riff');
     value(call('composition_open_blank', { name: 'Song' }));
@@ -1410,7 +2075,7 @@ describe('arranging', () => {
         deltaTicks: PPQ * 32,
       }),
     );
-    expect((copies.placementIds as string[]).length).toBe(2);
+    expect(rows(copies.copies)).toHaveLength(2);
     expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(4);
     compositionUndo();
     expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(2);
@@ -1423,6 +2088,44 @@ describe('arranging', () => {
     expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(0);
     compositionUndo();
     expect(rows(rows(value(call('read_composition')).tracks)[0].blocks)).toHaveLength(2);
+  });
+
+  /**
+   * DUPLICATING IS NOT PLACING. `composition_place_pattern` writes `startTick`
+   * verbatim; the lib's `duplicatePlacements` inserts each clone and then routes
+   * it through `movePlacement`, which runs `clampStartToFreeSlot` — so a copy
+   * offset onto occupied ground is silently relocated. The reply used to be the
+   * new ids and nothing else, which left "did my copy land where I asked?"
+   * unanswerable, and `agentRules` steers layout work onto `place_pattern` on
+   * the strength of exactly that difference.
+   */
+  it('reports where a duplicated block actually landed, because a copy clamps', () => {
+    const patternId = seedPattern('Riff');
+    value(call('composition_open_blank', { name: 'Song' }));
+    const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+    // Two adjacent one-bar blocks: bars 1 and 2 are both occupied.
+    const placed = rows(
+      value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 2] })).placed,
+    );
+    expect(placed.map((block) => block.atTick)).toEqual([0, 1920]);
+
+    // Offset the first by ONE bar, onto the second. There is no room, so the
+    // copy does not land at 0 + 1920 the way an equivalent placement would.
+    const copies = rows(
+      value(
+        call('composition_duplicate_placements', {
+          placementIds: [placed[0].placementId],
+          deltaTicks: 1920,
+        }),
+      ).copies,
+    );
+    expect(copies).toHaveLength(1);
+    expect(copies[0].startTick).not.toBe(1920);
+    expect(copies[0].startTick).toBe(3840);
+    expect(copies[0].endTick).toBe(5760);
+    // And the document agrees — the reply is read back, not computed.
+    expect(rows(rows(value(call('read_composition')).tracks)[0].blocks).map((b) => b.startTick))
+      .toEqual([0, 1920, 3840]);
   });
 
   it('reorders tracks, and refuses to remove the last one', () => {
@@ -2130,9 +2833,250 @@ describe('stamping the same phrase several times over', () => {
     expect(refused).toContain('on string 0');
     expect(refused).toContain(`span ${BAR} ticks`);
     expect(refused).toContain(`every ${BAR / 2}`);
+    // And the spacing LEADS here, because the notes that overrun start at and
+    // after the next pass does — no length would fit them inside one pass, so
+    // "shorten them" would be advice that cannot be followed.
+    expect(refused).toContain('no length would fit');
+    expect(refused).not.toContain('Shorten');
 
     expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
     expect(canUndoPattern()).toBe(false);
+  });
+
+  /**
+   * The 2026-08-11 run, exactly: three sixteenths and a fourth note a QUARTER
+   * long, repeated every beat. ONE number is wrong out of sixteen and the
+   * intent — four beats of a sixteenth figure — is entirely reasonable, so a
+   * refusal that only quotes the span and the spacing sends the model off to
+   * rewrite the rhythm. It sent this call twice, byte-identical, four steps
+   * apart, and then gave up on the pattern.
+   */
+  it('names the note that overruns, and leads with shortening it', () => {
+    value(call('pattern_open_blank', { name: 'Figure', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    const sixteenth = PPQ / 4;
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [0, 1, 2, 3].map((step) => ({
+          stringIndex: 0,
+          fret: 8,
+          tick: step * sixteenth,
+          // The whole mistake, one number: the last note is a quarter where it
+          // should have been a sixteenth, so the figure runs to 840 rather than
+          // stopping at 480.
+          durationTicks: step === 3 ? PPQ : sixteenth,
+        })),
+        repeat: { times: 4, everyTicks: PPQ },
+      }),
+    );
+
+    // WHICH note, by the tick and the length the model itself sent.
+    expect(refused).toContain(`string 0 tick ${3 * sixteenth}`);
+    expect(refused).toContain(`lasts ${PPQ} ticks`);
+    expect(refused).toContain(`runs to ${3 * sixteenth + PPQ}`);
+    // ONCE, however many passes it kept out — four passes name it four times
+    // otherwise, and that is one fact billed four times. Counted rather than
+    // asserted absent, because `toContain` is satisfied by the first copy.
+    expect(refused.match(/string 0 tick 360:/g)).toHaveLength(1);
+    // And only that note: the three that fit are not dragged into the sentence.
+    // One named entry in the whole sentence, so a mistake that names all four
+    // fails here even if the extra labels are spelt some other way.
+    expect(refused.match(/ — past /g)).toHaveLength(1);
+    expect(refused).not.toMatch(/string 0 tick (0|120|240):/);
+    // The singular agreement, which only ever holds when exactly one is named.
+    expect(refused).toContain('the note named below');
+    expect(refused).toContain('it stops');
+
+    // Shortening first. A bigger everyTicks is still offered — it is correct —
+    // but it destroys the rhythm that was asked for, so it cannot be the
+    // headline. BOTH indices asserted present first: `indexOf` answers -1 for a
+    // string that is absent, and -1 is less than everything, so the ordering
+    // alone passes a refusal that dropped the shorten clause entirely.
+    const shortenAt = refused.indexOf('Shorten the note named below');
+    const spacingAt = refused.indexOf('everyTicks of at least');
+    expect(shortenAt).toBeGreaterThanOrEqual(0);
+    expect(spacingAt).toBeGreaterThanOrEqual(0);
+    expect(shortenAt).toBeLessThan(spacingAt);
+    // The span is still in the sentence, as the fallback it always was.
+    expect(refused).toContain(`everyTicks of at least ${3 * sixteenth + PPQ}`);
+
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+    expect(canUndoPattern()).toBe(false);
+  });
+
+  /**
+   * The same fix, on a string whose phrase does not start on the downbeat.
+   *
+   * Testing "can this be shortened?" against `everyTicks` gets this wrong: the
+   * note starts at 600, which is past a spacing of 480, so a test against the
+   * spacing calls it unshortenable and hands the model the rhythm-destroying
+   * advice as its ONLY advice — when in fact its pass is not reached until 720
+   * and a shorter note clears it. A second voice entering off the beat is an
+   * ordinary shape, not a corner.
+   */
+  it('measures shortenable against the tick that collides, not against everyTicks', () => {
+    value(call('pattern_open_blank', { name: 'Late', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [
+          { stringIndex: 2, fret: 3, tick: 240, durationTicks: 120 },
+          // Runs to 1000; the next pass of this string does not begin until 720.
+          { stringIndex: 2, fret: 5, tick: 600, durationTicks: 400 },
+        ],
+        repeat: { times: 4, everyTicks: 480 },
+      }),
+    );
+
+    expect(refused).toContain('Shorten the note named below');
+    expect(refused).toContain('string 2 tick 600: it lasts 400 ticks, so it runs to 1000');
+    // 720 and not 480: the tick the replay actually collided at. 480 is a tick
+    // this string has nothing on, so quoting it sends the model looking for a
+    // number it never wrote.
+    expect(refused).toContain('past 720, where a later pass puts a note');
+    expect(refused).not.toContain('no length would fit');
+    // The spacing fallback measures from the string's own first note, not from
+    // zero: 1000 − 240.
+    expect(refused).toContain('everyTicks of at least 760');
+
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+  });
+
+  /**
+   * A blocker the lib has already CLAMPED. Its `durationTicks` is then not the
+   * number that reaches, so quoting it would name a length that is not what
+   * sounds — and the model cannot reconcile "2000" with "runs to 600" unless
+   * the sentence says what cut it short.
+   */
+  it('quotes what a clamped note actually sounds, and says what clamped it', () => {
+    value(call('pattern_open_blank', { name: 'Clamped', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [
+          { stringIndex: 0, fret: 3, tick: 600, durationTicks: 50 },
+          // Asks for 2000 but stops at 600, where the note above begins.
+          { stringIndex: 0, fret: 5, tick: 0, durationTicks: 2000 },
+        ],
+        repeat: { times: 3, everyTicks: 480 },
+      }),
+    );
+
+    expect(refused).toContain('string 0 tick 0: it sounds until 600');
+    expect(refused).toContain('cut short there by the next note you sent on that string');
+    // The length it asked for is nowhere in the sentence — it is not what
+    // sounds, and it is not the number to reason about.
+    expect(refused).not.toContain('2000');
+    expect(refused).not.toContain('lasts');
+    // And the spacing fallback is what actually sounds too: 650, not 2000.
+    expect(refused).toContain('everyTicks of at least 650');
+
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+  });
+
+  /**
+   * One call, both kinds. A refusal that picks ONE branch for the whole call
+   * states something false about half the notes it names — and a false sentence
+   * about numbers the model itself sent is the failure this file exists to
+   * avoid.
+   */
+  it('scopes each fix to the notes it is actually the fix for', () => {
+    value(call('pattern_open_blank', { name: 'Both', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [
+          // Shortenable: reaches 600, the next pass of this string lands at 480.
+          { stringIndex: 0, fret: 3, tick: 0, durationTicks: 600 },
+          // Not: the next pass puts the note below's copy at exactly 480, which
+          // is where this one starts, so no length at all would fit it.
+          { stringIndex: 1, fret: 3, tick: 0, durationTicks: 480 },
+          { stringIndex: 1, fret: 5, tick: 480, durationTicks: 480 },
+        ],
+        repeat: { times: 2, everyTicks: 480 },
+      }),
+    );
+
+    // The shorten clause names its own note, and does NOT claim the other one.
+    expect(refused).toContain('Shorten string 0 tick 0 so it stops');
+    expect(refused).not.toContain('Shorten string 1');
+    // The spacing clause names its own, and is the only place "no length would
+    // fit" is said.
+    expect(refused).toContain('string 1 tick 480 starts exactly where a later pass lands');
+    expect(refused.match(/no length would fit/g)).toHaveLength(1);
+    // Shortening still leads, because there is something to shorten.
+    expect(refused.indexOf('Shorten')).toBeLessThan(refused.indexOf('everyTicks of at least'));
+
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+  });
+
+  /**
+   * The cap, on THIS path. `namedRefusals` bounds the named list and the
+   * shorten clause bounds its own labels — two lists down the same unbounded
+   * `notes`, so a cap on one of them only is not a cap.
+   */
+  it('names ten of the overrunning notes and counts the rest', () => {
+    value(call('pattern_open_blank', { name: 'Many', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [
+          // Twelve notes that touch end to end — no collision inside a pass —
+          // each of which overruns the pass 480 ticks later.
+          ...Array.from({ length: 12 }, (_, index) => ({
+            stringIndex: 0,
+            fret: 3,
+            tick: index * 600,
+            durationTicks: 600,
+          })),
+          // Plus one that cannot be shortened, so the labelled clause is
+          // exercised rather than the "the notes named below" shorthand.
+          { stringIndex: 1, fret: 3, tick: 0, durationTicks: 480 },
+          { stringIndex: 1, fret: 5, tick: 480, durationTicks: 480 },
+        ],
+        repeat: { times: 2, everyTicks: 480 },
+      }),
+    );
+
+    // Ten labels in the shorten clause, then the count. Twelve overrun.
+    expect(refused).toContain('string 0 tick 5400 and 2 more so they stop');
+    expect(refused).not.toContain('string 0 tick 6000,');
+    // Thirteen named entries in all, so the tail count differs from the one
+    // above — which is what makes the two caps distinguishable.
+    expect(refused).toContain('…and 3 more.');
+
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
+  });
+
+  it('names every note that overruns, not just the first', () => {
+    value(call('pattern_open_blank', { name: 'Two', instrumentId: 'bass' }));
+    clearPatternHistory();
+
+    // One note per string, each reaching past the next pass on its own string —
+    // so neither is the other's blocker and both have to be named for the call
+    // to be fixable in one go.
+    const refused = reason(
+      call('pattern_stamp_notes', {
+        notes: [
+          { stringIndex: 0, fret: 3, tick: 0, durationTicks: PPQ + PPQ / 4 },
+          { stringIndex: 1, fret: 5, tick: PPQ / 4, durationTicks: PPQ + PPQ / 4 },
+        ],
+        repeat: { times: 3, everyTicks: PPQ },
+      }),
+    );
+
+    expect(refused).toContain('string 0 tick 0');
+    expect(refused).toContain(`string 1 tick ${PPQ / 4}`);
+    expect(refused).toContain(`runs to ${PPQ + PPQ / 4}`);
+    expect(refused).toContain(`runs to ${PPQ + PPQ / 2}`);
+    expect(refused).toContain('the notes named below');
+
+    expect(rows(value(call('read_pattern')).notes)).toHaveLength(0);
   });
 
   /**
@@ -2374,6 +3318,20 @@ describe('stamping the same phrase several times over', () => {
     // call.
     expect(schemaOf('pattern_stamp_notes').required).toEqual(['notes']);
   });
+
+  it('says what a repeat is NOT for, where the repeat is chosen', () => {
+    // `repeat` exists to stop a runaway (1002 notes in one call) and it did —
+    // and then became the cheapest way to say the wrong thing, because its
+    // description sold only the upside. The 2026-08-11 blues was three parts,
+    // each one bar repeated twelve times, on a form with three chords in it.
+    // The counterweight has to be HERE and not only in `agentRules`: this is
+    // the sentence read at the moment the argument is filled in.
+    const times = schemaOf('pattern_stamp_notes').properties?.repeat?.properties?.times?.description;
+    expect(times).toMatch(/same notes/i);
+    // The claim, not just the word "chord": a description that said to use a
+    // repeat FOR a chord progression would match a bare /chord/.
+    expect(times).toMatch(/one pattern PER CHORD/i);
+  });
 });
 
 // ------------------------------------------- asking where a chord is on the neck ---
@@ -2388,13 +3346,13 @@ describe('stamping the same phrase several times over', () => {
  * tool that stamped the chord would have removed the arithmetic AND the
  * authorship, and turned every backing track into block chords on the downbeat.
  */
-describe('looking a chord up on the open instrument', () => {
+describe('looking a chord up on a named instrument', () => {
   const voicings = (result: ToolResult) => rows(value(result).voicings);
 
   it('gives frets and strings for a whole progression in one call', () => {
-    value(call('pattern_open_blank', { name: 'Blues', instrumentId: 'guitar' }));
-
-    const reply = value(call('read_chord_voicings', { symbols: ['A7', 'D7', 'E7'] }));
+    const reply = value(
+      call('read_chord_voicings', { symbols: ['A7', 'D7', 'E7'], instrumentId: 'guitar' }),
+    );
     // Which end of the string axis this is, on the reply itself: cells read
     // against the wrong end put every note on the wrong string and still look
     // like a chord. The reentrant caveat rides along, because this is the tool
@@ -2425,15 +3383,20 @@ describe('looking a chord up on the open instrument', () => {
     for (const answer of answers) expect(rows(answer.cells).length).toBeGreaterThan(0);
   });
 
-  it('answers for the instrument the pattern is on — a bass never gets a six-string grip', () => {
+  it('answers for the instrument NAMED — a bass never gets a six-string grip', () => {
     // Acceptance criterion 2, and the values are pinned for the reason
     // `patternService.test.ts` argues at length: a guitar grip trimmed to four
     // strings passes every bound this could otherwise state, so bounds cannot be
     // what catches a wrong tuning source.
-    value(call('pattern_open_blank', { name: 'Bass part', instrumentId: 'bass' }));
+    //
+    // The open pattern is a GUITAR throughout, so a tool still reading it would
+    // answer with six strings here — which is the 2026-08-11 failure exactly.
+    value(call('pattern_open_blank', { name: 'Guitar part', instrumentId: 'guitar' }));
 
-    const answers = voicings(call('read_chord_voicings', { symbols: ['A7'] }));
-    expect(answers[0].cells).toEqual([
+    const reply = value(call('read_chord_voicings', { symbols: ['A7'], instrumentId: 'bass' }));
+    expect(reply.instrumentId).toBe('bass');
+    expect(reply.strings).toMatch(/^4 strings/);
+    expect(rows(reply.voicings)[0].cells).toEqual([
       { stringIndex: 0, fret: 5 },
       { stringIndex: 1, fret: 4 },
       { stringIndex: 2, fret: 5 },
@@ -2441,10 +3404,85 @@ describe('looking a chord up on the open instrument', () => {
     ]);
   });
 
-  it('names the symbol it could not read, and still answers the others', () => {
-    value(call('pattern_open_blank', { name: 'Mixed', instrumentId: 'guitar' }));
+  it('is asked once per neck, with arguments that DIFFER — the property a loop detector reads', () => {
+    // THE POINT OF THE CHANGE. The 2026-08-11 run wanted a guitar, a bass and a
+    // ukulele answer for the same three chords; the old shape made all three
+    // calls byte-identical, and the harness ended the run on the third —
+    // "repeatedly called read_chord_voicings with identical arguments" — having
+    // built nothing. A detector reads ARGUMENTS, never answers, so the fix has
+    // to be visible in the arguments; that is asserted here rather than left as
+    // a property of the reply.
+    const forBass = { symbols: ['C7', 'F7', 'G7'], instrumentId: 'bass' };
+    const forGuitar = { symbols: ['C7', 'F7', 'G7'], instrumentId: 'guitar' };
 
-    const answers = voicings(call('read_chord_voicings', { symbols: ['G', 'H7', 'C'] }));
+    const bassReply = value(call('read_chord_voicings', forBass));
+    const guitarReply = value(call('read_chord_voicings', forGuitar));
+
+    // The two calls are told apart by an ARGUMENT — which is the fact a loop
+    // detector can read — and the reply echoes it back so the answer says which
+    // neck it is about. Comparing the two literals to each other would be a test
+    // with no production code on either side of it; the echo is the tool's.
+    expect(bassReply.instrumentId).toBe('bass');
+    expect(guitarReply.instrumentId).toBe('guitar');
+    expect(bassReply.instrumentId).not.toBe(guitarReply.instrumentId);
+
+    const bass = rows(bassReply.voicings);
+    const guitar = rows(guitarReply.voicings);
+    for (const answer of bass) expect(rows(answer.cells)).toHaveLength(4);
+    for (const answer of guitar) expect(rows(answer.cells).length).toBeGreaterThan(4);
+    expect(bass[0].cells).not.toEqual(guitar[0].cells);
+  });
+
+  it('needs nothing open, so a plan can look chords up before it builds', () => {
+    // The precondition is gone, and its removal is what stops the "open three
+    // patterns, then ask three times" shape from being the obvious route. Read
+    // through `read_pattern` rather than through the store, so the claim is
+    // "nothing is open AS THE AGENT SEES IT" and not a fact about test setup.
+    expect(reason(call('read_pattern'))).toBe('No pattern is open.');
+
+    const answers = voicings(
+      call('read_chord_voicings', { symbols: ['C'], instrumentId: 'ukulele' }),
+    );
+    expect(rows(answers[0].cells)).toHaveLength(4);
+  });
+
+  it('refuses an instrument it has no neck for ONCE, not once per symbol', () => {
+    // Once for the whole call: a progression refused twelve times over for a
+    // reason that has nothing to do with the chords reads as the chords being at
+    // fault. Dropping the up-front check leaves `chordGrip` refusing per symbol,
+    // every symbol refuses, and the whole call still fails naming 'theremin' —
+    // so "contains theremin" cannot be the assertion. `namedRefusals` prefixes
+    // each entry with its label, so the ABSENCE of the labels is what says the
+    // refusal was raised once about the neck rather than five times about the
+    // chords.
+    const refused = reason(
+      call('read_chord_voicings', { symbols: ['A7', 'D7'], instrumentId: 'theremin' }),
+    );
+    expect(refused).toContain('theremin');
+    expect(refused).not.toContain('A7:');
+    expect(refused).not.toContain('D7:');
+    // The seam's sentence, verbatim — authored once in `patternService` and
+    // passed through, so the two ways into `chordGrip` cannot describe the same
+    // mistake two ways.
+    expect(refused).toBe(unknownInstrumentRefusal('theremin'));
+  });
+
+  it('refuses an instrument left out entirely, in its own words', () => {
+    // A DISTINCT sentence, not the unknown-instrument one with "undefined" in
+    // it: without the `typeof` guard the model is told `"undefined" is not an
+    // instrument`, which reads as a typo in a value it never sent. The schema
+    // makes this required, and a model can still leave it out.
+    const missing = reason(call('read_chord_voicings', { symbols: ['A7'] }));
+    expect(missing).toMatch(/No instrument was named/);
+    expect(missing).not.toContain('undefined');
+    // The choices come with it, so the retry is one call away.
+    expect(missing).toContain('bass');
+  });
+
+  it('names the symbol it could not read, and still answers the others', () => {
+    const answers = voicings(
+      call('read_chord_voicings', { symbols: ['G', 'H7', 'C'], instrumentId: 'guitar' }),
+    );
     expect(answers).toHaveLength(3);
     expect(answers[1].symbol).toBe('H7');
     expect(answers[1].refused as string).toContain('H7');
@@ -2455,15 +3493,11 @@ describe('looking a chord up on the open instrument', () => {
   });
 
   it('refuses the whole call when nothing at all parsed, carrying every reason', () => {
-    value(call('pattern_open_blank', { name: 'Nonsense' }));
-
-    const refused = reason(call('read_chord_voicings', { symbols: ['H7', 'zzz'] }));
+    const refused = reason(
+      call('read_chord_voicings', { symbols: ['H7', 'zzz'], instrumentId: 'guitar' }),
+    );
     expect(refused).toContain('H7');
     expect(refused).toContain('zzz');
-  });
-
-  it('refuses in the words the other reads use when no pattern is open', () => {
-    expect(reason(call('read_chord_voicings', { symbols: ['A7'] }))).toBe('No pattern is open.');
   });
 
   it('changes nothing and pushes no undo step', () => {
@@ -2475,7 +3509,14 @@ describe('looking a chord up on the open instrument', () => {
     expect(canUndoPattern()).toBe(false);
     const before = JSON.stringify(value(call('read_pattern')));
 
-    value(call('read_chord_voicings', { symbols: ['A7', 'D7', 'E7', 'G', 'C'] }));
+    value(
+      call('read_chord_voicings', {
+        symbols: ['A7', 'D7', 'E7', 'G', 'C'],
+        // Deliberately NOT the open pattern's instrument: the lookup must not
+        // touch the document it was not asked about either.
+        instrumentId: 'bass',
+      }),
+    );
 
     expect(canUndoPattern()).toBe(false);
     expect(JSON.stringify(value(call('read_pattern')))).toBe(before);
@@ -2486,11 +3527,10 @@ describe('looking a chord up on the open instrument', () => {
     // and the tenth says nothing the first nine did not. The same cap
     // `pattern_stamp_notes` applies, which is why it lives in `types.ts` rather
     // than beside one caller.
-    value(call('pattern_open_blank', { name: 'Nonsense', instrumentId: 'guitar' }));
-
     const refused = reason(
       call('read_chord_voicings', {
         symbols: Array.from({ length: 13 }, (_, index) => `H${index}`),
+        instrumentId: 'guitar',
       }),
     );
     expect(refused).toContain('H0');
@@ -2514,5 +3554,264 @@ describe('looking a chord up on the open instrument', () => {
     // it calls one.
     expect(READ_TOOLS.map((tool) => tool.name)).toContain('read_chord_voicings');
     for (const tool of READ_TOOLS) expect(tool.name.startsWith('read_')).toBe(true);
+  });
+});
+
+// ------------------------------------ one bar twelve times, or an actual form ---
+
+/**
+ * THE 2026-08-11 RUN. It built a twelve-bar blues whose bass, rhythm and lead
+ * were each one bar stamped twelve times — after looking up C7, F7 and G7 and
+ * getting all three right. Nothing could have told it: the stamp replied
+ * `bars: 12, refusedCount: 0`, and reading the composition back listed twelve
+ * blocks by tick, which is exactly what three patterns over twelve bars looks
+ * like too.
+ *
+ * So the assertion that matters here is the COMPARISON — the same block count,
+ * read differently. Either test alone would pass against a read that says
+ * nothing at all about how many distinct patterns a track plays.
+ */
+describe('what a track is made of', () => {
+  const BAR = PPQ * 4;
+  const TWELVE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+  const openSong = (): string => {
+    value(call('composition_open_blank', { name: 'Blues' }));
+    return rows(value(call('read_composition')).tracks)[0].trackId as string;
+  };
+
+  const trackNamed = (name: string): Record<string, JsonValue> => {
+    const track = rows(value(call('read_composition')).tracks).find((row) => row.name === name);
+    if (!track) throw new Error(`no such track: ${name}`);
+    return track;
+  };
+
+  /**
+   * ⚠ THE THREE ORDERINGS ARE DELIBERATELY DIFFERENT, and naming them is the
+   * whole point of the fixture. Heard order is Home, Subdominant, Turnaround;
+   * the CALLS are made Turnaround, Home, Subdominant; alphabetical is Home,
+   * Subdominant, Turnaround inverted at the front; and by group size it is
+   * Home (7), Subdominant (3), Turnaround (2). An earlier version of this test
+   * used names whose four orders coincided, so a grouping that keyed off call
+   * order — or sorted by name, or by size — passed it unchanged.
+   */
+  it('tells one pattern twelve times from three patterns over twelve bars', () => {
+    // ONE composition, so the two tracks are read out of the same reply and the
+    // comparison is between two things a model would actually be choosing
+    // between.
+    const home = seedPattern('Home', 3);
+    const subdominant = seedPattern('Subdominant', 8);
+    const turnaround = seedPattern('Turnaround', 10);
+    const stuck = openSong();
+    value(call('composition_rename_track', { trackId: stuck, name: 'Static' }));
+    const moving = value(call('composition_add_track', { name: 'Form' })).trackId as string;
+
+    value(call('composition_place_pattern', { patternId: home, trackId: stuck, atBars: TWELVE }));
+    // The real changes of a blues in C: I for bars 1-4 and 7-8 and 11, IV for
+    // 5-6 and 10, V for 9 and 12. Placed LAST-first, so the reply's order cannot
+    // be the order the calls were made in.
+    value(
+      call('composition_place_pattern', { patternId: turnaround, trackId: moving, atBars: [9, 12] }),
+    );
+    value(
+      call('composition_place_pattern', {
+        patternId: home,
+        trackId: moving,
+        atBars: [1, 2, 3, 4, 7, 8, 11],
+      }),
+    );
+    value(
+      call('composition_place_pattern', {
+        patternId: subdominant,
+        trackId: moving,
+        atBars: [5, 6, 10],
+      }),
+    );
+
+    const stat = trackNamed('Static');
+    const form = trackNamed('Form');
+    // INDISTINGUISHABLE by everything the read used to report: same number of
+    // blocks, same twelve bars, same total length.
+    expect(rows(stat.blocks)).toHaveLength(12);
+    expect(rows(form.blocks)).toHaveLength(12);
+    expect(rows(stat.blocks).map((block) => block.startTick)).toEqual(
+      rows(form.blocks).map((block) => block.startTick),
+    );
+
+    // And told apart by one integer, with no arithmetic over those ticks.
+    expect(stat.distinctPatterns).toBe(1);
+    expect(form.distinctPatterns).toBe(3);
+
+    const staticMadeOf = rows(stat.madeOf);
+    expect(staticMadeOf).toHaveLength(1);
+    expect(staticMadeOf[0].name).toBe('Home');
+    // Named at every bar it covers rather than counted, because "which chord is
+    // sounding in bar 9" is the question a form is checked against.
+    expect(staticMadeOf[0].atBars).toEqual(TWELVE);
+    expect(staticMadeOf[0].fromPatternId).toBe(home);
+
+    const formMadeOf = rows(form.madeOf);
+    // In the order the track is HEARD — the pattern that opens it first. Not the
+    // order the three calls were made in (turnaround, home, subdominant), not
+    // alphabetical (Home, Subdominant, Turnaround happens to match, which is why
+    // the call order is the one that had to differ), and not by group size.
+    expect(formMadeOf.map((entry) => entry.name)).toEqual(['Home', 'Subdominant', 'Turnaround']);
+    expect(formMadeOf.map((entry) => entry.atBars)).toEqual([
+      [1, 2, 3, 4, 7, 8, 11],
+      [5, 6, 10],
+      [9, 12],
+    ]);
+  });
+
+  it('says a track with nothing on it is made of nothing', () => {
+    const trackId = openSong();
+    expect(trackId).toBeTruthy();
+    const track = rows(value(call('read_composition')).tracks)[0];
+    expect(track.distinctPatterns).toBe(0);
+    // The RAW field, not `rows(...)` — that helper coerces `undefined` to `[]`,
+    // so deleting `madeOf` outright would satisfy the coerced form.
+    expect(track.madeOf).toEqual([]);
+  });
+
+  /**
+   * THE STATIC CASE IN ITS OTHER SHAPE. `pattern_stamp_notes` takes a `repeat`,
+   * so the 2026-08-11 failure is also reachable as ONE twelve-bar pattern placed
+   * ONCE — one block, `distinctPatterns: 1`, and no list of ticks to count. With
+   * a start bar alone the only way to see that it covers the whole form is to
+   * divide `endTick` by the bar length, which is the arithmetic this read exists
+   * to remove.
+   */
+  it('gives a block the bar it ends in, so one long block reads as the span it is', () => {
+    const patternId = seedPattern('Twelve bar riff');
+    // A note in bar 12 makes the pattern twelve bars: length is worked out from
+    // the notes and rounded UP to a whole bar.
+    value(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 0, fret: 5, tick: BAR * 11, durationTicks: PPQ }],
+      }),
+    );
+    const trackId = openSong();
+    value(call('composition_place_pattern', { patternId, trackId, atBars: [1] }));
+
+    const track = rows(value(call('read_composition')).tracks)[0];
+    expect(track.distinctPatterns).toBe(1);
+    const block = rows(track.blocks)[0];
+    expect(block.startBar).toBe(1);
+    // INCLUSIVE — bar 12 is the last bar it sounds in. `endTick` is exclusive
+    // and lands on the barline of bar 13, so a bar number taken straight off it
+    // would claim a bar the block never reaches.
+    expect(block.endBar).toBe(12);
+    expect(block.endTick).toBe(BAR * 12);
+  });
+
+  /**
+   * THE LIMIT OF THE METRIC, pinned so it is a documented answer rather than a
+   * surprise. Grouping is by the SNAPSHOT's id, which survives editing a block
+   * apart from its siblings — so a track whose blocks have been given different
+   * notes one at a time still reads `distinctPatterns: 1`. Fingerprinting each
+   * snapshot's events would fix it and is real work for a signal nothing yet
+   * acts on; until then the description says the count is by source, and this
+   * test is what makes that claim falsifiable.
+   */
+  it('counts by the pattern a block was cut from, even after the block is edited apart', () => {
+    const patternId = seedPattern('Riff');
+    const trackId = openSong();
+    value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 2] }));
+
+    const second = rows(rows(value(call('read_composition')).tracks)[0].blocks)[1];
+    value(call('composition_edit_placement', { placementId: second.placementId }));
+    // A note the other block does not have: the two copies now sound different.
+    value(
+      call('pattern_stamp_notes', {
+        notes: [{ stringIndex: 2, fret: 9, tick: PPQ * 2, durationTicks: PPQ }],
+      }),
+    );
+    value(call('composition_stop_editing_placement', {}));
+
+    const track = rows(value(call('read_composition')).tracks)[0];
+    expect(rows(track.blocks)).toHaveLength(2);
+    expect(track.distinctPatterns).toBe(1);
+  });
+
+  it('leaves the pattern name to madeOf rather than repeating it on every block', () => {
+    const patternId = seedPattern('Riff');
+    const trackId = openSong();
+    value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 2, 3] }));
+
+    const track = rows(value(call('read_composition')).tracks)[0];
+    // Once per PATTERN, joined to the blocks by `fromPatternId` — not once per
+    // block, which on a real arrangement is the same string a hundred times.
+    expect(rows(track.madeOf)[0].name).toBe('Riff');
+    for (const block of rows(track.blocks)) {
+      expect(block.name).toBeUndefined();
+      expect(block.fromPatternId).toBe(patternId);
+    }
+  });
+
+  it('gives every block its bar alongside its tick', () => {
+    const patternId = seedPattern('Riff');
+    const trackId = openSong();
+    // The third is a beat INTO bar 9, which is the case a bar number alone
+    // cannot express — it reads as the bar it starts in, and `startTick` is
+    // still there to say how far into it.
+    value(call('composition_place_pattern', { patternId, trackId, atTicks: [0, BAR * 4, BAR * 8 + PPQ] }));
+
+    const blocks = rows(rows(value(call('read_composition')).tracks)[0].blocks);
+    expect(blocks.map((block) => block.startBar)).toEqual([1, 5, 9]);
+    expect(blocks.map((block) => block.startTick)).toEqual([0, BAR * 4, BAR * 8 + PPQ]);
+  });
+
+  it('counts bars by the composition’s own signature, not by 4/4', () => {
+    const patternId = seedPattern('Riff');
+    const trackId = openSong();
+    // 6/8 is 1440 ticks a bar, so 5760 is bar 5 here and would be bar 4 under a
+    // 4/4 assumption.
+    value(call('composition_set_settings', { timeSignature: { numerator: 6, denominator: 8 } }));
+    value(call('composition_place_pattern', { patternId, trackId, atTicks: [0, 5760] }));
+
+    const track = rows(value(call('read_composition')).tracks)[0];
+    expect(rows(track.blocks).map((block) => block.startBar)).toEqual([1, 5]);
+    expect(rows(track.madeOf)[0].atBars).toEqual([1, 5]);
+  });
+
+  /**
+   * `composition_set_settings` takes any denominator from 1 to 32, and a 4/7 bar
+   * is 1097.142... ticks — so no bar after the first starts on a whole one.
+   * `composition_place_pattern` refuses the bar form there; a read cannot
+   * refuse, so it reports ticks and omits the bar numbers rather than handing
+   * back ones that are a fraction out and read as the previous bar.
+   */
+  /**
+   * The description is the ONLY thing that tells the model these two fields are
+   * in the reply at all — a tool description is read at the moment the tool is
+   * chosen, and nothing else in the run mentions them. Delete the sentence and
+   * every other test in this file still passes while the feature goes invisible.
+   */
+  it('says in its own description that a track reports what it is made of', () => {
+    const readComposition = READ_TOOLS.find((tool) => tool.name === 'read_composition');
+    expect(readComposition).toBeDefined();
+    const description = readComposition?.description ?? '';
+    expect(description).toContain('distinctPatterns');
+    expect(description).toContain('madeOf');
+    // And what the number MEANS, not just that it is there: a field name alone
+    // does not say that 1 is the diagnosis.
+    expect(description).toMatch(/one chord for twelve bars/i);
+  });
+
+  it('omits bar numbers where a bar is not a whole number of ticks', () => {
+    const patternId = seedPattern('Riff');
+    const trackId = openSong();
+    value(call('composition_set_settings', { timeSignature: { numerator: 4, denominator: 7 } }));
+    value(call('composition_place_pattern', { patternId, trackId, atTicks: [0, PPQ * 8] }));
+
+    const track = rows(value(call('read_composition')).tracks)[0];
+    expect(rows(track.blocks)[0].startBar).toBeUndefined();
+    expect(rows(track.blocks)[0].startTick).toBe(0);
+    const madeOf = rows(track.madeOf)[0];
+    expect(madeOf.atBars).toBeUndefined();
+    expect(madeOf.atTicks).toEqual([0, PPQ * 8]);
+    // Still one pattern, which is the fact this read exists to state and does
+    // not depend on the units.
+    expect(track.distinctPatterns).toBe(1);
   });
 });

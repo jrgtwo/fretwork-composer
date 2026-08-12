@@ -14,7 +14,6 @@ import {
   beginEditGesture,
   chordGrip,
   patternInstrumentId,
-  setEditingPatternInstrument,
   deleteNotes,
   endEditGesture,
   getEditingPattern,
@@ -409,7 +408,13 @@ describe('fret entry', () => {
  *
  * The claim under test is not that the lib can voice a chord (it can; that is
  * `voiceChordPreferred`'s test, not ours) but that the answer comes back for the
- * neck the OPEN PATTERN is on, from the voicer that gives idiomatic shapes.
+ * neck the CALLER NAMED, from the voicer that gives idiomatic shapes.
+ *
+ * ⚠ The instrument is an argument and no pattern need be open. It used to be
+ * read off the open pattern, and the answer then depended on state the call did
+ * not mention — which is what killed a run on 2026-08-11 (three necks asked for,
+ * three identical calls, three ukulele answers). The "with nothing open" test
+ * below is the one that pins the precondition's removal.
  *
  * ⚠ These assert EXACT grips, and that is deliberate. Bounds are not enough to
  * state either claim: `getTuningsForInstrument(id)[0]` happens to equal every
@@ -422,14 +427,17 @@ describe('fret entry', () => {
  * the lib changing its preferred shapes.
  */
 describe('chordGrip', () => {
-  const grip = (symbol: string) => {
-    const result = chordGrip(symbol);
+  // NO default neck. The whole point of the change is that the instrument is
+  // named in the call, and a helper that quietly supplies one is a suite that
+  // reads as if it were not.
+  const grip = (symbol: string, instrumentId: string) => {
+    const result = chordGrip(symbol, instrumentId);
     if (!result.ok) throw new Error(`refused: ${result.reason}`);
     return result.value;
   };
 
-  const refusal = (symbol: string) => {
-    const result = chordGrip(symbol);
+  const refusal = (symbol: string, instrumentId: string) => {
+    const result = chordGrip(symbol, instrumentId);
     if (result.ok) throw new Error('expected a refusal');
     return result.reason;
   };
@@ -438,8 +446,8 @@ describe('chordGrip', () => {
    *  has. Derived from the tuning rather than from a remembered shape, so it
    *  states "these frets are this chord on this neck" without also pinning which
    *  voicing the lib prefers. */
-  const soundsTheChord = (symbol: string, tuningId: string) => {
-    const voicing = grip(symbol);
+  const soundsTheChord = (symbol: string, instrumentId: string, tuningId: string) => {
+    const voicing = grip(symbol, instrumentId);
     const strings = getTuning(tuningId)!.strings;
     const wanted = parseChordSymbol(symbol)!.pitchClasses;
     expect(voicing.cells.length).toBeGreaterThan(0);
@@ -452,20 +460,45 @@ describe('chordGrip', () => {
   it('names the symbol it could not read', () => {
     // The symbol is IN the sentence: a caller sending a whole progression can
     // only respell the one that failed if it is told which one that was.
-    expect(refusal('H7')).toContain('H7');
-    expect(refusal('')).toContain('chord symbol');
+    expect(refusal('H7', 'guitar')).toContain('H7');
+    expect(refusal('', 'guitar')).toContain('chord symbol');
   });
 
-  it('refuses when no pattern is open, because there is no neck to answer about', () => {
+  it('names the instrument it does not have a neck for', () => {
+    // Not a fallback to guitar, which `patternInstrumentId` does for a stored
+    // pattern: a caller that asked for the wrong neck by name wants to hear so
+    // rather than be handed six strings under a bass's label.
+    expect(refusal('A7', 'theremin')).toContain('theremin');
+    expect(refusal('A7', '')).toContain('guitar');
+    // THE NECK IS CHECKED FIRST, because it is the call-wide fact and the symbol
+    // is the per-item one: a caller that got both wrong hears about the neck it
+    // asked for, not about the first chord of a progression it will have to send
+    // again anyway.
+    expect(refusal('H7', 'theremin')).toContain('theremin');
+    expect(refusal('H7', 'theremin')).not.toContain('chord symbol');
+  });
+
+  it('answers with NOTHING open, so a plan can ask before it builds', () => {
+    // The precondition's removal, pinned. Asking what a chord looks like on a
+    // bass before any pattern exists is what a planning step wants to do, and
+    // forcing a pattern open first is what produced the open-three-then-ask-
+    // three shape the 2026-08-11 run died of.
     usePatternsStore.setState({
       ...DEFAULT_PATTERNS_STATE,
       library: { patterns: [], compositions: [], collections: [] },
     });
-    expect(refusal('A7')).toContain('No pattern is open');
+    expect(getEditingPattern()).toBeNull();
+
+    expect(grip('A7', 'bass').cells).toEqual([
+      { stringIndex: 0, fret: 5 },
+      { stringIndex: 1, fret: 4 },
+      { stringIndex: 2, fret: 5 },
+      { stringIndex: 3, fret: 6 },
+    ]);
   });
 
   it('answers on the guitar with the open shape a guitarist would play', () => {
-    const voicing = grip('A7');
+    const voicing = grip('A7', 'guitar');
 
     expect(voicing.symbol).toBe('A7');
     expect(voicing.root).toBe('A');
@@ -484,14 +517,14 @@ describe('chordGrip', () => {
       { stringIndex: 4, fret: 2 },
       { stringIndex: 5, fret: 0 },
     ]);
-    soundsTheChord('A7', 'standard');
+    soundsTheChord('A7', 'guitar', 'standard');
   });
 
   it('gives the open G shape rather than the algorithmic one', () => {
     // The two differ only on strings 3 and 4 (open/open against fret 4/3), which
     // is the whole point: both are playable G chords and only one is the shape a
     // player means by "G".
-    expect(grip('G').cells).toEqual([
+    expect(grip('G', 'guitar').cells).toEqual([
       { stringIndex: 0, fret: 3 },
       { stringIndex: 1, fret: 2 },
       { stringIndex: 2, fret: 0 },
@@ -506,16 +539,13 @@ describe('chordGrip', () => {
     // still four plausible-looking cells with plausible frets, so the SHAPE has
     // to be pinned: `standard` filtered would give [1,0][2,2][3,0], which passes
     // every bound this test could otherwise state.
-    const set = setEditingPatternInstrument('bass');
-    expect(set.ok).toBe(true);
-
-    expect(grip('A7').cells).toEqual([
+    expect(grip('A7', 'bass').cells).toEqual([
       { stringIndex: 0, fret: 5 },
       { stringIndex: 1, fret: 4 },
       { stringIndex: 2, fret: 5 },
       { stringIndex: 3, fret: 6 },
     ]);
-    soundsTheChord('A7', 'bass-standard');
+    soundsTheChord('A7', 'bass', 'bass-standard');
   });
 
   it('answers on a ukulele too, on the four strings a ukulele has', () => {
@@ -524,23 +554,23 @@ describe('chordGrip', () => {
     // cell 0 here is C5, the TOP note of the chord. Noted rather than worked
     // around: the grip is still four real cells on four real strings, which is
     // what this seam promises. `read_chord_voicings` says so in its reply.
-    expect(setEditingPatternInstrument('ukulele').ok).toBe(true);
-
-    expect(grip('C').cells).toEqual([
+    expect(grip('C', 'ukulele').cells).toEqual([
       { stringIndex: 0, fret: 5 },
       { stringIndex: 1, fret: 4 },
       { stringIndex: 2, fret: 3 },
       { stringIndex: 3, fret: 3 },
     ]);
-    soundsTheChord('C', 'ukulele-standard');
+    soundsTheChord('C', 'ukulele', 'ukulele-standard');
   });
 
-  it('changes its answer when the pattern changes instrument', () => {
-    // Same chord, both necks, values pinned — a seam that answered from a fixed
-    // tuning would give the same cells twice, or the same cells trimmed.
-    const onGuitar = grip('G').cells;
-    expect(setEditingPatternInstrument('bass').ok).toBe(true);
-    const onBass = grip('G').cells;
+  it('answers the SAME symbol differently for two instruments, in the same breath', () => {
+    // The property the whole change exists for: the answer follows the argument
+    // and nothing else. The open pattern is left on guitar throughout, so a seam
+    // still reading it would give the guitar's cells for both.
+    expect(patternInstrumentId(getEditingPattern()!)).toBe('guitar');
+
+    const onGuitar = grip('G', 'guitar').cells;
+    const onBass = grip('G', 'bass').cells;
 
     expect(onGuitar).toHaveLength(6);
     expect(onBass).toEqual([
@@ -558,8 +588,8 @@ describe('chordGrip', () => {
     stampNote({ stringIndex: 4, fret: 5, tick: 0, durationTicks: PPQ });
     const before = JSON.stringify(getEditingPattern());
 
-    grip('A7');
-    grip('D9');
+    grip('A7', 'guitar');
+    grip('D9', 'bass');
 
     expect(JSON.stringify(getEditingPattern())).toBe(before);
   });

@@ -72,6 +72,18 @@ describe('the pattern page agent', () => {
     // satisfy the name alone and be the opposite instruction.
     expect(prompt).toContain('read_chord_voicings');
     expect(prompt).toMatch(/LOOKUP, NOT ARITHMETIC/i);
+    // Which neck is an ARGUMENT now, and the rule must not send the model back
+    // to opening a pattern first — that ordering is what the 2026-08-11 run died
+    // of, three identical calls expecting three different necks.
+    expect(prompt).toMatch(/instrumentId/);
+    expect(prompt).not.toMatch(/ask again after opening a pattern/i);
+    // The counterweight to `repeat`, which is CALLED from this page even when
+    // the arrangement it is feeding lives on the other one: every pass is the
+    // same notes, so a part that follows the changes is one pattern per chord.
+    // It reaches here through the shared length rules; a copy in the
+    // composition page's own section would leave the page that does the
+    // stamping without it.
+    expect(prompt).toMatch(/ONE PATTERN PER CHORD/i);
     // A refusal is text to act on, not a crash — the seams author those
     // sentences and AG-04 hands them to the model.
     expect(prompt).toMatch(/"ok":false/);

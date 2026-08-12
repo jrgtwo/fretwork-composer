@@ -112,9 +112,19 @@ describe('the composition page agent', () => {
     // would name the tool and invert the rule.
     expect(prompt).toContain('read_chord_voicings');
     expect(prompt).toMatch(/LOOKUP, NOT ARITHMETIC/i);
-    // Both instruments of a backing track need the same symbols looked up
-    // again, and `RESULTS` forbids a repeated call in absolute terms.
-    expect(prompt).toMatch(/not a repeated call/i);
+    // WHICH NECK is an argument, and the rule has to say so: the tool used to
+    // answer for whichever pattern was open, and the sentence that told the
+    // model to "ask again after opening a pattern on a different instrument" is
+    // what killed the 2026-08-11 run — it had opened all three patterns first,
+    // so the three calls were byte-identical and the loop detector ended it.
+    expect(prompt).toMatch(/instrumentId/);
+    // Both instruments of a backing track need the same symbols looked up, and
+    // `RESULTS` forbids a repeated call in absolute terms — so this must say
+    // that a second instrument is a different QUESTION, which is now true of the
+    // arguments and not merely of the intent.
+    expect(prompt).toMatch(/different question rather than a repeated one/i);
+    // And the deleted sentence must stay deleted.
+    expect(prompt).not.toMatch(/ask again after opening a pattern/i);
   });
 
   it('takes the chord rule from the shared rules, so the pattern page has it too', () => {
@@ -125,6 +135,50 @@ describe('the composition page agent', () => {
     // is the drift this module exists to stop.
     expect(SHARED_RULES).toMatch(/LOOKUP, NOT ARITHMETIC/i);
     expect(SHARED_RULES).toContain('read_chord_voicings');
+    // The precondition is GONE from the tool, so the rule must not reimpose it:
+    // a model told to open something first goes back to the shape that failed.
+    expect(SHARED_RULES).toMatch(/Nothing has to be open to ask/i);
+  });
+
+  it('says a part that follows the changes is more than one pattern', () => {
+    // THE 2026-08-11 RUN. It looked C7, F7 and G7 up, got all three right, and
+    // then played one of them for twelve bars — every part one pattern stamped
+    // twelve times. The chord rule above got the lookup made; nothing said what
+    // to DO with three answers, and the cheapest route on offer (`repeat`, one
+    // pattern along a track) covers a form with a single chord.
+    //
+    // Asserted against `SHARED_RULES` for the reason the test above gives, and
+    // as the CONSEQUENCE as well as the instruction — a prompt that said "one
+    // pattern per chord" without saying what repeating one costs is advice, and
+    // this file's other rules are all statements of what is or is not possible.
+    expect(SHARED_RULES).toMatch(/ONE PATTERN PER CHORD/i);
+    expect(SHARED_RULES).toMatch(/one chord for the whole form/i);
+    // In BARS, because `composition_place_pattern` takes them and the rule is
+    // about placing one pattern at several of them in a single call.
+    expect(SHARED_RULES).toContain('atBars');
+    expect(COMPOSITION_AGENT.systemPrompt).toMatch(/ONE PATTERN PER CHORD/i);
+  });
+
+  /**
+   * "NOTHING MOVES BLOCKS OUT OF EACH OTHER'S WAY" was true of the tool the rule
+   * was written for and false of the other two: `composition_move_placement` and
+   * `composition_duplicate_placements` both route through `movePlacement`, which
+   * runs `clampStartToFreeSlot`. `movePlacementTool`'s own description says so in
+   * as many words — and `agentRules` is read BEFORE any tool is chosen, so the
+   * unqualified sentence won first. `RESULTS` then turns that into a loop: a
+   * model that hand-spaces duplicates, reads the clamped positions back and
+   * applies "a difference IS the constraint you have hit" changes approach
+   * against a constraint that is not there.
+   */
+  it('scopes the never-nudged rule to placing, which is the only tool it is true of', () => {
+    // The rule survives, for the tool it is about.
+    expect(SHARED_RULES).toMatch(/A block you PLACE lands exactly where you put it/i);
+    // And the exception is stated, so it cannot be read as universal.
+    expect(SHARED_RULES).toMatch(/moving or duplicating/i);
+    expect(SHARED_RULES).toMatch(/nearest free slot/i);
+    // The absolute form is GONE. Without this the two sentences above can both
+    // be added while the contradiction stays in the file.
+    expect(SHARED_RULES).not.toMatch(/Nothing moves blocks out of each other's way/i);
   });
 });
 

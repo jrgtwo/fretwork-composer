@@ -153,7 +153,7 @@ Finish by saying how many notes you moved and how many you re-lengthened.`,
 
 Open a blank pattern, set its instrument, then stamp the notes. Read the pattern once before you choose fret numbers: it tells you the ticks per quarter note, the time signature, how many strings the instrument has and how far up the neck you can go. Frets past the end of the neck are refused.
 
-Where the part is built on chords, ask read_chord_voicings for them once the instrument is set rather than working the frets out yourself — then choose which notes of each shape to play and when.
+Where the part is built on chords, ask read_chord_voicings for them with instrumentId "{instrument}" rather than working the frets out yourself — then choose which notes of each shape to play and when. Nothing has to be open to ask.
 
 The pattern's length is not something you set — it auto-fits whatever you stamp. "About {bars} bars" means stamp that much music, not resize anything afterwards.
 
@@ -369,7 +369,7 @@ const COMPOSITION_COMMANDS: readonly Command[] = [
 
 Read the composition first. Set its tempo and groove, then work in this order for each part — write it as a pattern in the library (open a blank pattern, set its instrument, stamp the notes), then add the track it belongs on, then place the pattern along that track.
 
-Decide the chord progression before you write anything, then ask read_chord_voicings for the whole progression once each pattern's instrument is set — the shapes come back for that instrument's neck. Play a part OUT of those shapes rather than stamping them whole on the downbeat.
+Decide the chord progression before you write anything, then ask read_chord_voicings for the whole progression — one call per instrument, naming that instrument, before you open anything. Play a part OUT of those shapes rather than stamping them whole on the downbeat.
 
 Get each pattern right BEFORE you place it. A block on a track is a deep copy taken at placement time: editing the pattern afterwards does not reach blocks you have already placed.
 
@@ -420,7 +420,7 @@ Tell me what each track is when you are done.`,
 
 Read the composition first and work out the harmony from the blocks that are already on it. Then write the line as one or more patterns on the bass instrument, add a bass track if there is not one already, and place the patterns so the line covers the same span as the rest of the arrangement.
 
-Once the pattern is on the bass, name the changes to read_chord_voicings and take the line's notes from what comes back — a bass neck's frets for a chord are not a guitar's, and the shapes come back for the instrument the open pattern is on.
+Name the changes to read_chord_voicings with instrumentId "bass" and take the line's notes from what comes back — a bass neck's frets for a chord are not a guitar's, so ask for the bass and never carry a guitar shape over. Ask before you write anything; nothing has to be open.
 
 Follow the existing parts rather than competing with them: land where they land, and stay out of the upper register.
 
@@ -525,7 +525,7 @@ Transposition is applied at playback and silently drops any note that lands off 
     ],
     template: `Extend the open composition by {bars} more bars past where it currently ends.
 
-Read the composition first to find where that is. Carry every track that is currently playing into the new section — a track that was busy going silent reads as a mistake, not as an arrangement choice. Reuse the patterns that are already in the library where the section should repeat; write new ones only where it should actually change, and set each new pattern's instrument to match the track it is going on. Where a new pattern moves to different chords, ask read_chord_voicings for them after setting its instrument.
+Read the composition first to find where that is. Carry every track that is currently playing into the new section — a track that was busy going silent reads as a mistake, not as an arrangement choice. Reuse the patterns that are already in the library where the section should repeat; write new ones only where it should actually change, and set each new pattern's instrument to match the track it is going on. Where a new pattern moves to different chords, ask read_chord_voicings for them naming the instrument that pattern is for.
 
 Do not move, shorten or delete anything that is already there. Say what the new section does.`,
   },
@@ -560,7 +560,7 @@ Do not move, shorten or delete anything that is already there. Say what the new 
 
 Read the library and the composition first so you know the pattern's length and where the track currently ends. Place all the copies in ONE call, so the whole thing is a single undo step.
 
-If a copy will not fit where you asked for it, the app lands it in the nearest free slot and tells you so. Pass that on rather than retrying.`,
+Nothing moves blocks out of each other's way, so "back to back" is yours to space: each copy starts one pattern-length after the one before it. Get that right in the first call — a copy that would land on another, or on a block already there, refuses the whole call before anything is written. The reply gives every block's \`endTick\` to space the next one from.`,
   },
 
   {

@@ -221,7 +221,23 @@ export function listScales(): readonly { id: string; name: string }[] {
 export { DEFAULT_SCALE_ID };
 
 /**
- * Where a named chord sits on THIS pattern's neck — a read, and only a read.
+ * What to say about a neck this app has not got, written ONCE.
+ *
+ * The seam authors refusal text and a tool passes it verbatim (`fromResult` in
+ * `src/ai/tools/types.ts` argues why). `read_chord_voicings` checks membership
+ * up front — once for the whole call rather than once per symbol — so without
+ * this the same sentence would be authored on both sides of the seam and drift
+ * the first time either is reworded.
+ */
+export function unknownInstrumentRefusal(instrumentId: string): string {
+  return `"${instrumentId}" is not an instrument this app has a neck for — ${listInstruments()
+    .map((known) => known.id)
+    .join(', ')}.`;
+}
+
+/**
+ * Where a named chord sits on a NAMED instrument's neck — a read, and only a
+ * read.
  *
  * Beside `listKeys`/`listScales` for their reason: it re-exports a lib catalog
  * (here `parseChordSymbol` + `voiceChordPreferred`) so a caller does not have to
@@ -235,6 +251,16 @@ export { DEFAULT_SCALE_ID };
  * differently; and the agent's tools cannot reach the lib at all
  * (`tests/AgentTools.test.ts`'s seam tripwire), so a grip is the only shape this
  * answer can take on that side of the wall.
+ *
+ * ⚠ THE INSTRUMENT IS AN ARGUMENT, not the open pattern's. It used to be read
+ * off whatever pattern happened to be open, and that is the defect the
+ * 2026-08-11 run died of: three patterns opened up front, the same symbols asked
+ * three times expecting one answer per neck, and every answer for the ukulele
+ * because only the last-opened pattern is the open one. Identical arguments and
+ * a different answer is a shape no caller — and no loop detector, which reads
+ * arguments alone — can tell apart. Naming the neck in the call also means a
+ * caller can ask what a chord looks like on a bass BEFORE it has created
+ * anything, which is what a planning step wants.
  *
  * ⚠ The tuning is the instrument's DECLARED DEFAULT, resolved through
  * `getTuning` — the same convention `reference/tabLayout.ts`'s `openStrings`
@@ -250,15 +276,27 @@ export { DEFAULT_SCALE_ID };
  * same bottom-to-top order. No remapping, and no cell on a string this
  * instrument has not got.
  */
-export function chordGrip(symbol: string): Result<{
+export function chordGrip(
+  symbol: string,
+  instrumentId: string,
+): Result<{
   symbol: string;
   root: string;
   type: string;
   notes: readonly string[];
   cells: readonly { stringIndex: number; fret: number }[];
 }> {
-  const pattern = getEditingPattern();
-  if (!pattern) return refuse('No pattern is open, so there is no instrument to voice a chord on.');
+  // The INSTRUMENT first, because it is the call-wide fact and the symbol is the
+  // per-item one: a caller that named a neck this app has not got should hear
+  // about the neck, not about the first chord in its progression.
+  //
+  // Membership is asked of the lib's catalog, `patternInstrumentId`'s reason: a
+  // list written here would go on refusing whatever the lib added last. Unlike
+  // `patternInstrumentId` there is no falling back to guitar — a caller that
+  // named the wrong neck wants to hear so, not to be handed a guitar's frets
+  // under a bass's name.
+  const instrument = getInstrument(instrumentId);
+  if (instrument === undefined) return refuse(unknownInstrumentRefusal(instrumentId));
 
   const chord = parseChordSymbol(symbol);
   if (chord === null) {
@@ -267,15 +305,12 @@ export function chordGrip(symbol: string): Result<{
     );
   }
 
-  // `patternInstrumentId` has already resolved the id against the lib's catalog,
-  // so the instrument is there; the TUNING it names is the half that can go
-  // missing, when a lib version adds an instrument before its tunings.
-  const instrumentId = patternInstrumentId(pattern);
-  const instrument = getInstrument(instrumentId);
-  const tuning = instrument === undefined ? undefined : getTuning(instrument.defaultTuningId);
+  // The TUNING is the half that can still go missing, when a lib version adds an
+  // instrument before its tunings.
+  const tuning = getTuning(instrument.defaultTuningId);
   if (tuning === undefined) {
     return refuse(
-      `This pattern's instrument (${instrumentId}) has no tuning in the catalog, so there is nothing to voice ${chord.symbol} against.`,
+      `${instrumentId} has no tuning in the catalog, so there is nothing to voice ${chord.symbol} against.`,
     );
   }
 
@@ -293,7 +328,7 @@ export function chordGrip(symbol: string): Result<{
   // impossible from the write side. What the trim must NOT do is hand back an
   // empty shape as an answer: `ok` with no cells is the reply a caller cannot
   // act on, so a grip that survives none of it is a refusal.
-  const strings = stringCount();
+  const strings = instrument.stringCount;
   const cells = grip.cells
     .filter((cell) => cell.stringIndex < strings)
     .map((cell) => ({ stringIndex: cell.stringIndex, fret: cell.fret }));
@@ -687,6 +722,18 @@ export function deletePattern(id: string): Result<Pattern> {
 }
 
 /**
+ * How many strings a NAMED instrument has — 0 for one the catalog does not know.
+ *
+ * Split out of `stringCount` for `chordGrip`, which answers about an instrument
+ * given to it rather than about the open pattern: the two must agree, and a
+ * second `getInstrument(...)?.stringCount ?? 0` is exactly the duplicate that
+ * would let them disagree.
+ */
+export function instrumentStringCount(instrumentId: string): number {
+  return getInstrument(instrumentId)?.stringCount ?? 0;
+}
+
+/**
  * How many strings the open pattern's instrument has.
  *
  * ⚠ `stringIndex` 0 is the LOW E — the physically bottom string. Display order
@@ -697,7 +744,7 @@ export function deletePattern(id: string): Result<Pattern> {
 export function stringCount(): number {
   const pattern = getEditingPattern();
   if (!pattern) return 0;
-  return getInstrument(patternInstrumentId(pattern))?.stringCount ?? 0;
+  return instrumentStringCount(patternInstrumentId(pattern));
 }
 
 /**

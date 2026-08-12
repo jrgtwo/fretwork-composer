@@ -67,6 +67,18 @@ describe('the adapter against the real ToolRegistry', () => {
     expect(registry.validate('pattern_open_blank', { nmae: 'typo' }).ok).toBe(false);
     // And a required argument that is missing, on a real tool.
     expect(registry.validate('pattern_stamp_notes', {}).ok).toBe(false);
+    // `read_chord_voicings`'s neck, against the REAL validator. The tool used to
+    // answer about whichever pattern was open; `instrumentId` is what makes two
+    // necks two different calls, and the stand-in in `AgentTools.test.ts` reads
+    // the schema object rather than compiling it — so "the model cannot leave it
+    // out" and "the model cannot invent a neck" are enforced here or nowhere.
+    expect(
+      registry.validate('read_chord_voicings', { symbols: ['A7'], instrumentId: 'bass' }),
+    ).toEqual({ ok: true });
+    expect(registry.validate('read_chord_voicings', { symbols: ['A7'] }).ok).toBe(false);
+    expect(
+      registry.validate('read_chord_voicings', { symbols: ['A7'], instrumentId: 'theremin' }).ok,
+    ).toBe(false);
   });
 
   /**
@@ -154,6 +166,46 @@ describe('the adapter against the real ToolRegistry', () => {
         repeat: { times: 12, everyTicks: 1920, evryTicks: 1920 },
       }).ok,
     ).toBe(false);
+  });
+
+  /**
+   * `atBars` is 1-BASED, and `minimum: 1` in its schema is the only thing that
+   * says so to a caller. Nothing in `run` re-checks it: bar N becomes
+   * `(N - 1) * ticksPerBar`, so bar 0 is a NEGATIVE start tick handed straight
+   * to the seam. `AgentTools.test.ts` drives `tool.run` directly and never sees
+   * the schema, so ajv is the only place this bound can be asserted at all.
+   */
+  it('enforces that a bar number starts at 1, since the tick maths does not', () => {
+    const registry = new ToolRegistry();
+    registry.register(ALL.map(toToolDef));
+    const where = { patternId: 'pt_1', trackId: 'tr_1' };
+
+    expect(registry.validate('composition_place_pattern', { ...where, atBars: [1] })).toEqual({
+      ok: true,
+    });
+    // Bar 0 does not exist; it converts to tick -1920.
+    expect(registry.validate('composition_place_pattern', { ...where, atBars: [0] }).ok).toBe(
+      false,
+    );
+    expect(registry.validate('composition_place_pattern', { ...where, atBars: [-1] }).ok).toBe(
+      false,
+    );
+    // `minItems: 1` — an empty list is a call that asks for nothing placed.
+    expect(registry.validate('composition_place_pattern', { ...where, atBars: [] }).ok).toBe(false);
+    expect(registry.validate('composition_place_pattern', { ...where, atTicks: [] }).ok).toBe(
+      false,
+    );
+    // Ticks are 0-based, and that difference is the whole point of the pair.
+    expect(registry.validate('composition_place_pattern', { ...where, atTicks: [0] })).toEqual({
+      ok: true,
+    });
+    expect(registry.validate('composition_place_pattern', { ...where, atTicks: [-1] }).ok).toBe(
+      false,
+    );
+    // Neither is required by the SCHEMA — the exclusivity is a typed refusal in
+    // `run`, because `JsonSchema` has no `oneOf` and a schema the validator
+    // cannot check would not be enforcing anything.
+    expect(registry.validate('composition_place_pattern', where)).toEqual({ ok: true });
   });
 
   it('marks every tool as running without consent, which is what `mode` records', () => {

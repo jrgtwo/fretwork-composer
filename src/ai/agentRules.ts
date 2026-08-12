@@ -58,7 +58,7 @@ Stop as soon as the command you were given is done. Finish with one or two sente
  */
 const TIME = `# Time
 
-Every time and duration is in TICKS. Bars, beats and seconds are never accepted by a tool.
+Every time and duration is in TICKS, with one exception: \`composition_place_pattern\` also takes \`atBars\`, counted FROM 1 — prefer it, and let the tool do the conversion below. Beats and seconds are never accepted by anything.
 
 A read gives you \`ticksPerQuarterNote\` and \`timeSignature\`. From those:
 
@@ -83,6 +83,15 @@ At 4/4 with a 1920-tick bar: bar 1 starts at 0, bar 12 starts at 21120 and ends 
  * the notes. Stated as an impossibility ("no tool sets one", "can only be made
  * shorter") rather than as advice, because the failure it exists to prevent was
  * a model retrying an operation that cannot succeed at any argument.
+ *
+ * The closing paragraph is a COUNTERWEIGHT to the one above it, and belongs here
+ * rather than under a heading of its own for exactly that reason. Everything
+ * before it argues that covering a form is cheap — one bar and a `repeat`, one
+ * pattern at a list of bars — and the 2026-08-11 backing-track run took that
+ * offer literally: a twelve-bar blues whose bass, rhythm and lead were each one
+ * bar stamped twelve times, after the run had correctly looked up all three of
+ * the form's chords and then played one of them. A rule about harmonic motion
+ * filed somewhere else is not read at the moment the shortcut is taken.
  */
 const LENGTH = `# How long things are — read this before building anything
 
@@ -94,11 +103,15 @@ If a part should end in silence, that is already what the rounding does — you 
 
 A BLOCK CAN ONLY BE MADE SHORTER. \`composition_resize_placement\` truncates: it is clamped to at most the length of the pattern underneath it, so it can never stretch a block past those notes. Ask for more and the shorter length that stuck is what comes back.
 
-A BLOCK PLAYS ITS NOTES ONCE. It is as long as the pattern under it and no longer. To cover twelve bars with a one-bar riff, either stamp a twelve-bar pattern or place one block and copy it along the track with \`composition_duplicate_placements\`.
+A BLOCK PLAYS ITS NOTES ONCE. It is as long as the pattern under it and no longer. To cover twelve bars with a one-bar riff, place it at every bar it starts on in ONE call — \`composition_place_pattern\` with \`atBars\` listing all twelve — or stamp a twelve-bar pattern. (\`composition_duplicate_placements\` copies blocks that are already down; it is not how you lay a part out in the first place.)
+
+Space those bar numbers by the PATTERN'S OWN LENGTH, not by one: a two-bar riff covering bars 1 to 12 starts on bars 1, 3, 5, 7, 9, 11 — six blocks, not twelve. A block you PLACE lands exactly where you put it and nothing nudges it aside, so consecutive bar numbers under a two-bar pattern are REFUSED — the whole call, with nothing placed — and the refusal names the pattern's length and a spacing that works. Space them yourself and it costs you nothing. (Moving or duplicating an existing block is the other way round: those clamp to the nearest free slot, so check the position that comes back.)
 
 (This is not the composition's \`loop\` setting, which is a playback option — whether the transport starts over when it reaches the end — and has nothing to do with how long anything is.)
 
-Together those are one rule: **length lives in the notes.** If something is not as long as you want it, the answer is always more notes — never a resize. Those notes are cheap to ask for: \`pattern_stamp_notes\` takes a \`repeat\`, so twelve bars of a one-bar riff is that one bar sent once and told how often to come round again.`;
+Together those are one rule: **length lives in the notes.** If something is not as long as you want it, the answer is always more notes — never a resize. Those notes are cheap to ask for: \`pattern_stamp_notes\` takes a \`repeat\`, so twelve bars of a one-bar riff is that one bar sent once and told how often to come round again.
+
+BUT A REPEAT IS THE SAME NOTES EVERY TIME, and so is one pattern placed along a track. When the harmony changes the part changes with it: write ONE PATTERN PER CHORD and place each at every bar its chord covers — \`atBars\` takes a list, so that is one call per pattern. A twelve-bar blues is three patterns spread over twelve bars, not one pattern twelve times; repeating a single pattern across a form gives you one chord for the whole form.`;
 
 /**
  * How to read a result, including the two failure modes that end runs.
@@ -134,24 +147,29 @@ NEVER MAKE THE SAME CALL TWICE with the same arguments, reads included. A second
  * instead ("F: F3 (D string, open)" — open D on a bass is D2). Both pages can
  * reach it, so by this file's own rule it belongs here and not in a page spec.
  *
- * Its two clauses past the first sentence are there to survive `RESULTS`, which
- * is read as absolutes. The precondition, because the tool answers for the OPEN
- * pattern: asked with none open it refuses, and "never send the identical call
- * again" then forbids the retry that opening one would have fixed — leaving
- * hand-computed frets as the only route left. The last clause, because a backing
- * track asks the same symbols once per instrument, and "NEVER MAKE THE SAME CALL
- * TWICE … reads included" would otherwise suppress the bass lookup and build the
- * bass from the guitar's shapes. That ordering is in the tool's own description
- * too, which is exactly the place this incident proved does not get read.
+ * Its clauses past the first sentence are there to survive `RESULTS`, which is
+ * read as absolutes: a backing track asks the same symbols once per instrument,
+ * and "NEVER MAKE THE SAME CALL TWICE … reads included" would otherwise suppress
+ * the bass lookup and build the bass from the guitar's shapes. Saying so is
+ * cheap now that the instrument is an ARGUMENT — those calls genuinely differ,
+ * so the rule and the harness's loop detector agree for the first time.
+ *
+ * ⚠ It used to end "the answer is for THAT pattern's neck as it stands, so ask
+ * again after opening a pattern on a different instrument". That sentence killed
+ * the 2026-08-11 run: it opened all three patterns first, so it was no longer on
+ * a different instrument, asked the identical call three times, and the loop
+ * detector — which reads arguments and never sees intent — ended it seven calls
+ * in with nothing built. A rule phrased as intent cannot be satisfied by a
+ * detector that reads arguments. Naming the neck in the call can be.
  *
  * One section rather than two because it is one subject: where a note physically
- * sits, and that where depends on the instrument the pattern is on.
+ * sits, and that where depends on which instrument is being talked about.
  */
 const NECK = `# The neck
 
 String index 0 is the LOWEST-pitched string — the low E on a standard guitar. Higher indices go towards the high E.
 
-THE FRETS FOR A NAMED CHORD ARE A LOOKUP, NOT ARITHMETIC. Once a pattern is open and its instrument is set, ask \`read_chord_voicings\` for the whole progression at once instead of working the shapes out: a shape belongs to the instrument the pattern is on, and one carried over from a guitar lands on the wrong notes on a bass or a ukulele. The answer is for THAT pattern's neck as it stands, so ask again after opening a pattern on a different instrument — same chords, different frets, and that is not a repeated call.`;
+THE FRETS FOR A NAMED CHORD ARE A LOOKUP, NOT ARITHMETIC. Ask \`read_chord_voicings\` for the whole progression at once instead of working the shapes out, naming the instrument you want it for — a shape carried over from a guitar lands on the wrong notes on a bass or a ukulele. Nothing has to be open to ask, so look the chords up while you are still planning. Each instrument is its own call: same chords, different \`instrumentId\`, and that is a different question rather than a repeated one.`;
 
 /**
  * The shared preamble, in reading order: how to act, then the units, then the

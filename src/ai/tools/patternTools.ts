@@ -103,7 +103,6 @@ import {
   getEditingPattern,
   stringCount,
   listGrooves,
-  listInstruments,
   moveNote,
   openBlankPattern,
   patternGrooveId,
@@ -135,6 +134,7 @@ import {
 // note editor is aimed at — and `compositionService` is the module that owns
 // saying so. See `openBlank` for what it is for.
 import { getEditingPlacementId } from '../../composition/compositionService';
+import { INSTRUMENT_IDS, INSTRUMENT_LIST } from './instrumentCatalog';
 import {
   arr,
   bool,
@@ -159,13 +159,8 @@ import {
 // The enumerable values, taken from the seam (which takes them from the lib's
 // own catalogs) and NEVER written out here. A literal list is a list that
 // silently omits the instrument the lib added last week — and in a schema, that
-// is the model being told a real value is invalid.
-const INSTRUMENT_IDS = listInstruments().map((instrument) => instrument.id);
-/** The same catalog as a sentence, for the two schemas that name the choices
- *  inline. Built once — `listInstruments` reads the lib's catalog. */
-const INSTRUMENT_LIST = listInstruments()
-  .map((instrument) => `${instrument.id} (${instrument.name})`)
-  .join(', ');
+// is the model being told a real value is invalid. The instruments come from
+// `instrumentCatalog` so `readTools` asks about exactly the necks this sets.
 const GROOVE_IDS = listGrooves().map((groove) => groove.id);
 
 const TICKS = `Ticks. ${PPQ} ticks = one quarter note.`;
@@ -377,17 +372,35 @@ function blockedByThisCall(
   return blocked;
 }
 
-/** How far the notes on one string reach, first start to last end — which is the
- *  spacing a repeat of them needs. Written as a fold rather than
- *  `Math.max(...notes.map(…))`: `notes` has no ceiling here (AG-12 is a separate
- *  ticket) and a spread long enough overflows the argument list. */
+/**
+ * How far the notes on one string reach, first start to what actually SOUNDS
+ * last — which is the spacing a repeat of them needs, exactly.
+ *
+ * ⚠ THE LAST END IS THE LAST NOTE'S, NOT THE LONGEST NOTE'S. Only the caller
+ * below uses this, and it is reached only once the replay has found no note
+ * kept out by its OWN pass — so on each string the ticks are distinct and no
+ * note's clamped reach passes the next note's start. Every note but the last is
+ * therefore clamped to at most the tick after it, and the last one is the only
+ * one that can reach beyond them all. Taking the longest note's unclamped end
+ * instead overstates: `{tick 600 dur 50}` before `{tick 0 dur 2000}` sounds for
+ * 650 ticks, not 2000, and the pattern's length auto-fits, so an `everyTicks`
+ * inflated to 2000 lands as bars the model then has to diagnose.
+ *
+ * Written as a fold rather than `Math.max(...notes.map(…))`: `notes` has no
+ * ceiling here (AG-12 is a separate ticket) and a spread long enough overflows
+ * the argument list.
+ */
 function spanOnString(notes: readonly StampNote[], stringIndex: number): number {
   let first = Infinity;
+  let lastTick = -1;
   let last = 0;
   for (const note of notes) {
     if (note.stringIndex !== stringIndex) continue;
     if (note.tick < first) first = note.tick;
-    if (endsAt(note) > last) last = endsAt(note);
+    if (note.tick > lastTick) {
+      lastTick = note.tick;
+      last = endsAt(note);
+    }
   }
   return last - first;
 }
@@ -433,8 +446,54 @@ function crowdedPhrase(
   return `These notes land on top of each other: ${firstPerNote.size} of the ${notes.length} you sent start where another note in the same list is still sounding, on the same string, and a string can only ring one note at a time. Nothing was written. ${steer} ${namedRefusals(pairs)}`;
 }
 
-/** Each pass starts before the one before it has finished. `everyTicks`' own
- *  description warns about this in prose; this is it as a refusal. */
+/** The agreement `passesTooClose` needs. One note and eight notes are the same
+ *  refusal, and a sentence that says "the notes … it" reads as a sentence about
+ *  a different call than the one that was sent. */
+const verb = (of: readonly unknown[], one: string, many: string): string =>
+  of.length === 1 ? one : many;
+const theNoteS = (of: readonly unknown[]): string =>
+  of.length === 1 ? 'the note named below' : 'the notes named below';
+const them = (of: readonly unknown[]): string => (of.length === 1 ? 'it' : 'them');
+
+/** The labels themselves, for the sentence that has to say WHICH of the notes
+ *  below it means. Capped exactly as {@link namedRefusals} caps its own list —
+ *  the two run down the same unbounded `notes`, and a cap on one of them only
+ *  is not a cap. */
+const labelList = (of: readonly { label: string }[]): string => {
+  const named = of.slice(0, REFUSALS_NAMED).map((entry) => entry.label);
+  const rest = of.length - REFUSALS_NAMED;
+  return rest > 0 ? `${named.join(', ')} and ${rest} more` : named.join(', ');
+};
+
+/**
+ * Each pass starts before the one before it has finished. `everyTicks`' own
+ * description warns about this in prose; this is it as a refusal.
+ *
+ * ⚠ IT NAMES THE NOTE THAT OVERRUNS. The 2026-08-11 run sent three sixteenths
+ * and a fourth note a QUARTER long — one wrong number out of sixteen, and the
+ * only thing wrong with the call — then sent the byte-identical call again four
+ * steps later and abandoned the pattern. The old sentence quoted the span and
+ * the spacing and nothing else, so "make the phrase shorter" was true and
+ * unactionable while the headline advice, a bigger `everyTicks`, would have
+ * thrown away the rhythm it asked for. The replay already knows exactly which
+ * note reaches too far; saying so is free.
+ *
+ * WHICH FIX LEADS is decided PER NOTE, not assumed and not decided for the call
+ * as a whole. Shortening a note clears its collision iff the note can be made to
+ * stop at or before the tick it actually collided at — so the test is against
+ * THAT tick and not against `everyTicks`. The two are not the same number: a
+ * string whose phrase starts off the downbeat collides a whole phrase-offset
+ * later, and a collision two passes on later still. Testing `note.tick <
+ * everyTicks` calls an ordinary late-entering voice unshortenable and hands it
+ * the rhythm-destroying advice as its only advice.
+ *
+ * Since the blocker starts at or before the tick it blocks, the only note that
+ * genuinely cannot be shortened is one starting EXACTLY where a later pass puts
+ * a note: it is covered at any length down to 1. That is a real phrase longer
+ * than its spacing, and the spacing is its fix. A call can hold both kinds at
+ * once, so the sentence names which notes each fix is for rather than asserting
+ * one of them about every note it lists.
+ */
 function passesTooClose(
   notes: readonly StampNote[],
   blocked: readonly Blocked[],
@@ -457,7 +516,55 @@ function passesTooClose(
       widest = stringIndex;
     }
   }
-  return `Every pass would land on the one before it: on string ${widest} these notes span ${span} ticks but repeat starts a pass every ${everyTicks}. Nothing was written. Send an everyTicks of at least ${span}, or make the phrase shorter.`;
+  // ONE entry per note of the phrase, not per collision: a four-pass repeat has
+  // the same note keeping three later passes out, and that is one fact. Ticks
+  // are quoted as the model SENT them — the blocker's own pass shifted back out
+  // — because a tick from pass 3 is a number it never wrote and cannot find.
+  //
+  // The EARLIEST tick each one blocks is kept with it: that is the tick a
+  // shortened note would have to stop at or before, so it is both the test and
+  // the number worth quoting. Earliest rather than first-seen, because the
+  // replay walks a pass in array order and array order is not tick order.
+  const worstPerNote = new Map<number, { entry: Blocked; collidesAt: number }>();
+  for (const entry of blocked) {
+    const collidesAt = entry.attempt.tick - entry.blocker.pass * everyTicks;
+    const seen = worstPerNote.get(entry.blocker.index);
+    if (seen === undefined || collidesAt < seen.collidesAt) {
+      worstPerNote.set(entry.blocker.index, { entry, collidesAt });
+    }
+  }
+  const overruns = [...worstPerNote.values()].map(({ entry, collidesAt }) => {
+    const note = notes[entry.blocker.index];
+    const reach = entry.soundingUntil - entry.blocker.pass * everyTicks;
+    // A blocker never starts after the tick it blocks, so "cannot be shortened"
+    // is exactly "starts on that tick" — covered at any length down to 1.
+    const shortenable = note.tick < collidesAt;
+    const landing = `${collidesAt}, where a later pass puts a note on that string`;
+    return {
+      shortenable,
+      label: `string ${note.stringIndex} tick ${note.tick}`,
+      reason: !shortenable
+        ? `a later pass puts a note on that string at ${collidesAt}, the very tick this one starts on.`
+        : reach === endsAt(note)
+          ? `it lasts ${note.durationTicks} ticks, so it runs to ${reach} — past ${landing}.`
+          : // Clamped by a later note of its own pass, so its own duration is not
+            // the number that reaches; quoting it would name a length that is
+            // already not what sounds — and the two numbers do not reconcile
+            // unless the clamp is named, so it is.
+            `it sounds until ${reach}, cut short there by the next note you sent on that string — still past ${landing}.`,
+    };
+  });
+
+  const spacing = `on string ${widest} these notes span ${span} ticks but repeat starts a pass every ${everyTicks}`;
+  const shortenable = overruns.filter((entry) => entry.shortenable);
+  const stuck = overruns.filter((entry) => !entry.shortenable);
+  const fix =
+    shortenable.length === 0
+      ? `Send an everyTicks of at least ${span} — ${spacing} — because ${theNoteS(stuck)} ${verb(stuck, 'starts', 'start')} exactly where a later pass lands, so no length would fit ${them(stuck)} inside one pass.`
+      : stuck.length === 0
+        ? `Shorten ${theNoteS(shortenable)} so ${verb(shortenable, 'it stops', 'they stop')} before the pass that lands on ${them(shortenable)} — that keeps the rhythm you asked for. Failing that, send an everyTicks of at least ${span}: ${spacing}.`
+        : `Shorten ${labelList(shortenable)} so ${verb(shortenable, 'it stops', 'they stop')} before the pass that lands on ${them(shortenable)} — that keeps the rhythm you asked for. ${labelList(stuck)} ${verb(stuck, 'starts', 'start')} exactly where a later pass lands, so no length would fit ${them(stuck)}: for ${verb(stuck, 'that one', 'those')} send an everyTicks of at least ${span}, since ${spacing}.`;
+  return `Every pass would land on the one before it. Nothing was written. ${fix} ${namedRefusals(overruns)}`;
 }
 
 /**
@@ -515,7 +622,7 @@ const stampNotes = defineTool<StampArgs>({
           // `obj()` carries no description of its own, and the container is the
           // first thing a model reads, so what a repeat IS is stated here.
           times: int(
-            'A repeat stamps the notes you sent again and again, each pass a fixed distance after the one before it. This is how many passes there are in total, COUNTING the first one. 1 means no repeat at all. Twelve bars of a one-bar riff is 12, not 11.',
+            'A repeat stamps the notes you sent again and again, each pass a fixed distance after the one before it. This is how many passes there are in total, COUNTING the first one. 1 means no repeat at all. Twelve bars of a one-bar riff is 12, not 11. EVERY PASS IS THE SAME NOTES, so a repeat is a riff or an ostinato that genuinely recurs unchanged — a part that follows chord changes is not one pattern repeated but one pattern PER CHORD, placed in the order the form calls for.',
             { min: 1, max: 64 },
           ),
           everyTicks: int(
@@ -1087,12 +1194,7 @@ const setInstrument = defineTool<{ instrumentId: string }>({
     "Put the open pattern on another instrument — which decides how many strings it has and which voices it can play. Notes on strings the new instrument has not got are KEPT but stop being drawn and stop sounding; switching back restores them.",
   parameters: obj(
     {
-      instrumentId: str(
-        listInstruments()
-          .map((instrument) => `${instrument.id} (${instrument.name})`)
-          .join(', '),
-        INSTRUMENT_IDS,
-      ),
+      instrumentId: str(INSTRUMENT_LIST, INSTRUMENT_IDS),
     },
     ['instrumentId'],
   ),
