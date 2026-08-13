@@ -312,6 +312,10 @@ interface Occupied {
   readonly label: string;
   readonly start: number;
   readonly end: number;
+  /** Whether this block is another COPY of the pattern being placed. It decides
+   *  which advice the refusal gives, and it is knowable exactly: a block carries
+   *  the id of the pattern it was cut from. */
+  readonly samePattern: boolean;
 }
 
 /** The earliest tick at or after this one that the caller can actually SAY. A
@@ -399,6 +403,19 @@ function lengthPhrase(length: number, unit: Unit, bars: BarConverter | null): st
  * is a sentence that says what to do BEFORE the mess exists, in the units the
  * caller used and with the pattern's own length in it.
  *
+ * ⚠ THE ADVICE BRANCHES ON *WHAT* IS IN THE WAY, because one recovery is right
+ * and the other is a loop. Spacing the copies apart is the answer when the
+ * obstacle is another copy of the same pattern — the caller asked for the same
+ * thing twice too close together. It is the WRONG answer when the obstacle is a
+ * different pattern: those are two PARTS, they are meant to sound at the same
+ * time, and moving one later does not make it play with the other. The same
+ * 2026-08-11 run ended with a twelve-bar rhythm pattern laid over four one-bar
+ * chord blocks on one track — told to space them, it would have pushed the
+ * chords to bar 13 and destroyed the arrangement rather than putting the second
+ * part on a second track. We can always tell the two apart: every block carries
+ * the id of the pattern it was cut from, and the call names the pattern being
+ * placed.
+ *
  * NOT a LIB-GAP. Placements have to be expressible anywhere the caller points
  * and the arrangement grid relies on that; this refuses a CALL, it does not
  * mask a defect, so there is no deletion condition to write down.
@@ -409,6 +426,7 @@ function wouldStack(
   length: number,
   unit: Unit,
   bars: BarConverter | null,
+  roomForAnotherTrack: boolean,
 ): string | null {
   // Sorted so "what is in front of this one" is the question the loop asks. The
   // caller's order is not touched anywhere else — the labels below carry the
@@ -425,6 +443,11 @@ function wouldStack(
   const kept: { asked: number; tick: number }[] = [];
   let selfCollisions = 0;
   let trackCollisions = 0;
+  // Split by WHAT was in the way, not just how often: a call can be blocked by
+  // an earlier copy of itself at one position and by somebody else's part at
+  // another, and both recoveries then apply.
+  let sameOnTrack = 0;
+  let otherOnTrack = 0;
   for (const position of order) {
     const start = position.tick;
     const end = start + length;
@@ -449,6 +472,8 @@ function wouldStack(
     const blocking = occupied.find((block) => block.start < end && block.end > start);
     if (blocking) {
       trackCollisions += 1;
+      if (blocking.samePattern) sameOnTrack += 1;
+      else otherOnTrack += 1;
       reasons.push(
         `${blocking.label} is already on this track until ${unit} ${freesUpAt(blocking.end, unit, bars)}`,
       );
@@ -471,24 +496,42 @@ function wouldStack(
       : selfCollisions === 0
         ? 'what you asked for would land on top of a block already on this track'
         : 'the copies you asked for would land on top of each other and on top of blocks already on this track';
-  // The spacing is only worth saying when the copies are the problem: told to
-  // space them when the obstacle is somebody else's block, a caller re-spaces a
-  // list that was already correctly spaced and is refused again.
+  // The spacing is worth saying exactly when the obstacle is THIS pattern —
+  // another copy in this call, or a copy already on the track. Told to space a
+  // list whose obstacle was somebody else's part, a caller re-spaces something
+  // that was already correctly spaced and is refused again.
   const step = spacingPhrase(length, unit, bars);
   let spacing = '';
-  if (selfCollisions > 0) {
-    // Stepped off a SURVIVOR — a self collision needs one in front of it, so
-    // `kept` is not empty here. `order[0]` would not do: the earliest position
-    // asked for may itself be one of the refused ones.
+  if (selfCollisions > 0 || sameOnTrack > 0) {
+    // Stepped off a SURVIVOR where there is one — `order[0]` would not do, since
+    // the earliest position asked for may itself be refused. A self collision
+    // guarantees a survivor; a collision with a copy ALREADY on the track does
+    // not (every position asked for can land on it), and there the walk starts
+    // from the earliest position asked for and clears the same ground.
     const from = kept[0];
-    const slot = nextFreeSlot(from.tick + length, length, occupied, unit, bars);
-    const free = `${unit} ${from.asked} the next free ${unit} is ${slot}.`;
+    const slot = nextFreeSlot(from ? from.tick + length : order[0].tick, length, occupied, unit, bars);
+    const free = from
+      ? `from ${unit} ${from.asked} the next free ${unit} is ${slot}`
+      : `the next free ${unit} is ${slot}`;
     // Without a step the caller can take, the free slot carries the sentence on
     // its own — see `spacingPhrase`.
     spacing =
-      step === null ? ` From ${free}` : ` Space the copies ${step} apart: from ${free}`;
+      step === null
+        ? ` ${free.charAt(0).toUpperCase()}${free.slice(1)}.`
+        : ` Space the copies ${step} apart: ${free}.`;
   }
-  return `This pattern is ${size} long and a block is never nudged aside, so ${what}. Nothing was placed.${spacing} ${namedRefusals(collisions)}`;
+  // A DIFFERENT pattern in the way is a different problem with a different
+  // answer, and it gets its own sentence rather than a variation on the spacing
+  // one. The cap is checked rather than assumed: advice to add a track on a
+  // composition that cannot hold another is a second refusal the caller pays a
+  // round trip to discover.
+  const secondTrack =
+    otherOnTrack === 0
+      ? ''
+      : roomForAnotherTrack
+        ? ' A block in the way is a different pattern, not another copy of this one — two parts that sound at the same time belong on two tracks, so add one with composition_add_track and place this there.'
+        : ` A block in the way is a different pattern, not another copy of this one — two parts that sound at the same time belong on two tracks, but this composition is already at the ${MAX_COMPOSITION_TRACKS}-track cap, so one of them has to move to another track or go.`;
+  return `This pattern is ${size} long and a block is never nudged aside, so ${what}. Nothing was placed.${spacing}${secondTrack} ${namedRefusals(collisions)}`;
 }
 
 /**
@@ -537,7 +580,7 @@ const placePattern = defineTool<{
 }>({
   name: 'composition_place_pattern',
   description:
-    'Place a library pattern onto a track, at one or more points in time — all of it one undo step. Say where with `atBars` or with `atTicks`, exactly one of the two. BARS ARE COUNTED FROM 1 — bar 1 is the start of the composition — and `atBars` is how a pattern is laid out over a form: the seven bars a C7 covers in a twelve-bar blues are one call, `atBars: [1, 2, 3, 4, 7, 8, 11]`. Bar length comes from the composition\'s own time signature, so a 6/8 bar is not a 4/4 one. `atTicks` is for a start that is not on a barline — a pickup, a part entering on the and-of-four. A block starts exactly where it is put and is as long as its pattern; nothing is ever nudged aside to make room. Two positions closer together than the pattern is long, or one landing on a block already on the track, refuse the WHOLE call before anything is written — the refusal names the length and a spacing that works. Blocks that merely touch are fine: one may start exactly where the one before it ends. Each block is a deep COPY of the pattern taken at placement time: editing the pattern afterwards does not change the blocks, and editing a block does not change the pattern. Every block that lands comes back with its tick and the `endTick` to space the next one from, plus its bar wherever bars convert exactly in this signature.',
+    'Place a library pattern onto a track, at one or more points in time — all of it one undo step. Say where with `atBars` or with `atTicks`, exactly one of the two. BARS ARE COUNTED FROM 1 — bar 1 is the start of the composition — and `atBars` is how a pattern is laid out over a form: the seven bars a C7 covers in a twelve-bar blues are one call, `atBars: [1, 2, 3, 4, 7, 8, 11]`. Bar length comes from the composition\'s own time signature, so a 6/8 bar is not a 4/4 one. `atTicks` is for a start that is not on a barline — a pickup, a part entering on the and-of-four. A block starts exactly where it is put and is as long as its pattern; nothing is ever nudged aside to make room. Two positions closer together than the pattern is long, or one landing on a block already on the track, refuse the WHOLE call before anything is written — the refusal names the length, the block in the way and what to do: a spacing that works when what is in the way is another copy of this same pattern, a SECOND TRACK when it is a different pattern, because two parts that sound at the same time cannot share a track. Blocks that merely touch are fine: one may start exactly where the one before it ends. Each block is a deep COPY of the pattern taken at placement time: editing the pattern afterwards does not change the blocks, and editing a block does not change the pattern. Every block that lands comes back with its tick and the `endTick` to space the next one from, plus its bar wherever bars convert exactly in this signature.',
   parameters: obj(
     {
       patternId: str('From read_pattern_library.'),
@@ -616,10 +659,17 @@ const placePattern = defineTool<{
           label: placement.id,
           start: placement.startTick,
           end: placementEndTick(placement),
+          // The snapshot keeps the SOURCE pattern's id (the lib's
+          // `snapshotPatternForPlacement` spreads it), so this is the same
+          // provenance `read_composition` reports as `fromPatternId` — a block
+          // cut from this very pattern, however much its copy has been edited
+          // since.
+          samePattern: placement.patternSnapshot.id === patternId,
         })),
         blockLength,
         inBars ? 'bar' : 'tick',
         bars,
+        composition.tracks.length < MAX_COMPOSITION_TRACKS,
       );
       if (stacked !== null) return fail(stacked);
     }

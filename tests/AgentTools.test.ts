@@ -1738,6 +1738,107 @@ describe('arranging', () => {
     });
 
     /**
+     * WHICH ADVICE, and the pair below is the whole of it. The obstacle is a
+     * block either way and the recoveries are opposites, so a refusal that gave
+     * one sentence in both cases had to be wrong half the time.
+     *
+     * Here the obstacle is ANOTHER COPY of the pattern being placed: the caller
+     * asked for the same thing twice, too close together, and spacing is the
+     * answer. Nothing survives this call — every position asked for lands on the
+     * block already down — so the free slot is walked from the earliest position
+     * ASKED FOR rather than off a survivor there is none of.
+     */
+    it('tells copies of the same pattern to space themselves apart', () => {
+      const patternId = fourBarPattern('Four bar pad');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      const sitting = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1] })).placed,
+      )[0].placementId as string;
+
+      const refused = reason(
+        call('composition_place_pattern', { patternId, trackId, atBars: [2] }),
+      );
+      // The block in the way, and where it lets go.
+      expect(refused).toContain(`bar 2: ${sitting} is already on this track until bar 5.`);
+      expect(refused).toContain('Space the copies 4 bars apart: the next free bar is 5.');
+      // A second track is the wrong advice here: these are the same part twice
+      // over, and two tracks would play it against itself.
+      expect(refused).not.toContain('composition_add_track');
+
+      // And the advice is worth following: accepted first time.
+      expect(
+        rows(value(call('composition_place_pattern', { patternId, trackId, atBars: [5] })).placed),
+      ).toHaveLength(1);
+    });
+
+    /**
+     * THE OTHER HALF, and the one the 2026-08-11 run needed. It ended with a
+     * twelve-bar rhythm pattern laid straight over four one-bar chord blocks on
+     * a single track. Told to space them, the only move available is to push the
+     * chords past bar 12 — which does not make the two parts play together, it
+     * destroys the arrangement. Two parts that sound at the same time need two
+     * tracks, and nothing but the pattern each block was cut from can tell this
+     * case from the one above.
+     */
+    it('tells a different pattern in the way to go on a second track', () => {
+      const pad = fourBarPattern('Four bar pad');
+      const stab = seedPattern('One bar stab');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      const padId = rows(
+        value(call('composition_place_pattern', { patternId: pad, trackId, atBars: [1] })).placed,
+      )[0].placementId as string;
+
+      const refused = reason(
+        call('composition_place_pattern', { patternId: stab, trackId, atBars: [2, 3] }),
+      );
+      // Still names the block and where it ends — the advice changed, not the
+      // account of what is in the way.
+      expect(refused).toContain(`bar 2: ${padId} is already on this track until bar 5.`);
+      expect(refused).toContain('a different pattern, not another copy of this one');
+      expect(refused).toContain('belong on two tracks');
+      // Named, because a sentence that says "another track" without saying how
+      // costs the round trip this refusal exists to save.
+      expect(refused).toContain('composition_add_track');
+      expect(refused).not.toContain('Space the copies');
+
+      // And it is advice that can be taken.
+      const other = value(call('composition_add_track', { name: 'Stabs' })).trackId as string;
+      expect(
+        rows(
+          value(call('composition_place_pattern', { patternId: stab, trackId: other, atBars: [2, 3] }))
+            .placed,
+        ),
+      ).toHaveLength(2);
+    });
+
+    /**
+     * AND NOT A TRACK THAT CANNOT BE ADDED. The cap is refused at the seam and
+     * is a memory limit, so advice to add a track on a full composition is a
+     * second refusal the caller pays a round trip to discover — the one thing
+     * worse than no advice.
+     */
+    it('does not offer a second track a composition at the cap cannot hold', () => {
+      const pad = fourBarPattern('Four bar pad');
+      const stab = seedPattern('One bar stab');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      // One track already; fill the rest.
+      for (let n = 1; n < MAX_COMPOSITION_TRACKS; n += 1) {
+        value(call('composition_add_track', {}));
+      }
+      value(call('composition_place_pattern', { patternId: pad, trackId, atBars: [1] }));
+
+      const refused = reason(
+        call('composition_place_pattern', { patternId: stab, trackId, atBars: [2] }),
+      );
+      expect(refused).toContain('a different pattern, not another copy of this one');
+      expect(refused).toContain(`${MAX_COMPOSITION_TRACKS}-track cap`);
+      expect(refused).not.toContain('composition_add_track');
+    });
+
+    /**
      * NOT OVER-BROAD, and this is where an off-by-one would show. Twelve
      * one-bar blocks at twelve consecutive bars is the commonest arrangement
      * there is: each starts exactly where the last ends, which is abutting and
@@ -3793,6 +3894,11 @@ describe('what a track is made of', () => {
     const description = readComposition?.description ?? '';
     expect(description).toContain('distinctPatterns');
     expect(description).toContain('madeOf');
+    expect(description).toContain('emptyBars');
+    // And the rule a reader would otherwise get wrong: a block covers its whole
+    // length, so bars between two blocks are not gaps merely because no block
+    // starts on them.
+    expect(description).toMatch(/covers every bar from its start to its end/i);
     // And what the number MEANS, not just that it is there: a field name alone
     // does not say that 1 is the diagnosis.
     expect(description).toMatch(/one chord for twelve bars/i);

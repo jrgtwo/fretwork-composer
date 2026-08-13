@@ -226,10 +226,95 @@ function trackMadeOf(placements: Placements, barOf: ((tick: number) => number) |
   }));
 }
 
+/**
+ * THE HOLES. The other half of `madeOf`, and the half nothing reported.
+ *
+ * The 2026-08-11 backing-track run finished and called itself done with a guitar
+ * track holding a one-bar chord pattern at bars 1, 4, 7 and 10 of a twelve-bar
+ * form. Bars 2, 3, 5, 6, 8, 9, 11 and 12 had no chord block on them at all — two
+ * thirds of the tune silent on the part carrying the harmony — and every field
+ * in every reply read healthy: four blocks, all placed, `distinctPatterns: 2`.
+ * Overlaps are refused up front and gaps had nothing watching them, which is the
+ * wrong way round: a stack is audible and a hole is not.
+ *
+ * A BLOCK COVERS ITS WHOLE LENGTH, not the bar it starts on — a two-bar pattern
+ * at bars 1, 3 and 5 covers bars 1 to 6 and has no gap in it. Bar numbering is
+ * `barMath`'s, so the ends line up with `startBar`/`endBar` on the blocks: the
+ * last bar a block sounds in is the bar the tick before its exclusive `endTick`
+ * falls in.
+ *
+ * SCOPED TO THE COMPOSITION'S SPAN, which is where the arrangement ends and not
+ * where this track does — a track that stops at bar 4 of a twelve-bar tune has
+ * eight empty bars, and that is the whole point. A track that runs to the end of
+ * the longest one is what defines the span, so it can never report a gap past
+ * its own last block.
+ *
+ * ⚠ SILENT IN BOTH DEGENERATE CASES, because this read is charged for on every
+ * composition call and a field that is loud when there is nothing to say is
+ * worse than no field. A track with no blocks already says so twice over
+ * (`distinctPatterns: 0`, an empty `blocks`), so listing every bar of the
+ * composition against it is the same fact a third time and the longest string in
+ * the reply. A track covered end to end says nothing at all.
+ */
+interface BarRange {
+  readonly from: number;
+  readonly to: number;
+}
+
+/** Past this many ranges the list stops being read and starts being paid for.
+ *  What is dropped is counted instead, in BARS — the number that says how much
+ *  of the tune is missing — because a count of ranges answers no question. */
+const MAX_GAP_RANGES = 12;
+
+function gapRanges(
+  placements: Placements,
+  barOf: (tick: number) => number,
+  lastBar: number,
+): BarRange[] {
+  const gaps: BarRange[] = [];
+  // The first bar not yet accounted for. Blocks arrive sorted by `startTick`
+  // (the seam keeps them so), and `Math.max` covers the one case that ordering
+  // does not settle: a short block sitting inside a long one must not wind the
+  // cursor backwards. Walked as INTERVALS rather than a bar-by-bar array
+  // because a block's start tick has no upper bound — a single placement far
+  // down the timeline would otherwise allocate a span of the arrangement.
+  let cursor = 1;
+  for (const placement of placements) {
+    const from = barOf(placement.startTick);
+    // INCLUSIVE, by the same arithmetic `blocks` reports `endBar` with.
+    const to = barOf(Math.max(placement.startTick, placementEndTick(placement) - 1));
+    if (from > cursor) gaps.push({ from: cursor, to: Math.min(from - 1, lastBar) });
+    cursor = Math.max(cursor, to + 1);
+    if (cursor > lastBar) break;
+  }
+  if (cursor <= lastBar) gaps.push({ from: cursor, to: lastBar });
+  return gaps.filter((gap) => gap.from <= gap.to);
+}
+
+/** The gaps as the shortest true sentence: ranges, and a count for whatever a
+ *  reader would have stopped reading. Null where there is nothing to say. */
+function emptyBarsPhrase(
+  placements: Placements,
+  barOf: (tick: number) => number,
+  lastBar: number,
+): string | null {
+  if (lastBar < 1 || placements.length === 0) return null;
+  const gaps = gapRanges(placements, barOf, lastBar);
+  if (gaps.length === 0) return null;
+  const shown = gaps
+    .slice(0, MAX_GAP_RANGES)
+    .map((gap) => (gap.from === gap.to ? `${gap.from}` : `${gap.from}-${gap.to}`))
+    .join(', ');
+  const hidden = gaps
+    .slice(MAX_GAP_RANGES)
+    .reduce((bars, gap) => bars + (gap.to - gap.from + 1), 0);
+  return hidden === 0 ? shown : `${shown}, and ${hidden} more empty bars`;
+}
+
 const readComposition = defineTool<Record<string, never>>({
   name: 'read_composition',
   description:
-    'The open composition: its tracks, its mix, and every block placed on it with its id, and the bars it starts and ends in as well as the ticks. Each track also says what it is MADE OF — `distinctPatterns`, how many different patterns it plays (counted by the pattern each block was CUT FROM, so blocks edited apart afterwards still count as one), and `madeOf`, which bars each of them sits at — so a part that follows the changes can be told apart from one pattern repeated across the whole form. `distinctPatterns: 1` against a twelve-bar track is one chord for twelve bars. Also reports what the arrangement is COSTING — notes on strings a track\'s instrument has not got, blocks written for another instrument, and notes a transposition has pushed off the neck (which are dropped from playback with nothing on screen to show it).',
+    'The open composition: its tracks, its mix, and every block placed on it with its id, and the bars it starts and ends in as well as the ticks. Each track also says what it is MADE OF — `distinctPatterns`, how many different patterns it plays (counted by the pattern each block was CUT FROM, so blocks edited apart afterwards still count as one), and `madeOf`, which bars each of them sits at — so a part that follows the changes can be told apart from one pattern repeated across the whole form. `distinctPatterns: 1` against a twelve-bar track is one chord for twelve bars. `emptyBars` is the other half of that: the bars inside the composition\'s span where this track has NO block, as ranges — a one-bar chord pattern at bars 1, 4, 7 and 10 of a twelve-bar form comes back `"2-3, 5-6, 8-9, 11-12"`, eight bars with no harmony under them. A block covers every bar from its start to its end, so a two-bar pattern at bars 1, 3, 5 has no gap; the field is absent when a track is covered end to end and on a track with no blocks at all. Also reports what the arrangement is COSTING — notes on strings a track\'s instrument has not got, blocks written for another instrument, and notes a transposition has pushed off the neck (which are dropped from playback with nothing on screen to show it).',
   parameters: noArgs,
   run: () => {
     const composition = getEditingComposition();
@@ -244,6 +329,12 @@ const readComposition = defineTool<Record<string, never>>({
     // reply and this one can never disagree about whether bars exist.
     const bars = barConverter(composition.timeSignature);
     const barOf = bars ? bars.toBar : null;
+    const totalTicks = totalDurationTicks();
+    // The last bar the ARRANGEMENT reaches, which is the span every track's gaps
+    // are measured against. `totalDurationTicks` is the end of the longest
+    // track and is exclusive, so the last sounding bar is the bar the tick
+    // before it falls in; an empty composition has no span at all.
+    const lastBar = barOf && totalTicks > 0 ? barOf(totalTicks - 1) : 0;
     return ok({
       compositionId: composition.id,
       name: composition.name,
@@ -259,6 +350,11 @@ const readComposition = defineTool<Record<string, never>>({
         const instrumentId = trackInstrumentId(track);
         const voice = readTrackVoiceRef(track);
         const madeOf = trackMadeOf(track.placements, barOf);
+        // Omitted entirely where a bar is not a whole number of ticks, exactly
+        // as `madeOf` and the blocks' `startBar`/`endBar` are: there are no bar
+        // numbers to report there, and a gap list in ticks would be a second
+        // answer to a question this read has already declined once.
+        const emptyBars = barOf ? emptyBarsPhrase(track.placements, barOf, lastBar) : null;
         return {
           trackId: track.id,
           name: track.name,
@@ -279,6 +375,8 @@ const readComposition = defineTool<Record<string, never>>({
           // disagree about what counts as one pattern.
           distinctPatterns: madeOf.length,
           madeOf,
+          // Present only when there IS a hole — see `emptyBarsPhrase`.
+          ...(emptyBars === null ? {} : { emptyBars }),
           blocks: track.placements.map((placement): JsonValue => {
             const endTick = placementEndTick(placement);
             return {
