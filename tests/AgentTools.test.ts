@@ -1744,9 +1744,9 @@ describe('arranging', () => {
      *
      * Here the obstacle is ANOTHER COPY of the pattern being placed: the caller
      * asked for the same thing twice, too close together, and spacing is the
-     * answer. Nothing survives this call — every position asked for lands on the
-     * block already down — so the free slot is walked from the earliest position
-     * ASKED FOR rather than off a survivor there is none of.
+     * answer. Nothing in THIS call is a copy of anything else in it — the copy
+     * in the way is already on the track — so the step is stated as a property
+     * of the pattern, and the walk starts from the position that was REFUSED.
      */
     it('tells copies of the same pattern to space themselves apart', () => {
       const patternId = fourBarPattern('Four bar pad');
@@ -1761,7 +1761,12 @@ describe('arranging', () => {
       );
       // The block in the way, and where it lets go.
       expect(refused).toContain(`bar 2: ${sitting} is already on this track until bar 5.`);
-      expect(refused).toContain('Space the copies 4 bars apart: the next free bar is 5.');
+      // The number is stepped off bar 2 — the position that was turned away —
+      // and the sentence does not call one position "the copies".
+      expect(refused).toContain(
+        'Copies of this pattern have to be 4 bars apart: from bar 2 the next free bar is 5.',
+      );
+      expect(refused).not.toContain('Space the copies');
       // A second track is the wrong advice here: these are the same part twice
       // over, and two tracks would play it against itself.
       expect(refused).not.toContain('composition_add_track');
@@ -1802,6 +1807,12 @@ describe('arranging', () => {
       // costs the round trip this refusal exists to save.
       expect(refused).toContain('composition_add_track');
       expect(refused).not.toContain('Space the copies');
+      // AND THE OTHER READING, because a foreign block in the way is not always
+      // a part meant to sound with this one — a chorus sent to bar 4 of a verse
+      // that runs to bar 5 is the same refusal, and a second track there makes
+      // two parts play over each other. No spacing sentence carried a number,
+      // so this one does.
+      expect(refused).toContain('If it is meant to FOLLOW instead, from bar 2 the next free bar is 5.');
 
       // And it is advice that can be taken.
       const other = value(call('composition_add_track', { name: 'Stabs' })).trackId as string;
@@ -1811,6 +1822,79 @@ describe('arranging', () => {
             .placed,
         ),
       ).toHaveLength(2);
+    });
+
+    /**
+     * THE NUMBER ANSWERS THE POSITION THAT WAS REFUSED, not one that was fine.
+     *
+     * Spacing off the earliest SURVIVOR is right only when the obstacle is
+     * another copy in this very call — there the survivors are the run of
+     * copies and the next one belongs a length past the first. When the
+     * obstacle is a copy already on the track the survivors are unrelated
+     * ground the caller already had right, and stepping off one names a bar
+     * seven bars from the answer while the same refusal states the real one two
+     * sentences later. Two numbers, one wrong, in one reply.
+     */
+    it('walks the free slot from the refused position, not from one that survived', () => {
+      const patternId = fourBarPattern('Four bar pad');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      const sitting = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1] })).placed,
+      )[0].placementId as string;
+
+      // Bar 2 lands on what is already there; bar 9 is perfectly fine, and is
+      // the survivor an anchor on `kept[0]` would have answered about.
+      const refused = reason(
+        call('composition_place_pattern', { patternId, trackId, atBars: [2, 9] }),
+      );
+      expect(refused).toContain(`bar 2: ${sitting} is already on this track until bar 5.`);
+      expect(refused).toContain(
+        'Copies of this pattern have to be 4 bars apart: from bar 2 the next free bar is 5.',
+      );
+      // The two numbers in the reply agree, which is the whole of the bug.
+      expect(refused).not.toContain('from bar 9');
+    });
+
+    /**
+     * BOTH OBSTACLES UNDER ONE POSITION, which is the 2026-08-11 track's own
+     * shape: a long block laid over several short ones. Classifying only the
+     * FIRST block under a position drops whichever sentence the later blocks
+     * would have earned — and the one that starts soonest here is the copy, so
+     * the second-track advice this branch exists to give is the one lost.
+     */
+    it('classifies every block under a position, not just the earliest', () => {
+      const pad = fourBarPattern('Four bar pad');
+      const stab = seedPattern('One bar stab');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+      const padId = rows(
+        value(call('composition_place_pattern', { patternId: pad, trackId, atBars: [1] })).placed,
+      )[0].placementId as string;
+      const stabId = rows(
+        value(call('composition_place_pattern', { patternId: stab, trackId, atBars: [5] })).placed,
+      )[0].placementId as string;
+
+      // Bars 2 to 5: over the pad copy (bars 1-4) AND over the stab (bar 5).
+      const refused = reason(
+        call('composition_place_pattern', { patternId: pad, trackId, atBars: [2] }),
+      );
+      // ⚠ THE BLOCK NAMED IS THE ONE THAT ENDS LAST, not the one that starts
+      // first. The pad starts soonest, but naming it answers "until bar 5" in
+      // the same reply whose advice says bar 6 — and a caller that follows the
+      // reason sentence retries at bar 5, lands on the stab, and pays the round
+      // trip this refusal exists to save.
+      expect(refused).toContain(`bar 2: ${stabId} is already on this track until bar 6.`);
+      expect(refused).not.toContain(padId);
+      // …and both recoveries are given, because both obstacles are real.
+      expect(refused).toContain(
+        'Copies of this pattern have to be 4 bars apart: from bar 2 the next free bar is 6.',
+      );
+      expect(refused).toContain('belong on two tracks');
+      expect(refused).toContain('composition_add_track');
+      // The free bar was already stated by the spacing sentence; saying it
+      // again under the second-track one is the same number twice.
+      expect(refused).not.toContain('If it is meant to FOLLOW instead');
     });
 
     /**
@@ -2086,7 +2170,38 @@ describe('arranging', () => {
       );
       expect(refused).toContain('bar 2: the copy you asked for at bar 1 is not free until bar 5.');
       expect(refused).not.toContain('bar 1: ');
-      expect(refused).toContain('from bar 1 the next free bar is 5');
+      // Anchored on bar 1, the earliest SURVIVOR — and the free bar is 9 rather
+      // than 5 because bar 5 is a survivor of this same call. See the test
+      // below: advice naming a bar the caller is about to re-send is a second
+      // refusal.
+      expect(refused).toContain('from bar 1 the next free bar is 9');
+    });
+
+    /**
+     * THE FREE SLOT IS FREE OF THIS CALL'S OWN SURVIVORS TOO. "Nothing was
+     * placed", so the caller's next move is to re-send the positions that
+     * survived — and a slot naming one of those is ground the caller is about
+     * to occupy itself, which is the second refusal the sentence exists to save.
+     * Nothing on the track here, so `occupied` alone cannot see it at all.
+     */
+    it('does not offer a bar this same call is keeping', () => {
+      const patternId = seedPattern('One bar riff');
+      value(call('composition_open_blank', { name: 'Song' }));
+      const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
+
+      // Bar 1 sent twice: the duplicate is refused, bars 1 and 2 survive.
+      const refused = reason(
+        call('composition_place_pattern', { patternId, trackId, atBars: [1, 1, 2] }),
+      );
+      expect(refused).toContain('bar 1: the copy you asked for at bar 1 is not free until bar 2.');
+      expect(refused).toContain('Space the copies 1 bar apart: from bar 1 the next free bar is 3.');
+      expect(refused).not.toContain('next free bar is 2');
+
+      // And the advice is accepted first time, survivors and all.
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 2, 3] })).placed,
+      );
+      expect(placed.map((block) => block.atBar)).toEqual([1, 2, 3]);
     });
 
     /**
@@ -3919,5 +4034,377 @@ describe('what a track is made of', () => {
     // Still one pattern, which is the fact this read exists to state and does
     // not depend on the units.
     expect(track.distinctPatterns).toBe(1);
+  });
+
+  /**
+   * THE HOLES, which nothing used to report.
+   *
+   * Overlaps are refused before they are written and gaps had nothing watching
+   * them at all, which is backwards: a stack is audible and a hole is not. The
+   * 2026-08-11 run shipped a twelve-bar blues whose chord part sounded in four
+   * bars out of twelve, and every field in the reply read healthy.
+   */
+  describe('the bars a track plays nothing in', () => {
+    /** A pattern `bars` bars long. Length fits the content and rounds UP to a
+     *  whole bar, so a note in the last bar is what makes it that long. */
+    const barsLong = (name: string, bars: number): string => {
+      const patternId = seedPattern(name);
+      if (bars > 1) {
+        value(
+          call('pattern_stamp_notes', {
+            notes: [{ stringIndex: 0, fret: 7, tick: BAR * (bars - 1), durationTicks: PPQ }],
+          }),
+        );
+      }
+      return patternId;
+    };
+
+    /**
+     * THE RUN'S OWN ARRANGEMENT, rebuilt. The bass is what makes the composition
+     * twelve bars long — gaps are measured against the span of the ARRANGEMENT,
+     * not of the track, or a part that stops early would look complete.
+     */
+    it('names the bars a one-bar chord pattern at bars 1, 4, 7 and 10 leaves silent', () => {
+      const bass = barsLong('Blues Bass Line', 2);
+      const chords = barsLong('Blues Guitar Chords', 1);
+      const bassTrack = openSong();
+      value(call('composition_rename_track', { trackId: bassTrack, name: 'Bass' }));
+      const guitar = value(call('composition_add_track', { name: 'Guitar' })).trackId as string;
+      value(
+        call('composition_place_pattern', {
+          patternId: bass,
+          trackId: bassTrack,
+          atBars: [1, 3, 5, 7, 9, 11],
+        }),
+      );
+      value(
+        call('composition_place_pattern', {
+          patternId: chords,
+          trackId: guitar,
+          atBars: [1, 4, 7, 10],
+        }),
+      );
+
+      // Eight bars of a twelve-bar form with no chord under them — as ranges,
+      // because this read is paid for on every composition call.
+      expect(trackNamed('Guitar').emptyBars).toBe('2-3, 5-6, 8-9, 11-12');
+      // And the healthy-looking number that hid it, unchanged: how many
+      // patterns a track plays says nothing about whether they cover it. One
+      // pattern placed four times reads exactly as healthy as the run's own
+      // two did.
+      expect(trackNamed('Guitar').distinctPatterns).toBe(1);
+      // The bass covers the form end to end, and a track with no hole in it is
+      // silent rather than saying so at length.
+      expect(trackNamed('Bass').emptyBars).toBeUndefined();
+    });
+
+    /**
+     * THE EASY THING TO GET WRONG. A block covers every bar from its start to
+     * its end, not the bar it starts on — measured by start bars, a two-bar
+     * pattern at 1, 3 and 5 would report bars 2, 4 and 6 as empty, which is
+     * exactly the arrangement the spacing rule asks for.
+     */
+    it('counts a block over every bar it covers, not just the bar it starts on', () => {
+      const twoBar = barsLong('Two bar riff', 2);
+      const stab = barsLong('Late stab', 1);
+      const riff = openSong();
+      value(call('composition_rename_track', { trackId: riff, name: 'Riff' }));
+      const other = value(call('composition_add_track', { name: 'Stabs' })).trackId as string;
+      value(call('composition_place_pattern', { patternId: twoBar, trackId: riff, atBars: [1, 3, 5] }));
+      // Stretches the arrangement to bar 8, so the riff track HAS bars it could
+      // be missing — without it, "covered" and "past the end" are the same
+      // answer and the test cannot tell them apart.
+      value(call('composition_place_pattern', { patternId: stab, trackId: other, atBars: [8] }));
+
+      // Bars 1-6 are covered, so the only hole is what comes after them.
+      expect(trackNamed('Riff').emptyBars).toBe('7-8');
+    });
+
+    /** The front of the span, where an off-by-one would hide: bars are counted
+     *  FROM 1, so a part entering at bar 3 has bars 1 and 2 empty and not bars
+     *  0 and 1 — nor bar 1 alone. */
+    it('counts the bars before a part enters', () => {
+      const patternId = barsLong('Riff', 1);
+      const late = openSong();
+      value(call('composition_rename_track', { trackId: late, name: 'Late' }));
+      value(call('composition_place_pattern', { patternId, trackId: late, atBars: [3, 4] }));
+
+      expect(trackNamed('Late').emptyBars).toBe('1-2');
+    });
+
+    it('says nothing about a track with no blocks, which already says so twice', () => {
+      const patternId = barsLong('Riff', 1);
+      const first = openSong();
+      value(call('composition_add_track', { name: 'Empty' }));
+      value(call('composition_place_pattern', { patternId, trackId: first, atBars: [1, 2, 3, 4] }));
+
+      const empty = trackNamed('Empty');
+      // `distinctPatterns: 0` and an empty `blocks` are the answer already;
+      // listing all four bars against it would be the same fact a third time
+      // and the longest string in the reply.
+      expect(empty.distinctPatterns).toBe(0);
+      expect(empty.emptyBars).toBeUndefined();
+    });
+
+    it('says nothing about a track covered end to end', () => {
+      const patternId = barsLong('Riff', 1);
+      const trackId = openSong();
+      value(call('composition_place_pattern', { patternId, trackId, atBars: TWELVE }));
+
+      const track = rows(value(call('read_composition')).tracks)[0];
+      expect(track.emptyBars).toBeUndefined();
+      expect(rows(track.blocks)).toHaveLength(12);
+    });
+
+    /**
+     * COMPACTNESS IS THE REQUIREMENT, not a preference. A bare list is fine for
+     * twelve bars and absurd for two hundred, and a field charged for on every
+     * composition call cannot grow without limit. What is dropped is counted in
+     * BARS rather than in ranges, because how much of the tune is missing is the
+     * question and a count of ranges answers nothing.
+     */
+    it('stops listing ranges and counts the rest, in bars and not in ranges', () => {
+      const patternId = barsLong('Riff', 1);
+      const trackId = openSong();
+      // Every other bar up to 27 — thirteen one-bar holes — and then a block
+      // far down the timeline, which opens a FOUR-bar hole behind it. Both of
+      // the hidden gaps are past the cap and they are different sizes, so a
+      // tail that counted ranges would say 2 where this says 5. Counting the
+      // wrong quantity was invisible against holes that were all one bar wide.
+      const odd = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27];
+      value(call('composition_place_pattern', { patternId, trackId, atBars: [...odd, 32] }));
+
+      expect(rows(value(call('read_composition')).tracks)[0].emptyBars).toBe(
+        '2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, and 5 more empty bars',
+      );
+    });
+
+    /** One dropped bar is "1 more empty bar". The tail is a sentence and a
+     *  plural that does not agree with its own number is where a reader starts
+     *  discounting the rest of the reply. */
+    it('says one hidden bar in the singular', () => {
+      const patternId = barsLong('Riff', 1);
+      const trackId = openSong();
+      // Thirteen one-bar holes: twelve listed, one counted.
+      const odd = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27];
+      value(call('composition_place_pattern', { patternId, trackId, atBars: odd }));
+
+      expect(rows(value(call('read_composition')).tracks)[0].emptyBars).toBe(
+        '2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, and 1 more empty bar',
+      );
+    });
+
+    /**
+     * A TRUNCATED BLOCK COVERS WHAT IT PLAYS, not what its pattern is. The copy
+     * underneath keeps its full length, so a walk that read the SNAPSHOT rather
+     * than the block's own `lengthTicks` would report the trimmed bar as
+     * covered and the hole with it.
+     */
+    it('counts a trimmed block over the length it actually plays', () => {
+      const twoBar = barsLong('Two bar riff', 2);
+      const stab = barsLong('Late stab', 1);
+      const riff = openSong();
+      value(call('composition_rename_track', { trackId: riff, name: 'Riff' }));
+      const other = value(call('composition_add_track', { name: 'Stabs' })).trackId as string;
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId: twoBar, trackId: riff, atBars: [1] }))
+          .placed,
+      )[0].placementId as string;
+      // Stretches the arrangement to bar 4, so the riff track HAS bars it could
+      // be missing.
+      value(call('composition_place_pattern', { patternId: stab, trackId: other, atBars: [4] }));
+      expect(trackNamed('Riff').emptyBars).toBe('3-4');
+
+      value(call('composition_resize_placement', { placementId: placed, lengthTicks: BAR }));
+      expect(trackNamed('Riff').emptyBars).toBe('2-4');
+    });
+
+    /**
+     * THE CURSOR NEVER WINDS BACKWARDS. A block nested inside a longer one is
+     * reachable — editing a block's own copy lengthens it under whatever is
+     * behind it, which is what happens here — and a cursor taken from the last
+     * block rather than the furthest would report a bar the long block covers
+     * as a hole.
+     */
+    it('does not invent a gap under a block nested inside a longer one', () => {
+      const patternId = barsLong('Riff', 1);
+      const trackId = openSong();
+      const placed = rows(
+        value(call('composition_place_pattern', { patternId, trackId, atBars: [1, 2, 5] })).placed,
+      );
+      // The block at bar 1 grows to three bars, swallowing the one at bar 2.
+      value(call('composition_edit_placement', { placementId: placed[0].placementId }));
+      value(
+        call('pattern_stamp_notes', {
+          notes: [{ stringIndex: 0, fret: 7, tick: BAR * 2, durationTicks: PPQ }],
+        }),
+      );
+      value(call('composition_stop_editing_placement', {}));
+
+      const blocks = rows(rows(value(call('read_composition')).tracks)[0].blocks);
+      expect(blocks[0].endBar).toBe(3);
+      expect(blocks[1].endBar).toBe(2);
+      // Bar 3 is covered by the long block; only bar 4 is genuinely empty.
+      expect(rows(value(call('read_composition')).tracks)[0].emptyBars).toBe('4');
+    });
+
+    /**
+     * The same answer the rest of this read gives where a bar is not a whole
+     * number of ticks: nothing. There are no bar numbers to report, and a gap
+     * list in ticks would be a second answer to a question `startBar`,
+     * `endBar` and `madeOf` have all already declined.
+     */
+    it('omits the gaps entirely where bars do not convert exactly', () => {
+      const patternId = barsLong('Riff', 1);
+      const trackId = openSong();
+      value(call('composition_set_settings', { timeSignature: { numerator: 4, denominator: 7 } }));
+      value(call('composition_place_pattern', { patternId, trackId, atTicks: [0, PPQ * 16] }));
+
+      const track = rows(value(call('read_composition')).tracks)[0];
+      expect(track.emptyBars).toBeUndefined();
+      expect(rows(track.blocks)[0].startBar).toBeUndefined();
+    });
+  });
+});
+
+// ------------------------------------------ a track added beside an empty one ---
+
+/**
+ * THE 2026-08-11 BACKING-TRACK RUN, from the other end.
+ *
+ * The composition it started from held exactly ONE track — named 'Guitar 1', on
+ * guitar, with nothing on it. The run left it alone, called
+ * `composition_add_track({name: 'Guitar 1', instrumentId: 'guitar'})`, and
+ * finished with two tracks of that name, one of them empty. Whichever run reads
+ * that document next has to tell them apart by id.
+ *
+ * ⚠ ASSERTED AS A REPLY FIELD AND NOT AS A REFUSAL, deliberately. Two tracks on
+ * one instrument is a real arrangement — a clean rhythm and a distorted lead —
+ * so the track is added either way and the check is on what came back with it.
+ */
+describe('a track added beside an empty one', () => {
+  const openSong = (): string => {
+    value(call('composition_open_blank', { name: 'Blues' }));
+    return rows(value(call('read_composition')).tracks)[0].trackId as string;
+  };
+
+  /** The instrument a blank composition's first track is on, read rather than
+   *  assumed — the tests below need a MATCH and a MISMATCH against it. */
+  const firstInstrument = (): string =>
+    rows(value(call('read_composition')).tracks)[0].instrumentId as string;
+
+  it('names the empty track already on this instrument, and its id', () => {
+    const first = openSong();
+    value(call('composition_rename_track', { trackId: first, name: 'Guitar 1' }));
+    // ⚠ `instrumentId` OMITTED, which is the argument the check must not trust:
+    // the seam picks the default when it is left out, so a comparison made
+    // against the ARGUMENT rather than against the track the seam actually made
+    // would compare against `undefined` and never match. Every other case below
+    // sends one explicitly, so this is the only place that mutation dies.
+    const added = value(call('composition_add_track', { name: 'Guitar 1' }));
+    expect(added.instrumentId).toBe(firstInstrument());
+
+    const warning = added.warning as string;
+    expect(warning).toContain('Guitar 1');
+    // The reply shape on the warning path, pinned the way the clean one is: the
+    // four fields a caller needs and the warning, and nothing else.
+    expect(Object.keys(added).sort()).toEqual(
+      ['instrumentId', 'name', 'trackId', 'tracksRemaining', 'warning'].sort(),
+    );
+    // The ID, which is the only thing that tells two tracks of one name apart
+    // and the only thing the caller can act on.
+    expect(warning).toContain(first);
+    // Both ways out are named: put the part on the track that was already
+    // there — under the name just supplied, which is otherwise the thing the
+    // recovery throws away — or drop the one just added.
+    expect(warning).toContain('composition_rename_track');
+    expect(warning).toContain('composition_remove_track');
+
+    // Added, not refused.
+    expect(rows(value(call('read_composition')).tracks)).toHaveLength(2);
+    expect(added.trackId).not.toBe(first);
+  });
+
+  it('says nothing when the empty track is on a DIFFERENT instrument', () => {
+    // The ordinary shape of a backing track: a bass added to a composition whose
+    // one guitar track is still empty. Warning here would fire on almost every
+    // arrangement ever built, and a field that is always present is one the
+    // caller stops reading.
+    const first = openSong();
+    expect(firstInstrument()).not.toBe('bass');
+    const added = value(call('composition_add_track', { name: 'Bass', instrumentId: 'bass' }));
+    expect(added.warning).toBeUndefined();
+    expect(added.trackId).not.toBe(first);
+  });
+
+  it('says nothing when the track already there has blocks on it', () => {
+    // A second guitar over a guitar part that exists is the case the field must
+    // not fire on: nothing is duplicated and the two tracks are two parts.
+    const patternId = seedPattern('Riff');
+    const first = openSong();
+    const instrumentId = firstInstrument();
+    value(call('composition_place_pattern', { patternId, trackId: first, atBars: [1] }));
+
+    const added = value(call('composition_add_track', { name: 'Guitar 2', instrumentId }));
+    expect(added.warning).toBeUndefined();
+  });
+
+  it('keeps the ordinary reply to the four fields a caller needs', () => {
+    const first = openSong();
+    const patternId = seedPattern('Riff');
+    value(call('composition_place_pattern', { patternId, trackId: first, atBars: [1] }));
+    const added = value(call('composition_add_track', { name: 'Lead' }));
+
+    expect(Object.keys(added).sort()).toEqual(
+      ['instrumentId', 'name', 'trackId', 'tracksRemaining'].sort(),
+    );
+    expect(added.name).toBe('Lead');
+  });
+
+  it('counts the slots left, so the cap is knowable before it refuses', () => {
+    // The cap's own refusal arrives a round trip too late for a job planning
+    // parts. Two tracks exist after this call — the blank composition's own and
+    // the one just added.
+    openSong();
+    const added = value(call('composition_add_track', { name: 'Bass', instrumentId: 'bass' }));
+    expect(added.tracksRemaining).toBe(MAX_COMPOSITION_TRACKS - 2);
+
+    // And it reaches zero exactly where the next call is refused.
+    let last = added;
+    while ((last.tracksRemaining as number) > 0) last = value(call('composition_add_track', {}));
+    expect(last.tracksRemaining).toBe(0);
+    expect(reason(call('composition_add_track', {}))).toContain(
+      `at most ${MAX_COMPOSITION_TRACKS} tracks`,
+    );
+  });
+
+  it('counts the empty tracks on this instrument without listing them all', () => {
+    const first = openSong();
+    const instrumentId = firstInstrument();
+    value(call('composition_rename_track', { trackId: first, name: 'Guitar 1' }));
+    const second = value(call('composition_add_track', { name: 'Guitar 2', instrumentId }));
+    const third = value(call('composition_add_track', { name: 'Guitar 3', instrumentId }));
+    const fourth = value(call('composition_add_track', { name: 'Guitar 4', instrumentId }));
+
+    // The FIRST is named, the way a stacking refusal names a block in the way;
+    // the rest are counted.
+    expect(second.warning as string).toContain(first);
+    expect(second.warning as string).toContain(
+      `so this is a second empty ${instrumentId} track.`,
+    );
+
+    // ⚠ ONE NUMBER, and it counts EVERY empty track on this instrument
+    // including the one just made. The earlier wording said "so this is a
+    // second empty guitar track" and then "(1 other empty guitar track as
+    // well.)" — a reply contradicting itself in consecutive sentences, and the
+    // third track is the third, not the second.
+    const warning = third.warning as string;
+    expect(warning).toContain('Guitar 1');
+    expect(warning).toContain(`so this composition now has 3 empty ${instrumentId} tracks.`);
+    expect(warning).not.toContain('a second empty');
+    // And the count keeps going up rather than being a special case for three.
+    expect(fourth.warning as string).toContain(
+      `so this composition now has 4 empty ${instrumentId} tracks.`,
+    );
   });
 });

@@ -100,6 +100,17 @@ describe('the composition page agent', () => {
     // LIB-GAP(15): a track carries no tuning, so a job must not promise how the
     // arrangement sounds.
     expect(prompt).toMatch(/how it will sound/i);
+    // THE 2026-08-11 RUN'S ANSWER: "'Blues Guitar Chords' (1-bar chord patterns)
+    // at bars 1,4,7,10 (I7-IV7-I7-IV7 progression)" over ONE pattern placed four
+    // times. The report has to come off what came BACK, and the invented claim
+    // is named rather than left to inference.
+    expect(prompt).toMatch(/what the tools RETURNED/i);
+    expect(prompt).toMatch(/chord progression the arrangement does not contain/i);
+    // ⚠ NOT "your last read". `read_composition` is `noArgs`, so every call to
+    // it is identical, and `RESULTS` below forbids repeating a call with reads
+    // included — an answer told to read the document again is an answer told to
+    // break the rule that is prepended to this very prompt.
+    expect(prompt).not.toMatch(/your last read/i);
     // The track cap is a memory limit and refusing is the normal path, not an
     // error to retry.
     expect(prompt).toMatch(/track limit|memory limit/i);
@@ -138,6 +149,16 @@ describe('the composition page agent', () => {
     // The precondition is GONE from the tool, so the rule must not reimpose it:
     // a model told to open something first goes back to the shape that failed.
     expect(SHARED_RULES).toMatch(/Nothing has to be open to ask/i);
+  });
+
+  it('keeps the "describe the arrangement" clause on this PAGE, not in the shared rules', () => {
+    // The mirror of the test above, and the placement decision the fix had to
+    // make: a chord progression is something only an ARRANGEMENT can fail to
+    // contain — the pattern page builds one pattern and has no progression to
+    // misreport — so this belongs in the page section. Without this assertion
+    // both prompt checks above stay green with the clause moved into
+    // `SHARED_RULES`, where it would spend the pattern page's budget too.
+    expect(SHARED_RULES).not.toMatch(/chord progression the arrangement does not contain/i);
   });
 
   it('says a part that follows the changes is more than one pattern', () => {

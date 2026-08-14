@@ -275,9 +275,12 @@ function gapRanges(
   // The first bar not yet accounted for. Blocks arrive sorted by `startTick`
   // (the seam keeps them so), and `Math.max` covers the one case that ordering
   // does not settle: a short block sitting inside a long one must not wind the
-  // cursor backwards. Walked as INTERVALS rather than a bar-by-bar array
-  // because a block's start tick has no upper bound — a single placement far
-  // down the timeline would otherwise allocate a span of the arrangement.
+  // cursor backwards. That state is reachable — editing a block's own copy
+  // lengthens it under whatever is behind it, and `composition_place_pattern`
+  // cannot refuse a built-in whose length this layer never sees. Walked as
+  // INTERVALS rather than a bar-by-bar array because a block's start tick has
+  // no upper bound — a single placement far down the timeline would otherwise
+  // allocate a span of the arrangement.
   let cursor = 1;
   for (const placement of placements) {
     const from = barOf(placement.startTick);
@@ -288,6 +291,11 @@ function gapRanges(
     if (cursor > lastBar) break;
   }
   if (cursor <= lastBar) gaps.push({ from: cursor, to: lastBar });
+  // Belt and braces, both of them: `lastBar` is the arrangement's own end, so
+  // no placement can start past it and no range built above can come out
+  // inverted. They stay because the day `lastBar` stops tracking that end — a
+  // span clamped for display, a track excluded from the total — the honest
+  // failure is a missing range and not a backwards one.
   return gaps.filter((gap) => gap.from <= gap.to);
 }
 
@@ -308,7 +316,9 @@ function emptyBarsPhrase(
   const hidden = gaps
     .slice(MAX_GAP_RANGES)
     .reduce((bars, gap) => bars + (gap.to - gap.from + 1), 0);
-  return hidden === 0 ? shown : `${shown}, and ${hidden} more empty bars`;
+  return hidden === 0
+    ? shown
+    : `${shown}, and ${hidden} more empty bar${hidden === 1 ? '' : 's'}`;
 }
 
 const readComposition = defineTool<Record<string, never>>({
@@ -344,7 +354,7 @@ const readComposition = defineTool<Record<string, never>>({
       groove: compositionGrooveId(),
       masterVolumeDb: composition.masterVolumeDb,
       ticksPerQuarterNote: PPQ,
-      totalDurationTicks: totalDurationTicks(),
+      totalDurationTicks: totalTicks,
       editingBlockId: getEditingPlacementId(),
       tracks: tracks.map((track): JsonValue => {
         const instrumentId = trackInstrumentId(track);

@@ -79,6 +79,24 @@ export const COMPOSITION_WRITE_TOOLS: ReadonlySet<string> = new Set(
  * track carries no tuning, so a bass part in a guitar composition sounds an
  * octave high. A job that promised a sound would be wrong through no fault of
  * its own, and the catalog's templates are worded to avoid the same trap.
+ *
+ * ⚠ THE CLAUSE ABOUT READING THE ANSWER OFF WHAT CAME BACK is the weakest thing
+ * in this file and is written small on purpose. The 2026-08-11 run reported
+ * "'Blues Guitar Chords' (1-bar chord patterns) at bars 1,4,7,10 (I7-IV7-I7-IV7
+ * progression)" over ONE pattern placed four times — one entry in `madeOf`, one
+ * name, four bars. No rule makes a model self-report accurately, so this points
+ * at the material the honest sentence is made of and names the one claim that
+ * run invented. It is a clause on a sentence that already exists rather than a
+ * section, because a paragraph spent on a lever this weak is prompt budget
+ * taken from `LENGTH`, which demonstrably changes what gets BUILT.
+ *
+ * It says TOOLS RETURNED and not "your last read" on purpose. `read_composition`
+ * takes no arguments, so every call to it is byte-identical, and `RESULTS` in
+ * the shared rules — which is prepended to this section and therefore read
+ * first — forbids repeating a call, reads included. Pointing at "your last
+ * read" would either name the OPENING read (the document before anything was
+ * built) or push the run into the repeated read that ended it seven calls in.
+ * Every placement reply already carries the names and the bars.
  */
 const COMPOSITION_PAGE = `# The arrangement
 
@@ -94,7 +112,7 @@ A track's TONE is a voice. \`voice_list_for_track\` is how you find the ones tha
 
 # Your answer
 
-Say what you BUILT — which tracks, how many blocks, how many bars. Never say how it will SOUND: a track carries no tuning of its own, so you cannot know what pitch it comes out at.`;
+Say what you BUILT — which tracks, how many blocks, how many bars — reading it off what the tools RETURNED, the pattern names and the bars you placed them at, and never naming a chord progression the arrangement does not contain. Never say how it will SOUND: a track carries no tuning of its own, so you cannot know what pitch it comes out at.`;
 
 export const COMPOSITION_AGENT: AgentSpec = {
   name: 'composition',

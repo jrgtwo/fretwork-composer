@@ -47,6 +47,7 @@ import {
   findPlacement,
   findTrack,
   getEditingComposition,
+  getTracks,
   listGrooves,
   listTrackInstruments,
   mismatchedPlacements,
@@ -73,6 +74,7 @@ import {
   splitPlacement,
   strandedByInstrument,
   ticksPerBar,
+  trackInstrumentId,
   type GrooveId,
 } from '../../composition/compositionService';
 import { PPQ, findLibraryPattern } from '../../patterns/patternService';
@@ -146,22 +148,80 @@ const openBlank = defineTool<{ name?: string }>({
     })),
 });
 
+/**
+ * The tracks that were already there, on this instrument, with nothing on them.
+ *
+ * ⚠ A REPLY FIELD, NOT A REFUSAL. Two tracks on one instrument is a real
+ * arrangement — a clean rhythm and a distorted lead are exactly that — so this
+ * stays on the line the placement and stamp checks draw: a refusal is for what
+ * is provably impossible, and a fact the caller could not otherwise see at the
+ * moment it matters is what a reply is for.
+ *
+ * The 2026-08-11 backing-track run is what it is for. The composition held ONE
+ * track — named 'Guitar 1', on guitar, empty — and the run left it alone and
+ * added a SECOND 'Guitar 1' on guitar. The finished arrangement has two tracks
+ * of that name, one of them empty, and the next run to read it has to work out
+ * which is which. Nothing said so while there was still a cheap way out.
+ *
+ * The instrument is compared as `trackInstrumentId` RESOLVES it — the id
+ * `read_composition` reports — so a loaded track carrying an id the lib no
+ * longer has is matched by what the caller was told it is, not by what is
+ * stored, and the two replies cannot disagree about which instrument a track is
+ * on.
+ */
 const addTrackTool = defineTool<{ name?: string; instrumentId?: string }>({
   name: 'composition_add_track',
-  description: `Add a track to the open composition. At most ${MAX_COMPOSITION_TRACKS} tracks — that is a memory limit, not a preference: each track loads its own sample bank.`,
+  description: `Add a track to the open composition. At most ${MAX_COMPOSITION_TRACKS} tracks — that is a memory limit, not a preference: each track loads its own sample bank. The reply says how many slots are left, and names an empty track already on the same instrument if there is one.`,
   parameters: obj({
     name: nameOf('What to call it. Omit for the next free "Track n".'),
     instrumentId: str(INSTRUMENT_LIST, INSTRUMENT_IDS),
   }),
-  run: ({ name, instrumentId }) =>
-    fromResult(
-      addTrack(name, instrumentId as (typeof INSTRUMENT_IDS)[number] | undefined),
-      (track) => ({
-        trackId: track.id,
-        name: track.name,
-        instrumentId: track.instrumentId,
-      }),
-    ),
+  run: ({ name, instrumentId }) => {
+    const result = addTrack(name, instrumentId as (typeof INSTRUMENT_IDS)[number] | undefined);
+    if (!result.ok) return fail(result.reason);
+    const track = result.value;
+    // Read the whole composition BACK rather than reasoning from the argument:
+    // `instrumentId` is optional here and the seam picks the default when it is
+    // omitted, so the instrument to compare against is the one the new track
+    // actually got.
+    const tracks = getTracks();
+    const instrument = trackInstrumentId(track);
+    const twins = tracks.filter(
+      (other) =>
+        other.id !== track.id &&
+        other.placements.length === 0 &&
+        trackInstrumentId(other) === instrument,
+    );
+    // Only the FIRST is named, the way a stacking refusal names the block in the
+    // way: the point is that one exists and can be reached by id, and a list of
+    // up to seven ids is prompt budget spent re-reporting a read. The COUNT is
+    // what carries the rest, and it is worded from one number rather than from
+    // two — "a second empty guitar track" followed by "1 other empty guitar
+    // track as well" was a reply disagreeing with itself in consecutive
+    // sentences, which is the failure the rest of this layer exists to stop.
+    const empty = twins.length + 1;
+    const tally =
+      empty === 2
+        ? `so this is a second empty ${instrument} track`
+        : `so this composition now has ${empty} empty ${instrument} tracks`;
+    return ok({
+      trackId: track.id,
+      name: track.name,
+      instrumentId: track.instrumentId,
+      // One number, and it answers the question the cap's refusal otherwise
+      // answers a round trip too late — a job planning parts can see the budget
+      // before it spends the slot rather than after. No clamp: the write above
+      // succeeded, so the seam had a slot free and `tracks` is at most the cap.
+      // `max(…, 1)` is about the other end — a document that vanished between
+      // the write and this read must not report every slot free.
+      tracksRemaining: MAX_COMPOSITION_TRACKS - Math.max(tracks.length, 1),
+      ...(twins.length === 0
+        ? {}
+        : {
+            warning: `Track "${twins[0].name}" (${twins[0].id}) was already on ${instrument} with nothing on it, ${tally}. Two ${instrument} tracks are a real arrangement where they are two different parts — but if this is THAT part, put the blocks on ${twins[0].id}, carry this name over to it with composition_rename_track, and remove this one with composition_remove_track.`,
+          }),
+    });
+  },
 });
 
 const removeTrackTool = defineTool<{ trackId: string }>({
@@ -349,7 +409,10 @@ function freesUpAt(endTick: number, unit: Unit, bars: BarConverter | null): numb
 function nextFreeSlot(
   from: number,
   length: number,
-  occupied: readonly Occupied[],
+  // Only the extent matters here — the label and the provenance are the reason
+  // sentence's business — so this takes the narrower shape and the caller can
+  // hand it the copies THIS call is keeping alongside what is already down.
+  occupied: readonly { readonly start: number; readonly end: number }[],
   unit: Unit,
   bars: BarConverter | null,
 ): number {
@@ -441,6 +504,10 @@ function wouldStack(
   // there — and the surviving subset is itself a placement that would be
   // accepted, so following the list is progress rather than another guess.
   const kept: { asked: number; tick: number }[] = [];
+  // The EARLIEST position that was turned away, which is the one the advice has
+  // to find a home for. Distinct from `kept[0]` and the difference matters: a
+  // survivor is ground the caller already had right.
+  let refused: { asked: number; tick: number } | null = null;
   let selfCollisions = 0;
   let trackCollisions = 0;
   // Split by WHAT was in the way, not just how often: a call can be blocked by
@@ -469,22 +536,37 @@ function wouldStack(
     // that was decidable in the first call. Overlap is STRICT on both sides: a
     // block that starts exactly where another ends abuts it, which is what a
     // normal arrangement is made of.
-    const blocking = occupied.find((block) => block.start < end && block.end > start);
-    if (blocking) {
+    // EVERY block under this position is classified, not just the first. One
+    // position can sit over several — that is the exact shape of the
+    // 2026-08-11 track, one long block over four short ones — and `find`
+    // returns the earliest-starting of them, so a copy of this pattern lying in
+    // front of somebody else's part would swallow the second-track advice this
+    // branch exists to give.
+    const blocking = occupied.filter((block) => block.start < end && block.end > start);
+    if (blocking.length > 0) {
       trackCollisions += 1;
-      if (blocking.samePattern) sameOnTrack += 1;
-      else otherOnTrack += 1;
+      if (blocking.some((block) => block.samePattern)) sameOnTrack += 1;
+      if (blocking.some((block) => !block.samePattern)) otherOnTrack += 1;
+      // The block named is the one that ends LAST, not the one that starts
+      // first. The sentence's number is when this ground frees up, and the
+      // earliest-starting block need not be the one holding it longest: a
+      // one-bar block at bar 1 under a ten-bar block at bar 2 would otherwise
+      // read "until bar 2" in the same reply whose advice says bar 12 — two
+      // numbers, one wrong, which is the shape this whole refusal exists to
+      // stop producing.
+      const furthest = blocking.reduce((worst, block) => (block.end > worst.end ? block : worst));
       reasons.push(
-        `${blocking.label} is already on this track until ${unit} ${freesUpAt(blocking.end, unit, bars)}`,
+        `${furthest.label} is already on this track until ${unit} ${freesUpAt(furthest.end, unit, bars)}`,
       );
     }
     if (reasons.length === 0) {
       kept.push(position);
       continue;
     }
+    if (refused === null) refused = position;
     collisions.push({ label: `${unit} ${position.asked}`, reason: `${reasons.join(', and ')}.` });
   }
-  if (collisions.length === 0) return null;
+  if (collisions.length === 0 || refused === null) return null;
 
   const size = lengthPhrase(length, unit, bars);
   // Phrased so it reads for one collision as well as for twenty — the sentence
@@ -501,36 +583,66 @@ function wouldStack(
   // list whose obstacle was somebody else's part, a caller re-spaces something
   // that was already correctly spaced and is refused again.
   const step = spacingPhrase(length, unit, bars);
+  // ⚠ ANCHORED ON WHAT WAS ACTUALLY REFUSED, except in the one case where a
+  // survivor is the better answer. A self collision means the caller sent two
+  // copies too close together: the earliest SURVIVOR is where the run of copies
+  // really starts, and the next one belongs a length past it. A collision with
+  // a copy already on the track says nothing about the survivors — `kept[0]`
+  // there is a position that was accepted, and stepping off it names ground
+  // that has nothing to do with the position turned away. (Bar 2 refused and
+  // bar 8 kept under a four-bar pattern would have answered "from bar 8 the
+  // next free bar is 12" while the same refusal said bar 2 frees up at 5: two
+  // numbers, one wrong, in one reply.)
+  const anchor =
+    selfCollisions > 0 && kept.length > 0
+      ? { asked: kept[0].asked, from: kept[0].tick + length }
+      : { asked: refused.asked, from: refused.tick };
+  // ⚠ WALKED OVER THE SURVIVORS TOO, not only over what was already down. The
+  // refusal says nothing was placed, so the caller's next move is to re-send the
+  // positions that survived — and a free slot that names one of those is a bar
+  // the caller is about to occupy itself, which is the second refusal this
+  // sentence exists to save. (One-bar pattern, `atBars: [1, 1, 2]`: bars 1 and 2
+  // survive, the duplicate bar 1 is refused, and walking `occupied` alone —
+  // empty here — answers "bar 2".)
+  const standing = [
+    ...occupied,
+    ...kept.map((position) => ({ start: position.tick, end: position.tick + length })),
+  ];
+  const slot = nextFreeSlot(anchor.from, length, standing, unit, bars);
+  const free = `from ${unit} ${anchor.asked} the next free ${unit} is ${slot}`;
   let spacing = '';
   if (selfCollisions > 0 || sameOnTrack > 0) {
-    // Stepped off a SURVIVOR where there is one — `order[0]` would not do, since
-    // the earliest position asked for may itself be refused. A self collision
-    // guarantees a survivor; a collision with a copy ALREADY on the track does
-    // not (every position asked for can land on it), and there the walk starts
-    // from the earliest position asked for and clears the same ground.
-    const from = kept[0];
-    const slot = nextFreeSlot(from ? from.tick + length : order[0].tick, length, occupied, unit, bars);
-    const free = from
-      ? `from ${unit} ${from.asked} the next free ${unit} is ${slot}`
-      : `the next free ${unit} is ${slot}`;
     // Without a step the caller can take, the free slot carries the sentence on
     // its own — see `spacingPhrase`.
     spacing =
       step === null
         ? ` ${free.charAt(0).toUpperCase()}${free.slice(1)}.`
-        : ` Space the copies ${step} apart: ${free}.`;
+        : selfCollisions > 0
+          ? ` Space the copies ${step} apart: ${free}.`
+          : // No copies in THIS call to space — the obstacle is a copy already
+            // down — so the spacing is stated as a property of the pattern
+            // rather than as an instruction about a list of one.
+            ` Copies of this pattern have to be ${step} apart: ${free}.`;
   }
   // A DIFFERENT pattern in the way is a different problem with a different
   // answer, and it gets its own sentence rather than a variation on the spacing
   // one. The cap is checked rather than assumed: advice to add a track on a
   // composition that cannot hold another is a second refusal the caller pays a
   // round trip to discover.
+  //
+  // ⚠ THE FREE SLOT COMES WITH IT where no spacing sentence already carried it,
+  // because "add a track" is only right for a part meant to sound WITH what is
+  // there. The commonest foreign collision is not that at all — it is a
+  // sequential off-by-one, a chorus sent to bar 4 of a verse that runs to bar 5
+  // — and a second track is the one answer that makes those two play over each
+  // other. Both readings get their number, and the caller picks.
+  const follows = spacing === '' ? ` If it is meant to FOLLOW instead, ${free}.` : '';
   const secondTrack =
     otherOnTrack === 0
       ? ''
       : roomForAnotherTrack
-        ? ' A block in the way is a different pattern, not another copy of this one — two parts that sound at the same time belong on two tracks, so add one with composition_add_track and place this there.'
-        : ` A block in the way is a different pattern, not another copy of this one — two parts that sound at the same time belong on two tracks, but this composition is already at the ${MAX_COMPOSITION_TRACKS}-track cap, so one of them has to move to another track or go.`;
+        ? ` A block in the way is a different pattern, not another copy of this one — two parts that sound at the same time belong on two tracks, so add one with composition_add_track and place this there.${follows}`
+        : ` A block in the way is a different pattern, not another copy of this one — two parts that sound at the same time belong on two tracks, but this composition is already at the ${MAX_COMPOSITION_TRACKS}-track cap, so one of them has to move to another track or go.${follows}`;
   return `This pattern is ${size} long and a block is never nudged aside, so ${what}. Nothing was placed.${spacing}${secondTrack} ${namedRefusals(collisions)}`;
 }
 
