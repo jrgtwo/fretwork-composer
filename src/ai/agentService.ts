@@ -43,7 +43,7 @@ import {
 } from 'agent-harness/browser';
 import { getConnectorSettings, isConfigured, type ConnectorSettings } from './connectorSettings';
 import { normalizeBaseUrl, validateBaseUrl } from './testConnection';
-import type { AgentTool } from './tools/types';
+import type { AgentTool, JsonSchema } from './tools/types';
 import type { Result } from '../patterns/patternService';
 
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
@@ -146,6 +146,26 @@ export interface AgentRunSummary {
   readonly stoppedReason: string;
   /** Tool names in call order, including repeats. */
   readonly toolCalls: readonly string[];
+  /**
+   * The final answer parsed and validated against {@link RunAgentTaskOptions
+   * .outputSchema}, when the caller asked for one and the model produced JSON
+   * that satisfies it. `undefined` otherwise — including when the run declared a
+   * schema and the model answered in prose. Read the caveat on that option
+   * before treating a present value as the normal case.
+   *
+   * ⚠ Only ever produced on `stoppedReason: 'answered'`. The harness parses on
+   * exactly one path — the turn where the model called no tools — so a run that
+   * hit the iteration cap, the loop breaker or an abort has none even when its
+   * `content` is valid JSON. Check {@link stoppedReason} before concluding from
+   * an absent value that the model wrote prose.
+   *
+   * `unknown`, deliberately, and not a generic parameterised on the schema. The
+   * harness validated this against the schema the caller handed in, but THIS
+   * seam did not author that schema and cannot promise the shape it describes —
+   * a generic here would be a cast wearing a type parameter. A caller that wants
+   * a type narrows this itself, next to the schema it wrote.
+   */
+  readonly structured?: unknown;
 }
 
 // ---------------------------------------------------------------- adapter ---
@@ -256,6 +276,45 @@ export interface RunAgentTaskOptions {
   readonly signal?: AbortSignal;
   /** Outer bound on model round-trips (harness default 8). */
   readonly maxIters?: number;
+  /**
+   * Ask for an OBJECT rather than prose: the final answer is parsed and
+   * validated against this schema and comes back as {@link AgentRunSummary
+   * .structured}.
+   *
+   * OUR `JsonSchema`, not the harness's `JSONSchema`, for the reason `AgentSpec`
+   * exists — this seam's surface names no harness type, so a caller can be
+   * written and tested without the harness in the room. The conversion is the
+   * same one-line widening {@link toToolDef} does, and for the same TypeScript
+   * reason.
+   *
+   * ⚠ **A RUN THAT MUST RETURN A STRUCTURE HAS TO HAVE AN EMPTY TOOL LIST.**
+   * This is invisible from the type and it decides how a caller is built, so it
+   * is here rather than in a commit message. The harness only sends the schema
+   * to the backend for grammar-enforced decoding on turns where NO tools are
+   * OFFERED at all (`browser.d.ts` says so on `outputSchema`; the loop's own
+   * call site passes the schema to `ModelClient.chat` only when the offered list
+   * — registry schemas plus any client tools — is empty. This seam exposes no
+   * client tools, so today that is the same as "the `AgentSpec` has no tools").
+   *
+   * What an agent WITH tools loses is the CONSTRAINT, not the parse: the harness
+   * compiles the validator whichever way, and still tries a parse on the turn
+   * the model answers. So `structured` on a tool-ful run reflects only whether
+   * the model happened to write schema-valid JSON of its own accord — and the
+   * parse is `JSON.parse` over the WHOLE answer with no fence stripping and no
+   * extraction, so a ```json block, the commonest way a chat model returns an
+   * object, yields `undefined` just as a leading sentence does.
+   *
+   * VERIFIED against the real harness (`tests/AgentService.test.ts` drives the
+   * unmocked module): with an empty tool list the schema reaches
+   * `ModelClient.chat` and the parsed object comes back; with one tool
+   * registered the schema never reaches `chat`, and `structured` is then only
+   * whatever the final answer happened to parse and validate to.
+   *
+   * A run that has tools may still pass a schema — it is then a hint that costs
+   * nothing — but it must not be RELIED on, and the prompt has to ask for JSON
+   * as well.
+   */
+  readonly outputSchema?: JsonSchema;
 }
 
 /** Whatever came out of a `catch`, as one line. Never interpolates settings, so
@@ -279,6 +338,10 @@ function describe(error: unknown): string {
  *
  * A run that was CANCELLED is a success with `stoppedReason: 'aborted'`, not a
  * refusal: the user got what they asked for.
+ *
+ * A caller that wants an OBJECT back rather than prose passes
+ * {@link RunAgentTaskOptions.outputSchema} — and reads the caveat there first,
+ * because it is a constraint on the AGENT (no tools), not just on the call.
  */
 export async function runAgentTask(
   spec: AgentSpec,
@@ -325,6 +388,21 @@ export async function runAgentTask(
       model: modelFor(settings, options.modelId ?? DEFAULT_MODEL_ID),
       signal: options.signal,
       maxIters: options.maxIters,
+      // Handed over BY REFERENCE, not copied. The harness compiles the schema
+      // with a module-level `ajv` whose cache is keyed on the schema OBJECT and
+      // never evicted, so copying per run would compile a fresh validator and
+      // leave a permanent cache entry on every run — and the plan step is meant
+      // to run repeatedly against one module-level schema. `ajv` does not mutate
+      // a schema, and neither does the client (it only serializes it into the
+      // request body).
+      //
+      // The cast is a TypeScript artefact and not a claim about the value:
+      // `JsonSchema` is an `interface`, so TS gives it no implicit index
+      // signature and it is not assignable to `JSONSchema = Record<string,
+      // unknown>` even though every inhabitant of one inhabits the other.
+      ...(options.outputSchema === undefined
+        ? {}
+        : { outputSchema: options.outputSchema as Record<string, unknown> }),
       onEvent: (event) => {
         if (event.type === 'tool.started') toolCalls.push(event.name);
         if (event.type === 'run.error') failure.error = event.error;
@@ -357,6 +435,10 @@ export async function runAgentTask(
       content: result.content,
       stoppedReason: result.stoppedReason,
       toolCalls,
+      // Spread rather than assigned, so a run that asked for nothing structured
+      // has no `structured` KEY at all — `'structured' in summary` then means
+      // "the harness produced one", which is the question a caller asks.
+      ...(result.structured === undefined ? {} : { structured: result.structured }),
     });
   } catch (error) {
     return refuse(`The agent run could not complete: ${describe(error)}`);

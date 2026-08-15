@@ -70,6 +70,10 @@ vi.mock('agent-harness/browser', () => {
   };
 });
 
+// Types only, so this does not defeat the `vi.mock` above — and the seam's
+// tripwire (`tests/AgentTools.test.ts`) globs `src/**` alone, so a TEST reaching
+// the harness directly is deliberate rather than a hole in the charter.
+import type { ModelClient } from 'agent-harness/browser';
 import {
   DEFAULT_MODEL_ID,
   registryFor,
@@ -104,7 +108,9 @@ const defsOf = (index = 0): ToolDefLike[] => harness.registries[index] as ToolDe
 const CONFIGURED = { baseUrl: 'http://localhost:5174/v1/', token: 'sk-test' };
 
 /** A `RunResult` shaped just enough for the seam. */
-const runResult = (over: Partial<{ content: string; stoppedReason: string }> = {}) => ({
+const runResult = (
+  over: Partial<{ content: string; stoppedReason: string; structured: unknown }> = {},
+) => ({
   messages: [],
   newMessages: [],
   content: 'done',
@@ -172,6 +178,104 @@ describe('the tool adapter', () => {
   it('registers nothing for an empty tool set rather than inventing one', () => {
     registryFor([]);
     expect(defsOf()).toEqual([]);
+  });
+});
+
+// -------------------------------------------------------- structured output ---
+
+/**
+ * A run with NO tools, which is the only shape structured output is reliable in
+ * — see the caveat on `RunAgentTaskOptions.outputSchema`.
+ *
+ * ⚠ What these tests can and cannot say. The harness is mocked here, so they pin
+ * what the SEAM does: it builds an empty registry, hands the schema over, and
+ * reports back what came out. Whether the REAL harness accepts a tool-free agent
+ * and sends the schema on such a turn is a different question, and it is pinned
+ * separately against the unmocked module — see "the real harness" at the bottom
+ * of this file.
+ */
+describe('asking a run for a structure', () => {
+  const PLAN_SCHEMA = obj({ form: str('The section letters, e.g. AABA.') }, ['form']);
+  const PLANNER: AgentSpec = {
+    name: 'planner',
+    systemPrompt: 'Answer with JSON and nothing else.',
+    tools: [],
+  };
+
+  beforeEach(() => {
+    setConnectorSettings(CONFIGURED);
+    harness.runAgent.mockResolvedValue(runResult());
+  });
+
+  it('runs an agent that has no tools at all', async () => {
+    const result = await runAgentTask(PLANNER, INPUT, { outputSchema: PLAN_SCHEMA });
+    // The one assertion here a mutation can move: a seam that rejected or
+    // short-circuited an empty tool list fails on one of these two lines.
+    expect(result.ok).toBe(true);
+    expect(harness.runAgent).toHaveBeenCalledTimes(1);
+    // An empty registry, not a missing one: the loop asks the registry for its
+    // schemas every iteration, so `tools` has to be a real object either way.
+    expect(harness.registries).toHaveLength(1);
+    expect(defsOf()).toHaveLength(0);
+  });
+
+  it('hands the schema to the harness — the caller’s own object, uncopied', async () => {
+    await runAgentTask(PLANNER, INPUT, { outputSchema: PLAN_SCHEMA });
+    const [, , options] = harness.runAgent.mock.calls[0] as [
+      unknown,
+      unknown,
+      { outputSchema?: unknown },
+    ];
+    // Identity, not deep equality, and that is the point: the harness compiles
+    // the schema with a module-level `ajv` whose cache is keyed on the OBJECT
+    // and never evicted, so a per-run copy would compile a fresh validator and
+    // leak a cache entry on every run of a step meant to run repeatedly.
+    expect(options.outputSchema).toBe(PLAN_SCHEMA);
+  });
+
+  it('passes a schema through on a run that HAS tools, because the doc says that is legal', async () => {
+    harness.runAgent.mockResolvedValue(
+      runResult({ content: '{"form":"AABA"}', structured: { form: 'AABA' } }),
+    );
+    const result = await runAgentTask(PATTERN_AGENT, INPUT, { outputSchema: PLAN_SCHEMA });
+    // The caveat on `outputSchema` says a tool-ful run may still ask, and gets a
+    // hint rather than a guarantee. This pins that the SEAM does not quietly
+    // gate the pass-through on the tool count and decide that for the caller.
+    const [, , options] = harness.runAgent.mock.calls[0] as [
+      unknown,
+      unknown,
+      { outputSchema?: unknown },
+    ];
+    expect(options.outputSchema).toBe(PLAN_SCHEMA);
+    expect(result.ok && result.value.structured).toEqual({ form: 'AABA' });
+  });
+
+  it('sends no schema at all when the caller did not ask for one', async () => {
+    await runAgentTask(PATTERN_AGENT, INPUT);
+    const [, , options] = harness.runAgent.mock.calls[0] as [unknown, unknown, object];
+    // Absent rather than `undefined`: the harness falls back to `agent.outputSchema`
+    // with `??`, so either would do — this pins that the seam adds no key of its own.
+    expect(options).not.toHaveProperty('outputSchema');
+  });
+
+  it('reports the parsed answer when the harness produced one', async () => {
+    harness.runAgent.mockResolvedValue(
+      runResult({ content: '{"form":"AABA"}', structured: { form: 'AABA' } }),
+    );
+    const result = await runAgentTask(PLANNER, INPUT, { outputSchema: PLAN_SCHEMA });
+    expect(result.ok && result.value.structured).toEqual({ form: 'AABA' });
+    // The prose is still there. A caller that wants to show what the model said
+    // does not have to re-serialize the object.
+    expect(result.ok && result.value.content).toBe('{"form":"AABA"}');
+  });
+
+  it('leaves it off when the model answered in prose', async () => {
+    // The failure mode the caveat is about: a schema was asked for, the model
+    // wrote a sentence, and the harness's parse produced nothing.
+    harness.runAgent.mockResolvedValue(runResult({ content: 'Sure — an AABA form.' }));
+    const result = await runAgentTask(PLANNER, INPUT, { outputSchema: PLAN_SCHEMA });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).not.toHaveProperty('structured');
   });
 });
 
@@ -372,5 +476,118 @@ describe('what the seam hands the harness', () => {
       },
     });
     expect(result.ok).toBe(true);
+  });
+});
+
+// ----------------------------------------------------- the real harness ---
+
+/**
+ * The one fact the seam's `outputSchema` caveat rests on, pinned against the
+ * REAL `agent-harness/browser` rather than the mock above.
+ *
+ * Everything else in this file asserts what the seam HANDS the harness. That is
+ * the right shape for a seam test, but it means the sentence the caveat actually
+ * turns on — "a tool-free agent is accepted, and only then does the schema reach
+ * the backend" — would be pinned nowhere, and the plan step depends on it
+ * entirely. The harness is a sibling package under active co-development; if it
+ * stops accepting an empty registry, or stops forwarding the schema on tool-free
+ * turns, something has to fail.
+ *
+ * `vi.importActual` bypasses this file's own `vi.mock`. No network is involved:
+ * the model is a stub `ModelClient` that records what it was called with. What
+ * these do NOT prove is that a provider honours `response_format` — that is the
+ * provider's half and stays a by-hand check.
+ */
+describe('the real harness, unmocked', () => {
+  const SCHEMA = { type: 'object', properties: { form: { type: 'string' } }, required: ['form'] };
+
+  interface ChatCall {
+    readonly offered: readonly unknown[];
+    readonly responseSchema: unknown;
+  }
+
+  /** Answers once, with JSON and no tool calls, and records the turn. */
+  const recordingModel = (calls: ChatCall[]): ModelClient => ({
+    chat: async (_messages, tools, _handlers, _signal, responseSchema) => {
+      calls.push({ offered: tools, responseSchema });
+      return { content: '{"form":"AABA"}', toolCalls: [], finishReason: 'stop' };
+    },
+  });
+
+  const realHarness = async (): Promise<typeof import('agent-harness/browser')> =>
+    vi.importActual<typeof import('agent-harness/browser')>('agent-harness/browser');
+
+  it('accepts an agent whose registry is empty, and gives that turn the schema', async () => {
+    const real = await realHarness();
+    const registry = new real.ToolRegistry();
+    // The seam's own `registryFor([])` cannot be reused here: it builds the
+    // MOCKED registry. What it does is `register([])`, which is this line.
+    registry.register([]);
+    expect(registry.names()).toEqual([]);
+
+    const calls: ChatCall[] = [];
+    const result = await real.runAgent(
+      { name: 'planner', systemPrompt: 'Answer with JSON.', tools: registry },
+      'go',
+      { model: recordingModel(calls), outputSchema: SCHEMA },
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].offered).toEqual([]);
+    // The whole point of the empty tool list: this is the turn the backend is
+    // asked to constrain its decoding.
+    expect(calls[0].responseSchema).toEqual(SCHEMA);
+    expect(result.stoppedReason).toBe('answered');
+    expect(result.structured).toEqual({ form: 'AABA' });
+  });
+
+  it('withholds the schema once a tool is registered — but still parses the answer', async () => {
+    const real = await realHarness();
+    const registry = new real.ToolRegistry();
+    registry.register([
+      toToolDef(
+        defineTool<{ what: string }>({
+          name: 'sample_tool',
+          description: 'A tool that exists only to occupy the registry, described at length.',
+          parameters: obj({ what: str('Anything at all.') }, ['what']),
+          run: ({ what }) => ok({ echoed: what }),
+        }),
+      ),
+    ]);
+
+    const calls: ChatCall[] = [];
+    const result = await real.runAgent(
+      { name: 'composer', systemPrompt: 'Answer with JSON.', tools: registry },
+      'go',
+      { model: recordingModel(calls), outputSchema: SCHEMA },
+    );
+
+    // The corrected half of the seam's caveat, and the reason it is worded the
+    // way it is: what a tool-ful run loses is the CONSTRAINT, not the parse.
+    expect(calls[0].offered).toHaveLength(1);
+    expect(calls[0].responseSchema).toBeUndefined();
+    // So a present `structured` does NOT imply a tool-free run. It only means
+    // the model happened to write schema-valid JSON of its own accord.
+    expect(result.structured).toEqual({ form: 'AABA' });
+  });
+
+  it('produces no `structured` when the run did not end by answering', async () => {
+    const real = await realHarness();
+    const registry = new real.ToolRegistry();
+    registry.register([]);
+
+    const controller = new AbortController();
+    controller.abort();
+    const result = await real.runAgent(
+      { name: 'planner', systemPrompt: 'Answer with JSON.', tools: registry },
+      'go',
+      { model: recordingModel([]), outputSchema: SCHEMA, signal: controller.signal },
+    );
+
+    // Pins the sentence on `AgentRunSummary.structured`: the harness parses on
+    // exactly one path, so an absent value is not evidence the model wrote
+    // prose. A caller has to read `stoppedReason` before saying that.
+    expect(result.stoppedReason).toBe('aborted');
+    expect(result.structured).toBeUndefined();
   });
 });
