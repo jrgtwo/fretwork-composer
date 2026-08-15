@@ -32,10 +32,13 @@
  * chord of whatever covers it — whereas the other direction does not: a harmony
  * grid alone never says how many patterns to write or where they repeat.
  *
- * ⚠ SYMBOLS, NEVER FRETS. A plan names "C7", not a shape. The run that writes
- * the pattern asks `read_chord_voicings` for that symbol on ITS OWN instrument,
- * which is the only thing that makes a bass part a bass part rather than a
- * guitar grip transposed onto four strings.
+ * ⚠ SYMBOLS, NEVER FRETS. A plan names "C7", not a shape. The frets come later,
+ * from the symbol plus the pattern's OWN instrument, which is the only thing
+ * that makes a bass part a bass part rather than a guitar grip transposed onto
+ * four strings. `patternSubRun` decided WHERE later is: `patternRunInput` calls
+ * the voicer itself and pastes the grip into the brief, rather than the writing
+ * run asking `read_chord_voicings` for it — see that file's header for why. The
+ * planner still never sees a fret either way.
  *
  * ⚠ BARS, NEVER TICKS, counted FROM 1. `barMath` owns tick↔bar and the assembly
  * step is where a plan meets it; nothing here converts anything.

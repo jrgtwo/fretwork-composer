@@ -161,6 +161,222 @@ Stay inside {key} {scale}. Keep it playable by one pair of hands: never two note
   },
 
   {
+    id: 'pattern-write-over-a-chord',
+    page: 'pattern',
+    label: 'Write a part over one chord',
+    summary: 'Write one part, over one chord, on one instrument — the narrow brief, by hand.',
+    /**
+     * ⚠ THE TEMPLATE IS `patternSubRun.patternRunInput`'S BRIEF, QUOTED.
+     *
+     * This row exists so a person can HEAR what the orchestrator's pattern
+     * sub-run writes. The epic's gate (OR-01) asks whether a narrow brief — one
+     * part, one chord, one instrument — writes better music than a run holding
+     * the whole job; the answer is only worth anything if the words being judged
+     * are the words that will ship. So the template is not a paraphrase of that
+     * brief, it is the same paragraphs, and `CommandCatalog.test.ts` compares the
+     * two paragraph for paragraph so a reword on either side fails a test rather
+     * than quietly making the listening test measure something else.
+     *
+     * The panel has no free-text slot, deliberately (`commandTypes`' header), and
+     * that is the right shape here anyway: the orchestrator will not TYPE a brief
+     * either, it will construct one out of a plan entry. A template with typed
+     * slots is that construction, done by hand.
+     *
+     * THREE PARAGRAPHS CANNOT BE THE SAME, and the test names each one:
+     *
+     *   - the chord. The sub-run is HANDED its grip — `patternRunInput` calls
+     *     `chordGrip` and pastes the cells in — because a fact in the brief is
+     *     read before any tool is chosen. A template substitutes slot values and
+     *     computes nothing, so this run is sent to `read_chord_voicings` for the
+     *     same answer from the same voicer. One round trip; the same frets.
+     *   - how long it is. The brief names the bar AFTER the last one ("makes this
+     *     5 bars long"), which is arithmetic on a slot value and not a slot
+     *     value.
+     *   - how to work. "The frets above" is only true where the frets are above.
+     *
+     * ONE thing the quoted wording asserts that is true of the sub-run and only
+     * nearly true here, left standing because the quote is worth more: "the
+     * arrangement was planned around it", where here a person picked the slots.
+     * It does not change what gets written into the open pattern, which is the
+     * thing being listened to.
+     *
+     * ⚠ WHAT COULD NOT BE LEFT STANDING was the arrangement paragraph's original
+     * "you cannot see one … you cannot make a second pattern — there is no tool
+     * here that does any of it". The sub-run's tool list makes that true; the
+     * PATTERN PAGE's does not — `read_composition` and `pattern_open_blank` are
+     * both in reach here, and the second one replaces the very pattern the
+     * listener is about to play. A model that disproves a capability claim
+     * mid-run can discount the paragraph it sits in, so BOTH files now word it
+     * as an instruction. Editing one alone fails the comparison, which is the
+     * mechanism working.
+     */
+    slots: [
+      {
+        // AUTHORED, and legitimate for `pattern-density`'s reason: `parseChordSymbol`
+        // reads any symbol you hand it, so there is no lib catalog of chords to
+        // bind a `choice` to — a list here is a picker, not a second copy of a
+        // vocabulary. Sized to cover a blues in the keys a guitar plays one in
+        // (A, C, D, E, G) and in the two flat keys a horn player picks (Bb, Eb
+        // — which is why `Ab7` is here, the IV of the second one), and stops
+        // there: every option costs prompt budget only when it is the one
+        // chosen, but a dropdown nobody can scan is a bad control.
+        kind: 'enum',
+        id: 'chord',
+        label: 'Chord',
+        // ⚠ THE MAJOR TRIADS CARRY A `maj` SUFFIX, which is not how anyone
+        // writes one. ONE reason, and it is about the control: in a list that
+        // holds `Am` and `Amaj` two rows apart, a bare `A` is one character
+        // away from the wrong chord and the hint column reads the same for
+        // both. (An earlier note here gave a second reason — that six bare
+        // roots would look like a copy of `CHROMATIC_KEYS` to a source scan in
+        // `CommandCatalog.test.ts`. There is no source scan. The check is a
+        // whole-list subset test, and a list holding `Am` and `C7` cannot be
+        // inside any lib vocabulary whatever the majors are spelled like.)
+        // `parseChordSymbol` reads both forms and voices the same triad, which
+        // the test below checks on every neck.
+        options: [
+          { value: 'Cmaj', label: 'Cmaj', hint: 'major triad' },
+          { value: 'Dmaj', label: 'Dmaj', hint: 'major triad' },
+          { value: 'Emaj', label: 'Emaj', hint: 'major triad' },
+          { value: 'Fmaj', label: 'Fmaj', hint: 'major triad' },
+          { value: 'Gmaj', label: 'Gmaj', hint: 'major triad' },
+          { value: 'Amaj', label: 'Amaj', hint: 'major triad' },
+          { value: 'Bbmaj', label: 'Bbmaj', hint: 'major triad' },
+          { value: 'Ebmaj', label: 'Ebmaj', hint: 'major triad' },
+          { value: 'Am', label: 'Am', hint: 'minor triad' },
+          { value: 'Bm', label: 'Bm', hint: 'minor triad' },
+          { value: 'Cm', label: 'Cm', hint: 'minor triad' },
+          { value: 'Dm', label: 'Dm', hint: 'minor triad' },
+          { value: 'Em', label: 'Em', hint: 'minor triad' },
+          { value: 'Fm', label: 'Fm', hint: 'minor triad' },
+          { value: 'Gm', label: 'Gm', hint: 'minor triad' },
+          { value: 'F#m', label: 'F#m', hint: 'minor triad' },
+          { value: 'A7', label: 'A7', hint: 'dominant seventh' },
+          { value: 'B7', label: 'B7', hint: 'dominant seventh' },
+          { value: 'C7', label: 'C7', hint: 'dominant seventh' },
+          { value: 'D7', label: 'D7', hint: 'dominant seventh' },
+          { value: 'E7', label: 'E7', hint: 'dominant seventh' },
+          { value: 'F7', label: 'F7', hint: 'dominant seventh' },
+          { value: 'G7', label: 'G7', hint: 'dominant seventh' },
+          { value: 'Bb7', label: 'Bb7', hint: 'dominant seventh' },
+          { value: 'Eb7', label: 'Eb7', hint: 'dominant seventh' },
+          { value: 'Ab7', label: 'Ab7', hint: 'dominant seventh' },
+        ],
+        // The I of a twelve-bar blues in C — the run this whole epic is reacting
+        // to, so it is the one a listening test reaches for first.
+        fallback: 'C7',
+      },
+      {
+        kind: 'choice',
+        id: 'instrument',
+        source: 'instrument',
+        label: 'Instrument',
+        // The row has no tool that opens or re-necks a pattern — it mirrors the
+        // sub-run, whose instrument is the plan's — so a slot moved off the open
+        // pattern's neck does not get corrected, it aborts: the brief tells the
+        // run to write nothing. Silent from the user's side, hence the help.
+        help: 'Must match the open pattern — the frets are voiced for this neck.',
+        // The open pattern's own neck, so the template's "that must be
+        // {instrument}" check passes by default rather than aborting the run on
+        // a slot nobody thought to move.
+        defaultFrom: 'editing-pattern-instrument',
+      },
+      {
+        // Authored: the plan's `PlannedPattern.name` is what the brief calls the
+        // part, and what it is FOR is not a value the lib has a type for. The
+        // four here are the four the brief's own sentence lists, so the name a
+        // person picks reads the way a planned one does.
+        kind: 'enum',
+        id: 'character',
+        label: 'Part',
+        options: [
+          { value: 'comping figure', label: 'Comping figure' },
+          { value: 'walking bass line', label: 'Walking bass line' },
+          { value: 'lead line', label: 'Lead line' },
+          { value: 'riff', label: 'Riff' },
+        ],
+        fallback: 'comping figure',
+      },
+      {
+        kind: 'number',
+        id: 'bars',
+        label: 'Length',
+        help: 'One chord for this many bars. Pattern length follows the notes.',
+        // ⚠ TWO BARS IS THE FLOOR, AND ONE BAR IS NOT A MISSING OPTION — it is
+        // the one length this row cannot say the same words as the sub-run in.
+        // A template substitutes and computes nothing: `{bars} bars` can only
+        // render the plural, while the brief's `barsPhrase` says "1 bar"; and
+        // `patternRunInput` grows the ostinato paragraph only above one bar,
+        // which a template has no conditional to drop. At one bar the fill would
+        // both read "1 bars" and carry a paragraph about later bars that do not
+        // exist — prose the shipping brief never sends, which is exactly the
+        // drift this row exists to rule out. One bar is the sub-run's case;
+        // hearing it is the assembly step's job, not this control's.
+        min: 2,
+        // A part over ONE chord. Past this it is a section, which is the plan
+        // step's business and not one pattern's.
+        max: 8,
+        step: 1,
+        unit: 'bars',
+        // Long enough that the "later bars answer earlier ones" paragraph has
+        // something to be about, which is the thing a listening test is judging.
+        fallback: 4,
+      },
+    ],
+    // The sub-run's `SUB_RUN_TOOL_NAMES`, plus the one it does without because
+    // its grip arrives in the prompt. Documentation, not enforcement
+    // (`commandTypes`) — the pattern page hands over its whole tool set — but it
+    // is what the brief above actually asks for.
+    tools: [
+      'read_pattern',
+      'read_chord_voicings',
+      'pattern_stamp_notes',
+      'pattern_set_dynamics',
+      'pattern_set_articulations',
+      'pattern_delete_notes',
+    ],
+    template: `# What to write
+
+Write "{character}": {bars} bars of {instrument} over {chord}. That is the whole run — one part, one chord, one instrument, and nothing else to decide.
+
+Its name is what the part is FOR — a comping figure, a walking bass line, a lead line, a riff — and the arrangement was planned around it. Write music that does that job for {bars} bars over {chord}.
+
+# This run is one pattern, not an arrangement
+
+THERE IS NO ARRANGEMENT IN THIS RUN. You are not looking at one, you are not placing anything into one, and you must not make a second pattern — nothing in this run is for any of it. So ignore every standing instruction about laying parts out: nothing here places a block at a list of bars, nothing spaces blocks, nothing resizes or duplicates them, and the rule about writing ONE PATTERN PER CHORD and placing each where its chord runs is somebody else's job, already done.
+
+That decision is what put you here. Which chord this pattern is over, how long it is and how often it comes round again were all settled before this run started. One pattern, {bars} bars of it, over {chord}. Writing a second chord into it would contradict the plan the rest of the piece is being built from.
+
+# The chord
+
+Ask read_chord_voicings for {chord} with instrumentId "{instrument}" before you write anything — nothing has to be open to ask, and a shape worked out in your head or carried over from another neck is a different chord with nothing to warn you. What comes back is one hand position, and its cells are already the stringIndex and fret numbers \`pattern_stamp_notes\` takes.
+
+This is MATERIAL, not the part. You choose which of these notes get played, in what order, at which ticks, for how long, how hard and with what articulation — a bass line takes one at a time and walks between them, a comping part spreads them across the bar. Notes outside the shape are yours where the line asks for one: an approach note, a passing note, a chromatic step into the next bar. If you want a tone an octave away, the same string twelve frets up is the same note an octave higher — that is the only fret arithmetic here.
+
+# What NOT to write
+
+Do not stamp the shape once at the top of the bar and stop. A stack of notes on beat 1 with silence behind it is not a part, it is the chord spelled out, and it is the exact failure this brief exists to prevent: the frets are right, the harmony is right, the length is right, and there is nothing to listen to.
+
+A bar has more than one attack in it. Something lands off the downbeat as well as on it, the notes are not all the same length, and the result is something a player would have played on purpose.
+
+Over {bars} bars the part goes somewhere: later bars answer earlier ones instead of repeating them note for note. \`repeat\` is for a figure that genuinely recurs — use it because the part IS an ostinato, not because {bars} bars was more than you felt like writing. It also costs you the marks below: a repeated stamp reports counts and hands back no note ids, so a figure you mean to accent, mute or ghost is one you write out bar by bar in the same single call.
+
+# The marks
+
+Notes all at one volume with no articulation read as typing, not as playing. \`pattern_stamp_notes\` lists the notes it placed one by one and hands back an id for each — EXCEPT on a call that used \`repeat\`, which reports counts only and no ids at all. The marks need those ids, so anything you mean to mark is stamped out rather than repeated. Then accent what the rhythm leans on with \`pattern_set_dynamics\`, and use \`pattern_set_articulations\` where the part calls for it — palm mutes under a chugging figure, ghost notes between the ones that count, a hammer-on or a pull-off where two notes are one gesture of the hand. A few marks in the right places say more than a mark on every note.
+
+# How long it is
+
+{bars} bars, and length is not something you set: the pattern is as long as the notes left in it, rounded UP to the end of the bar the last one finishes in. So every note must END by the end of bar {bars} — start plus duration, not start. A note that begins inside bar {bars} but rings past its barline makes this longer than {bars} bars just as surely as one that starts late, and everything downstream was planned around {bars} bars. Check the last note of every string before you send it: a long final note is the easy way to buy a bar you did not want.
+
+# How to work
+
+Read the pattern once first: it gives the ticks per quarter note and the time signature, which is what one bar is worth in ticks, and it gives the ids of anything already in it. It also says which instrument the open pattern is on, and that must be {instrument} — the frets you looked up were voiced for that neck and no other, and on a different one they are a different chord with nothing to warn you. If it is not {instrument}, write nothing and say so. Then send the whole {bars} bars in ONE stamp call, the dynamics in one call and the articulations in one call.
+
+Finish with a sentence or two on what you actually wrote — the rhythm, and which notes of {chord} you used where. Not how it will sound.`,
+  },
+
+  {
     id: 'pattern-density',
     page: 'pattern',
     label: 'Make this busier or sparser',

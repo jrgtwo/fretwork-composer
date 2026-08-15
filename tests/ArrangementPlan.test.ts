@@ -311,7 +311,7 @@ describe('placements that name something that is not there', () => {
     };
     const review = reviewPlan(plan);
     expect(review.refusals.map((refusal) => refusal.rule)).toEqual(['pattern-length']);
-    expect(review.refusals[0].reason).toContain('at least 1 whole bar');
+    expect(review.refusals[0].reason).toContain('a whole number of bars, at least 1');
   });
 
   it('refuses a start that is not a bar, and a form that is not bars long', () => {

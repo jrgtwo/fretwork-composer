@@ -50,13 +50,13 @@ describe('the pattern page agent', () => {
     }
   });
 
-  it('offers six commands on the pattern page, and none of them belong elsewhere', () => {
+  it('offers seven commands on the pattern page, and none of them belong elsewhere', () => {
     const commands = commandsForPage('pattern');
-    expect(commands).toHaveLength(6);
+    expect(commands).toHaveLength(7);
     for (const command of commands) expect(command.page).toBe('pattern');
   });
 
-  it('states the page’s standing instructions once, for all six commands', () => {
+  it('states the page’s standing instructions once, for all seven commands', () => {
     // ONE prompt, not one per command: the command's template is the task, and
     // these are true whichever one is running. Asserted as substrings because
     // the wording is meant to be edited — what must not vanish is the FACT.

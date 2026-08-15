@@ -17,6 +17,7 @@ import {
 } from '../src/ai/commandCatalog';
 import {
   fillCommand,
+  findSlot,
   templateSlotIds,
   type ChoiceSource,
   type Command,
@@ -24,6 +25,8 @@ import {
   type Slot,
   type SlotValue,
 } from '../src/ai/commandTypes';
+import { SUB_RUN_TOOL_NAMES, patternRunInput } from '../src/ai/patternSubRun';
+import type { PlannedPattern } from '../src/ai/arrangementPlanSchema';
 import {
   allowedValues,
   defaultValues,
@@ -33,6 +36,7 @@ import {
   slotOptions,
 } from '../src/ai/slotSources';
 import {
+  chordGrip,
   clearHistory as clearPatternHistory,
   openBlankPattern,
   setEditingPatternInstrument,
@@ -183,8 +187,9 @@ function assertCommandInvariants(command: Command): void {
   for (const slot of command.slots) {
     // (A `choice` slot carrying its own `options` used to be asserted here. It
     //  is an excess-property error on any typed literal, so the assertion could
-    //  not fail; the check that CAN fail is the source scan below, which catches
-    //  a lib vocabulary copied into this directory whatever shape it is in.)
+    //  not fail; the check that CAN fail is the whole-list subset check below,
+    //  which catches a lib vocabulary copied into this directory whatever shape
+    //  it is in. Nothing in this suite reads a source file.)
     if (slot.kind === 'enum') {
       expect(slot.options.length).toBeGreaterThan(1);
       expect(slot.options.map((option) => option.value)).toContain(slot.fallback);
@@ -383,15 +388,15 @@ describe('mode scoping', () => {
   });
 
   it('leaves the pattern page untouched by modes', () => {
-    // Two claims. The pattern page passes no mode, and its list is the same
-    // list it was before this axis existed — pinned LITERALLY rather than by
-    // re-running `offered`'s own predicate, which would move with any edit and
-    // could never fail. These six are also what edit mode is served by, so
-    // losing one is a hole in the composition page too.
+    // Two claims. The pattern page passes no mode, and its list is pinned
+    // LITERALLY rather than by re-running `offered`'s own predicate, which would
+    // move with any edit and could never fail. These are also what edit mode is
+    // served by, so losing one is a hole in the composition page too.
     const pattern = commandsForPage('pattern');
     expect(pattern.map((c) => c.id)).toEqual([
       'pattern-fix-timing',
       'pattern-generate',
+      'pattern-write-over-a-chord',
       'pattern-density',
       'pattern-fit-key',
       'pattern-articulations',
@@ -930,6 +935,259 @@ describe('filling a command', () => {
     const refused = fillCommand(command, stale, allowedValues(command));
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.reason).toContain('no longer offers');
+  });
+});
+
+// -------------------------------------------- the narrow brief, by hand ---
+
+/**
+ * OR-03 — `pattern-write-over-a-chord`, and the check that keeps it honest.
+ *
+ * The row exists so the epic's gate (OR-01) can be ANSWERED: does one part, one
+ * chord, one instrument write better music than a run holding the whole job? A
+ * person cannot type that brief — the panel has no free-text slot, deliberately
+ * — and the orchestrator will not type it either, it will construct it from a
+ * plan entry. So the row IS that construction, done by hand, and the thing being
+ * listened to is only worth listening to if it is the thing that will ship.
+ *
+ * Hence the paragraph-for-paragraph comparison below against
+ * `patternSubRun.patternRunInput`. It is the reason this task ran second, and it
+ * fails on a reword in EITHER file rather than letting the two drift until the
+ * listening test measures something that never ships.
+ */
+describe('writing a part over one chord', () => {
+  const command = (): Command => {
+    const found = findCommand('pattern-write-over-a-chord');
+    if (!found) throw new Error('missing command');
+    return found;
+  };
+
+  const filled = (values: Record<string, SlotValue>): string => {
+    const result = fillCommand(command(), values);
+    if (!result.ok) throw new Error(result.reason);
+    return result.value;
+  };
+
+  /**
+   * The slot values, and the plan entry they are the hand-driven spelling of.
+   *
+   * FOUR BARS because that is the slot's own default, and one bar is not
+   * reachable at all — see the `bars` slot for why: a template pluralises
+   * nothing and drops nothing, so at one bar it would render "1 bars" and carry
+   * a paragraph about later bars that do not exist. The comparison is run below
+   * over `defaultValues` and over the two-bar floor as well, so the fills a
+   * person can actually reach are all held to it, not just this one.
+   */
+  const VALUES: Readonly<Record<string, SlotValue>> = {
+    chord: 'F7',
+    // Not the guitar: the sub-run's brief is neck-specific, and a bass is where
+    // a voicing carried over from a guitar goes wrong silently.
+    instrument: 'bass',
+    character: 'walking bass line',
+    bars: 4,
+  };
+
+  /**
+   * The `PlannedPattern` a fill IS — derived from the fill rather than written
+   * out beside it, so a slot value and its plan entry cannot drift apart and
+   * leave the equality below comparing two texts about different music.
+   *
+   * ⚠ NO CHORD SYMBOL IN THE NAME, `PatternSubRun.test.ts`'s reason: the name is
+   * the `character` value ("walking bass line"), so a name like "Walking Bass
+   * F7" cannot make every check for the chord pass on the interpolation alone.
+   */
+  const planFor = (values: Record<string, SlotValue>): PlannedPattern => ({
+    name: String(values.character),
+    instrumentId: String(values.instrument),
+    chord: String(values.chord),
+    lengthBars: Number(values.bars),
+  });
+
+  const paragraphs = (text: string): readonly string[] => text.split('\n\n');
+
+  /**
+   * The paragraphs that CANNOT be identical in the two texts.
+   *
+   * Every entry is applied to BOTH sides, so nothing is excused on one side
+   * only, and the counts asserted below pin how many each side loses — an
+   * over-broad regex that quietly deleted real content would move one of them.
+   */
+  const CANNOT_MATCH: readonly RegExp[] = [
+    // The chord. `patternRunInput` INJECTS the grip — it calls `chordGrip` and
+    // pastes the cells in, because a fact in the brief is read before any tool
+    // is chosen. A template substitutes slot values and computes nothing, so
+    // this row sends the run to `read_chord_voicings`, which is the same voicer
+    // behind the same seam. These five paragraphs are that swap.
+    /^# The chord/,
+    /^\S[^\n]* sits here:$/,
+    /^ {4}stringIndex /,
+    /^That is one hand position/,
+    /^THERE IS NO CHORD LOOKUP IN THIS RUN/,
+    /^Ask read_chord_voicings/,
+    // How long it is. The brief names the bar AFTER the last one ("makes this 5
+    // bars long"), and arithmetic on a slot value is not a slot value.
+    /and length is not something you set/,
+    // How to work. "The frets above" is only true where the frets are above.
+    /^Read the pattern once first/,
+  ];
+
+  /**
+   * What survives inside the two paragraphs `CANNOT_MATCH` excuses — asserted on
+   * BOTH texts, because a per-paragraph excuse for a one-clause difference is a
+   * hole the size of the paragraph.
+   *
+   * Written at `VALUES`' bar count and neck, so the numbers and the instrument
+   * are substituted on one side and computed on the other, exactly as in the
+   * equality. The last one is the abort that keeps a grip voiced for one neck
+   * off another: it is the only thing standing between a bass line dropped into
+   * a guitar pattern and a run that stamps it cleanly and sounds wrong.
+   */
+  const SHARED_SENTENCES: readonly string[] = [
+    'rounded UP to the end of the bar the last one finishes in',
+    'every note must END by the end of bar 4 — start plus duration, not start',
+    'Check the last note of every string before you send it',
+    'It also says which instrument the open pattern is on',
+    'If it is not bass, write nothing and say so',
+    'send the whole 4 bars in ONE stamp call, the dynamics in one call and the articulations in one call',
+  ];
+
+  const spine = (text: string): readonly string[] =>
+    paragraphs(text).filter((para) => !CANNOT_MATCH.some((skip) => skip.test(para)));
+
+  /**
+   * The brief, with the instrument's display NAME rewritten to its id.
+   *
+   * `fillCommand` substitutes a slot's VALUE and never the label the user saw —
+   * that is the reproducibility the catalog is built on — so a template can only
+   * ever carry `bass`, while `patternRunInput` names the catalog's `Bass`. Case
+   * is the whole of the difference, and normalising it here is cheaper than
+   * inlining a display string into a template.
+   */
+  const briefForPlan = (planned: PlannedPattern): string => {
+    const instrument = INSTRUMENTS.find((entry) => entry.id === planned.instrumentId);
+    if (!instrument) throw new Error(`no instrument ${planned.instrumentId}`);
+    const built = patternRunInput(planned);
+    if (!built.ok) throw new Error(`patternRunInput refused: ${built.reason}`);
+    return built.value.replaceAll(instrument.name, instrument.id);
+  };
+
+  /**
+   * The whole anti-drift assertion over ONE fill, parametrised — because the
+   * fill that matters most is not this file's hand-picked set, it is the one a
+   * person gets by opening the panel and pressing go.
+   */
+  const expectSameAsBrief = (values: Record<string, SlotValue>): void => {
+    const brief = briefForPlan(planFor(values));
+    const text = filled(values);
+
+    // The excuse list is doing exactly the work it documents and no more: the
+    // brief loses its injected grip (five paragraphs) plus the two that differ
+    // in a phrase; the template loses its lookup (two) plus the same two.
+    expect(paragraphs(brief).length - spine(brief).length).toBe(7);
+    expect(paragraphs(text).length - spine(text).length).toBe(4);
+    expect(spine(brief).length).toBeGreaterThan(10);
+
+    // ⚠ THE ANTI-DRIFT CHECK. Verbatim, and in order.
+    expect(spine(text)).toEqual(spine(brief));
+  };
+
+  it('is offered on the pattern page, and asks for the lookup it cannot be handed', () => {
+    expect(commandsForPage('pattern')).toContain(command());
+    for (const tool of command().tools) expect(TOOL_NAMES.has(tool)).toBe(true);
+    // The one tool the sub-run does without, and the reason it can: its grip
+    // arrives in the prompt. This row's does not, so the lookup is not optional.
+    expect(command().tools).toContain('read_chord_voicings');
+    expect(command().template).toContain('read_chord_voicings');
+
+    // Pinned against the constant rather than against a copy of it here, for
+    // the template's own reason: `SUB_RUN_TOOL_NAMES` exists so a list can be
+    // held EXACTLY, and a name added there is a capability this row must either
+    // offer too or be a deliberate exception to. A hand-kept copy would drift
+    // and still pass, because every name in it would exist.
+    expect([...command().tools].sort()).toEqual(
+      [...SUB_RUN_TOOL_NAMES, 'read_chord_voicings'].sort(),
+    );
+  });
+
+  it('names the chosen chord, instrument and bar count', () => {
+    const text = filled(VALUES);
+    expect(text).toContain('F7');
+    // Phrases only the INSTRUMENT slot can produce. Bare 'bass' cannot fail:
+    // it is already a substring of the `character` value 'walking bass line'.
+    expect(text).toContain('4 bars of bass over F7');
+    expect(text).toContain('instrumentId "bass"');
+    // The slot VALUE, not the label: a picker showing "Walking bass line" still
+    // sends the lowercase phrase the brief's own sentence uses.
+    expect(text).toContain('"walking bass line"');
+    expect(text).not.toMatch(/\{[a-zA-Z]/);
+
+    // A different fill is a different brief, all the way through.
+    const other = filled({ ...VALUES, chord: 'Gm', instrument: 'guitar', bars: 2 });
+    expect(other).toContain('Gm');
+    expect(other).toContain('2 bars');
+    expect(other).not.toContain('F7');
+  });
+
+  it('offers only chord symbols the app can voice, on every neck it has', () => {
+    const slot = findSlot(command(), 'chord');
+    if (slot?.kind !== 'enum') throw new Error('chord is not an enum slot');
+    expect(slot.options.length).toBeGreaterThan(10);
+
+    // The picker cannot offer a symbol `parseChordSymbol` refuses: the run would
+    // spend its whole budget finding that out, and the seam's refusal would name
+    // a chord the person picked from a list this app wrote.
+    for (const option of slot.options) {
+      for (const instrument of INSTRUMENTS) {
+        const grip = chordGrip(option.value, instrument.id);
+        const where = `${option.value} on ${instrument.id}`;
+        expect(`${where}: ${grip.ok ? 'voiced' : grip.reason}`).toBe(`${where}: voiced`);
+      }
+    }
+  });
+
+  it("says what the pattern sub-run's brief says, paragraph for paragraph", () => {
+    expectSameAsBrief(VALUES);
+
+    const brief = briefForPlan(planFor(VALUES));
+    const text = filled(VALUES);
+
+    // The load-bearing paragraph of the whole epic, pinned against the brief
+    // rather than against a copy of it in this file: it lives inside the chord
+    // section, which the swap above excuses on both sides.
+    const material = paragraphs(brief).find((para) => para.startsWith('This is MATERIAL'));
+    expect(material).toBeDefined();
+    expect(text).toContain(material);
+
+    // The two paragraphs `CANNOT_MATCH` excuses differ in ONE clause each, and
+    // the equality above therefore compares nothing else in them — which leaves
+    // the most operational instructions in the brief unchecked on both sides. A
+    // reword of "start plus duration, not start", or of the abort when the open
+    // pattern is on the wrong neck, would otherwise pass every assertion here.
+    for (const sentence of SHARED_SENTENCES) {
+      expect(text).toContain(sentence);
+      expect(brief).toContain(sentence);
+    }
+  });
+
+  it('says it at the fill a person is handed, and at the shortest one offered', () => {
+    // With a bass pattern open, `defaultFrom: 'editing-pattern-instrument'` is
+    // live rather than falling back — the panel's real opening state.
+    seedPattern('Take one');
+    const bass = setEditingPatternInstrument('bass');
+    if (!bass.ok) throw new Error(bass.reason);
+
+    const defaults = defaultValues(command());
+    expect(defaults.instrument).toBe('bass');
+    // ⚠ NOT ONE BAR. The template has no conditional and no plural, so at one
+    // bar it would say "1 bars" and carry the brief's ostinato paragraph about
+    // bars that do not exist. The floor is what keeps the equality reachable.
+    expect(defaults.bars).toBe(4);
+    expectSameAsBrief(defaults);
+
+    const floor = findSlot(command(), 'bars');
+    if (floor?.kind !== 'number') throw new Error('bars is not a number slot');
+    expect(floor.min).toBe(2);
+    expectSameAsBrief({ ...defaults, bars: floor.min });
   });
 });
 

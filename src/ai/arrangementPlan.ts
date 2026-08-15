@@ -265,10 +265,23 @@ interface Occupied {
 }
 
 /** Bars and lengths are whole and count from 1. One predicate for both, because
- *  they are the same claim: a half bar is not a position and not a length. */
-const isBarCount = (value: number): boolean => Number.isInteger(value) && value >= 1;
+ *  they are the same claim: a half bar is not a position and not a length.
+ *
+ *  ⚠ EXPORTED for `patternSubRun`, which briefs a run from one `PlannedPattern`
+ *  and has to make the same three judgements about it. It inlined all three
+ *  first and the copies had already drifted within one card — `barMath` and
+ *  `instrumentCatalog` exist because that happened twice before. */
+export const isBarCount = (value: number): boolean => Number.isInteger(value) && value >= 1;
 
-const barsPhrase = (count: number): string => `${count} bar${count === 1 ? '' : 's'}`;
+export const barsPhrase = (count: number): string => `${count} bar${count === 1 ? '' : 's'}`;
+
+/** ONE account of one mistake, wherever it is noticed: the plan validator turns
+ *  a bad length away here, and the brief builder turns the same entry away when
+ *  a caller skipped the validator. Worded to be true of every input that fails
+ *  {@link isBarCount} — 0, -1 and 1.5 are all wrong, and only one of them is
+ *  "shorter than a bar". */
+export const patternLengthRefusal = (name: string, lengthBars: number): string =>
+  `Pattern "${name}" is ${lengthBars} bars long. A pattern is a whole number of bars, at least 1 — nothing shorter, and nothing in between.`;
 
 const listed = (names: readonly string[]): string =>
   names.length === 0 ? 'none' : names.map((entry) => `"${entry}"`).join(', ');
@@ -378,7 +391,7 @@ export function reviewPlan(plan: ArrangementPlan): PlanReview {
     if (!isBarCount(pattern.lengthBars)) {
       refusals.push({
         rule: 'pattern-length',
-        reason: `Pattern "${pattern.name}" is ${pattern.lengthBars} bars long. A pattern is at least 1 whole bar — that is the shortest thing there is to place.`,
+        reason: patternLengthRefusal(pattern.name, pattern.lengthBars),
       });
     }
   }
