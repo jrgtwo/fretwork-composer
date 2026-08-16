@@ -1139,6 +1139,20 @@ function checkString(stringIndex: number): Result {
 }
 
 /**
+ * How many frets a NAMED instrument's neck has — 0 for one the catalog does not
+ * know.
+ *
+ * {@link instrumentStringCount}'s sibling and split out for the same reason: a
+ * caller that is authoring notes for an instrument it has been handed, rather
+ * than for the open pattern, must be able to ask about that instrument, and a
+ * second `getInstrument(...)?.fretCount ?? 0` is exactly the duplicate that
+ * would let the two answers disagree.
+ */
+export function instrumentFretCount(instrumentId: string): number {
+  return getInstrument(instrumentId)?.fretCount ?? 0;
+}
+
+/**
  * How many frets the open pattern's instrument has.
  *
  * ⚠ NOT the same bound as {@link MAX_FRET}, and the difference is the whole
@@ -1152,7 +1166,7 @@ function checkString(stringIndex: number): Result {
 export function fretCount(): number {
   const pattern = getEditingPattern();
   if (!pattern) return 0;
-  return getInstrument(patternInstrumentId(pattern))?.fretCount ?? 0;
+  return instrumentFretCount(patternInstrumentId(pattern));
 }
 
 /** Notes whose fret this instrument's neck hasn't got — stored and editable,
