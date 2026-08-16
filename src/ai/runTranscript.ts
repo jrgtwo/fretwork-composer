@@ -46,9 +46,14 @@
  *
  * ── A JOB IS A TRANSCRIPT WITH SECTIONS ─────────────────────────────────────
  *
- * `arrangementJob` runs SEVERAL runs to build one arrangement — a plan run, then
- * one sub-run per pattern — with a different prompt and a different input each
- * time. The shape chosen for that is ONE transcript carrying its runs in
+ * A JOB is several runs building one thing — a different prompt and a different
+ * input each time. Nothing in the app runs one today: the orchestrated
+ * composition job that did was deleted on 2026-08-16 after three end-to-end runs
+ * produced nothing, and the design replacing it will want these sections back.
+ * ⚠ THE SECTIONS ARE KEPT DELIBERATELY, and they are why those three failures
+ * were diagnosable at all — do not delete them for want of a caller.
+ *
+ * The shape chosen for a job is ONE transcript carrying its runs in
  * {@link RunTranscript.runs}, rather than N transcripts under a job id, and the
  * deciding question was the one thing this module is actually for: the Copy and
  * Download control takes ONE id and hands over ONE artifact. Seven files is not
@@ -287,7 +292,7 @@ function admit(entry: RunTranscript): void {
  * before the first run starts.
  *
  * `input` is the JOB's input — what the user asked the whole job for. Each run's
- * own input goes on its section, because the sub-runs are handed briefs that the
+ * own input goes on its section, because a job's runs are handed briefs that the
  * request cannot be reconstructed from and vice versa.
  *
  * Never throws and never refuses, exactly like the single-run entry point: a job

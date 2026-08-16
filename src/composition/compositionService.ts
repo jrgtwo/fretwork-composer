@@ -254,22 +254,6 @@ export function isJobRunning(): boolean {
 }
 
 /**
- * Whether a write made RIGHT HERE would be refused by the job lock — a job holds
- * the document and this call is not inside {@link asJobWrite}.
- *
- * ⚠ NOT {@link isJobRunning}, and the difference is the whole point: a job's own
- * writes run with the job running, inside `asJobWrite`, and answering "locked"
- * there would refuse a job its own document. This is the question a caller that
- * writes in BULK has to ask — `arrangementAssembly` builds a whole arrangement
- * in one synchronous pass, and without this it would add tracks, place nothing,
- * and report every block in the plan as a casualty of a lock it could have seen
- * before the first write.
- */
-export function writesLockedOut(): boolean {
-  return lockedOut();
-}
-
-/**
  * React hook: whether a job holds the document.
  *
  * The lock refuses through `Result`, and the two writes that cannot — `undo` and

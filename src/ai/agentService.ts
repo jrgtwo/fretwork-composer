@@ -313,6 +313,11 @@ export interface RunAgentTaskOptions {
    * A run that has tools may still pass a schema — it is then a hint that costs
    * nothing — but it must not be RELIED on, and the prompt has to ask for JSON
    * as well.
+   *
+   * NO CALLER TODAY, KEPT DELIBERATELY. The only one — the orchestrated
+   * composition job's plan step — was deleted on 2026-08-16, but the design
+   * replacing it has the agent emit one JSON document for the lib to validate,
+   * so it needs exactly this and the caveat above. Do not delete as dead code.
    */
   readonly outputSchema?: JsonSchema;
 }
@@ -391,10 +396,10 @@ export async function runAgentTask(
       // Handed over BY REFERENCE, not copied. The harness compiles the schema
       // with a module-level `ajv` whose cache is keyed on the schema OBJECT and
       // never evicted, so copying per run would compile a fresh validator and
-      // leave a permanent cache entry on every run — and the plan step is meant
-      // to run repeatedly against one module-level schema. `ajv` does not mutate
-      // a schema, and neither does the client (it only serializes it into the
-      // request body).
+      // leave a permanent cache entry on every run — and a caller that returns
+      // a structure runs repeatedly against one module-level schema. `ajv` does
+      // not mutate a schema, and neither does the client (it only serializes it
+      // into the request body).
       //
       // The cast is a TypeScript artefact and not a claim about the value:
       // `JsonSchema` is an `interface`, so TS gives it no implicit index

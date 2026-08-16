@@ -488,8 +488,11 @@ describe('what the seam hands the harness', () => {
  * Everything else in this file asserts what the seam HANDS the harness. That is
  * the right shape for a seam test, but it means the sentence the caveat actually
  * turns on — "a tool-free agent is accepted, and only then does the schema reach
- * the backend" — would be pinned nowhere, and the plan step depends on it
- * entirely. The harness is a sibling package under active co-development; if it
+ * the backend" — would be pinned nowhere, and any caller that must come back
+ * with a structure depends on it entirely. The orchestrated composition job's
+ * plan step was that caller until 2026-08-16; the design replacing it, where the
+ * agent emits one JSON document for the lib to validate, turns on the same
+ * property. The harness is a sibling package under active co-development; if it
  * stops accepting an empty registry, or stops forwarding the schema on tool-free
  * turns, something has to fail.
  *

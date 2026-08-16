@@ -5,32 +5,31 @@ import {
   patternRunInput,
 } from '../src/ai/patternSubRun';
 import { PATTERN_AGENT } from '../src/ai/patternAgent';
-import { reviewPlan } from '../src/ai/arrangementPlan';
 import { AGENT_TOOLS } from '../src/ai/tools';
 import { chordGrip } from '../src/patterns/patternService';
-import type { PlannedPattern } from '../src/ai/arrangementPlanSchema';
+import type { PatternBrief } from '../src/ai/patternSubRun';
 
 /**
- * OR-03 — the sub-run: one pattern, one chord, one instrument.
+ * The sub-run: one pattern, one chord, one instrument.
  *
- * ⚠ NO MODEL IN THIS FILE, and none is needed. Both halves of the ticket are
- * checkable without one: the tool list is a list of names, and the brief is a
- * pure function of a plan entry. What no test here can check is whether the
- * brief produces better music — that is the listening test's, and this file
- * exists so that what it listens to is the thing that will ship.
+ * ⚠ NO MODEL IN THIS FILE, and none is needed. Both halves are checkable without
+ * one: the tool list is a list of names, and the brief is a pure function of a
+ * {@link PatternBrief}. What no test here can check is whether the brief
+ * produces better music — that is the listening test's, and this file exists so
+ * that what it listens to is the thing that will ship.
  */
 
 /** ⚠ THE NAME CARRIES NO CHORD SYMBOL, deliberately. With a name like "Walking
  *  Bass F7" every `toContain('F7')` below passes on the interpolated name alone,
  *  and deleting the chord from the brief entirely would fail nothing. */
-const bassLine = (): PlannedPattern => ({
+const bassLine = (): PatternBrief => ({
   name: 'Walking Bass',
   instrumentId: 'bass',
   chord: 'F7',
   lengthBars: 1,
 });
 
-const brief = (pattern: PlannedPattern): string => {
+const brief = (pattern: PatternBrief): string => {
   const result = patternRunInput(pattern);
   if (!result.ok) throw new Error(`patternRunInput refused: ${result.reason}`);
   return result.value;
@@ -59,7 +58,7 @@ describe('the sub-run is restricted to writing one pattern', () => {
   it('offers nothing that opens a pattern', () => {
     // `pattern_open` does not exist in this build. Named anyway: the day it does,
     // it must not appear here, and a test that only knew about `pattern_open_blank`
-    // would pass on the day the pointer starts moving under the orchestrator.
+    // would pass on the day the pointer starts moving under a caller.
     expect(toolNames()).not.toContain('pattern_open_blank');
     expect(toolNames()).not.toContain('pattern_open');
     expect(toolNames().filter((name) => name.includes('open'))).toEqual([]);
@@ -68,8 +67,8 @@ describe('the sub-run is restricted to writing one pattern', () => {
   it('cannot change the instrument the injected frets were voiced for', () => {
     // Not a `composition_*`, not a `voice_*`, does not contain "open" — so every
     // other test in this block passes with it added. It is the one addition that
-    // silently invalidates the brief: the grip in the prompt is for the plan's
-    // neck, and a run that switched necks would leave those frets describing a
+    // silently invalidates the brief: the grip in the prompt is for the neck the
+    // caller named, and a run that switched necks would leave those frets describing a
     // different instrument with every stamp still landing in range.
     expect(toolNames()).not.toContain('pattern_set_instrument');
   });
@@ -92,7 +91,7 @@ describe('the sub-run is restricted to writing one pattern', () => {
     // BY IDENTITY, not by name. `AGENT_TOOLS` is the only list whose writes are
     // wrapped in `asJobWrite`; rebuilding this from `[...READ_TOOLS,
     // ...PATTERN_TOOLS]` gives identical names, type-checks, and loses the
-    // exemption the day an orchestrator holds a composition job lock.
+    // exemption the day a caller holds a composition job lock.
     // `CompositionAgent.test.ts` pins the same property the same way.
     for (const tool of PATTERN_SUB_RUN_AGENT.tools) expect(AGENT_TOOLS).toContain(tool);
   });
@@ -137,7 +136,7 @@ describe('the brief', () => {
     expect(text).toContain('Write "Walking Bass": 1 bar of Bass over F7');
     // What the part is FOR, which is the half that asks for music at all.
     expect(text).toContain('Its name is what the part is FOR');
-    // The failure the whole epic is reacting to, forbidden in advance.
+    // The failure this brief exists to prevent, forbidden in advance.
     expect(text).toContain('Do not stamp the shape once at the top of the bar and stop');
     expect(text).toContain('A bar has more than one attack in it');
   });
@@ -214,7 +213,7 @@ describe('the brief', () => {
     expect(fourBars).toContain('`repeat` is for a figure that genuinely recurs');
   });
 
-  it('is the same brief every time for the same plan entry', () => {
+  it('is the same brief every time for the same input', () => {
     // Pure: no clock, no randomness. The clock is MOVED between the two calls
     // rather than trusted to move on its own — two synchronous calls land in the
     // same millisecond, so a hidden `Date.now()` would pass and flake later.
@@ -225,7 +224,7 @@ describe('the brief', () => {
     expect(brief(bassLine())).toBe(first);
   });
 
-  it('is a function of its input — a different entry gives a different brief', () => {
+  it('is a function of its input — a different input gives a different brief', () => {
     // The other half of purity: same in, same out is also true of a constant.
     expect(brief({ ...bassLine(), chord: 'C7' })).not.toBe(brief(bassLine()));
     expect(brief({ ...bassLine(), lengthBars: 2 })).not.toBe(brief(bassLine()));
@@ -272,7 +271,7 @@ describe('the grip in the brief is the one the neck actually has', () => {
 
 // -------------------------------------------------------------- refusals ---
 
-describe('a plan entry that cannot be briefed is refused, not papered over', () => {
+describe('an input that cannot be briefed is refused, not papered over', () => {
   it("refuses a chord symbol the app cannot read, in the seam's own words", () => {
     const result = patternRunInput({ ...bassLine(), chord: 'Zz9' });
     const grip = chordGrip('Zz9', 'bass');
@@ -312,22 +311,5 @@ describe('a plan entry that cannot be briefed is refused, not papered over', () 
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.reason).toContain('no name');
     }
-  });
-
-  it('refuses the length in the same words the plan validator refuses it in', () => {
-    // ONE account of one mistake. `reviewPlan` turns the same entry away, and a
-    // caller that sees both must not get two descriptions of it.
-    const bad: PlannedPattern = { ...bassLine(), lengthBars: 0 };
-    const review = reviewPlan({
-      bars: 4,
-      tracks: [{ name: 'Bass', instrumentId: 'bass' }],
-      patterns: [bad],
-      placements: [{ trackName: 'Bass', patternName: bad.name, atBars: [1] }],
-    });
-    const planRefusal = review.refusals.find((refusal) => refusal.rule === 'pattern-length');
-    const result = patternRunInput(bad);
-    expect(planRefusal).toBeDefined();
-    expect(result.ok).toBe(false);
-    if (planRefusal !== undefined && !result.ok) expect(result.reason).toBe(planRefusal.reason);
   });
 });

@@ -26,7 +26,7 @@ import {
   type SlotValue,
 } from '../src/ai/commandTypes';
 import { SUB_RUN_TOOL_NAMES, patternRunInput } from '../src/ai/patternSubRun';
-import type { PlannedPattern } from '../src/ai/arrangementPlanSchema';
+import type { PatternBrief } from '../src/ai/patternSubRun';
 import {
   allowedValues,
   defaultValues,
@@ -941,19 +941,20 @@ describe('filling a command', () => {
 // -------------------------------------------- the narrow brief, by hand ---
 
 /**
- * OR-03 — `pattern-write-over-a-chord`, and the check that keeps it honest.
+ * `pattern-write-over-a-chord`, and the check that keeps it honest.
  *
- * The row exists so the epic's gate (OR-01) can be ANSWERED: does one part, one
- * chord, one instrument write better music than a run holding the whole job? A
+ * The row exists so a question can be ANSWERED by ear: does one part, one chord,
+ * one instrument write better music than a run holding a whole composition? A
  * person cannot type that brief — the panel has no free-text slot, deliberately
- * — and the orchestrator will not type it either, it will construct it from a
- * plan entry. So the row IS that construction, done by hand, and the thing being
- * listened to is only worth listening to if it is the thing that will ship.
+ * — and a caller building it in code will not type it either, it will construct
+ * it from four fields. So the row IS that construction, done by hand, and the
+ * thing being listened to is only worth listening to if it is the thing that
+ * will ship.
  *
  * Hence the paragraph-for-paragraph comparison below against
- * `patternSubRun.patternRunInput`. It is the reason this task ran second, and it
- * fails on a reword in EITHER file rather than letting the two drift until the
- * listening test measures something that never ships.
+ * `patternSubRun.patternRunInput`, which fails on a reword in EITHER file rather
+ * than letting the two drift until the listening test measures something that
+ * never ships.
  */
 describe('writing a part over one chord', () => {
   const command = (): Command => {
@@ -969,7 +970,7 @@ describe('writing a part over one chord', () => {
   };
 
   /**
-   * The slot values, and the plan entry they are the hand-driven spelling of.
+   * The slot values, and the brief input they are the hand-driven spelling of.
    *
    * FOUR BARS because that is the slot's own default, and one bar is not
    * reachable at all — see the `bars` slot for why: a template pluralises
@@ -988,15 +989,16 @@ describe('writing a part over one chord', () => {
   };
 
   /**
-   * The `PlannedPattern` a fill IS — derived from the fill rather than written
-   * out beside it, so a slot value and its plan entry cannot drift apart and
-   * leave the equality below comparing two texts about different music.
+   * The {@link PatternBrief} a fill IS — derived from the fill rather than
+   * written out beside it, so a slot value and its brief input cannot drift
+   * apart and leave the equality below comparing two texts about different
+   * music.
    *
    * ⚠ NO CHORD SYMBOL IN THE NAME, `PatternSubRun.test.ts`'s reason: the name is
    * the `character` value ("walking bass line"), so a name like "Walking Bass
    * F7" cannot make every check for the chord pass on the interpolation alone.
    */
-  const planFor = (values: Record<string, SlotValue>): PlannedPattern => ({
+  const briefInputFor = (values: Record<string, SlotValue>): PatternBrief => ({
     name: String(values.character),
     instrumentId: String(values.instrument),
     chord: String(values.chord),
@@ -1063,10 +1065,10 @@ describe('writing a part over one chord', () => {
    * is the whole of the difference, and normalising it here is cheaper than
    * inlining a display string into a template.
    */
-  const briefForPlan = (planned: PlannedPattern): string => {
-    const instrument = INSTRUMENTS.find((entry) => entry.id === planned.instrumentId);
-    if (!instrument) throw new Error(`no instrument ${planned.instrumentId}`);
-    const built = patternRunInput(planned);
+  const renderBrief = (input: PatternBrief): string => {
+    const instrument = INSTRUMENTS.find((entry) => entry.id === input.instrumentId);
+    if (!instrument) throw new Error(`no instrument ${input.instrumentId}`);
+    const built = patternRunInput(input);
     if (!built.ok) throw new Error(`patternRunInput refused: ${built.reason}`);
     return built.value.replaceAll(instrument.name, instrument.id);
   };
@@ -1077,7 +1079,7 @@ describe('writing a part over one chord', () => {
    * person gets by opening the panel and pressing go.
    */
   const expectSameAsBrief = (values: Record<string, SlotValue>): void => {
-    const brief = briefForPlan(planFor(values));
+    const brief = renderBrief(briefInputFor(values));
     const text = filled(values);
 
     // The excuse list is doing exactly the work it documents and no more: the
@@ -1148,10 +1150,10 @@ describe('writing a part over one chord', () => {
   it("says what the pattern sub-run's brief says, paragraph for paragraph", () => {
     expectSameAsBrief(VALUES);
 
-    const brief = briefForPlan(planFor(VALUES));
+    const brief = renderBrief(briefInputFor(VALUES));
     const text = filled(VALUES);
 
-    // The load-bearing paragraph of the whole epic, pinned against the brief
+    // The load-bearing paragraph of the brief, pinned against `patternRunInput`
     // rather than against a copy of it in this file: it lives inside the chord
     // section, which the swap above excuses on both sides.
     const material = paragraphs(brief).find((para) => para.startsWith('This is MATERIAL'));

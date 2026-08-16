@@ -168,19 +168,20 @@ Stay inside {key} {scale}. Keep it playable by one pair of hands: never two note
     /**
      * ⚠ THE TEMPLATE IS `patternSubRun.patternRunInput`'S BRIEF, QUOTED.
      *
-     * This row exists so a person can HEAR what the orchestrator's pattern
-     * sub-run writes. The epic's gate (OR-01) asks whether a narrow brief — one
-     * part, one chord, one instrument — writes better music than a run holding
-     * the whole job; the answer is only worth anything if the words being judged
-     * are the words that will ship. So the template is not a paraphrase of that
-     * brief, it is the same paragraphs, and `CommandCatalog.test.ts` compares the
-     * two paragraph for paragraph so a reword on either side fails a test rather
-     * than quietly making the listening test measure something else.
+     * This row exists so a person can HEAR what that brief writes, and it is how
+     * the brief was verified by hand. The question it answers is whether a narrow
+     * brief — one part, one chord, one instrument — writes better music than a
+     * run holding a whole composition; the answer is only worth anything if the
+     * words being judged are the words that will ship. So the template is not a
+     * paraphrase of that brief, it is the same paragraphs, and
+     * `CommandCatalog.test.ts` compares the two paragraph for paragraph so a
+     * reword on either side fails a test rather than quietly making the listening
+     * test measure something else.
      *
      * The panel has no free-text slot, deliberately (`commandTypes`' header), and
-     * that is the right shape here anyway: the orchestrator will not TYPE a brief
-     * either, it will construct one out of a plan entry. A template with typed
-     * slots is that construction, done by hand.
+     * that is the right shape here anyway: whatever calls `patternRunInput` next
+     * will not TYPE a brief either, it will construct one out of four fields. A
+     * template with typed slots is that construction, done by hand.
      *
      * THREE PARAGRAPHS CANNOT BE THE SAME, and the test names each one:
      *
@@ -194,11 +195,11 @@ Stay inside {key} {scale}. Keep it playable by one pair of hands: never two note
      *     value.
      *   - how to work. "The frets above" is only true where the frets are above.
      *
-     * ONE thing the quoted wording asserts that is true of the sub-run and only
-     * nearly true here, left standing because the quote is worth more: "the
-     * arrangement was planned around it", where here a person picked the slots.
-     * It does not change what gets written into the open pattern, which is the
-     * thing being listened to.
+     * ONE thing the quoted wording asserts that nothing in the app makes true
+     * today, left standing because the quote is worth more: "the arrangement was
+     * planned around it", where here a person picked the slots. It does not
+     * change what gets written into the open pattern, which is the thing being
+     * listened to.
      *
      * ⚠ WHAT COULD NOT BE LEFT STANDING was the arrangement paragraph's original
      * "you cannot see one … you cannot make a second pattern — there is no tool
@@ -262,8 +263,9 @@ Stay inside {key} {scale}. Keep it playable by one pair of hands: never two note
           { value: 'Eb7', label: 'Eb7', hint: 'dominant seventh' },
           { value: 'Ab7', label: 'Ab7', hint: 'dominant seventh' },
         ],
-        // The I of a twelve-bar blues in C — the run this whole epic is reacting
-        // to, so it is the one a listening test reaches for first.
+        // The I of a twelve-bar blues in C — the chord of the 2026-08-14 backing
+        // track this brief is reacting to (see `patternSubRun`'s header), so it
+        // is the one a listening test reaches for first.
         fallback: 'C7',
       },
       {
@@ -272,9 +274,9 @@ Stay inside {key} {scale}. Keep it playable by one pair of hands: never two note
         source: 'instrument',
         label: 'Instrument',
         // The row has no tool that opens or re-necks a pattern — it mirrors the
-        // sub-run, whose instrument is the plan's — so a slot moved off the open
-        // pattern's neck does not get corrected, it aborts: the brief tells the
-        // run to write nothing. Silent from the user's side, hence the help.
+        // sub-run, whose instrument is its caller's — so a slot moved off the
+        // open pattern's neck does not get corrected, it aborts: the brief tells
+        // the run to write nothing. Silent from the user's side, hence the help.
         help: 'Must match the open pattern — the frets are voiced for this neck.',
         // The open pattern's own neck, so the template's "that must be
         // {instrument}" check passes by default rather than aborting the run on
@@ -282,10 +284,10 @@ Stay inside {key} {scale}. Keep it playable by one pair of hands: never two note
         defaultFrom: 'editing-pattern-instrument',
       },
       {
-        // Authored: the plan's `PlannedPattern.name` is what the brief calls the
-        // part, and what it is FOR is not a value the lib has a type for. The
-        // four here are the four the brief's own sentence lists, so the name a
-        // person picks reads the way a planned one does.
+        // Authored: `PatternBrief.name` is what the brief calls the part, and
+        // what it is FOR is not a value the lib has a type for. The four here are
+        // the four the brief's own sentence lists, so the name a person picks
+        // reads the way a constructed one does.
         kind: 'enum',
         id: 'character',
         label: 'Part',
@@ -310,11 +312,11 @@ Stay inside {key} {scale}. Keep it playable by one pair of hands: never two note
         // which a template has no conditional to drop. At one bar the fill would
         // both read "1 bars" and carry a paragraph about later bars that do not
         // exist — prose the shipping brief never sends, which is exactly the
-        // drift this row exists to rule out. One bar is the sub-run's case;
-        // hearing it is the assembly step's job, not this control's.
+        // drift this row exists to rule out. One bar is a case only a caller
+        // building the brief in code can reach, and no such caller ships today.
         min: 2,
-        // A part over ONE chord. Past this it is a section, which is the plan
-        // step's business and not one pattern's.
+        // A part over ONE chord. Past this it is a section, which is somebody
+        // else's business and not one pattern's.
         max: 8,
         step: 1,
         unit: 'bars',

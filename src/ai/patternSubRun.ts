@@ -1,21 +1,30 @@
 /**
- * ONE PATTERN, ONE CHORD, ONE INSTRUMENT — the writing step of an orchestrated
- * job, briefed from a single `PlannedPattern` of an arrangement plan.
+ * ONE PATTERN, ONE CHORD, ONE INSTRUMENT — the narrow writing run, briefed from
+ * a {@link PatternBrief} and nothing else.
  *
- * The epic's premise is that a run holding the whole job defaults to generic
- * output. The 2026-08-14 backing track is the exhibit: mechanically perfect —
- * correct spacing, full coverage, no wasted steps — and musically empty. It
- * asked `read_chord_voicings` for C7/F7/G7 on guitar and again on bass, got
- * correct grips both times, used neither, and wrote one repeated cell per part:
- * four notes at fret 3 on one downbeat for the rhythm guitar, a two-note
- * ostinato for the bass. A run asked for ONE bar of ONE chord on ONE instrument
- * has almost nowhere to put that filler — the whole of its output is the bar
- * being judged. That claim is what the listening test is for, so what is built
- * here is the thing that will actually ship rather than a rig for the test.
+ * ⚠ THIS IS THE ONE THING IN THIS AREA THAT DEMONSTRABLY WORKS, which is why it
+ * outlived everything around it. The orchestrated composition job that was meant
+ * to call it — a plan run, one of these per pattern, assembly in code — was
+ * deleted on 2026-08-16 having never produced a composition. This module was
+ * kept: asked for one part over one chord on one instrument, it reliably
+ * produces one, verified by hand through the pattern page's
+ * `pattern-write-over-a-chord` command, which is {@link patternRunInput}'s brief
+ * QUOTED with a test pinning the two together.
  *
- * Wired to nothing, like the plan step before it: a spec, a brief and its tests.
- * The step that opens the pattern, runs this and places the result is the
- * assembly card, and it is not this one.
+ * So it has no caller in the app today. It is a spec, a brief and its tests, and
+ * the design replacing the orchestrator will hand it the same four facts.
+ *
+ * The premise it was written on is that a run holding a whole composition
+ * defaults to generic output. The 2026-08-14 backing track is the exhibit:
+ * mechanically perfect — correct spacing, full coverage, no wasted steps — and
+ * musically empty. It asked `read_chord_voicings` for C7/F7/G7 on guitar and
+ * again on bass, got correct grips both times, used neither, and wrote one
+ * repeated cell per part: four notes at fret 3 on one downbeat for the rhythm
+ * guitar, a two-note ostinato for the bass. A run asked for ONE bar of ONE
+ * chord on ONE instrument has almost nowhere to put that filler — the whole of
+ * its output is the bar being judged. That claim is what the listening test is
+ * for, so what is built here is the thing that will actually ship rather than a
+ * rig for the test.
  *
  * ── THE GRIP IS INJECTED, and here is the reasoning the card left open ──────
  *
@@ -43,7 +52,7 @@
  *
  * ⚠ THE REAL COST OF INJECTING is that the frets become neck-specific BEFORE the
  * run starts, while the pattern they land in was opened by somebody else. A grip
- * for the plan's bass dropped into a guitar pattern by mistake stamps cleanly —
+ * voiced for a bass dropped into a guitar pattern by mistake stamps cleanly —
  * `stringIndex` 0-3 exist on both necks — and sounds like a different chord with
  * nothing refused anywhere. (The reverse is loud: a guitar grip on a bass gets
  * `stringIndex` 4 and 5 refused.) The run cannot fix that, having no
@@ -77,13 +86,13 @@
  *
  *   - `pattern_open_blank` (and `pattern_open`, which this build has not got —
  *     asserted by name anyway, because the day it exists is the day it must not
- *     be in this list). THE ORCHESTRATOR OWNS THE POINTER: the app has ONE open
- *     pattern, and a sub-run that could open another would move it out from
- *     under the next sub-run and under the assembly step's placement.
+ *     be in this list). THE CALLER OWNS THE POINTER: the app has ONE open
+ *     pattern, it was opened for this run, and a run that could open another
+ *     would move it out from under whatever the caller does with the result.
  *   - every `composition_*` and every `voice_*` tool. This run is not building
- *     an arrangement and cannot see one; the plan already decided where this
- *     pattern goes.
- *   - `pattern_set_instrument` — the instrument is the plan's, and the grip
+ *     an arrangement and cannot see one; where this pattern goes was settled
+ *     before it started.
+ *   - `pattern_set_instrument` — the instrument is the caller's, and the grip
  *     below was voiced for it. A run that changed it would leave the frets in
  *     its own brief describing a different neck.
  *   - `read_chord_voicings` — see the decision above.
@@ -97,9 +106,9 @@
  *     for one.
  *
  * ⚠ Built by filtering `AGENT_TOOLS`, so the writes carry `asJobWrite` and will
- * pass the composition job lock when the orchestrator that owns one exists. The
- * price is that a rename in a tool module has to be repeated in the list below,
- * which is why {@link subRunTools} throws rather than quietly running short.
+ * pass the composition job lock the day a caller holds one. The price is that a
+ * rename in a tool module has to be repeated in the list below, which is why
+ * {@link subRunTools} throws rather than quietly running short.
  *
  * ── THE SYSTEM PROMPT IS THE PATTERN PAGE'S, VERBATIM ──────────────────────
  *
@@ -132,22 +141,49 @@
  *
  * Not fixed in `agentRules` itself: those paragraphs are correct for the two
  * page agents that ship today, and a shared file cannot be edited for a run that
- * is wired to nothing yet. If the orchestrator lands and this list grows, the
- * honest move is to split `LENGTH` into the pattern half and the arrangement
- * half — the counter below is a per-run patch over a shared file's assumption
- * and it should stay small enough to be read as one.
+ * is wired to nothing yet. If a caller lands and this list grows, the honest
+ * move is to split `LENGTH` into the pattern half and the arrangement half — the
+ * counter below is a per-run patch over a shared file's assumption and it should
+ * stay small enough to be read as one.
  */
 import { chordGrip, listInstruments } from '../patterns/patternService';
 import { AGENT_TOOLS } from './tools';
 import { PATTERN_AGENT } from './patternAgent';
-// Shared with the plan step rather than re-derived: the same three judgements
-// about the same `PlannedPattern`, and `barMath`/`instrumentCatalog` exist
-// because that was got wrong twice already.
-import { barsPhrase, isBarCount, patternLengthRefusal } from './arrangementPlan';
 import type { AgentSpec } from './agentService';
 import type { AgentTool } from './tools/types';
-import type { PlannedPattern } from './arrangementPlanSchema';
 import type { Result } from '../patterns/patternService';
+
+// ------------------------------------------------------------------ input ---
+
+/**
+ * The four facts a brief is built out of, and the whole of this module's input.
+ *
+ * ⚠ DELIBERATELY LOCAL. It was a `PlannedPattern` off an arrangement plan until
+ * that plan was deleted, and the lesson of the deletion was that these four are
+ * the only ones that ever mattered: what the part is for, over which chord, on
+ * which neck, for how long. Whatever calls this next declares those four; it
+ * does not get to make this module import its schema.
+ */
+export interface PatternBrief {
+  /** What the part is FOR — "Walking Bass", "Comping". It is the ROLE, and the
+   *  brief hands it to the model as one. */
+  readonly name: string;
+  readonly instrumentId: string;
+  /** The chord SYMBOL this pattern is over — "C7", "Fmaj7", "G/B". */
+  readonly chord: string;
+  /** How many bars long it is: a whole number, at least 1. */
+  readonly lengthBars: number;
+}
+
+/** A whole number of bars, at least 1 — the only lengths a pattern has. */
+const isBarCount = (value: number): boolean => Number.isInteger(value) && value >= 1;
+
+const barsPhrase = (count: number): string => `${count} bar${count === 1 ? '' : 's'}`;
+
+/** Worded to be true of every input that fails {@link isBarCount} — 0, -1 and
+ *  1.5 are all wrong, and only one of them is "shorter than a bar". */
+const patternLengthRefusal = (name: string, lengthBars: number): string =>
+  `Pattern "${name}" is ${lengthBars} bars long. A pattern is a whole number of bars, at least 1 — nothing shorter, and nothing in between.`;
 
 // ------------------------------------------------------------------ tools ---
 
@@ -169,10 +205,10 @@ export const SUB_RUN_TOOL_NAMES: readonly string[] = [
 /**
  * The allow-list resolved against the app's own tools.
  *
- * THROWS on a name that no longer exists, at import. A sub-run silently short of
- * `pattern_stamp_notes` is a run that answers "done" having written nothing, and
- * that failure would be read as the model's — a renamed tool is ours, and it
- * should stop the tests rather than the arrangement.
+ * THROWS on a name that no longer exists, at import. A run silently short of
+ * `pattern_stamp_notes` answers "done" having written nothing, and that failure
+ * would be read as the model's — a renamed tool is ours, and it should stop the
+ * tests rather than the run.
  */
 function subRunTools(): readonly AgentTool[] {
   const wanted = new Set(SUB_RUN_TOOL_NAMES);
@@ -220,15 +256,21 @@ const gripLines = (cells: readonly { stringIndex: number; fret: number }[]): str
   cells.map((cell) => `    stringIndex ${cell.stringIndex}, fret ${cell.fret}`).join('\n');
 
 /**
- * THE BRIEF — the artefact this card is really about. Everything else in this
- * module is plumbing around this string.
+ * THE BRIEF — the artefact this module is really about. Everything else in it is
+ * plumbing around this string.
+ *
+ * ⚠ THE PROSE IS A BASELINE. It is what a deferred musicality ticket will tune
+ * against, and `commandCatalog`'s `pattern-write-over-a-chord` is these
+ * paragraphs QUOTED with a test comparing the two paragraph for paragraph. Word
+ * it differently and you have moved the baseline and failed that test; do both
+ * on purpose or neither.
  *
  * It asks for MUSIC and not for a structure: what the part is for, over which
  * chord, how long, on which instrument, and then what a bar of music is not.
- * The role comes from the plan's own `name` rather than from a guess off the
+ * The role comes from the caller's own `name` rather than from a guess off the
  * instrument id, because "bass instrument therefore bass line" is a heuristic
- * that would contradict the plan the first time a guitar is asked for a bass
- * figure or a bass for a melody. The plan named the part; the name is the role.
+ * that would contradict the caller the first time a guitar is asked for a bass
+ * figure or a bass for a melody. The caller named the part; the name is the role.
  *
  * ⚠ THE PROHIBITION IS THE LOAD-BEARING PARAGRAPH. "Do not stamp the shape once
  * on the downbeat and stop" is the exact thing the 2026-08-14 rhythm guitar did
@@ -236,10 +278,10 @@ const gripLines = (cells: readonly { stringIndex: number; fret: number }[]): str
  * the frets are right, the harmony is right, the length is right, the spacing is
  * right. No reply we can design catches it, so it is forbidden in advance.
  *
- * PURE — a plan entry in, a brief out. `chordGrip` is a lookup over the lib's
- * chord and tuning catalogs and takes nothing from the open document, so the
- * same entry gives the same brief with no clock, no randomness and no app state
- * in the answer.
+ * PURE — a {@link PatternBrief} in, a brief out. `chordGrip` is a lookup over
+ * the lib's chord and tuning catalogs and takes nothing from the open document,
+ * so the same input gives the same brief with no clock, no randomness and no app
+ * state in the answer.
  *
  * ⚠ THE ARRANGEMENT PARAGRAPH IS AN INSTRUCTION, NOT A CAPABILITY CLAIM — "you
  * must not make a second pattern", not "there is no tool here that does it" —
@@ -253,10 +295,10 @@ const gripLines = (cells: readonly { stringIndex: number; fret: number }[]): str
  *
  * REFUSES rather than papering over, in the register the seams refuse in: an
  * unreadable symbol, a neck this app has not got and a length that is not a
- * whole bar are all things the plan step can be sent back to fix, and a brief
+ * whole bar are all things the caller can be sent back to fix, and a brief
  * built around "0 bars of Zz9" would spend a whole run finding that out.
  */
-export function patternRunInput(pattern: PlannedPattern): Result<string> {
+export function patternRunInput(pattern: PatternBrief): Result<string> {
   if (!isBarCount(pattern.lengthBars)) {
     return { ok: false, reason: patternLengthRefusal(pattern.name, pattern.lengthBars) };
   }
@@ -273,7 +315,7 @@ export function patternRunInput(pattern: PlannedPattern): Result<string> {
   const grip = chordGrip(pattern.chord, pattern.instrumentId);
   if (!grip.ok) return { ok: false, reason: grip.reason };
 
-  // The symbol as the VOICER echoed it rather than as the plan wrote it. Those
+  // The symbol as the VOICER echoed it rather than as the caller wrote it. Those
   // are the same string today — `chordGrip` echoes what it was given and refuses
   // what it cannot read, rather than normalising — so this is insurance and not
   // a live guarantee: if the lib ever starts normalising, the chord named in the

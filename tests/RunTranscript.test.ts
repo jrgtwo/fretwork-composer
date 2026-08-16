@@ -223,8 +223,9 @@ describe('handing it to somebody', () => {
 
 /**
  * A JOB — several runs with different prompts and different inputs, building one
- * arrangement. `arrangementJob` records one of these per job: a plan run, then
- * one sub-run per pattern.
+ * thing. Nothing in the app runs one today: the orchestrated composition job
+ * that did was deleted on 2026-08-16. These sections are kept anyway, and this
+ * file is why — they are what made its failures readable.
  *
  * What is asserted here is the thing the shape was chosen for: ONE id gives the
  * WHOLE job as ONE artifact. Handing somebody seven files is handing them
