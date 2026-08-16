@@ -41,6 +41,19 @@ import {
   type PatternEvent,
   type Tick,
 } from '@fretwork/lib';
+// A real subpath export, and the only way in: the import pipeline is not on the
+// lib's root barrel. It is reached from HERE and nowhere else for this file's
+// stated reason, and because `src/ai/**` may not import the lib at all — the
+// agent-facing wrapper has to come through this seam.
+import {
+  ImportValidationError,
+  LIMITS,
+  mapImportToLibrary,
+  validateImportIR,
+  type ImportIR,
+  type MapTopology,
+  type ValidationResult,
+} from '@fretwork/lib/import';
 import { createHistory } from './history';
 import { toPitchPatch, type NotePitch } from './articulations';
 
@@ -54,6 +67,14 @@ import { toPitchPatch, type NotePitch } from './articulations';
  * schema descriptions have to state what a tick IS.
  */
 export { PPQ };
+
+/**
+ * The document {@link importIR} takes, re-exported for {@link PPQ}'s reason: a
+ * caller that has to reach past the seam for the TYPE of the thing the seam takes
+ * has two dependencies instead of one — and the agent-facing wrapper, which may
+ * not import the lib at all, could not name it any other way.
+ */
+export type { ImportIR, MapTopology };
 
 type SelectionMode = 'replace' | 'add' | 'toggle';
 
@@ -719,6 +740,357 @@ export function deletePattern(id: string): Result<Pattern> {
     clearHistory();
   }
   return ok(target);
+}
+
+// ---------------------------------------------------------------- import ---
+
+/**
+ * What an import put in the library.
+ *
+ * Ids rather than documents: they are what a caller with no pointer needs to
+ * open, rename or delete what it just made, and the documents themselves are one
+ * `findLibraryPattern` away. `compositionId` is null when the mapper produced no
+ * composition — see {@link importIR} on when that happens.
+ */
+export interface ImportedDocuments {
+  readonly patternIds: readonly string[];
+  readonly compositionId: string | null;
+  readonly topology: MapTopology;
+  /**
+   * The third channel. Neither success nor refusal: the validator's DROPS, the
+   * mapper's inventory of what it approximated, and this seam's own note when
+   * notes landed on strings the resolved instrument hasn't got. All of them, in
+   * that order — a caller that only saw the mapper's would never hear that a
+   * track was dropped before the mapper ever ran.
+   *
+   * ⚠ CLAMPS ARE SILENT. The validator clamps fret, string index, tick, bpm,
+   * capo and meter without saying a word — only its 64-track and
+   * 100 000-events-per-track CAPS produce a warning. A caller must range-check
+   * what it emits rather than expecting the pipeline to complain; fret 99
+   * becomes fret 36 with nothing said. Pinned in tests/ImportIR.test.ts.
+   */
+  readonly warnings: readonly string[];
+}
+
+export interface ImportOptions {
+  /** Which track is "primary" — it sorts first among the composition's tracks
+   *  and its instrument becomes the composition's. Defaults to the first track
+   *  that has any NOTES; naming one that has none is refused, because the mapper
+   *  answers it with an empty document rather than with an error. */
+  readonly selectedTrackId?: string;
+  /** Force a topology. Omitted, the mapper picks: 'composition' when the
+   *  document has more than one non-empty track, OR any section marker, OR a
+   *  meter change; 'single-pattern' otherwise. */
+  readonly topology?: MapTopology;
+  /** Composition mode only: import just these tracks. The rest survive on the
+   *  composition's `sourceIR` and are not materialized.
+   *
+   *  ⚠ The SELECTED track is always force-added to this list by the mapper, so
+   *  filtering without also setting {@link selectedTrackId} imports one lane more
+   *  than was asked for — the default selection is the first track with notes. */
+  readonly includedTrackIds?: readonly string[];
+  /** Library collection to file the new rows under. */
+  readonly collectionId?: string | null;
+  /** Instrument for a track whose `instrumentHint` is missing or unknown. The
+   *  mapper's own default is a guitar, which puts a ukulele or bass user's
+   *  import on the wrong neck; a UI caller should pass whatever it is showing.
+   *  A hint that IS present always wins — including `drums` and `vocals`, which
+   *  map to a guitar (see {@link importIR}). */
+  readonly fallbackInstrumentId?: string;
+}
+
+/**
+ * Notes in an IR, counted the way the validator counts them.
+ *
+ * The caps are applied here too because the surplus past them is dropped AND
+ * already warned about: including it would make "N notes were discarded" name a
+ * number the caller cannot act on. Defensive property access because this also
+ * runs over the RAW document, whose events the validator has not vetted yet.
+ */
+function countIRNotes(tracks: ImportIR['tracks']): number {
+  let total = 0;
+  for (const track of tracks.slice(0, LIMITS.maxTracks)) {
+    for (const event of (track?.events ?? []).slice(0, LIMITS.maxEventsPerTrack)) {
+      total += Math.min(event?.notes?.length ?? 0, LIMITS.maxNotesPerEvent);
+    }
+  }
+  return total;
+}
+
+/**
+ * Notes on strings the pattern's own instrument hasn't got.
+ *
+ * The two bounds never meet in the pipeline: the validator clamps `string`
+ * against the TRACK'S TUNING (or 6, when the track gave none), while the mapper
+ * picks the instrument from `instrumentHint`. A bass-hinted track with no tuning
+ * therefore stores notes on strings 4 and 5 of a four-string bass — undrawable,
+ * unplayable, and only ever surfacing later as {@link checkString} refusing to
+ * edit a note that is already there. Reported per instrument rather than per
+ * pattern because one bad track is one mistake, not twenty-seven.
+ */
+function offNeck(patterns: readonly Pattern[]): string[] {
+  const counts = new Map<string, number>();
+  for (const pattern of patterns) {
+    // The RESOLVED id, which is what the editor will read: `patternInstrumentId`
+    // substitutes the default for one the catalog does not know, and comparing
+    // against an unknown instrument's 0 strings would flag every note.
+    const instrumentId = patternInstrumentId(pattern);
+    const strings = instrumentStringCount(instrumentId);
+    if (strings === 0) continue;
+    const off = pattern.events.filter((event) => event.stringIndex >= strings).length;
+    if (off > 0) counts.set(instrumentId, (counts.get(instrumentId) ?? 0) + off);
+  }
+  return [...counts].map(
+    ([instrumentId, off]) =>
+      `${off} note${off === 1 ? '' : 's'} sit on strings a ${instrumentId} hasn't got ` +
+        `(it has ${instrumentStringCount(instrumentId)}). They are stored but nothing ` +
+        'draws or plays them — give the track a `tuning` as long as its instrument.',
+  );
+}
+
+/**
+ * Turn an `ImportIR` document into stored patterns plus a stored composition.
+ *
+ * Three lib stages, none of whose arithmetic is ours or a caller's:
+ *
+ *   `validateImportIR` — rejects a structurally broken document, SILENTLY clamps
+ *     every out-of-range number (fret to 0..36, string index into the track's
+ *     tuning, bpm to 10..600), strips control characters from names, and drops
+ *     items past its caps. Only a CAP produces a warning; see
+ *     {@link ImportedDocuments.warnings}. It also drops, silently, any event or
+ *     note whose `atTick`, `durationTicks`, `string` or `fret` is not a whole
+ *     number — which this function turns back into a refusal when it costs the
+ *     document all of its notes, and into a warning otherwise.
+ *   `mapImportToLibrary` — cuts the document into `Pattern`s and a
+ *     `Composition`, rescaling the IR's `ticksPerQuarter` to the project's 480.
+ *   `commitImport` — writes both into the library under the tier gate.
+ *
+ * ⚠ THIS CREATES A NEW COMPOSITION. It never edits the open one — nothing here
+ * touches `compositionService`'s document — so there is no edit to undo: the
+ * import is not an undo step, and the way back out is to delete what it made.
+ *
+ * ⚠ IT ALSO CHANGES WHAT IS OPEN. `commitImport` points the store at what it
+ * created (the composition when there is one, otherwise the first pattern) and
+ * clears the placement/selection/cursor state — including `editingPatternId`,
+ * which it nulls in composition mode. That null is left standing on purpose:
+ * `App.tsx` adopts the most recently updated library row when nothing is open,
+ * so the pattern page jumps to one of the imported patterns rather than to the
+ * junk pattern a re-seed would otherwise append.
+ *
+ * This function drops the pattern seam's undo history for the same reason —
+ * history is per-pattern and `writePatternBack` addresses whatever is open NOW.
+ * (An open gesture bracket is NOT re-armed after a composition-mode import,
+ * because no pattern is open to re-arm it on; nothing brackets this call today,
+ * and a future caller that does would get one undo step per write.)
+ *
+ * ⚠ IT CANNOT CLEAN UP AFTER THE COMPOSITION SEAM, because `compositionService`
+ * imports this module and not the other way round — yet that seam holds four
+ * pieces of per-composition state OUTSIDE the store, and all four now name a
+ * document nobody is looking at. A caller with both seams in scope must do what
+ * `compositionService`'s own switch routine does, after a successful import:
+ *   - `closePlacementEditing()` — the open block belongs to the old composition,
+ *     and leaving it open sends the pattern pointer back to a pre-import pattern.
+ *   - `selectPlacements([], 'replace')` — the module's selection list, which the
+ *     store's single `selectedPlacementId` is kept in sync with; `commitImport`
+ *     nulls the store's side only, breaking that invariant.
+ *   - `selectTrack(null)` — otherwise `getSelectedTrackId()` still names a track
+ *     of the previous composition, and a write aimed at it is refused with no
+ *     visible cause.
+ *   - `clearHistory()` — or an undo stamps a snapshot of the previously-open
+ *     composition back over that composition.
+ *
+ * ⚠ A DOCUMENT WITH NO SECTION MARKERS STILL PRODUCES A COMPOSITION, as long as
+ * it has more than one non-empty track (or a meter change, or an explicit
+ * `topology`). The mapper's own doc comment says otherwise; the code does not.
+ * What sections change is the CUT: with markers, every track is sliced into one
+ * pattern per section, so the pattern count is tracks × sections; without them,
+ * each track becomes one pattern spanning the whole piece. Pinned in
+ * tests/ImportIR.test.ts, because the shape of a document a caller writes
+ * follows from it.
+ *
+ * ⚠ THREE DOCUMENTED IR FIELDS GO NOWHERE, so a caller writing one is writing
+ * dead weight (all three do survive on the row's `sourceIR`):
+ *   - `chords` — `validateImportIR` does not copy it onto the IR it returns, so
+ *     the mapper's harmony lane is always empty no matter what was written. It is
+ *     NOT masked here by passing the raw list through: `chords[].symbol` is the
+ *     one user-visible string the validator never sanitizes, and re-attaching it
+ *     would re-open the hole `sanitizeString` exists for.
+ *   - `keySignatures` — the mapper never reads it; every pattern is built with
+ *     `key: null, scaleType: null`.
+ *   - `instrumentHint: 'drums' | 'vocals'` — both map to a guitar, and in
+ *     composition mode (the usual one) not even with a warning.
+ * All three are pinned in tests/ImportIR.test.ts.
+ *
+ * ⚠ EVENTS MUST BE TICK-ORDERED within a track. The mapper preserves IR order
+ * and never sorts, so an out-of-order document produces a pattern whose
+ * `startTick`s run backwards — and `resolveSlideTarget` walks FORWARD BY INDEX
+ * to find a slide's destination, so it resolves to the wrong fret. Not sorted
+ * here on purpose: reordering a caller's document silently would hide the
+ * mistake rather than let the caller's own tests catch it.
+ *
+ * Frets above the instrument's neck can arrive: the validator's ceiling is 36,
+ * {@link MAX_FRET} is 24 and a real neck is shorter still. They are stored and
+ * editable, drawn by nothing and played by nothing — the tolerance
+ * {@link fretCount} documents. ({@link notesAboveNeck} counts them for the OPEN
+ * pattern only, and a composition-mode import leaves no pattern open, so it
+ * reports 0 for every imported row.)
+ */
+export function importIR(raw: ImportIR, options: ImportOptions = {}): Result<ImportedDocuments> {
+  let validated: ValidationResult;
+  try {
+    validated = validateImportIR(raw);
+  } catch (error) {
+    // The validator THROWS rather than returning its refusal, so the seam's own
+    // idiom has to be put back on. `issues` is the list of what was structurally
+    // wrong and is the only actionable part — a caller that hears "import
+    // failed" has nothing to change.
+    if (error instanceof ImportValidationError) {
+      return refuse(`That document isn't a valid import: ${error.issues.join('; ')}.`);
+    }
+    // Anything else is the validator walking off the end of a shape it did not
+    // check — `tracks: [null]` dereferences `t.tuning`, for instance. The raw JS
+    // message alone ("Cannot read properties of null") names nothing a caller can
+    // change, so it gets the structural sentence in front of it.
+    return refuse(
+      `That document couldn't be read — a track, event or note isn't an object: ${
+        error instanceof Error ? error.message : String(error)
+      }.`,
+    );
+  }
+
+  const ir = validated.ir;
+  // NOTES, not events: the validator drops a note whose `string` or `fret` is
+  // fractional but KEEPS its event, so a track can survive validation carrying
+  // events that are all empty. Counting events instead lets such a document
+  // through and commits a pattern with nothing in it.
+  const noteCount = (track: ImportIR['tracks'][number]) =>
+    track.events.reduce((sum, event) => sum + event.notes.length, 0);
+  const playable = ir.tracks.filter((track) => noteCount(track) > 0);
+  const dropped = countIRNotes(raw.tracks) - countIRNotes(ir.tracks);
+  if (playable.length === 0) {
+    // Fractional ticks and frets are the single likeliest mistake in a
+    // hand-written or model-written document, and "no notes" alone would send the
+    // caller looking at the wrong thing.
+    if (dropped > 0) {
+      return refuse(
+        `Nothing survived validation — all ${dropped} note${
+          dropped === 1 ? '' : 's'
+        } were discarded. \`atTick\`, \`durationTicks\`, \`string\` and \`fret\` must be whole numbers.`,
+      );
+    }
+    return refuse(
+      `Nothing to import — the document has ${ir.tracks.length} track${
+        ir.tracks.length === 1 ? '' : 's'
+      } and no notes on any of them.`,
+    );
+  }
+
+  // The survivable version of the same drop: some notes went and some stayed. The
+  // pipeline says nothing at all about it, so this is the only place a caller can
+  // hear it.
+  const seamWarnings =
+    dropped > 0
+      ? [
+          `Discarded ${dropped} note${dropped === 1 ? '' : 's'} whose \`atTick\`, ` +
+            '`durationTicks`, `string` or `fret` was not a whole number.',
+        ]
+      : [];
+
+  // Two markers on one tick, or a marker at or past `totalTicks`, each produce a
+  // section interval of zero length — and the mapper builds a real Pattern with
+  // `durationTicks: 0` for it, commits it, and hangs a placement off it. Nothing
+  // downstream refuses a zero-length block, and these patterns never pass through
+  // `fitPatternDuration`, so the document has to be refused here instead.
+  const sectionTicks = ir.sections.map((section) => section.atTick);
+  const duplicate = sectionTicks.find((tick, i) => sectionTicks.indexOf(tick) !== i);
+  if (duplicate !== undefined) {
+    return refuse(
+      `Two section markers are both at tick ${duplicate}. Each marker starts a ` +
+        'section, so two on one tick makes one of them zero bars long.',
+    );
+  }
+  const pastEnd = sectionTicks.find((tick) => tick >= ir.totalTicks);
+  if (pastEnd !== undefined) {
+    return refuse(
+      `A section marker sits at tick ${pastEnd}, at or past the document's end ` +
+        `(\`totalTicks\` is ${ir.totalTicks}). Every marker has to start a section ` +
+        'with room in it.',
+    );
+  }
+
+  // The mapper takes an unknown `selectedTrackId` as a WARNING and hands back
+  // zero patterns, and a SILENT track as a legitimate pick — throwing every other
+  // track's music away and returning one empty pattern. Both read downstream as
+  // an empty document rather than as a caller naming the wrong track, so both are
+  // checked here, separately, so the sentence names the mistake.
+  const selectedTrackId = options.selectedTrackId ?? playable[0].id;
+  if (!playable.some((track) => track.id === selectedTrackId)) {
+    const known = ir.tracks.some((track) => track.id === selectedTrackId);
+    return refuse(
+      known
+        ? `Track ${selectedTrackId} has no notes, so it cannot be the primary track. These do: ${playable
+            .map((track) => track.id)
+            .join(', ')}.`
+        : `No such track: ${selectedTrackId}. The document has ${ir.tracks
+            .map((track) => track.id)
+            .join(', ')}.`,
+    );
+  }
+
+  const mapped = mapImportToLibrary({
+    ir,
+    selectedTrackId,
+    topology: options.topology,
+    includedTrackIds: options.includedTrackIds,
+    fallbackInstrumentId: options.fallbackInstrumentId,
+  });
+  const warnings = [
+    ...validated.warnings,
+    ...seamWarnings,
+    ...mapped.warnings,
+    ...offNeck(mapped.patterns),
+  ];
+
+  if (mapped.patterns.length === 0) {
+    // Defence only: the mapper returns zero patterns for an unknown selected
+    // track alone, which the guard above has already refused, so this cannot
+    // currently fire. Kept because "zero patterns" must never reach `commitImport`
+    // — nobody should go hunting for the test that covers it.
+    return refuse(
+      `Nothing came out of that document. ${warnings.join(' ') || 'The mapper produced no patterns.'}`,
+    );
+  }
+
+  const { patterns: heldPatterns, compositions: heldCompositions } = store().library;
+  const committed = store().commitImport(mapped, options.collectionId ?? null);
+  if (committed === null) {
+    // The gate mutates NOTHING and opens the upgrade prompt (or, for a signed-out
+    // viewer, the signup modal) on its way out. It gates patterns and compositions
+    // INDEPENDENTLY and says which one declined to nobody, so the sentence names
+    // what the import needs and what is already held rather than guessing.
+    return refuse(
+      `Nothing was imported — your plan's library cap is in the way. This import needs room for ${
+        mapped.patterns.length
+      } more pattern${mapped.patterns.length === 1 ? '' : 's'}${
+        mapped.composition ? ' and one more composition' : ''
+      }, on top of the ${heldPatterns.length} pattern${
+        heldPatterns.length === 1 ? '' : 's'
+      } and ${heldCompositions.length} composition${
+        heldCompositions.length === 1 ? '' : 's'
+      } already in your library.`,
+    );
+  }
+
+  // History is per-pattern and the store is now pointed somewhere else — see the
+  // doc comment. Same reason `openPattern` clears it.
+  clearHistory();
+
+  return ok({
+    patternIds: mapped.patterns.map((pattern) => pattern.id),
+    compositionId: mapped.composition?.id ?? null,
+    topology: mapped.topology,
+    warnings,
+  });
 }
 
 /**
