@@ -909,7 +909,9 @@ function offNeck(patterns: readonly Pattern[]): string[] {
  * follows from it.
  *
  * ⚠ THREE DOCUMENTED IR FIELDS GO NOWHERE, so a caller writing one is writing
- * dead weight (all three do survive on the row's `sourceIR`):
+ * dead weight (all three do survive on the row's `sourceIR`). The first two are
+ * LIB-GAP(21) — docs/FOLLOW-UPS.md row 21 names where it costs something and
+ * what closes it:
  *   - `chords` — `validateImportIR` does not copy it onto the IR it returns, so
  *     the mapper's harmony lane is always empty no matter what was written. It is
  *     NOT masked here by passing the raw list through: `chords[].symbol` is the

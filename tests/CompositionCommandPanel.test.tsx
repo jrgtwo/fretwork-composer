@@ -25,6 +25,16 @@ import { DEFAULT_PATTERNS_STATE, MAX_COMPOSITION_TRACKS, usePatternsStore } from
  * does it and for the same reason: exactly one module imports
  * `agent-harness/browser`, so one `vi.mock` replaces it — and the mock is what
  * lets a "run" call real tools at times this test chooses.
+ *
+ * ── TWO ROUTES, AND EVERY LIST ABOVE IS ABOUT ONE OF THEM ───────────────────
+ *
+ * Everything named above is the `'single-run'` route — a tool-using agent
+ * writing into the OPEN composition, driven here by {@link SINGLE_RUN}. The
+ * backing track declares `route: 'ir-job'` and does something else entirely:
+ * it runs `irCompositionJob` and IMPORTS A NEW COMPOSITION, so it has no tools
+ * to trace, no gesture to bracket and no rollback to assert. That route has its
+ * own mock and its own describe at the foot of this file; the two are kept apart
+ * because the claims are not the same claims.
  */
 
 // -------------------------------------------------------- the harness mock ---
@@ -100,6 +110,65 @@ vi.mock('agent-harness/browser', () => {
   };
 });
 
+/**
+ * ── THE IR JOB, MOCKED AT ITS OWN MODULE BOUNDARY ───────────────────────────
+ *
+ * `irCompositionJob` is driven end to end by `IrCompositionJob.test.ts` with its
+ * own fakes; what is left to assert HERE is the panel around it, and that is
+ * exactly the thing a real job cannot give in jsdom — a chart run needs a
+ * provider, and the phases are what is being rendered.
+ *
+ * So the module is replaced by a promise this file settles by hand, which makes
+ * every phase, every failure and the exact moment of a Cancel a choice the test
+ * makes rather than a race it hopes for. It is the same technique the harness
+ * mock above uses, one seam further out.
+ */
+const irJob = vi.hoisted(() => ({
+  /** The live job's handles, set when the panel starts one. */
+  live: null as null | {
+    input: string;
+    label: string | undefined;
+    signal: AbortSignal | undefined;
+    progress: (event: unknown) => void;
+    settle: (outcome: unknown) => void;
+  },
+  /** Set to make the job throw synchronously — a defect in the job runner,
+   *  which the panel still has to survive with the lock given back. */
+  throwWith: null as string | null,
+}));
+
+vi.mock('../src/ai/irCompositionJob', () => ({
+  runIrCompositionJob: (
+    input: string,
+    options: {
+      signal?: AbortSignal;
+      label?: string;
+      onProgress?: (event: unknown) => void;
+    } = {},
+  ) => {
+    if (irJob.throwWith !== null) throw new Error(irJob.throwWith);
+    return new Promise<unknown>((resolve) => {
+      irJob.live = {
+        input,
+        label: options.label,
+        signal: options.signal,
+        progress: (event) => options.onProgress?.(event),
+        settle: resolve,
+      };
+      // The real job checks its signal between steps and reports a cancel as a
+      // typed refusal that names where it stopped — never as a failure of the
+      // model. Its guarantee is the second sentence: nothing was written.
+      options.signal?.addEventListener('abort', () =>
+        resolve({
+          ok: false,
+          stopped: 'cancelled',
+          reason: 'The job was cancelled while it was writing the chart. Nothing was written.',
+        }),
+      );
+    });
+  },
+}));
+
 import { CompositionCommandPanel } from '../src/ai/CompositionCommandPanel';
 import { commandsForPage } from '../src/ai/commandCatalog';
 import { setConnectorSettings } from '../src/ai/connectorSettings';
@@ -111,11 +180,19 @@ import {
   closePlacementEditing,
   endJob,
   ensureComposition,
+  getEditingComposition,
+  getEditingPlacementId,
+  getSelectedPlacementIds,
+  getSelectedTrackId,
   getTracks,
   isJobRunning,
+  openBlankComposition,
   openPlacementForEditing,
+  selectPlacements,
+  selectTrack,
   undo,
 } from '../src/composition/compositionService';
+import { beginJobTranscript, clearTranscripts } from '../src/ai/runTranscript';
 import {
   clearHistory as clearPatternHistory,
   getEditingPattern,
@@ -138,9 +215,16 @@ beforeEach(() => {
   // pointer, so the next test's pattern writes would land in a block.
   endJob();
   closePlacementEditing();
+  // Selection is module state on the seam like the two above, and it is asserted
+  // on below — a set left behind by one test would be another's starting point.
+  selectPlacements([], 'replace');
+  clearTranscripts();
   harness.registries.length = 0;
   harness.live = null;
   harness.throwWith = null;
+  irJob.live = null;
+  irJob.throwWith = null;
+  selectTrack(null);
   setConnectorSettings({ baseUrl: 'http://localhost:8080/v1', token: '' });
 });
 
@@ -148,8 +232,20 @@ beforeEach(() => {
 
 const BACKING_TRACK = 'Create a backing track';
 
+/**
+ * The composition row every SINGLE-RUN test below drives.
+ *
+ * ⚠ It used to be the backing track, and that row has moved to the `'ir-job'`
+ * route — no tools, no edit to the open composition, no rollback. Everything in
+ * this file about the tool trace, the gesture and the rollback is about the
+ * OTHER route, so it needs a row still on it; the bass line is one, and it
+ * reaches the same tools (`composition_add_track`, `pattern_open_blank`) the
+ * assertions below name.
+ */
+const SINGLE_RUN = 'Create a bass line';
+
 /** Pick a command and press Run. Returns once the run is in flight. */
-async function startRun(label = BACKING_TRACK) {
+async function startRun(label = SINGLE_RUN) {
   await userEvent.click(screen.getByRole('button', { name: label }));
   await userEvent.click(screen.getByRole('button', { name: 'Run' }));
 }
@@ -339,13 +435,13 @@ describe('a run in flight', () => {
     await startRun();
     callTool('read_composition');
 
-    await userEvent.click(screen.getByRole('button', { name: 'Create a bass line' }));
+    await userEvent.click(screen.getByRole('button', { name: BACKING_TRACK }));
 
     const running = report();
     expect(within(running).getByText(/Running…/)).toBeInTheDocument();
     // Still named as the command that is actually running, not the one just
     // clicked.
-    expect(within(running).getByText(new RegExp(BACKING_TRACK))).toBeInTheDocument();
+    expect(within(running).getByText(new RegExp(SINGLE_RUN))).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
 
     // And the way out still works.
@@ -369,9 +465,9 @@ describe('a run in flight', () => {
 
     rerender(<CompositionCommandPanel mode="voice" />);
 
-    expect(screen.queryByRole('button', { name: BACKING_TRACK })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: SINGLE_RUN })).not.toBeInTheDocument();
     const done = report();
-    expect(within(done).getByText(new RegExp(BACKING_TRACK))).toBeInTheDocument();
+    expect(within(done).getByText(new RegExp(SINGLE_RUN))).toBeInTheDocument();
     expect(within(done).getByText(/Added a drum track\./)).toBeInTheDocument();
   });
 
@@ -394,11 +490,11 @@ describe('a run in flight', () => {
     rerender(<CompositionCommandPanel mode="voice" />);
 
     // The list swapped…
-    expect(screen.queryByRole('button', { name: BACKING_TRACK })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: SINGLE_RUN })).not.toBeInTheDocument();
     // …and the run did not. Including which command is running, because the form
     // that started it is no longer on screen to say so.
     const running = report();
-    expect(within(running).getByText(new RegExp(BACKING_TRACK))).toBeInTheDocument();
+    expect(within(running).getByText(new RegExp(SINGLE_RUN))).toBeInTheDocument();
     expect(within(running).getByText(/1\. read_composition/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
 
@@ -639,7 +735,7 @@ describe('a cancelled job', () => {
       // `fireEvent`, not `userEvent`: the deadline is a `setTimeout` taken when
       // the run starts, so the clock has to already be fake by then — and
       // `userEvent`'s own delays run on the same faked clock.
-      fireEvent.click(screen.getByRole('button', { name: BACKING_TRACK }));
+      fireEvent.click(screen.getByRole('button', { name: SINGLE_RUN }));
       fireEvent.click(screen.getByRole('button', { name: 'Run' }));
       callTool('composition_add_track', { name: 'Drums' });
 
@@ -784,6 +880,677 @@ describe('a run started from edit mode', () => {
     expect(isJobRunning()).toBe(true);
 
     await finishRun();
+    expect(isJobRunning()).toBe(false);
+  });
+});
+
+// ------------------------------------------------------------- the ir route ---
+
+/**
+ * THE `'ir-job'` ROUTE — one row, and it is a different shape of thing.
+ *
+ * ⚠ The difference that drives every test here: **the import CREATES A NEW
+ * COMPOSITION.** It does not edit the open one, nothing is written until the
+ * import runs, and after it runs the job is over. So there is no gesture, no
+ * rollback and no "the arrangement was put back" to assert — what there IS to
+ * assert is that the panel says a new composition was made, that a job which
+ * came back short does not read as a clean success, and that a cancel wrote
+ * nothing.
+ */
+describe('a command on the IR route', () => {
+  /** Emit one progress event, as the job would. */
+  function progress(event: unknown): void {
+    act(() => {
+      irJob.live?.progress(event);
+    });
+  }
+
+  /**
+   * Settle the job, as the job would.
+   *
+   * `before` runs inside the same act, just ahead of the promise resolving —
+   * which is where `importIR` does its work in a real run: the store is already
+   * repointed by the time the panel's continuation gets the outcome. See
+   * {@link repointTo}.
+   */
+  async function settle(outcome: unknown, before?: () => void): Promise<void> {
+    await act(async () => {
+      before?.();
+      irJob.live?.settle(outcome);
+      await Promise.resolve();
+    });
+  }
+
+  /**
+   * The one move of `commitImport` this panel can observe: the store stops
+   * pointing at the composition the user had open and points at what was
+   * imported.
+   *
+   * Reached through the LIB store rather than through `openBlankComposition`,
+   * for the same reason the real import does not go near the seam: the job lock
+   * is still held at this moment and the seam refuses a composition switch for
+   * its duration.
+   */
+  function repointTo(compositionId: string): void {
+    usePatternsStore.getState().openCompositionForArranging(compositionId);
+  }
+
+  const CHART = {
+    bars: 12,
+    bpm: 100,
+    tracks: [
+      { name: 'Bass', instrumentId: 'bass', role: 'walking bass' },
+      { name: 'Rhythm', instrumentId: 'guitar', role: 'off-beat comping' },
+      { name: 'Lead', instrumentId: 'guitar', role: 'sparse fills' },
+    ],
+    chords: [{ bar: 1, symbol: 'C7' }],
+  };
+
+  /** The job's progress, up to and including the part named. Every phase in
+   *  order, because the order is what the panel is rendering. */
+  function runThroughParts(upTo = CHART.tracks.length): void {
+    progress({ type: 'job.started', transcriptId: 'run-1' });
+    progress({ type: 'chart.started' });
+    progress({ type: 'chart.finished', chart: CHART });
+    for (let index = 1; index <= upTo; index++) {
+      const track = CHART.tracks[index - 1];
+      progress({ type: 'track.started', index, count: CHART.tracks.length, track });
+      progress({ type: 'track.finished', index, count: CHART.tracks.length, track, ok: true });
+    }
+  }
+
+  const documents = (patternIds: readonly string[], warnings: readonly string[] = []) => ({
+    patternIds,
+    compositionId: 'comp-1',
+    topology: 'composition' as const,
+    warnings,
+  });
+
+  it('starts the job rather than an agent run, and the other rows still do not', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    // The job got the FILLED template — the chart run's whole input.
+    expect(irJob.live?.input).toContain('backing track');
+    expect(irJob.live?.label).toBe(BACKING_TRACK);
+    // ⚠ And no agent loop was started at all. This route registers no tools, so
+    // a run reaching the harness would be the old path silently still in place.
+    expect(harness.live).toBeNull();
+
+    await settle({ ok: false, stopped: 'chart-failed', reason: 'no chart' });
+
+    // The other composition rows are unchanged: an agent run, with tools.
+    await startRun(SINGLE_RUN);
+    expect(harness.live).not.toBeNull();
+    callTool('read_composition');
+    expect(within(report()).getByText('1. read_composition …')).toBeInTheDocument();
+    await finishRun();
+  });
+
+  it('shows the phases the job emits — chart, then part N of M, then import', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    progress({ type: 'job.started', transcriptId: 'run-1' });
+    progress({ type: 'chart.started' });
+    // Before the chart lands there is nothing else to say, and no count to
+    // count towards — the job does not know how many parts there are yet.
+    expect(within(report()).getByText('Chart …')).toBeInTheDocument();
+    expect(within(report()).queryByText(/Part 1 of/)).not.toBeInTheDocument();
+
+    progress({ type: 'chart.finished', chart: CHART });
+    expect(within(report()).getByText('Chart — 12 bars at 100 bpm, 3 parts')).toBeInTheDocument();
+
+    progress({ type: 'track.started', index: 1, count: 3, track: CHART.tracks[0] });
+    // ⚠ "1 of 3" is the whole point of the job emitting phases rather than the
+    // panel inferring them: nothing else in the app knows there are three.
+    expect(within(report()).getByText('Part 1 of 3: Bass …')).toBeInTheDocument();
+
+    progress({ type: 'track.finished', index: 1, count: 3, track: CHART.tracks[0], ok: true });
+    progress({ type: 'track.started', index: 2, count: 3, track: CHART.tracks[1] });
+    // The mark MOVES, exactly as the single-run route's tool trace does.
+    expect(within(report()).getByText('Part 1 of 3: Bass')).toBeInTheDocument();
+    expect(within(report()).getByText('Part 2 of 3: Rhythm …')).toBeInTheDocument();
+
+    progress({ type: 'track.finished', index: 2, count: 3, track: CHART.tracks[1], ok: true });
+    progress({ type: 'track.started', index: 3, count: 3, track: CHART.tracks[2] });
+    progress({ type: 'track.finished', index: 3, count: 3, track: CHART.tracks[2], ok: true });
+    progress({ type: 'import.started', trackCount: 3 });
+    expect(within(report()).getByText('Importing …')).toBeInTheDocument();
+
+    await settle({
+      ok: true,
+      value: { chart: CHART, documents: documents(['p1', 'p2', 'p3']), transcriptId: 'run-1' },
+    });
+    expect(within(report()).getByText('Imported')).toBeInTheDocument();
+    // No tool trace anywhere: there are no tools on this route, so the
+    // single-run report's "No tools called" would be a lie about a capability.
+    expect(within(report()).queryByText(/tools called/)).not.toBeInTheDocument();
+  });
+
+  it('says a NEW composition was created and opened, and clears the state naming the old one', async () => {
+    // What the import will hand back, made before the run because the mocked job
+    // cannot run the real one — see `repointTo`.
+    const imported = openBlankComposition('What the import built');
+    if (!imported.ok) throw new Error(imported.reason);
+    const mine = openBlankComposition('The one you had open');
+    if (!mine.ok) throw new Error(mine.reason);
+
+    const { placementId } = openBlock();
+    selectTrack(getTracks()[0].id);
+    selectPlacements([placementId], 'replace');
+    expect(getEditingPlacementId()).toBe(placementId);
+    expect(getSelectedPlacementIds()).toHaveLength(1);
+    const minesTracks = getTracks().length;
+
+    render(<CompositionCommandPanel mode="pattern" />);
+    await startRun(BACKING_TRACK);
+    runThroughParts();
+    progress({ type: 'import.started', trackCount: 3 });
+    await settle(
+      {
+        ok: true,
+        value: { chart: CHART, documents: documents(['p1', 'p2', 'p3']), transcriptId: 'run-1' },
+      },
+      () => repointTo(imported.value.id),
+    );
+
+    const done = report();
+    expect(within(done).getByText(/^Done/)).toBeInTheDocument();
+    expect(
+      within(done).getByText(/A new composition was created from 3 parts and is now open/),
+    ).toBeInTheDocument();
+    // ⚠ And it says the OPEN one was left alone, which is the fact a user
+    // watching their own arrangement for changes will otherwise never work out.
+    expect(within(done).getByText(/composition you had open was not changed/)).toBeInTheDocument();
+
+    // ⚠ THE IMPORT'S REPOINT SURVIVED THE PANEL. Asserted because the panel's
+    // clean-up runs AFTER it — four seam calls, one of which (`clearHistory`)
+    // exists precisely so nothing later writes the old document back.
+    expect(getEditingComposition()?.id).toBe(imported.value.id);
+    expect(getTracks().some((track) => track.name === 'Riff track')).toBe(false);
+
+    // The four pieces of seam state `importIR` cannot reach itself, all of which
+    // named the document that WAS open. The fourth — the history — has a test of
+    // its own below, because an undo is what shows it.
+    expect(getEditingPlacementId()).toBeNull();
+    expect(getSelectedPlacementIds()).toHaveLength(0);
+    expect(getSelectedTrackId()).toBeNull();
+    expect(isJobRunning()).toBe(false);
+
+    // ⚠ AND THE COMPOSITION THE USER HAD OPEN IS UNTOUCHED — the route's own
+    // claim, checked where it lives rather than through what happens to be on
+    // screen.
+    const untouched = usePatternsStore
+      .getState()
+      .library.compositions.find((composition) => composition.id === mine.value.id);
+    expect(untouched?.tracks).toHaveLength(minesTracks);
+
+    // ⚠ WHAT THIS DOES *NOT* PROVE, said plainly rather than claimed in a
+    // comment that reads like an assertion: that no undo gesture was bracketed
+    // around the job. `abortEditGesture` restores BY ID, so a bracket opened out
+    // of habit would write the pre-job snapshot over the row it came from —
+    // which the import did not touch and nothing above reads — and would move
+    // nothing observable here. The reason not to open one is in the panel's
+    // header; there is no assertion in this seam that can tell the two apart.
+  });
+
+  it('drops the undo history, so a press cannot stamp the old composition back', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+    const added = addTrack('The user’s own track');
+    if (!added.ok) throw new Error(added.reason);
+    const tracksBefore = getTracks().length;
+
+    await startRun(BACKING_TRACK);
+    runThroughParts();
+    await settle({
+      ok: true,
+      value: { chart: CHART, documents: documents(['p1', 'p2', 'p3']), transcriptId: 'run-1' },
+    });
+
+    // The user's own edit is still there and undo is inert: the history was
+    // cleared, because an undo after an import writes a snapshot of the
+    // PREVIOUS composition over the one that is now open.
+    act(() => undo());
+    expect(getTracks()).toHaveLength(tracksBefore);
+
+    // ⚠ AND THE HISTORY STILL WORKS AFTERWARDS, which is the half a cleared
+    // stack cannot show on its own: a job that opened an undo GESTURE and never
+    // closed it leaves the seam's one gesture slot held, and every later edit
+    // disappears into it instead of pushing a step. Two lines that fail if a
+    // bracket is ever added around this route and leaked.
+    const after = addTrack('After the job');
+    if (!after.ok) throw new Error(after.reason);
+    act(() => undo());
+    expect(getTracks()).toHaveLength(tracksBefore);
+  });
+
+  /**
+   * The panel says both halves of what the route costs BEFORE the run, under the
+   * Run button — and says them only for this route.
+   *
+   * ⚠ THE UNDO CLAUSE IS NOT DECORATION. `clearHistory` is the composition
+   * seam's single global stack, so an import drops the undo history of the
+   * document the user had open even though the job never touched it. That is a
+   * consequence the user cannot see coming from anywhere else.
+   */
+  it('says what the route costs, and says something else for the other route', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await userEvent.click(screen.getByRole('button', { name: BACKING_TRACK }));
+    expect(screen.getByText(/builds a NEW composition and opens it/)).toBeInTheDocument();
+    expect(screen.getByText(/clears the undo history/)).toBeInTheDocument();
+    // ⚠ And NOT the single-run promise: there is no arrangement edit to put
+    // back, so offering one is a promise this route cannot keep.
+    expect(screen.queryByText(/puts the arrangement back/)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: SINGLE_RUN }));
+    expect(screen.getByText(/Cancelling puts the arrangement back as it was/)).toBeInTheDocument();
+    expect(screen.queryByText(/builds a NEW composition/)).not.toBeInTheDocument();
+  });
+
+  it('does not read as a clean success when a part is missing from the piece', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    runThroughParts();
+    progress({ type: 'import.started', trackCount: 3 });
+    // ⚠ THREE PARTS WRITTEN, TWO PATTERNS IMPORTED. Reachable and SILENT: the
+    // validator drops a note whose tick is not a whole number, a track left
+    // empty is not cut into a pattern, and nothing warns. The job returned `ok`.
+    await settle({
+      ok: true,
+      value: { chart: CHART, documents: documents(['p1', 'p2']), transcriptId: 'run-1' },
+    });
+
+    const done = report();
+    expect(within(done).getByText(/^Incomplete/)).toBeInTheDocument();
+    expect(within(done).queryByText(/^Done/)).not.toBeInTheDocument();
+    expect(
+      within(done).getByText(
+        /The chart named 3 parts and 2 were imported — 1 did not survive, so this is not the arrangement that was asked for/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * ⚠ THE REPORT IS BUILT FROM THE OUTCOME, NOT FROM THE PROGRESS IT SAW.
+   *
+   * `partsMissing` — the whole of whether this reads "Done" or "Incomplete" — is
+   * the chart's part count against the imported one, so a chart taken from the
+   * `chart.finished` event alone makes a MISSED event read as a clean success.
+   * The outcome carries the chart every part was written against, and the
+   * transcript id, and cannot have been missed; this test settles a job that
+   * emitted no progress at all to say so.
+   */
+  it('builds the report from the outcome, not from the events it happened to see', async () => {
+    ensureComposition();
+    const transcript = beginJobTranscript({
+      page: 'composition',
+      command: BACKING_TRACK,
+      agent: 'ir-composition-job',
+      input: 'a blues backing track',
+    });
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    await settle({
+      ok: true,
+      value: {
+        chart: CHART,
+        documents: documents(['p1', 'p2']),
+        transcriptId: transcript.id,
+      },
+    });
+
+    const done = report();
+    expect(within(done).getByText(/^Incomplete/)).toBeInTheDocument();
+    expect(within(done).getByText(/The chart named 3 parts and 2 were imported/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
+  });
+
+  it('puts the import’s warnings on the screen', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    runThroughParts();
+    progress({ type: 'import.started', trackCount: 3 });
+    await settle({
+      ok: true,
+      value: {
+        chart: CHART,
+        documents: documents(
+          ['p1', 'p2', 'p3'],
+          ['Dropped 2 events with a fractional tick.', 'Lead: 4 notes are on strings the guitar has not got.'],
+        ),
+        transcriptId: 'run-1',
+      },
+    });
+
+    const done = report();
+    // Verbatim, both of them: the validator and the mapper author these, and
+    // they arrive on a SUCCESS — nothing else on screen would mention them.
+    expect(within(done).getByText('Dropped 2 events with a fractional tick.')).toBeInTheDocument();
+    expect(
+      within(done).getByText('Lead: 4 notes are on strings the guitar has not got.'),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * ⚠ THE SAME SENTENCE TWICE IS TWO WARNINGS. `importIR` concatenates the
+   * validator's list, the seam's, the mapper's and its own off-neck check with
+   * no dedupe — unlike the single-run route's tool refusals, which are
+   * deduplicated on the way in — so one string can legitimately arrive from two
+   * of the four. Keyed on the string alone, React renders one row and logs about
+   * the collision, and the count the user is reading is wrong.
+   */
+  it('shows a repeated warning as many times as it arrived', async () => {
+    ensureComposition();
+    // ⚠ THE COLLISION IS REPORTED TO THE CONSOLE, NOT TO THE DOM — React renders
+    // both rows and logs "two children with the same key" — so the console is
+    // where the assertion has to look. Restored in a `finally`: a swallowed
+    // `console.error` left behind would hide the next test's own warnings.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    const twice = 'Dropped 2 events with a fractional tick.';
+    await startRun(BACKING_TRACK);
+    runThroughParts();
+    progress({ type: 'import.started', trackCount: 3 });
+    await settle({
+      ok: true,
+      value: {
+        chart: CHART,
+        documents: documents(['p1', 'p2', 'p3'], [twice, twice]),
+        transcriptId: 'run-1',
+      },
+    });
+
+    try {
+      expect(within(report()).getAllByText(twice)).toHaveLength(2);
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it('marks the part that failed where the part is, and says nothing was imported', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    runThroughParts(1);
+    progress({ type: 'track.started', index: 2, count: 3, track: CHART.tracks[1] });
+    progress({
+      type: 'track.finished',
+      index: 2,
+      count: 3,
+      track: CHART.tracks[1],
+      ok: false,
+      reason: 'Fret 40 is off the neck.',
+    });
+    await settle({
+      ok: false,
+      stopped: 'track-failed',
+      reason:
+        '"Rhythm" — part 2 of 3 — could not be written, so nothing was imported and the part already written was not kept. Fret 40 is off the neck.',
+    });
+
+    const refused = report();
+    expect(within(refused).getByText(/^Refused/)).toBeInTheDocument();
+    // The part is marked WHERE THE PART IS, rather than the whole display being
+    // replaced by one sentence — the phases stay readable.
+    expect(within(refused).getByText('Part 1 of 3: Bass')).toBeInTheDocument();
+    expect(
+      within(refused).getByText('Part 2 of 3: Rhythm — could not be written'),
+    ).toBeInTheDocument();
+    // …and the job's own sentence, which names what became of the rest.
+    expect(within(refused).getByText(/nothing was imported/)).toBeInTheDocument();
+    expect(isJobRunning()).toBe(false);
+  });
+
+  /**
+   * The three phase lines an ENDED job leaves behind, each of which is the
+   * difference between "this went wrong here" and a display that just stops.
+   * One test apiece, because each needs the job to end at a different point.
+   */
+  it('says the chart was not written when the chart run is what failed', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    // ⚠ `job.started` FIRST — it is what says a job was ever handed the request,
+    // and the phase list is withheld without it. A refusal decided before that
+    // (no provider, a slot that no longer fills) reports no phases at all, which
+    // the provider test below pins.
+    progress({ type: 'job.started', transcriptId: 'run-1' });
+    progress({ type: 'chart.started' });
+    await settle({
+      ok: false,
+      stopped: 'chart-failed',
+      reason: 'The model did not answer with a chart.',
+    });
+
+    const refused = report();
+    expect(within(refused).getByText('Chart — not written')).toBeInTheDocument();
+    expect(within(refused).queryByText('Chart …')).not.toBeInTheDocument();
+    expect(within(refused).getByText(/^Refused/)).toBeInTheDocument();
+  });
+
+  it('says the import was refused when every part was written and the document was not', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    runThroughParts();
+    progress({ type: 'import.started', trackCount: 3 });
+    await settle({
+      ok: false,
+      stopped: 'import-refused',
+      reason: 'Nothing was imported — your plan’s library cap is in the way.',
+    });
+
+    const refused = report();
+    // Every part is still marked written: the parts were fine, the import was
+    // not, and a display that blamed the last part would send somebody to fix
+    // the wrong thing.
+    expect(within(refused).getByText('Part 3 of 3: Lead')).toBeInTheDocument();
+    expect(within(refused).getByText('Import — refused')).toBeInTheDocument();
+    expect(within(refused).getByText(/library cap is in the way/)).toBeInTheDocument();
+  });
+
+  it('leaves the part a cancel interrupted marked stopped, not failed', async () => {
+    ensureComposition();
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    runThroughParts(1);
+    progress({ type: 'track.started', index: 2, count: 3, track: CHART.tracks[1] });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      await Promise.resolve();
+    });
+
+    const stopped = report();
+    // ⚠ NOT "could not be written". The job emits no `track.finished` for a part
+    // the user cancelled out of, deliberately — putting a failure mark against
+    // work nobody claims is bad is the report this route must not write.
+    expect(within(stopped).getByText('Part 2 of 3: Rhythm — stopped')).toBeInTheDocument();
+    expect(
+      within(stopped).queryByText('Part 2 of 3: Rhythm — could not be written'),
+    ).not.toBeInTheDocument();
+    expect(within(stopped).getByText('Part 1 of 3: Bass')).toBeInTheDocument();
+  });
+
+  /**
+   * The log of a job that went wrong, offered where the job's own account of
+   * itself is.
+   *
+   * ⚠ AGAINST A REAL TRANSCRIPT. `RunTranscriptControl` renders NOTHING for an
+   * id that resolves to no record, so a test emitting a made-up id asserts the
+   * control's absence just as happily as its presence.
+   */
+  it('offers the job’s run log, from the id the job emitted', async () => {
+    ensureComposition();
+    const transcript = beginJobTranscript({
+      page: 'composition',
+      command: BACKING_TRACK,
+      agent: 'ir-composition-job',
+      input: 'a blues backing track',
+    });
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    progress({ type: 'job.started', transcriptId: transcript.id });
+    progress({ type: 'chart.started' });
+    // Withheld while the job is live — the log is still growing.
+    expect(screen.queryByRole('button', { name: 'Copy' })).not.toBeInTheDocument();
+
+    await settle({
+      ok: false,
+      stopped: 'chart-failed',
+      reason: 'The model did not answer with a chart.',
+    });
+
+    expect(within(report()).getByText('Run log')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
+  });
+
+  it('stops on Cancel and imports nothing', async () => {
+    ensureComposition();
+    const tracksBefore = getTracks().length;
+    const patternsBefore = usePatternsStore.getState().library.patterns.length;
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    progress({ type: 'job.started', transcriptId: 'run-1' });
+    progress({ type: 'chart.started' });
+    expect(irJob.live?.signal?.aborted).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      await Promise.resolve();
+    });
+
+    // The signal the job checks between steps — its own guarantee is that a
+    // cancel landing before the import writes nothing at all.
+    expect(irJob.live?.signal?.aborted).toBe(true);
+    expect(within(report()).getByText(/Nothing was written/)).toBeInTheDocument();
+    expect(within(report()).queryByText(/^Done/)).not.toBeInTheDocument();
+
+    // ⚠ AND IT IS NOT HEADED "REFUSED". The job types its stop precisely so a
+    // caller can tell a cancel from a failure — "a cancel above all is not a
+    // failure and must not be reported as one" — and REFUSED over somebody's
+    // own Cancel press is that report. The single-run route next door says
+    // 'Cancelled.' for the same event.
+    expect(within(report()).getByText(/^Cancelled/)).toBeInTheDocument();
+    expect(within(report()).queryByText(/^Refused/)).not.toBeInTheDocument();
+
+    // The lock is back, and the library is where it was. ⚠ THIS HALF IS WEAK ON
+    // PURPOSE and the comment says so rather than the title implying otherwise:
+    // the job module is mocked here, so no path in this test could have written
+    // a composition or a pattern in the first place. What actually guarantees
+    // "imports nothing" is the job itself, in `IrCompositionJob.test.ts`; what
+    // this test owns is the signal reaching it and the panel's own teardown.
+    expect(usePatternsStore.getState().library.compositions).toHaveLength(1);
+    expect(usePatternsStore.getState().library.patterns).toHaveLength(patternsBefore);
+    expect(getTracks()).toHaveLength(tracksBefore);
+    expect(isJobRunning()).toBe(false);
+  });
+
+  /**
+   * ⚠ NOBODY CANCELLED THIS ONE. The deadline aborts the same controller a
+   * Cancel press does, so the job reports `stopped: 'cancelled'` for both — and
+   * the whole value of having a deadline is saying which of the two happened.
+   * Eighteen minutes is `JOB_TIMEOUT_MS`, derived as `1 + MAX_COMPOSITION_TRACKS`
+   * runs at two minutes each, and the single-run route has this test for its own
+   * fifteen.
+   */
+  it('gives up on its own deadline, and does not call that a cancel', async () => {
+    vi.useFakeTimers();
+    try {
+      ensureComposition();
+      render(<CompositionCommandPanel mode="pattern" />);
+
+      // `fireEvent`, not `userEvent`: the deadline is a `setTimeout` taken when
+      // the job starts, so the clock has to already be fake by then.
+      fireEvent.click(screen.getByRole('button', { name: BACKING_TRACK }));
+      fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+      act(() => {
+        irJob.live?.progress({ type: 'job.started', transcriptId: 'run-1' });
+        irJob.live?.progress({ type: 'chart.started' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(18 * 60_000);
+        await Promise.resolve();
+      });
+
+      expect(within(report()).getByText(/Gave up after 18 minutes/)).toBeInTheDocument();
+      expect(within(report()).getByText(/^Refused/)).toBeInTheDocument();
+      expect(within(report()).queryByText(/^Cancelled/)).not.toBeInTheDocument();
+      expect(isJobRunning()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses without a provider, and reports no phase the job never reached', async () => {
+    ensureComposition();
+    setConnectorSettings({ baseUrl: '', token: '' });
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+
+    // Decided before anything ran, so the lock was never taken and no job
+    // exists — the same guard the single-run route has, on the other report.
+    expect(irJob.live).toBeNull();
+    expect(isJobRunning()).toBe(false);
+    const refused = report();
+    expect(within(refused).getByText(/No provider is configured/)).toBeInTheDocument();
+    // ⚠ And NOT "Chart — not written": there was no chart run to fail. A phase
+    // list here would describe a job that was never asked for.
+    expect(within(refused).queryByText(/^Chart/)).not.toBeInTheDocument();
+  });
+
+  it('gives the lock back when the job runner itself throws', async () => {
+    ensureComposition();
+    irJob.throwWith = 'the job runner is broken';
+    render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(within(report()).getByText(/The job could not complete/)).toBeInTheDocument();
+    // ⚠ AND NO PHASE LIST. The throw happened before the job emitted anything,
+    // so there was no chart run to have failed — "Chart — not written" here
+    // would describe a run nobody ever asked for, which is the distinction
+    // `JobView.started` exists to keep.
+    expect(within(report()).queryByText(/^Chart/)).not.toBeInTheDocument();
+    // The failure this asserts is not the message: it is the page staying
+    // read-only for the rest of the session.
+    expect(isJobRunning()).toBe(false);
+  });
+
+  it('cancels the job when the panel is unmounted mid-job', async () => {
+    ensureComposition();
+    const { unmount } = render(<CompositionCommandPanel mode="pattern" />);
+
+    await startRun(BACKING_TRACK);
+    runThroughParts(1);
+
+    unmount();
+
+    expect(irJob.live?.signal?.aborted).toBe(true);
     expect(isJobRunning()).toBe(false);
   });
 });

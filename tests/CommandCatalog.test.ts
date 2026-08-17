@@ -166,7 +166,15 @@ function assertCommandInvariants(command: Command): void {
 
   expect(command.label.trim().length).toBeGreaterThan(2);
   expect(command.summary.length).toBeGreaterThan(20);
-  expect(command.tools.length).toBeGreaterThan(0);
+
+  // ⚠ THE TOOL BAR IS THE ROUTE'S, NOT THE CATALOG'S, and the two are opposite.
+  // A `single-run` row is driven by a tool-using agent, so naming no tool means
+  // the row documents no capability. An `ir-job` row's two runs are TOOL-FREE by
+  // construction — the harness only sends `outputSchema` to the backend on turns
+  // where nothing is registered — so a name there describes something neither
+  // run can reach, and the emptiness is the assertion.
+  if (command.route === 'ir-job') expect(`${where} ${command.tools.length}`).toBe(`${where} 0`);
+  else expect(command.tools.length).toBeGreaterThan(0);
 
   // 3. Every named tool exists. Not enforcement — the model still chooses — but
   //    a renamed tool now fails here instead of mid-run.
@@ -326,6 +334,77 @@ describe('page scoping', () => {
       command.tools.includes('pattern_stamp_notes'),
     );
     expect(buildsPatterns.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------- route scoping ---
+
+/**
+ * WHICH PIPELINE A ROW DECLARES — the third scoping question, after `page` and
+ * `mode`, and the one with a live example of each answer.
+ *
+ * Both routes are deliberately kept in service: the backing track builds a NEW
+ * composition through `irCompositionJob`, and the other six composition rows
+ * EDIT the open one, which that route cannot do. Keeping both is also what lets
+ * them be compared on the same page, so "everything moved" would be a
+ * regression here rather than a silent redesign.
+ */
+describe('the route a command declares', () => {
+  const backingTrack = (): Command => {
+    const command = findCommand('composition-backing-track');
+    if (!command) throw new Error('missing command');
+    return command;
+  };
+
+  it('sends the backing track through the IR job and leaves the others on the single run', () => {
+    expect(backingTrack().route).toBe('ir-job');
+
+    const others = commandsForPage('composition').filter(
+      (command) => command.id !== 'composition-backing-track',
+    );
+    expect(others.length).toBeGreaterThan(0);
+    for (const command of others) {
+      // ⚠ The default is what carries "behaves exactly as today": a row that
+      // declares nothing is a single run, and this is the line that fails if
+      // someone flips that default rather than adding a field to a row.
+      expect(`${command.id}: ${command.route ?? 'single-run'}`).toBe(`${command.id}: single-run`);
+      expect(command.tools.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('still fills, into a request rather than a build order', () => {
+    seedComposition();
+    const command = backingTrack();
+    const values = defaultValues(command);
+    const filled = fillForNow(command, values);
+    if (!filled.ok) throw new Error(filled.reason);
+
+    // The slots that survived the rewrite, all substituted — against the
+    // RESOLVED values, because `bpm` is read off the live composition and
+    // hardcoding it here would pin the seed rather than the fill.
+    expect(filled.value).toContain('blues');
+    expect(filled.value).toContain(`${values.bars} bars`);
+    expect(filled.value).toContain(`${values.bpm} bpm`);
+    expect(filled.value).toContain(`${values.key} ${values.scale}`);
+    expect(filled.value).not.toMatch(/\{[a-zA-Z]/);
+
+    // ⚠ THE READER IS `ARRANGEMENT_CHART_AGENT`, which has no tools and no
+    // document in front of it. A tool name here instructs nobody, and the old
+    // template was nothing but tool names in order.
+    for (const tool of TOOL_NAMES) {
+      expect(`${tool}: ${filled.value.includes(tool)}`).toBe(`${tool}: false`);
+    }
+    expect(filled.value).not.toMatch(/read the composition|open a blank|stamp|place the pattern/i);
+  });
+
+  it('leaves every number the chart prompt or the app already owns out of the template', () => {
+    // The RAW template, so the slot fills do not mask it: no digit at all. Bars
+    // count from 1, a chord holds until the next one, the track cap is
+    // `MAX_COMPOSITION_TRACKS` and the answer is one JSON object — every one of
+    // those is stated by `ARRANGEMENT_CHART_PROMPT`, and a second copy here is a
+    // contradiction waiting for one of the two to be edited.
+    expect(backingTrack().template).not.toMatch(/[0-9]/);
+    expect(backingTrack().template).not.toMatch(/json/i);
   });
 });
 
@@ -661,14 +740,33 @@ describe('defaults come from live state', () => {
     return defaultValues(command);
   };
 
-  it('takes the tempo and the groove from the composition', () => {
+  /**
+   * `composition-groove` HAS NO ROW USING IT, so it is probed through a slot
+   * built here.
+   *
+   * The backing track was its last user and its groove slot went when that row
+   * moved to the `'ir-job'` route — a groove is a playback preset and `ImportIR`
+   * has no field for one, so the picker would have promised a swing the imported
+   * piece could not have. The resolver is still correct and a composition row
+   * wanting a groove is an ordinary thing to add, so the branch keeps a test
+   * rather than being deleted with the slot; `resolveSlot` is the same entry
+   * point `defaultValues` walks a command through.
+   */
+  const grooveSlot: Slot = {
+    kind: 'choice',
+    id: 'groove',
+    label: 'Groove',
+    source: 'groove',
+    defaultFrom: 'composition-groove',
+  };
+
+  it('takes the tempo from the composition, and the groove for a slot that asks', () => {
     seedComposition();
     expect(setCompositionBpm(137).ok).toBe(true);
     expect(setCompositionGroove('shuffle').ok).toBe(true);
 
-    const values = defaultsOf('composition-backing-track');
-    expect(values.bpm).toBe(137);
-    expect(values.groove).toBe('shuffle');
+    expect(defaultsOf('composition-backing-track').bpm).toBe(137);
+    expect(resolveSlot(grooveSlot).value).toBe('shuffle');
   });
 
   it('takes the tempo and the groove from the pattern', () => {
@@ -813,8 +911,10 @@ describe('defaults come from live state', () => {
     // the lib's default stops being first, this test starts discriminating.
     expect(values.scale).toBe(DEFAULT_SCALE_ID);
     expect(values.key).toBe(CHROMATIC_KEYS[0]);
-    expect(values.groove).toBe(GROOVE_PRESETS[0].id);
     expect(typeof values.bpm).toBe('number');
+    // Same claim, on the slot that reads the composition's groove — see
+    // `grooveSlot` on why it is built here rather than taken from a row.
+    expect(resolveSlot(grooveSlot).value).toBe(GROOVE_PRESETS[0].id);
   });
 
   it('ignores a live value the picker cannot represent', () => {
@@ -823,7 +923,7 @@ describe('defaults come from live state', () => {
     // made elsewhere. `compositionGrooveId` calls it 'custom', which is not an
     // offered value, so the slot must fall back rather than show nothing.
     usePatternsStore.getState().setEditingCompositionGroove({ swing: 0.55, appliedTo: 'eighths' });
-    expect(defaultsOf('composition-backing-track').groove).toBe(GROOVE_PRESETS[0].id);
+    expect(resolveSlot(grooveSlot).value).toBe(GROOVE_PRESETS[0].id);
   });
 });
 
@@ -874,7 +974,11 @@ describe('filling a command', () => {
   });
 
   it('emits the lib groove id rather than a word for it', () => {
-    const command = backing();
+    // `pattern-feel`, because the backing track no longer has a groove slot to
+    // fill — see `grooveSlot` above. The claim is about `fillCommand` and any
+    // row with a groove in it demonstrates the same thing.
+    const command = findCommand('pattern-feel');
+    if (!command) throw new Error('missing command');
     const filled = text(command, { ...defaultValues(command), groove: 'shuffle' });
     expect(filled).toContain('shuffle');
     expect(filled).not.toMatch(/heavy swing/i);
@@ -906,13 +1010,13 @@ describe('filling a command', () => {
     const allowed = allowedValues(command);
     expect(Object.keys(allowed)).not.toContain('bpm');
     expect(Object.keys(allowed)).not.toContain('bars');
-    expect(Object.keys(allowed)).toContain('groove');
+    expect(Object.keys(allowed)).toContain('key');
 
     const values = defaultValues(command);
     expect(fillForNow(command, values).ok).toBe(true);
     expect(fillForNow(command, { ...values, bpm: 137, bars: 16 }).ok).toBe(true);
-    // …and the live check is still ON in that form: an off-list groove refuses.
-    expect(fillForNow(command, { ...values, groove: 'heavy-swing' }).ok).toBe(false);
+    // …and the live check is still ON in that form: an off-list key refuses.
+    expect(fillForNow(command, { ...values, key: 'H' }).ok).toBe(false);
   });
 
   it('refuses a value the app no longer offers', () => {

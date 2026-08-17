@@ -500,12 +500,45 @@ Then read the pattern back and say in one sentence whether the note lengths stil
 // ------------------------------------------------------ composition page ---
 
 const COMPOSITION_COMMANDS: readonly Command[] = [
+  /**
+   * ⚠ THE ONE ROW ON THE `'ir-job'` ROUTE, and the only one in this file whose
+   * template is not read by a tool-using agent. See `CommandRoute` in
+   * `commandTypes`, which carries the whole of why the route is a field.
+   *
+   * The filled text goes to `arrangementChart`'s run: no tools, no document in
+   * front of it, and one product — `{bars, bpm, tracks, chords}`. Ordinary code
+   * then briefs a run per part and hands the lot to `patternService.importIR`,
+   * which CREATES A NEW COMPOSITION rather than editing the open one.
+   *
+   * ── WHAT THE TEMPLATE MAY AND MAY NOT SAY ───────────────────────────────
+   *
+   * `ARRANGEMENT_CHART_PROMPT` is the system prompt this text lands under, and
+   * it already states what a chart is, that bars count from 1, that a chord
+   * holds until the next one, that chords are symbols and never frets, that the
+   * parts are few and distinct, what the track cap is, and that the answer is
+   * one bare JSON object. Repeating any of it here is drift waiting to happen
+   * and contradicting it is worse, so this text says only what the PROMPT
+   * cannot: what the user asked for. It is a request, not a build order.
+   *
+   * ── WHY THE GROOVE SLOT IS GONE ─────────────────────────────────────────
+   *
+   * It was a `composition_set_settings` argument, and nothing on this route
+   * calls it. A groove is a playback-time swing preset; `ImportIR` has no field
+   * for one, so the imported composition takes the mapper's default whatever the
+   * picker said. A control that promises a shuffle the piece will not have is
+   * worse than no control — and `genre` already carries the feel to the model
+   * that has to write the notes. The other five slots survive because the chart
+   * run genuinely acts on all five: `bars` and `bpm` ARE fields of the chart,
+   * and `genre`, `key` and `scale` are what the progression is chosen from.
+   */
   {
     id: 'composition-backing-track',
     page: 'composition',
     mode: 'pattern',
+    route: 'ir-job',
     label: 'Create a backing track',
-    summary: 'Build a whole arrangement — patterns, tracks and blocks — from a genre and a key.',
+    summary:
+      'Chart a whole piece — form, tempo, changes and parts — then write each part and open it as a new composition.',
     slots: [
       {
         kind: 'enum',
@@ -548,15 +581,6 @@ const COMPOSITION_COMMANDS: readonly Command[] = [
         defaultFrom: 'composition-bpm',
       },
       {
-        kind: 'choice',
-        id: 'groove',
-        source: 'groove',
-        label: 'Groove',
-        // The four presets, from the lib. "Heavy swing" is not a value; whoever
-        // wants one picks Shuffle, which is what the lib calls it.
-        defaultFrom: 'composition-groove',
-      },
-      {
         kind: 'number',
         id: 'bars',
         label: 'Length',
@@ -567,33 +591,16 @@ const COMPOSITION_COMMANDS: readonly Command[] = [
         fallback: 12,
       },
     ],
-    tools: [
-      'read_composition',
-      'read_pattern_library',
-      // The row this ticket was written for. A {bars}-bar track over a
-      // progression is a few dozen fret numbers per part, on whatever neck the
-      // part is on, and every backing-track run that failed on 2026-08-09 failed
-      // at that arithmetic rather than at the music.
-      'read_chord_voicings',
-      'composition_set_settings',
-      'composition_add_track',
-      'composition_set_track_instrument',
-      'pattern_open_blank',
-      'pattern_set_instrument',
-      'pattern_stamp_notes',
-      'composition_place_pattern',
-    ],
-    template: `Build a {genre} backing track in the open composition: {bars} bars in {key} {scale} at {bpm} bpm, with the groove preset {groove}.
+    // ⚠ EMPTY, AND THE EMPTINESS IS THE POINT — see `CommandRoute` in
+    // `commandTypes`. Both runs on this route are tool-free so the backend
+    // decodes against the output schema; a name here would describe a capability
+    // neither run is offered.
+    tools: [],
+    template: `A {genre} backing track: {bars} bars in {key} {scale}, at {bpm} bpm.
 
-Read the composition first. Set its tempo and groove, then work in this order for each part — write it as a pattern in the library (open a blank pattern, set its instrument, stamp the notes), then add the track it belongs on, then place the pattern along that track.
+Write the changes a {genre} player would expect in {key} {scale} over {bars} bars — the form this music actually has, rather than one chord held down for the whole of it.
 
-Decide the chord progression before you write anything, then ask read_chord_voicings for the whole progression — one call per instrument, naming that instrument, before you open anything. Play a part OUT of those shapes rather than stamping them whole on the downbeat.
-
-Get each pattern right BEFORE you place it. A block on a track is a deep copy taken at placement time: editing the pattern afterwards does not reach blocks you have already placed.
-
-There is a hard cap on tracks and composition_add_track will refuse past it — its description names the number. Plan the parts before you start adding them; two or three well-written parts beat eight thin ones. Repeat and vary a short pattern rather than writing {bars} bars of fresh material for every track.
-
-Tell me what each track is when you are done.`,
+Give it the parts a {genre} backing track is made of, each with a job the others are not doing: something holding the bottom, something carrying the harmony, and a part on top only if it has something of its own to say. Nobody is playing over this yet, so leave the room somebody will need.`,
   },
 
   {

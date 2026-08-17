@@ -68,6 +68,46 @@ export type CommandPage = 'pattern' | 'composition';
 export type CommandMode = 'pattern' | 'edit' | 'voice';
 
 /**
+ * WHICH PIPELINE RUNS THE ROW — a third question, and not a third `page`.
+ *
+ * `page` picks the agent, the tool set and the history a run brackets against;
+ * `mode` picks which rows are OFFERED (see {@link Command.mode}). Neither can
+ * answer this one, because the two routes are not two agents doing the same
+ * thing differently — they are different in what they PRODUCE:
+ *
+ *   - `'single-run'` is one tool-using run against the OPEN document. The agent
+ *     reads it, writes into it, and every write is bracketed so a cancel can put
+ *     it back. This is what every row did before there was a field to declare,
+ *     and it is what a row that declares nothing still does.
+ *   - `'ir-job'` is `irCompositionJob`: a tool-free chart run, a tool-free run
+ *     per part, then one `patternService.importIR`. ⚠ IT CREATES A NEW
+ *     COMPOSITION and never touches the open one, so there is no partial edit to
+ *     roll back and nothing to bracket — the panel's own header spells out what
+ *     that changes about a cancel.
+ *
+ * Two consequences a row author has to know about:
+ *
+ *   - ⚠ AN `'ir-job'` ROW NAMES NO TOOLS, and that is load-bearing rather than
+ *     tidy. The harness sends `outputSchema` to the backend for grammar-enforced
+ *     decoding ONLY on turns where no tool is offered; register one and the
+ *     structured answer degrades to a `JSON.parse` of the whole reply with no
+ *     fence stripping, which is no answer at all. Both runs in the job are
+ *     tool-free for that reason (`arrangementChart`, `irTrackRun`), so there is
+ *     no tool for the row to name. `CommandCatalog.test.ts` holds each route to
+ *     its own bar.
+ *   - ⚠ THE TEMPLATE IS READ BY A DIFFERENT READER. `fillCommand` still
+ *     substitutes slots the same way, but the filled text goes to the CHART run,
+ *     which has no tools, no document in front of it and one product:
+ *     `{bars, bpm, tracks, chords}`. A build order — "read the composition, open
+ *     a blank pattern, stamp the notes" — instructs nobody there.
+ *
+ * Omitted means `'single-run'`. That is deliberate rather than lazy: the default
+ * is the behaviour every row had before this field existed, so adding the field
+ * changed no row that did not opt in.
+ */
+export type CommandRoute = 'single-run' | 'ir-job';
+
+/**
  * Where a {@link ChoiceSlot}'s values come from. Every one of these is resolved
  * by `slotSources` through a seam — `compositionService.getTracks`,
  * `patternService.listGrooves`, and so on. The union exists so a source with no
@@ -100,6 +140,14 @@ export type ChoiceSource =
  * these into reads. A default that does not resolve — no composition open, a
  * groove the lib calls `'custom'` — falls back to the slot's own fallback, so a
  * command is always fillable.
+ *
+ * `composition-groove` currently has a resolver and NO row using it: the backing
+ * track was the one that did, and its groove slot went when that row moved to
+ * the `'ir-job'` route — a groove is a playback setting the import pipeline has
+ * no field for (see the row's own note). Kept rather than deleted because the
+ * resolver is correct and a composition row wanting a groove is an ordinary
+ * thing to add; it is named here so the next reader knows it is unused on
+ * purpose.
  */
 export type DefaultSource =
   | 'selected-track'
@@ -195,6 +243,12 @@ export interface Command {
    * caller that passes none gets everything that page offers.
    */
   readonly mode?: CommandMode;
+  /**
+   * Which pipeline runs it — see {@link CommandRoute}, which carries the whole
+   * of why this is a field of its own. Omitted means `'single-run'`, so a row
+   * that says nothing behaves exactly as it did before the field existed.
+   */
+  readonly route?: CommandRoute;
   /** What the button says. */
   readonly label: string;
   /** One sentence for the panel, describing the OUTCOME rather than the steps. */
@@ -207,6 +261,12 @@ export interface Command {
    * route is not a bug. It is what makes the tripwire possible (every name here
    * must exist in AG-04's registry, so a renamed tool fails a test instead of a
    * run) and it documents which capability the row is actually about.
+   *
+   * ⚠ EMPTY, AND REQUIRED TO BE EMPTY, ON AN `'ir-job'` ROW. Nothing in that
+   * pipeline is offered a tool — the reason is in {@link CommandRoute} and it is
+   * the harness's, not a preference — so a name here would describe a capability
+   * the run cannot reach. A `single-run` row must name at least one; both bars
+   * are held in `CommandCatalog.test.ts`.
    */
   readonly tools: readonly string[];
   /** The instruction, with `{slotId}` where a slot's value goes. */
