@@ -166,7 +166,9 @@ export const ARRANGEMENT_CHART_SCHEMA: JsonSchema = obj(
     tracks: arr(
       obj(
         {
-          name: nameField('What this part is called — "Bass", "Rhythm Guitar", "Lead".'),
+          name: nameField(
+            'What this part is called. Name it for the instrument it is on — "Bass", "Rhythm Guitar", "Lead Guitar", "Ukulele".',
+          ),
           instrumentId: instrument('The instrument this part plays.'),
           role: nameField(
             'What this part DOES, in your own words and in a few — "walking bass, quarter notes", "off-beat comping", "lead fills over the changes". This is the whole brief the run that writes it gets.',
@@ -211,20 +213,49 @@ export const ARRANGEMENT_CHART_SCHEMA: JsonSchema = obj(
  * `additionalProperties: false` turns that reach into a decoding failure rather
  * than into an answer. Telling it those are somebody else's costs four lines.
  *
- * ⚠ AND `The parts` OPENS ON WHAT THE APP CAN PLAY, for the same shape of reason
- * one section down. The 2026-08-16 run planned Bass, Guitar and a part called
- * DRUMS carrying `instrumentId: "bass"` — the instrument check did its job,
- * `drums` is not in the catalog and never got through, so what arrived was a
- * legal bass with a drummer's brief on it, and the piece shipped with two bass
- * tracks. Nothing had told the model this app has no kit; it was asked which
- * instrument each part plays and never asked whether the part exists. Naming the
- * necks there are is cheaper than any check, because the mistake is made before the
- * `instrumentId` is chosen — see {@link reviewChart} for why there is no check
- * behind it.
+ * ⚠ AND `The parts` STATES A RELATION BETWEEN TWO FIELDS RATHER THAN A RULE ABOUT
+ * A SET. That is the second attempt at one repair, and the first attempt is why.
+ *
+ * The 2026-08-16 run planned Bass, Guitar and a part called DRUMS whose
+ * `instrumentId` was `bass`. The instrument check did its job — `drums` is not in
+ * the catalog and never got through — so what arrived was a legal bass with a
+ * drummer's brief on it, and the piece shipped with two bass tracks. The repair
+ * was a paragraph saying this app plays fretted strings and nothing else. THE NEXT
+ * RUN PLANNED A PART CALLED PIANO WHOSE `instrumentId` WAS `ukulele`, role "light
+ * comping, inner voice fills". The model had obeyed the letter and kept the
+ * intent: it changed the id it SENT and not the part it IMAGINED, and the user got
+ * a ukulele track called Piano playing piano-shaped comping.
+ *
+ * So the sentence about what the app has not got is DEMOTED TO A PREMISE — it is
+ * still there, because the model has to know which necks exist, but it is no longer
+ * the rule. A constraint over a set the model must recall and then apply is the
+ * shape this pipeline has lost at every time — it is what the step deleted at
+ * b8582bb was made of. A relation between fields the model is writing on the same
+ * object is the shape that has stuck every time; `strum`, over a grip the brief
+ * already carries, is the same move. The rule is therefore THE PART IS THE
+ * INSTRUMENT IT IS ON: the `name` and the `role` are the ones for the
+ * `instrumentId` beside them.
+ *
+ * ⚠ AND THE REASON OFFERED FOR IT IS THE TRUE MECHANISM, WHICH IS ALSO THE
+ * STRONGER ONE. A first draft of this paragraph told the model the `name` is a
+ * label that changes nothing that sounds. That is FALSE — `irCompositionJob`'s
+ * `briefFor` copies the name straight through and `trackRunInput` opens the
+ * writing brief with `Write "<name>" — <role> — on <instrument>`, then says in the
+ * next line that the name and the role are what the part is FOR. So the name is
+ * the first thing the writing model reads, and the false version argued the wrong
+ * way besides: a model told the name is inert has been told that calling the part
+ * Piano is free, which is the permission it already took. The true chain is the
+ * one that explains the observed defect — `name: "Piano"` plus a comping role went
+ * into the brief AS THE PART'S PURPOSE, and a ukulele came back playing keyboard
+ * music. A mechanical reason is one the model can check its own answer against;
+ * a mechanical reason that is not true of the pipeline is worse than none.
  *
  * The catalog is SUBSTITUTED, never typed out — `instrumentCatalog`'s own rule.
  * An instrument the lib adds is one this prompt offers the same day, and a
  * hand-written list here would be a model told a real instrument does not exist.
+ * The two WRONG PAIRINGS named as examples are safe from that staleness for a
+ * different reason: what makes each wrong is the MISMATCH between the name and the
+ * id, which stays wrong whatever the catalog grows to.
  *
  * ⚠ AND THE `role` EXAMPLES NAME ONLY PARTS THAT CAN BE ON THE CHART. A role is
  * the ENTIRE brief the writing run gets, so an exemplar mentioning a part this
@@ -257,7 +288,15 @@ Chords are SYMBOLS, never frets: "C7", "Fmaj7", "F#m7b5", "G/B". The run that wr
 
 # The parts
 
-THIS APP PLAYS FRETTED STRINGS AND NOTHING ELSE: ${INSTRUMENT_LIST}. Every part is one of those, played on a neck. A part this app cannot play is a part not to plan — naming a track for an instrument there is no neck for and handing it a bass gets a second bass, not that instrument. Write the piece for the instruments there are: their own low end, their own chords, their own attack for the pulse.
+EVERY PART IS PLAYED ON A FRETTED NECK, AND THESE ARE THE ONLY NECKS THERE ARE: ${INSTRUMENT_LIST}. If an instrument is not on that list, this app does not have it and cannot get it.
+
+SO A PART IS THE INSTRUMENT IT IS ON. Pick the neck first, then say what THAT neck does: name the part for the neck you picked, and write its \`role\` for that neck — its strings, its register, its attack.
+
+The run that writes the part is handed your \`name\`, your \`role\` and that neck, and it is told the name and the role are WHAT THE PART IS FOR. It reads them and writes notes. So "Piano" on a \`ukulele\` does not get a piano: it gets a player reading "Write Piano — light comping, inner voice fills — on Ukulele" and writing keyboard music onto four strings that have not got the range for it, and the piece is a part short. "Drums" on a \`bass\` is a second bass reading a drummer's brief.
+
+If the arrangement in your head wants a part there is no neck for, do not dress another instrument in its name. Give that job to the necks there are, or leave it out.
+
+PARTS MAY SHARE A NECK, and that is how a band gets another voice rather than by reaching for a different instrument. Two guitars playing different jobs — one comping, one answering it — is the ordinary shape of a rhythm section, and three is not unusual. Pick a second guitar over a first ukulele every time, unless the piece asks for that ukulele: a neck chosen for variety, when the part could have been played on one already in the arrangement, is a colour nobody asked for.
 
 \`tracks\` are the parts, one per track: two things that sound at the same time cannot share one. Each has a \`name\`, the \`instrumentId\` it plays, and a \`role\` — a short phrase in your own words saying what that part DOES. "Walking bass, quarter notes." "Off-beat comping, upper strings." "Sparse lead fills in the gaps between the other parts." The role is the entire brief the run that writes that part is given, so it has to say something a player could act on.
 
@@ -387,26 +426,53 @@ function chordRefusal(chord: ChartChord, instruments: readonly string[]): ChartR
  * a limit invented here would be this module refusing a form for a reason no
  * other part of the app holds.
  *
- * ⚠ AND — THE ONE THIS FUNCTION WAS ASKED FOR AND DECLINED — A PART THIS APP
- * CANNOT PLAY. The 2026-08-16 chart's "Drums" on a `bass` is the case, and there
- * is no check for it here because there is nothing in the data to check. The
- * instrument is legal and the app will build that track correctly; `name` and
- * `role` are free text this run is told to write in its own words; and the only
- * thing separating that part from a good one is what a person reads into the
- * word "Drums" — which is not reliably the wrong part, because a percussive
- * muted-string figure holding the pulse is a real part a player would nickname
- * exactly that. So the only check on offer is matching a name against a list of
- * words this module guesses mean percussion. It would refuse on a string rather
- * than on a fact, take that legitimate part down with it, and pass the moment
- * the model wrote "Kit" instead. A refusal has to be defensible to whoever
- * reads it, and "your track is called Drums" is not one.
+ * ⚠ AND — THE CHECK THIS FUNCTION HAS NOW BEEN ASKED FOR TWICE AND DECLINED
+ * TWICE — A PART FOR AN INSTRUMENT THIS APP HAS NOT GOT. "Drums" on a `bass`
+ * (2026-08-16) and "Piano" on a `ukulele` (the run after it) are the two cases,
+ * and the only check on offer is a blocklist of names: Drums, Piano, Keys, Organ,
+ * Vocals, Horns.
  *
- * The repair is therefore wholly in the prompt, and that is where it belongs:
- * this function refuses what the app cannot BUILD, and it can build a bass part
- * whatever the part is called. What went wrong was what the model IMAGINED
- * before it picked an id, which no reading of the id catches — the deleted
- * step's lesson at a smaller scale, where warning the model harder never once
- * beat changing what it was asked for.
+ * THE CASE FOR IT IS BETTER THAN IT WAS, AND SAYING OTHERWISE WOULD BE DISHONEST.
+ * Twice, with two different imagined instruments, is not one anecdote; five of
+ * those six words are names nobody gives a guitar or a bass part; and "it passes
+ * the moment the model writes Kit" is an argument against a check being COMPLETE,
+ * which no check in this file is. The old objection — that a percussive
+ * muted-string figure holding the pulse is a real part a player would nickname
+ * "Drums" — survives, but it covers one word of six.
+ *
+ * IT IS DECLINED ON WHERE IT WOULD FIRE, NOT ON WHETHER IT WOULD BE RIGHT.
+ * `irCompositionJob` retries a PART, once, with the refusal fed back, and imports
+ * what survived when one fails for good. THE CHART HAS NEITHER: it is never
+ * re-asked, so a refusal here ends the job with nothing imported and nothing
+ * written, and the sentence is read by a person who can only run the whole thing
+ * again. So the arithmetic is that a WRONG refusal costs the entire composition
+ * and a RIGHT one costs the entire composition too — because what it catches is a
+ * chart that BUILDS. The Piano run is the measurement: a correct twelve-bar blues,
+ * 323 notes, three parts that played, and the verdict on it was that this is a much
+ * better path. A name check would have deleted all of that to avoid one ukulele
+ * track called Piano. A refusal has to be cheaper than the defect it prevents, and
+ * at this step, uniquely, nothing is.
+ *
+ * The right shape here would be a NOTE — build the piece, and say the track looks
+ * misnamed. There is no note channel: this function returns refusals, the job turns
+ * any of them into a dead run, and inventing a third outcome would be this module
+ * authoring a concept the job it feeds does not have.
+ *
+ * SO THE REPAIR IS THE PROMPT AGAIN — but a DIFFERENT prompt, not a louder one.
+ * The header says why: the paragraph that failed stated a rule about the set of
+ * instruments the app lacks, and the model satisfied it by changing the id it sent;
+ * the paragraph that replaced it states a relation between the `name`, the `role`
+ * and the `instrumentId` sitting beside them, which is the only shape of
+ * instruction this pipeline has ever made stick. IF IT FAILS A THIRD TIME the next
+ * move is still not a blocklist. It is to stop the model choosing the name at all
+ * and derive it from the instrument, leaving the model only what distinguishes two
+ * parts on one neck — the deleted step's lesson pointed the other way, taking the
+ * field away rather than policing what goes into it. Note what that costs, because
+ * it is not free: the name is NOT inert downstream. `trackRunInput` opens the
+ * writing brief with it and calls it what the part is FOR, so deriving it would
+ * change what every writing run reads, not just what the finished track is
+ * labelled. That is a schema change AND a change to the other prompt, and it is a
+ * bigger claim than a rewritten prompt is owed before it has been tried once.
  *
  * ⚠ TAKES ITS ARGUMENT ON TRUST. The lists are iterated, not guarded — a caller
  * holding an `unknown` narrows it with {@link asChart} first, which is why that

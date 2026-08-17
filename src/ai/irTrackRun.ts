@@ -232,6 +232,7 @@ import {
   PPQ,
   chordGrip,
   instrumentFretCount,
+  instrumentOpenStrings,
   instrumentStringCount,
   listInstruments,
   unknownInstrumentRefusal,
@@ -478,6 +479,63 @@ const SCHEMA_BY_INSTRUMENT = new Map<string, JsonSchema>();
 const neckFrets = (instrumentId: string): number =>
   Math.min(instrumentFretCount(instrumentId), MAX_FRET);
 
+/**
+ * WHAT EACH STRING OF THIS NECK SOUNDS, and which end of the list `string` 0 is
+ * — the two sentences the schema and the brief both need, authored ONCE so the
+ * grammar's field description and the prose cannot tell the model different
+ * things about the same neck in the same request.
+ *
+ * ⚠ THIS IS THE 2026-08-16 BASS DEFECT'S REPAIR. That run put all 48 notes of a
+ * bass part on `string` 3 — the G, the highest string of the four. It had been
+ * told only that 0 is the bottom string and that the neck has four, which is a
+ * fact about OUR numbering; the player's numbering runs the other way, where the
+ * lowest string carries the highest number. Every one of those notes was in
+ * range, so nothing downstream caught it and nothing could have: the import
+ * pipeline clamps an out-of-range string and drops a fractional tick, and a part
+ * played entirely on the wrong string is neither. Naming the PITCHES is what
+ * makes the axis checkable by the model instead of memorable, which is the same
+ * move `strum` made for chord shapes.
+ *
+ * ⚠ AND IT NEVER CLAIMS 0 IS THE LOWEST PITCH. On a reentrant ukulele
+ * (G4 C4 E4 A4) that is false — the high-G drone sits at the bottom of the neck
+ * — so the anchor sentence is chosen off `ascending` rather than assumed, and
+ * the reentrant neck is told which index really is the lowest. The old text said
+ * "0 is the low E on a guitar" to every instrument, which was a guitar's fact
+ * shipped to a bass and a falsehood shipped to a ukulele.
+ *
+ * Empty for an instrument the catalog does not know — the same unreachable case
+ * {@link irTrackSchema} explains, and both callers join on nothing.
+ *
+ * `namePitches` repeats the pitch beside the index in the REENTRANT anchor, and
+ * only there. The brief takes it: that anchor is the one sentence contradicting
+ * what the model already believes about string order, and the pitch is what
+ * makes it checkable against the list rather than another numbering rule to
+ * take on trust. The schema's copy is a field description read beside the field
+ * and stays terse. The ascending anchor is one sentence either way — there is no
+ * index to disambiguate when 0 is the answer.
+ */
+function openStringSentences(
+  instrumentId: string,
+  { namePitches = false }: { readonly namePitches?: boolean } = {},
+): readonly string[] {
+  const { names, lowestIndex, highestIndex, ascending } = instrumentOpenStrings(instrumentId);
+  if (names.length === 0) return [];
+
+  const list = names.map((note, index) => `string ${index} sounds ${note}`).join(', ');
+  if (ascending) {
+    return [
+      `Played open, ${list}.`,
+      'String 0 is the lowest-sounding string on this instrument, and each one after it sounds higher.',
+    ];
+  }
+  const at = (index: number): string =>
+    namePitches ? `string ${index} (${names[index]})` : `string ${index}`;
+  return [
+    `Played open, ${list}.`,
+    `They do not run low to high on this instrument: ${at(lowestIndex)} is the lowest-sounding, and ${at(highestIndex)} the highest.`,
+  ];
+}
+
 export function irTrackSchema(instrumentId: string): JsonSchema {
   const cached = SCHEMA_BY_INSTRUMENT.get(instrumentId);
   if (cached !== undefined) return cached;
@@ -505,7 +563,15 @@ export function irTrackSchema(instrumentId: string): JsonSchema {
               obj(
                 {
                   string: int(
-                    `Which string. 0 is the BOTTOM string (the low E on a guitar) — this instrument has ${strings}, so 0 to ${strings - 1}.`,
+                    // ⚠ THIS DESCRIPTION IS PROMPT. These runs are tool-free so
+                    // that the harness sends the schema for grammar-enforced
+                    // decoding, descriptions and all — so the neck named here
+                    // reaches the model in the same request as the brief's prose
+                    // and must not contradict it.
+                    [
+                      `Which string. 0 is the BOTTOM string of the neck — this instrument has ${strings}, so 0 to ${strings - 1}.`,
+                      ...openStringSentences(instrumentId),
+                    ].join(' '),
                     { min: 0, max: strings - 1 },
                   ),
                   fret: int(
@@ -852,7 +918,7 @@ EVERY NUMBER IS A WHOLE NUMBER. A tick with a fraction in it is thrown away alon
 
 # Where the notes go on this neck
 
-\`string\` counts from the BOTTOM string: 0 is the low E on a guitar. This ${instrument} has ${strings}, so \`string\` runs from 0 to ${strings - 1}. \`fret\` runs from 0, the open string, up to ${frets} — that is where this neck ends, and a fret past it is a note nothing will draw and nothing will play.
+\`string\` counts from the BOTTOM string of the neck. This ${instrument} has ${strings}, so \`string\` runs from 0 to ${strings - 1}. ${openStringSentences(brief.instrumentId, { namePitches: true }).join(' ')} Write the part where it belongs on THIS neck, not where the same shape would sit on a guitar. \`fret\` runs from 0, the open string, up to ${frets} — that is where this neck ends, and a fret past it is a note nothing will draw and nothing will play.
 
 A string can only ring one note at a time. Two notes on the same string must not overlap: the second one starts at or after the first one's \`atTick\` plus its \`durationTicks\`, and two notes in the same event are never on the same string.
 

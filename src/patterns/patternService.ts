@@ -27,7 +27,9 @@ import {
   SCALES,
   getInstrument,
   getTuning,
+  noteAt,
   parseChordSymbol,
+  pitchClass,
   presetMatching,
   usePatternsStore,
   selectEditingPattern,
@@ -1152,6 +1154,127 @@ function checkString(stringIndex: number): Result {
  */
 export function instrumentFretCount(instrumentId: string): number {
   return getInstrument(instrumentId)?.fretCount ?? 0;
+}
+
+/** What an instrument's open strings sound, and which of them is which. */
+export interface InstrumentOpenStrings {
+  /**
+   * Open-string pitches in scientific notation, `stringIndex` order — index 0
+   * is the physically BOTTOM string. Empty for an instrument or a tuning the
+   * catalog does not have.
+   */
+  readonly names: readonly string[];
+  /** Index of the lowest-SOUNDING string; -1 when there is no order to give. */
+  readonly lowestIndex: number;
+  /** Index of the highest-SOUNDING string; -1 when there is no order to give. */
+  readonly highestIndex: number;
+  /** Whether the pitches rise with the index — false on a reentrant tuning, and
+   *  false when there is no order to give. */
+  readonly ascending: boolean;
+}
+
+const NO_OPEN_STRINGS: InstrumentOpenStrings = {
+  names: [],
+  lowestIndex: -1,
+  highestIndex: -1,
+  ascending: false,
+};
+
+/**
+ * Where an open-string pitch sits absolutely, in semitones, for ORDERING only —
+ * `null` for a name nothing here can read.
+ *
+ * ⚠ NORMALISED FIRST, and that is not tidiness. An octave digit multiplied out
+ * and added to a chroma is only a height while the two agree about which octave
+ * the note is in, and on a name that crosses the C boundary they do not: `Cb4`
+ * sounds B3 and `B#3` sounds C4, so the printed digit is a semitone's worth of
+ * an octave wrong in each direction. `noteAt(name, 0)` is the lib's own MIDI
+ * round-trip — it returns a sharp spelling whose octave digit is exact — after
+ * which the digits and `pitchClass` describe the same note. No catalog tuning is
+ * spelled that way today; the brief prints this ordering to the model as fact,
+ * which is not a place to leave a latent octave error.
+ *
+ * Both lib calls THROW on a name they cannot parse, and this runs over catalog
+ * data a lib version can change under us, so an unreadable pitch becomes "no
+ * order" rather than an exception thrown out of a seam accessor.
+ */
+function openStringHeight(note: string): number | null {
+  try {
+    const canonical = noteAt(note, 0);
+    const octave = /(-?\d+)$/.exec(canonical);
+    if (octave === null) return null;
+    return Number(octave[1]) * 12 + pitchClass(canonical);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a NAMED instrument's strings SOUND when played open, in `stringIndex`
+ * order.
+ *
+ * {@link instrumentStringCount}'s and {@link instrumentFretCount}'s sibling and
+ * split out for their reason: a caller authoring notes for an instrument it has
+ * been handed, rather than for the open pattern, must be able to ask about that
+ * instrument, and a second `getTuning(...)` elsewhere is exactly the duplicate
+ * that would let two answers disagree.
+ *
+ * ⚠ WHY THE COUNT WAS NOT ENOUGH. A run on 2026-08-16 put all 48 notes of a bass
+ * part on `string` 3 — the G, the HIGHEST string of the four — because the
+ * player's numbering runs the other way (the lowest string carries the highest
+ * number). Every one of those notes was in range, so nothing downstream caught
+ * it and nothing could have. A string index is only an anchor once something
+ * says what it sounds.
+ *
+ * ⚠ The tuning is the instrument's DECLARED DEFAULT, resolved through
+ * `getTuning`, matching {@link chordGrip} and `reference/tabLayout.ts`'s
+ * `openStrings` — NOT `getTuningsForInstrument(id)[0]`, which agrees with that
+ * only because of the order `TUNINGS` happens to be written in (see
+ * `tabLayout`'s header). Nothing in this app owns instrument/tuning/capo yet
+ * (docs/FOLLOW-UPS.md §3), so the default is the only answer there is to give.
+ *
+ * ⚠ INDEX ORDER IS NOT PITCH ORDER. Index 0 is the bottom string PHYSICALLY,
+ * which on a guitar and a bass is also the lowest-sounding one and on a standard
+ * ukulele (G4 C4 E4 A4) is not — the high-G drone sits at the bottom of the
+ * neck. {@link InstrumentOpenStrings.lowestIndex} is the answer to "which sounds
+ * lowest" and is never assumed to be 0.
+ *
+ * Empty names and no order at all for an instrument the catalog does not know —
+ * its siblings' `0`, in the shape this answer has.
+ */
+export function instrumentOpenStrings(instrumentId: string): InstrumentOpenStrings {
+  const instrument = getInstrument(instrumentId);
+  if (instrument === undefined) return NO_OPEN_STRINGS;
+
+  // The half that can still go missing when a lib version adds an instrument
+  // before its tunings — `chordGrip`'s case, in the shape this answer has.
+  const tuning = getTuning(instrument.defaultTuningId);
+  if (tuning === undefined) return NO_OPEN_STRINGS;
+
+  // Trimmed to the instrument's own string count for `chordGrip`'s reason: a
+  // tuning wider than its neck would name a string nothing draws and nothing
+  // plays. Every tuning in the catalog is as wide as its instrument today, so
+  // this drops nothing.
+  const names = tuning.strings.slice(0, instrument.stringCount);
+  if (names.length === 0) return NO_OPEN_STRINGS;
+
+  const heights: number[] = [];
+  for (const name of names) {
+    const height = openStringHeight(name);
+    if (height === null) return { ...NO_OPEN_STRINGS, names };
+    heights.push(height);
+  }
+
+  let lowestIndex = 0;
+  let highestIndex = 0;
+  let ascending = true;
+  heights.forEach((height, index) => {
+    if (height < heights[lowestIndex]) lowestIndex = index;
+    if (height > heights[highestIndex]) highestIndex = index;
+    if (index > 0 && height <= heights[index - 1]) ascending = false;
+  });
+
+  return { names, lowestIndex, highestIndex, ascending };
 }
 
 /**

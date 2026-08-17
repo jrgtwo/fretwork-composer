@@ -13,6 +13,9 @@ import {
 import {
   beginEditGesture,
   chordGrip,
+  instrumentFretCount,
+  instrumentOpenStrings,
+  instrumentStringCount,
   patternInstrumentId,
   deleteNotes,
   endEditGesture,
@@ -593,4 +596,90 @@ describe('chordGrip', () => {
 
     expect(JSON.stringify(getEditingPattern())).toBe(before);
   });
+});
+
+describe('instrumentOpenStrings', () => {
+  it('names every string of a bass and of a guitar, one per string', () => {
+    // THE 2026-08-16 DEFECT'S FIX. A count says how many strings there are and
+    // nothing about which is which — the run that put a whole bass part on
+    // string 3 (the G, the HIGHEST string) had the count and still got it
+    // backwards, and every note it wrote was in range.
+    expect(instrumentOpenStrings('bass').names).toEqual(['E1', 'A1', 'D2', 'G2']);
+    expect(instrumentOpenStrings('guitar').names).toEqual(['E2', 'A2', 'D3', 'G3', 'B3', 'E4']);
+
+    // As many names as the neck has strings, asked of the sibling accessor: a
+    // list one entry out would put a note on a string nothing draws and nothing
+    // plays, which is the exact failure the seam exists to prevent.
+    for (const instrumentId of ['bass', 'guitar', 'ukulele']) {
+      expect(instrumentOpenStrings(instrumentId).names).toHaveLength(
+        instrumentStringCount(instrumentId),
+      );
+    }
+  });
+
+  it('says which string SOUNDS lowest, and it is 0 on a bass and a guitar', () => {
+    for (const instrumentId of ['bass', 'guitar']) {
+      const open = instrumentOpenStrings(instrumentId);
+      expect(open.lowestIndex).toBe(0);
+      expect(open.highestIndex).toBe(open.names.length - 1);
+      expect(open.ascending).toBe(true);
+    }
+  });
+
+  it('is honest about the reentrant ukulele instead of assuming index order', () => {
+    // Standard ukulele is G4 C4 E4 A4: the high-G drone sits at the BOTTOM of the
+    // neck, so index 0 is the lowest string physically and the second-highest
+    // note on it. "String 0 is the lowest" is false here and is a sentence this
+    // must never let a caller write.
+    const uke = instrumentOpenStrings('ukulele');
+
+    expect(uke.names).toEqual(['G4', 'C4', 'E4', 'A4']);
+    expect(uke.lowestIndex).toBe(1);
+    expect(uke.highestIndex).toBe(3);
+    expect(uke.ascending).toBe(false);
+  });
+
+  it('reads a tuning, and it is not one of the OTHER tunings this neck has', () => {
+    // ⚠ WHAT THIS CANNOT CATCH, said plainly rather than claimed away.
+    // `getTuningsForInstrument(id)[0]` returns each instrument's declared default
+    // in today's catalog, so swapping the implementation to it leaves every
+    // assertion in this block green — the same trap `chordGrip`'s header above
+    // states, and the reason that block pins exact grips. Nothing here defends
+    // against a reordered `TUNINGS`; the hardcoded lists above are the guard, and
+    // they move with the catalog by hand.
+    //
+    // What this DOES catch is the wrong tuning of the right WIDTH — the mutation
+    // that renames every string while passing every bound, and the one that would
+    // print a false pitch straight into the brief.
+    expect(instrumentOpenStrings('guitar').names).not.toEqual(getTuning('drop-d')!.strings);
+    expect(instrumentOpenStrings('bass').names).not.toEqual(getTuning('bass-drop-d')!.strings);
+    expect(instrumentOpenStrings('ukulele').names).not.toEqual(getTuning('ukulele-low-g')!.strings);
+
+    // And every instrument the catalog carries gets an answer, so a new one added
+    // without a tuning shows up here rather than as an empty list in a brief.
+    for (const instrument of INSTRUMENTS) {
+      expect(instrumentOpenStrings(instrument.id).names).toHaveLength(instrument.stringCount);
+    }
+  });
+
+  it('has nothing to say about a neck the catalog does not know', () => {
+    // Its siblings answer 0 rather than refusing; this answers the same way in
+    // the shape it has, and -1 says there is no string to BE the lowest rather
+    // than pointing at one that does not exist.
+    const unknown = instrumentOpenStrings('theremin');
+
+    expect(unknown.names).toEqual([]);
+    expect(unknown.lowestIndex).toBe(-1);
+    expect(unknown.highestIndex).toBe(-1);
+    expect(unknown.ascending).toBe(false);
+    expect(instrumentStringCount('theremin')).toBe(0);
+    expect(instrumentFretCount('theremin')).toBe(0);
+  });
+
+  // ⚠ NO "agrees with the neck `chordGrip` voices against" TEST. There was one; it
+  // re-implemented `soundsTheChord` above with this accessor's names swapped in,
+  // and since both sides resolve `getTuning(instrument.defaultTuningId)` it was
+  // the same arithmetic stated twice and could not fail on its own. The agreement
+  // it meant to claim is covered: the pinned lists at the top of this block, and
+  // `chordGrip`'s own pinned grips.
 });

@@ -221,6 +221,37 @@ describe('the schema is the neck it was built for', () => {
     expect(notesOf('ukulele')?.string.maximum).toBe(3);
   });
 
+  it('tells the model what each string SOUNDS on the field it is filling in', () => {
+    // ⚠ THIS SCHEMA IS PROMPT. These runs are tool-free precisely so the harness
+    // sends it for grammar-enforced decoding, descriptions and all — so a
+    // convention explained here reaches the model exactly as the brief's prose
+    // does, only attached to the field. The 2026-08-16 bass run received "0 is
+    // the BOTTOM string (the low E on a guitar)" HERE while being briefed as a
+    // bass, and put all 48 of its notes on the G.
+    const stringOf = (instrumentId: string) =>
+      irTrackSchema(instrumentId).properties?.events.items?.properties?.notes.items?.properties
+        ?.string.description ?? '';
+
+    expect(stringOf('bass')).toContain('0 sounds E1');
+    expect(stringOf('bass')).toContain('3 sounds G2');
+    expect(stringOf('bass')).toContain('0 is the lowest-sounding');
+    expect(stringOf('guitar')).toContain('5 sounds E4');
+    // The neck it names is THIS neck, or the assertions above would hold for a
+    // description that named a guitar for every part — which is what the deleted
+    // sentence did.
+    expect(stringOf('bass')).not.toContain('sounds E4');
+    expect(stringOf('guitar')).not.toContain('sounds E1');
+    expect(JSON.stringify(irTrackSchema('bass'))).not.toContain('low E on a guitar');
+
+    // And the reentrant neck is not told the falsehood the brief refuses to tell
+    // it: these two sentences reach the model in the same request and must not
+    // contradict each other.
+    expect(stringOf('ukulele')).toContain('0 sounds G4');
+    expect(stringOf('ukulele')).toContain('They do not run low to high');
+    expect(stringOf('ukulele')).toContain('1 is the lowest-sounding');
+    expect(stringOf('ukulele')).not.toContain('0 is the lowest-sounding');
+  });
+
   it('bounds `fret` by THIS neck, not by the app-wide ceiling', () => {
     // The ceiling is 24 for everything; the necks are not. A ukulele part at fret
     // 20 passes a `MAX_FRET` grammar, imports clean, is drawn by nothing and is
@@ -371,12 +402,64 @@ describe('the brief is voiced for THIS neck', () => {
     );
   });
 
+  it('names what every string SOUNDS, and a different set per instrument', () => {
+    // THE 2026-08-16 BASS DEFECT. The brief used to explain our numbering — "0 is
+    // the low E on a guitar" — and lost to the player's numbering, where the
+    // lowest string carries the HIGHEST number. All 48 notes of a bass part
+    // landed on string 3, the G, which is in range on every one of them, so
+    // nothing downstream caught it and nothing could have.
+    const bass = brief(oneBar());
+    const guitar = brief(oneBar({ instrumentId: 'guitar' }));
+
+    // ⚠ BOTH LISTS ARE WRITTEN OUT, not asked of `instrumentOpenStrings`. An
+    // expectation derived from the accessor the brief is built from reverses
+    // whenever it does and passes either way — and the reversal is the whole
+    // failure mode, at its worst on the six-string neck.
+    expect(bass).toContain(
+      'string 0 sounds E1, string 1 sounds A1, string 2 sounds D2, string 3 sounds G2',
+    );
+    expect(guitar).toContain(
+      'string 0 sounds E2, string 1 sounds A2, string 2 sounds D3, string 3 sounds G3, string 4 sounds B3, string 5 sounds E4',
+    );
+    // The two really are different necks, or the assertions above would hold for
+    // a brief that named one instrument for every part.
+    expect(bass).not.toContain('string 5 sounds');
+    expect(bass).not.toContain('string 0 sounds E2');
+    expect(guitar).not.toContain('string 0 sounds E1');
+  });
+
+  it('states which string sounds LOWEST, which is the anchor the bass run needed', () => {
+    // THE REGRESSION. The pitch list alone still leaves the model to work out
+    // which end of it `string` 0 is. This is the sentence that says so, and a
+    // future edit must not quietly drop it.
+    const bass = brief(oneBar());
+
+    expect(bass).toContain('string 0 sounds E1');
+    expect(bass).toContain('String 0 is the lowest-sounding string on this instrument');
+    // The second neck the task asked to differ gets the same anchor — the
+    // ascending branch is not a bass-only sentence.
+    expect(brief(oneBar({ instrumentId: 'guitar' }))).toContain(
+      'String 0 is the lowest-sounding string on this instrument',
+    );
+    // ...and the old rule it replaced is gone, not sitting beside it — in the
+    // schema that ships with the brief as well as in the prose.
+    expect(bass).not.toContain('low E on a guitar');
+    expect(JSON.stringify(irTrackSchema('bass'))).not.toContain('low E on a guitar');
+  });
+
   it('does not tell a ukulele player that string 0 is the lowest PITCH', () => {
     // A reentrant ukulele is G4 C4 E4 A4: index 0 is the bottom string and the
-    // fourth-lowest note on it. "The lowest string" is a sentence that is false on
-    // an instrument this module explicitly supports.
-    expect(brief(oneBar({ instrumentId: 'ukulele' }))).toContain('counts from the BOTTOM string');
-    expect(brief(oneBar({ instrumentId: 'ukulele' }))).not.toContain('from the LOWEST string');
+    // second-highest note on it. "String 0 is the lowest-sounding" is a sentence
+    // that is false on an instrument this module explicitly supports.
+    const uke = brief(oneBar({ instrumentId: 'ukulele' }));
+
+    expect(uke).toContain(
+      'string 0 sounds G4, string 1 sounds C4, string 2 sounds E4, string 3 sounds A4',
+    );
+    expect(uke).toContain('They do not run low to high');
+    expect(uke).toContain('string 1 (C4) is the lowest-sounding');
+    expect(uke).toContain('string 3 (A4) the highest');
+    expect(uke).not.toContain('String 0 is the lowest-sounding');
   });
 });
 

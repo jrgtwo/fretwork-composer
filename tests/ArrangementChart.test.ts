@@ -23,6 +23,7 @@ import {
   type ChartRunDeps,
 } from '../src/ai/arrangementChart';
 import { MAX_COMPOSITION_TRACKS, TRACK_CAP_REASON } from '../src/composition/compositionService';
+import { trackRunInput } from '../src/ai/irTrackRun';
 import { INSTRUMENT_IDS, INSTRUMENT_LIST } from '../src/ai/tools/instrumentCatalog';
 import type { AgentRunSummary, AgentSpec, RunAgentTaskOptions } from '../src/ai/agentService';
 import type { Result } from '../src/patterns/patternService';
@@ -162,12 +163,6 @@ describe('the chart run is tool-free', () => {
   });
 
   /**
-   * The 2026-08-16 run planned Bass, Guitar, and a part called DRUMS carrying
-   * `instrumentId: "bass"` — a legal instrument with an unplayable part on it,
-   * and the piece shipped with two bass tracks. Nothing in the data catches
-   * that (see `reviewChart`'s DELIBERATELY NOT CHECKED for the argument), so
-   * the prompt is the entire repair and this is the entire test of it.
-   *
    * The catalog is asserted as the LIVE value rather than as typed-out ids, and
    * then EVERY id in it separately, so an instrument the lib adds fails here
    * unless the prompt is offering it.
@@ -179,15 +174,114 @@ describe('the chart run is tool-free', () => {
    * `toContain('')` is vacuously true, which would leave the live-value claim
    * resting on nothing the day the catalog is empty.
    */
-  it('tells the model this app plays only the fretted instruments it has', () => {
+  it('tells the model which necks this app has, from the live catalog', () => {
     const prompt = ARRANGEMENT_CHART_AGENT.systemPrompt;
     expect(INSTRUMENT_LIST).not.toBe('');
     expect(prompt).toContain(INSTRUMENT_LIST);
     expect(INSTRUMENT_IDS).not.toEqual([]);
     INSTRUMENT_IDS.forEach((id) => expect(prompt).toContain(id));
-    expect(prompt).toContain('FRETTED STRINGS AND NOTHING ELSE');
-    // Naming the catalog is not the instruction; this is.
-    expect(prompt).toContain('A part this app cannot play is a part not to plan');
+    expect(prompt).toContain('THESE ARE THE ONLY NECKS THERE ARE');
+  });
+
+  /**
+   * THE WHOLE REPAIR, AND THE SECOND ATTEMPT AT IT. Naming the catalog was the
+   * first attempt and it did not hold: told this app plays fretted strings and
+   * nothing else, the 2026-08-16 follow-up run sent a LEGAL `ukulele` and called
+   * the part "Piano" anyway — it changed the id it sent, not the part it
+   * imagined. Nothing in the data catches that and nothing should try to (see
+   * `reviewChart`'s DELIBERATELY NOT CHECKED for the argument, and the test below
+   * for the guard on it), so the prompt is the entire repair.
+   *
+   * What is pinned is the SHAPE of the instruction rather than its wording: a
+   * relation between the `name`/`role` and the `instrumentId` beside them, not a
+   * rule about the set of instruments the app lacks. A rewrite that drops back to
+   * "we have no drums" fails here, which is the point — that sentence was already
+   * tried.
+   */
+  it('requires the part to be named and briefed for the instrument it is on', () => {
+    const prompt = ARRANGEMENT_CHART_AGENT.systemPrompt;
+    expect(prompt).toContain('A PART IS THE INSTRUMENT IT IS ON');
+    // The mechanical reason, which is what makes it checkable by the model — and
+    // it has to be the TRUE one. An earlier draft said the writing run never sees
+    // the `name`; `trackRunInput` opens its brief with the name and calls it what
+    // the part is FOR, so that draft was both false and an argument that naming a
+    // ukulele part "Piano" is free. This assertion pins the corrected mechanism,
+    // and the companion assertion in tests/IrTrackRun.test.ts pins the other end
+    // of it: the writing brief really does carry the name.
+    expect(prompt).toContain('handed your `name`');
+    expect(prompt).toContain('WHAT THE PART IS FOR');
+    expect(prompt).not.toContain('changes nothing that sounds');
+    // The observed failure, named as the wrong PAIRING rather than as a banned
+    // word — the form that survives the lib growing a catalog entry.
+    expect(prompt).toContain('"Piano" on a `ukulele`');
+    // What to do with the imagined part instead, which is the only sentence that
+    // answers the failure rather than describing it.
+    expect(prompt).toContain('do not dress another instrument in its name');
+    // And the schema's own description of the field, which is what a provider
+    // decoding against the grammar reads.
+    expect(
+      ARRANGEMENT_CHART_SCHEMA.properties?.tracks?.items?.properties?.name?.description,
+    ).toContain('Name it for the instrument it is on');
+  });
+
+  /**
+   * THE POSITIVE HALF, and it is a separate failure from the one above.
+   *
+   * The rule against dressing one instrument in another's name ends "or leave it
+   * out", which on its own answers a wanted third part by dropping to two. The
+   * 2026-08-16 run reached for a ukulele as a third colour and called it Piano;
+   * banning the name without naming the alternative just loses the part. So the
+   * prompt has to say that a second guitar IS the alternative — parts may share a
+   * neck, and that is how another voice is got.
+   */
+  it('says a second part on the same instrument is how another voice is got', () => {
+    const prompt = ARRANGEMENT_CHART_AGENT.systemPrompt;
+    expect(prompt).toContain('PARTS MAY SHARE A NECK');
+    // The concrete pairing, in the direction the observed failure went — and as a
+    // preference rather than a ban, because a piece that genuinely wants a
+    // ukulele must still be able to have one.
+    expect(prompt).toContain('Pick a second guitar over a first ukulele');
+    expect(prompt).toContain('unless the piece asks for that ukulele');
+  });
+
+  /**
+   * THE OTHER END OF THE MECHANISM THE PROMPT ABOVE ASSERTS, so that the claim is
+   * enforced rather than believed.
+   *
+   * The chart prompt tells the model the writing run is handed its `name` and is
+   * told the name says what the part is FOR. That is a claim about a DIFFERENT
+   * prompt in a different module, and the first draft of it was simply false —
+   * it said the name is a label that changes nothing that sounds, which is both
+   * wrong and an argument that calling a ukulele part "Piano" is harmless. A
+   * comment cannot stop that coming back; this can. If `trackRunInput` ever stops
+   * carrying the track name, the chart prompt is lying again and this fails.
+   *
+   * It is deliberately the WEAKEST possible coupling to that module: one real
+   * brief, one assertion that the name is in it. Nothing about the writing run's
+   * musical paragraphs is asserted here — those are `tests/IrTrackRun.test.ts`'s.
+   */
+  it('is telling the truth about the writing run reading the name', () => {
+    const [part] = blues().tracks;
+    // ⚠ THE NAME IS A SENTINEL RATHER THAN THE FIXTURE'S "Bass", and that is the
+    // whole difference between this test and one that cannot fail. The brief
+    // prints the INSTRUMENT as well, so a track called "Bass" on a bass is found
+    // in the brief whether the name reached it or not — asserting the fixture's
+    // name passes even on a brief that dropped the field entirely. This name
+    // appears nowhere else the brief could get it from.
+    const name = 'Understudy Filigree';
+    const written = trackRunInput({
+      id: 'track-0',
+      name,
+      instrumentId: part.instrumentId,
+      role: part.role,
+      bars: 12,
+      chords: blues().chords,
+    });
+    if (!written.ok) throw new Error(`trackRunInput refused: ${written.reason}`);
+
+    expect(written.value).toContain(name);
+    expect(written.value).toContain(part.role);
+    expect(written.value).toContain('what the part is FOR');
   });
 
   /**
@@ -196,7 +290,14 @@ describe('the chart run is tool-free', () => {
    * silence — the same defect the section above exists to stop, one field over.
    */
   it('gives no role example that leans on a part the app cannot play', () => {
-    expect(ARRANGEMENT_CHART_AGENT.systemPrompt).not.toContain('vocal');
+    const prompt = ARRANGEMENT_CHART_AGENT.systemPrompt;
+    // More than one spelling of the defect, because one word was a guard against
+    // one wording rather than against the mistake. These are instruments with no
+    // neck in this app; "Drums" and "Piano" are deliberately absent from the list
+    // because the prompt names both ON PURPOSE, as the wrong PAIRINGS.
+    ['vocal', 'horn', 'organ', 'saxophone', 'trumpet'].forEach((absent) =>
+      expect(prompt.toLowerCase()).not.toContain(absent),
+    );
   });
 
   /** The deleted step made the model author pattern ids, lengths and bar lists,
@@ -423,20 +524,34 @@ describe('the parts', () => {
   });
 
   /**
-   * THE DECLINED CHECK, PINNED SO REVERSING IT FAILS. The 2026-08-16 chart's
-   * "Drums" on a `bass` is exactly this chart, and `reviewChart` deliberately
-   * has nothing to say about it: the instrument is legal, the app builds that
-   * track correctly, and a percussive muted-string figure holding the pulse is a
-   * part a player would nickname exactly that. A name blocklist would refuse on
-   * a string rather than on a fact, take that legitimate part with it, and pass
-   * the moment the model wrote "Kit". The repair is the prompt, tested above;
-   * this is the guard on the argument in `reviewChart`'s own header.
+   * THE DECLINED CHECK, PINNED SO REVERSING IT FAILS — and it is the case that
+   * MUST NOT BE REFUSED. Both charts that went wrong are here: "Drums" on a
+   * `bass` (2026-08-16) and "Piano" on a `ukulele` (the run after it). Both are
+   * built correctly by the app, and `reviewChart` deliberately has nothing to say
+   * about either.
+   *
+   * The reason is not that a blocklist would be wrong — after two runs it would
+   * be right more often than not. It is that the chart is the one step
+   * `irCompositionJob` never re-asks, so a refusal here throws away the WHOLE
+   * composition, and what it would be throwing away is a piece that plays. A
+   * right refusal costs as much as a wrong one. See `reviewChart`'s own header
+   * for the full argument; the repair is the prompt, tested above.
+   *
+   * The FIRST track is the false positive a blocklist would take with it — it is
+   * called "Drums" and its role is a percussive muted-string pulse, which is a
+   * real bass part a player would nickname exactly that. The third is that same
+   * part named the way the prompt now asks for, and is here to show a correctly
+   * named part is not refused either: the check is absent, not lenient.
    */
   it('does not refuse a part for what it is called', () => {
     expect(
       reviewChart({
         ...blues(),
-        tracks: [{ name: 'Drums', instrumentId: 'bass', role: 'percussive muted-string pulse' }],
+        tracks: [
+          { name: 'Drums', instrumentId: 'bass', role: 'percussive muted-string pulse' },
+          { name: 'Piano', instrumentId: 'ukulele', role: 'light comping, inner voices' },
+          { name: 'Muted Pulse', instrumentId: 'bass', role: 'dead-string sixteenths' },
+        ],
       }),
     ).toEqual([]);
   });
