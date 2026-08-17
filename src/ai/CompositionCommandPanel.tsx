@@ -208,11 +208,20 @@ const RUN_TIMEOUT_MS = MAX_ITERS * SECONDS_PER_ITER * 1_000;
  *
  * DERIVED, and derivable exactly — which is the difference from {@link MAX_ITERS}
  * and the reason the deleted orchestrator needed a ceiling of its own. The job is
- * `1 + chart.tracks.length` runs and `reviewChart` refuses a chart naming more
- * parts than a composition can hold, so the worst case is a number this file can
- * name rather than guess at.
+ * the chart plus AT MOST TWO runs per part — `runIrCompositionJob` asks a part
+ * whose own review refused it exactly once more — so the worst case is
+ * `1 + 2 * chart.tracks.length`, and `reviewChart` refuses a chart naming more
+ * parts than a composition can hold. A number this file can name rather than
+ * guess at.
+ *
+ * ⚠ THE FACTOR OF TWO IS THE RETRY, and it must track that decision. Sized for
+ * one run a part, a job in which several parts were asked again would be aborted
+ * by {@link JOB_TIMEOUT_MS} part way through — and an abort lands before the
+ * import, which throws away every part that HAD been written. That is the exact
+ * loss the job's "import what survived" policy exists to prevent, reintroduced
+ * through the deadline instead of through the failure policy.
  */
-const MAX_JOB_RUNS = 1 + MAX_COMPOSITION_TRACKS;
+const MAX_JOB_RUNS = 1 + 2 * MAX_COMPOSITION_TRACKS;
 
 /**
  * How long ONE of those runs is allowed to take, on average.

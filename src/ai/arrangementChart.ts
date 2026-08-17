@@ -210,6 +210,26 @@ export const ARRANGEMENT_CHART_SCHEMA: JsonSchema = obj(
  * will reach for pattern names and bar lists unprompted, and
  * `additionalProperties: false` turns that reach into a decoding failure rather
  * than into an answer. Telling it those are somebody else's costs four lines.
+ *
+ * ⚠ AND `The parts` OPENS ON WHAT THE APP CAN PLAY, for the same shape of reason
+ * one section down. The 2026-08-16 run planned Bass, Guitar and a part called
+ * DRUMS carrying `instrumentId: "bass"` — the instrument check did its job,
+ * `drums` is not in the catalog and never got through, so what arrived was a
+ * legal bass with a drummer's brief on it, and the piece shipped with two bass
+ * tracks. Nothing had told the model this app has no kit; it was asked which
+ * instrument each part plays and never asked whether the part exists. Naming the
+ * necks there are is cheaper than any check, because the mistake is made before the
+ * `instrumentId` is chosen — see {@link reviewChart} for why there is no check
+ * behind it.
+ *
+ * The catalog is SUBSTITUTED, never typed out — `instrumentCatalog`'s own rule.
+ * An instrument the lib adds is one this prompt offers the same day, and a
+ * hand-written list here would be a model told a real instrument does not exist.
+ *
+ * ⚠ AND THE `role` EXAMPLES NAME ONLY PARTS THAT CAN BE ON THE CHART. A role is
+ * the ENTIRE brief the writing run gets, so an exemplar mentioning a part this
+ * app has no neck for — "fills between the vocal lines" was one — asks for a
+ * guitar written around a silence, which is this same defect one field over.
  */
 const ARRANGEMENT_CHART_PROMPT = `# What you are doing
 
@@ -237,7 +257,9 @@ Chords are SYMBOLS, never frets: "C7", "Fmaj7", "F#m7b5", "G/B". The run that wr
 
 # The parts
 
-\`tracks\` are the parts, one per track: two things that sound at the same time cannot share one. Each has a \`name\`, the \`instrumentId\` it plays, and a \`role\` — a short phrase in your own words saying what that part DOES. "Walking bass, quarter notes." "Off-beat comping, upper strings." "Sparse lead fills between the vocal lines." The role is the entire brief the run that writes that part is given, so it has to say something a player could act on.
+THIS APP PLAYS FRETTED STRINGS AND NOTHING ELSE: ${INSTRUMENT_LIST}. Every part is one of those, played on a neck. A part this app cannot play is a part not to plan — naming a track for an instrument there is no neck for and handing it a bass gets a second bass, not that instrument. Write the piece for the instruments there are: their own low end, their own chords, their own attack for the pulse.
+
+\`tracks\` are the parts, one per track: two things that sound at the same time cannot share one. Each has a \`name\`, the \`instrumentId\` it plays, and a \`role\` — a short phrase in your own words saying what that part DOES. "Walking bass, quarter notes." "Off-beat comping, upper strings." "Sparse lead fills in the gaps between the other parts." The role is the entire brief the run that writes that part is given, so it has to say something a player could act on.
 
 FEW AND DISTINCT. Three parts each doing a different job beat six that double each other, and a part with no job of its own is a part that will be written as filler.
 
@@ -364,6 +386,27 @@ function chordRefusal(chord: ChartChord, instruments: readonly string[]): ChartR
  * catches it. Nor is there a CEILING on `bars`: nothing downstream has one, and
  * a limit invented here would be this module refusing a form for a reason no
  * other part of the app holds.
+ *
+ * ⚠ AND — THE ONE THIS FUNCTION WAS ASKED FOR AND DECLINED — A PART THIS APP
+ * CANNOT PLAY. The 2026-08-16 chart's "Drums" on a `bass` is the case, and there
+ * is no check for it here because there is nothing in the data to check. The
+ * instrument is legal and the app will build that track correctly; `name` and
+ * `role` are free text this run is told to write in its own words; and the only
+ * thing separating that part from a good one is what a person reads into the
+ * word "Drums" — which is not reliably the wrong part, because a percussive
+ * muted-string figure holding the pulse is a real part a player would nickname
+ * exactly that. So the only check on offer is matching a name against a list of
+ * words this module guesses mean percussion. It would refuse on a string rather
+ * than on a fact, take that legitimate part down with it, and pass the moment
+ * the model wrote "Kit" instead. A refusal has to be defensible to whoever
+ * reads it, and "your track is called Drums" is not one.
+ *
+ * The repair is therefore wholly in the prompt, and that is where it belongs:
+ * this function refuses what the app cannot BUILD, and it can build a bass part
+ * whatever the part is called. What went wrong was what the model IMAGINED
+ * before it picked an id, which no reading of the id catches — the deleted
+ * step's lesson at a smaller scale, where warning the model harder never once
+ * beat changing what it was asked for.
  *
  * ⚠ TAKES ITS ARGUMENT ON TRUST. The lists are iterated, not guarded — a caller
  * holding an `unknown` narrows it with {@link asChart} first, which is why that

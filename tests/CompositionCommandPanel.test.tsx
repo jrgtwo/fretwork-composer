@@ -1469,9 +1469,11 @@ describe('a command on the IR route', () => {
    * ⚠ NOBODY CANCELLED THIS ONE. The deadline aborts the same controller a
    * Cancel press does, so the job reports `stopped: 'cancelled'` for both — and
    * the whole value of having a deadline is saying which of the two happened.
-   * Eighteen minutes is `JOB_TIMEOUT_MS`, derived as `1 + MAX_COMPOSITION_TRACKS`
-   * runs at two minutes each, and the single-run route has this test for its own
-   * fifteen.
+   * Thirty-four minutes is `JOB_TIMEOUT_MS`, derived as
+   * `1 + 2 * MAX_COMPOSITION_TRACKS` runs at two minutes each — the factor of two
+   * is the job's one retry per part, and a ceiling sized for one run a part would
+   * abort a job mid-way and throw away every part it had already written. The
+   * single-run route has this test for its own fifteen.
    */
   it('gives up on its own deadline, and does not call that a cancel', async () => {
     vi.useFakeTimers();
@@ -1489,11 +1491,11 @@ describe('a command on the IR route', () => {
       });
 
       await act(async () => {
-        vi.advanceTimersByTime(18 * 60_000);
+        vi.advanceTimersByTime(34 * 60_000);
         await Promise.resolve();
       });
 
-      expect(within(report()).getByText(/Gave up after 18 minutes/)).toBeInTheDocument();
+      expect(within(report()).getByText(/Gave up after 34 minutes/)).toBeInTheDocument();
       expect(within(report()).getByText(/^Refused/)).toBeInTheDocument();
       expect(within(report()).queryByText(/^Cancelled/)).not.toBeInTheDocument();
       expect(isJobRunning()).toBe(false);

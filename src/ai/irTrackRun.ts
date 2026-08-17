@@ -97,6 +97,111 @@
  * So {@link reviewTrack} refuses before the seam ever sees the document, and it
  * names the event it is talking about. Nothing downstream will say any of this.
  *
+ * ── ⚠ A CHORD IS ASKED FOR, NOT TRANSCRIBED ─────────────────────────────────
+ *
+ * The 2026-08-16 run is the evidence and it is unambiguous. The brief was right,
+ * the C7 grip was handed over in full — strings 1,2,3,4,5 at frets 3,5,3,5,3 —
+ * and across the 24 events of that section the guitar emitted the shape correctly
+ * 8 times, every string shifted down by one 8 times, and a third wrong variant 8
+ * times. The bass, which composes one note at a time instead of copying five, was
+ * right throughout. The model cannot reliably copy five numbers, and no amount of
+ * warning it harder changes that: it is the same lesson the orchestrator deleted
+ * at b8582bb died of, at a smaller scale.
+ *
+ * So an event has TWO shapes now. `notes` is unchanged and is what a composed
+ * line uses — a bass walking, a melody, a fill — because that path demonstrably
+ * works. {@link STRUM_SPANS}' `strum` is the other: it says WHEN, HOW LONG and
+ * WHICH PART OF THE SHAPE, and {@link expandStrums} fills the cells in from the
+ * grip this module already looked up. The model never types a string or a fret
+ * for it, and it never names the chord either — which chord is in force is
+ * derived from `atTick` against the progression the brief already carries, since
+ * naming it is one more thing to get wrong.
+ *
+ * `strum` is not a boolean, and that is deliberate: "play the chord" that always
+ * hit every string would make every comping part in the app identical, which is
+ * the failure the brief's own musical paragraphs exist to prevent. The spans are
+ * the bottom or top 2 or 3 strings of the shape, or all of it — the choice a
+ * comper actually makes bar to bar.
+ *
+ * ⚠ EXPANSION HAPPENS BEFORE THE REVIEW, so an expanded event is subject to every
+ * check above with no second path around them: a strum that collides with a line
+ * already ringing on one of those strings is refused by the same overlap walk
+ * that catches two typed notes. And the expansion is 1:1 — one answer event in,
+ * one event out, at the same index — so {@link eventLabel} still names the entry
+ * where the model wrote it.
+ *
+ * ⚠ WHICH IS WHY THE BRIEF SAYS HOW LONG A STRUM OCCUPIES ITS STRINGS. The whole
+ * point of the span is that the model never learns which strings it just played,
+ * so it cannot work out that a chord left ringing for a bar collides with the
+ * next stab inside that bar — and the overlap walk would refuse the pair, with no
+ * retry, for a figure a guitarist plays every day. A rule the answer is judged by
+ * and cannot see has to be stated in the sentence that offers the feature.
+ *
+ * ── ⚠ AND A TYPED CHORD IS CHECKED AGAINST THAT SHAPE ───────────────────────
+ *
+ * Not every note in a part is a chord tone — a walking bass is mostly passing
+ * notes and must not be refused — but several notes AT ONE INSTANT are a chord,
+ * and a chord whose notes are not that chord's is a mistake and not a choice.
+ *
+ * THE THRESHOLD IS THREE NOTES IN ONE EVENT. Two is a double-stop: a tenth, a
+ * sixth, a root-and-fifth are ordinary line writing and carry no harmony of their
+ * own. Three is the smallest stack that claims to BE a chord. Notes in SEPARATE
+ * events are never gathered, even at one tick — an event is the unit the model
+ * wrote and the unit a refusal can name, and a held note under a melody that
+ * starts on the same tick is two lines rather than one chord. That leaves a
+ * mis-copy split across two entries unjudged, which is the price of not refusing
+ * an arpeggio, a let-ring figure or a line against a pedal.
+ *
+ * THE TOLERANCE IS ONE NOTE. A comper adds a tone the preferred voicing left out;
+ * two notes off the shape at one instant is the shape mis-copied, which is
+ * exactly what the run above did (four of five, and three of five). The bias is
+ * deliberate: passing an odd voicing costs a listening note, refusing a real one
+ * costs a run and, if the second attempt goes the same way, the part. (A refused
+ * part is asked again ONCE — `irCompositionJob`'s retry — which softens that cost
+ * but does not remove it, and is no reason to tighten a bound that was set
+ * against real music.)
+ *
+ * AND ONLY A NEAR MISS IS COUNTED AS OFF THE SHAPE — {@link SLIP_FRETS}. What
+ * `chordGrip` hands back is ONE voicing, the preferred one, so "not this fret" is
+ * not the same claim as "not this chord": a C7 taken as an E-shape barre five
+ * frets higher is the right chord in a different place, and refusing it would
+ * refuse real music for the sake of a position nobody promised. A mis-copy does
+ * not look like that. Both of the 2026-08-16 wrong variants sit a whole tone off
+ * the shape on every string they moved — the same frets, read off the wrong line
+ * — so a bound of three frets catches both while a deliberate move up the neck
+ * passes. Notes further off than that are otherwise not judged at all, and that is
+ * the same limit as the paragraph below: without a tuning, this side of the seam
+ * cannot tell a distant voicing of the chord from a distant mistake.
+ *
+ * WITH ONE EXCEPTION, and it is the only wrong chord that can be NAMED as one: a
+ * stack that is, cell for cell, ANOTHER chord of this progression on this neck.
+ * That is not a voicing chosen elsewhere on the neck, it is the wrong line copied
+ * off the brief's own sheet — the mis-copy the slip bound is blind to, and the one
+ * this module holds both halves of the evidence for, since it looked every chord
+ * of the progression up to write the brief.
+ *
+ * ⚠ IT IS LOOKED FOR FIRST, AND THAT ORDER IS EVIDENCE-DRIVEN. It used to be
+ * computed only where the slip bound had NOT already fired, which suppressed the
+ * most useful diagnosis in this file exactly where it was most needed: the
+ * 2026-08-16 'Guitar 2' typed F7's six-string barre at bar 1 over C7, two of whose
+ * notes land within {@link SLIP_FRETS} of C7's own shape — so the slip branch
+ * claimed it and said "two notes are a fret or two off" about a stack that was a
+ * different chord entirely. A model told it played F7 where C7 belongs fixes that
+ * in one go. One mistake still costs ONE sentence out of the capped batch: the two
+ * branches are exclusive, stale first.
+ *
+ * ⚠ WHAT "OFF THE SHAPE" CAN AND CANNOT MEAN, and this is a limit rather than a
+ * choice. `chordGrip` hands back cells and the chord's TONE NAMES, and the lib's
+ * `Grip` (read at `dist/lib/chord-voicing.d.ts`) carries no note per cell — so
+ * nothing on this side of the seam can say which tone a given cell is, and the
+ * tuning that would answer it is withheld from the seam on purpose (`chordGrip`'s
+ * own header). A note's PITCH is therefore unknowable here. What is knowable is
+ * the shape: on a string the shape uses, a fret that is neither the shape's nor
+ * an octave of it on that same string is a note the model changed. On a string
+ * the shape does not use, nothing here can tell a chord tone from a wrong one, so
+ * it is never counted against the answer. The 2026-08-16 voicing is caught by the
+ * four strings it moved, not by the one it added.
+ *
  * ── THE BRIEF IS `patternSubRun`'s, LIFTED ──────────────────────────────────
  *
  * `patternSubRun.patternRunInput` is the only prose in this area the user has
@@ -110,6 +215,15 @@
  * instead of one chord, and it answers with JSON instead of calling stamp tools.
  * Two lifted paragraphs carry a one-clause edit each for exactly those two
  * reasons, and the test excuses those two clauses by name and no others.
+ *
+ * ── A SECOND ATTEMPT IS AN ADDENDUM, NOT A DIFFERENT BRIEF ──────────────────
+ *
+ * {@link runIRTrack} runs ONCE. When the caller asks again — `irCompositionJob`
+ * does, once, and only for a `'review'` stop — it passes `previousRefusal` and
+ * {@link addendum} puts that sentence in its own marked section at the END. Every
+ * word above it is byte for byte what the first attempt read, so the baseline the
+ * musicality ticket will tune against is not quietly two briefs, and the model is
+ * told to write the whole part again rather than to patch the one it lost.
  */
 import { ticksPerBar } from '../composition/compositionService';
 import {
@@ -173,6 +287,45 @@ export interface IREvent {
   /** One note is a single line; several at one tick is a chord. */
   readonly notes: IRNote[];
   /** How hard it is played. The one expressive field that reaches playback. */
+  readonly dynamic?: DynamicMark;
+}
+
+/**
+ * Which strings of the chord's shape one strum hits, bottom of the neck first.
+ *
+ * ⚠ "BOTTOM" IS THE STRING AXIS AND NOT THE PITCH AXIS — `string` 0 upwards, the
+ * same convention as everywhere else in this app, which on a reentrant ukulele
+ * (G4 C4 E4 A4) is not the lowest note. Saying "lowest" here would be false on an
+ * instrument this module explicitly supports.
+ *
+ * Five values and not a boolean: see the header. A part that can only strum the
+ * whole shape is a part that sounds the same on every attack.
+ */
+export const STRUM_SPANS = ['all', 'bottom-2', 'bottom-3', 'top-2', 'top-3'] as const;
+
+export type StrumSpan = (typeof STRUM_SPANS)[number];
+
+/**
+ * One entry as the MODEL may write it: an attack that either carries the notes it
+ * composed or asks for the chord already in force at its tick.
+ *
+ * Both fields are optional because JSON Schema as this app spells it has no
+ * `oneOf` (`src/ai/tools/types.ts`'s `JsonSchema`, and that file is another
+ * card's), so "exactly one of them" is prose in the brief and a refusal here
+ * rather than a grammar. An entry with BOTH is refused by {@link expandStrums};
+ * an entry with NEITHER expands to no notes and is refused by
+ * {@link reviewTrack}'s existing sentence about an event with nothing in it.
+ *
+ * {@link IREvent} is what survives expansion, and it is the only shape the
+ * document ever sees.
+ */
+export interface IRAnswerEvent {
+  readonly atTick: number;
+  readonly durationTicks: number;
+  /** The notes it composed. Absent when it asked for the chord instead. */
+  readonly notes?: IRNote[];
+  /** Play the chord in force at `atTick`, this much of its shape. */
+  readonly strum?: StrumSpan;
   readonly dynamic?: DynamicMark;
 }
 
@@ -267,6 +420,20 @@ const barsPhrase = (count: number): string => `${count} bar${count === 1 ? '' : 
  *  arithmetic that could actually go wrong, ticks per bar, is the seam's above. */
 const barStartTick = (bar: number): number => (bar - 1) * TICKS_PER_BAR;
 
+/** Which bar a tick falls in, counted FROM 1 — {@link barStartTick} the other way
+ *  round. Only ever asked of a tick that is a whole number at or above 0, which
+ *  {@link reviewTrack} has refused and skipped before it gets here. */
+const barOf = (tick: number): number => Math.floor(tick / TICKS_PER_BAR) + 1;
+
+/** The bars a chord arrives at, as a person would say them — "bar 5", "bars 5
+ *  and 10". A chord that arrives twice is ordinary (a blues turnaround), so
+ *  naming only the first would send the model to the wrong bar half the time. */
+const barList = (bars: readonly number[]): string => {
+  if (bars.length === 0) return 'no bar of this form';
+  if (bars.length === 1) return `bar ${bars[0]}`;
+  return `bars ${bars.slice(0, -1).join(', ')} and ${bars[bars.length - 1]}`;
+};
+
 // ---------------------------------------------------------------- schema ---
 
 /**
@@ -348,13 +515,23 @@ export function irTrackSchema(instrumentId: string): JsonSchema {
                 },
                 ['string', 'fret'],
               ),
-              'What sounds at this instant: one note for a single line, several for a chord. A string can only ring one note at a time, so no two of them are on the same string.',
+              'The notes YOU compose at this instant — a line, a melody, a fill. A string can only ring one note at a time, so no two of them are on the same string. Leave it out and write `strum` instead to play a chord: never copy a shape out by hand.',
+            ),
+            strum: str(
+              `Play the chord already in force at this tick, filled in for you from its shape on this neck — write this INSTEAD of \`notes\` and you never copy a string, a fret or the chord's name. Which strings of the shape it hits: "all" every string the shape uses, "bottom-2"/"bottom-3" the 2 or 3 lowest-numbered strings of it, "top-2"/"top-3" the 2 or 3 highest-numbered.`,
+              STRUM_SPANS,
             ),
             dynamic: str(`How hard it is played. Softest to loudest: ${DYNAMICS.join(', ')}.`, DYNAMICS),
           },
-          // `dynamic` is the one optional field — a part with none is playable and
-          // one dynamic per event, all the same, is worse than none at all.
-          ['atTick', 'durationTicks', 'notes'],
+          // ⚠ `notes` IS NO LONGER REQUIRED, and it is not a loosening for its own
+          // sake: an entry carries `notes` or `strum`, and this dialect of JSON
+          // Schema has no `oneOf` to say so. What the grammar can no longer refuse
+          // — an entry with neither — {@link reviewTrack} refuses by name, in a
+          // sentence the model can act on, which a grammar error is not.
+          //
+          // `dynamic` is optional for its own reason: a part with none is playable
+          // and one dynamic per event, all the same, is worse than none at all.
+          ['atTick', 'durationTicks'],
         ),
         'The part, one entry per attack, in time order.',
       ),
@@ -428,9 +605,19 @@ const instrumentName = (instrumentId: string): string =>
 
 /** The shape, one cell a line, in the IR's OWN spelling of the two axes — so
  *  nothing in it has to be renamed before it can be written back. See
- *  {@link IRNote} on why that rename is worth removing. */
-const gripLines = (cells: readonly { stringIndex: number; fret: number }[]): string =>
-  cells.map((cell) => `    string ${cell.stringIndex}, fret ${cell.fret}`).join('\n');
+ *  {@link IRNote} on why that rename is worth removing.
+ *
+ *  ⚠ SORTED, for {@link shapeFinder}'s reason and so that one ordering rule
+ *  governs both ends: the brief tells the model that "lowest-numbered" is nearest
+ *  `string` 0, and {@link STRUM_SUBSET} slices an ascending copy. Both voicing
+ *  paths in the lib happen to return ascending cells today, so this changes
+ *  nothing now — it stops the printed shape and the strum that fills it in from
+ *  disagreeing the day one of them stops. */
+const gripLines = (cells: readonly GripCell[]): string =>
+  [...cells]
+    .sort((a, b) => a.stringIndex - b.stringIndex)
+    .map((cell) => `    string ${cell.stringIndex}, fret ${cell.fret}`)
+    .join('\n');
 
 /**
  * One chord of the progression, with the arithmetic already done: which bars it
@@ -462,6 +649,46 @@ ${gripLines(cells)}`;
 }
 
 /**
+ * WHAT THE LAST ATTEMPT GOT WRONG, as a paragraph on the end of the brief.
+ *
+ * ⚠ AN ADDENDUM, AND DELIBERATELY NOT A REWRITE. The prose above it is
+ * `patternRunInput`'s, lifted, and is the baseline a deferred musicality ticket
+ * will tune against — so feedback goes at the END, marked as feedback, and the
+ * part of the brief that works is byte for byte the same on the second attempt as
+ * on the first. It is also why the model is told to write the WHOLE part again:
+ * the brief it is reading is the same brief, not a patch instruction.
+ *
+ * The sentence it carries is `runIRTrack`'s own refusal, unedited. That refusal
+ * is already written to be acted on — it names the event, prints its notes, prints
+ * the shape that belongs there and says to write `strum` instead — so a second
+ * account of it here would be the thing this codebase keeps paying for.
+ *
+ * Empty for the first attempt, and for a refusal that is blank once trimmed: a
+ * heading with nothing under it reads as an instruction the model cannot follow.
+ *
+ * ⚠ IT RESTATES THE BARE-OBJECT RULE, and that clause is not spare prose. This
+ * paragraph goes AFTER `# Answer`, so on a second attempt the last thing the
+ * model reads is feedback rather than "the object alone" — and an answer that
+ * came back as prose is an `'answer'` stop, which is deliberately NOT retried.
+ * A retry that regressed into a sentence would lose the part outright.
+ */
+function addendum(previousRefusal?: string): string {
+  const said = previousRefusal?.trim() ?? '';
+  if (said === '') return '';
+  return `
+
+# Your last answer was refused — this is the second and final attempt
+
+You already wrote this part once and it was sent back. Nothing above has changed and nothing else is wrong with the brief; this is what was wrong with the answer:
+
+${said}
+
+Write the whole part again from the top — every event, not only the ones named above — with that fixed. If the reason names notes you typed out by hand where a chord belongs, that attack wants \`"strum"\` on it instead: you do not name the chord and you do not copy a fret, and it is the one way not to get the harmony wrong twice in a row.
+
+Answer with the object alone, as above: no fence, no preamble, nothing after it.`;
+}
+
+/**
  * THE BRIEF — the artefact this module is really about. Everything else in it is
  * plumbing around this string.
  *
@@ -485,6 +712,10 @@ ${gripLines(cells)}`;
  * the frets are right, the harmony is right, the length is right, the spacing is
  * right. No reply we can design catches it, so it is forbidden in advance.
  *
+ * `previousRefusal` is what a SECOND attempt at this part carries: the sentence
+ * the first attempt was refused with, appended as its own marked section by
+ * {@link addendum} and changing nothing above it. Absent on a first attempt.
+ *
  * PURE — a {@link TrackBrief} in, a brief out. `chordGrip` is a lookup over the
  * lib's chord and tuning catalogs and takes nothing from the open document, so the
  * same input gives the same brief with no clock, no randomness and no app state
@@ -498,7 +729,7 @@ ${gripLines(cells)}`;
  * The chart run refuses most of these earlier; this module is callable on its own
  * and does not assume it ran.
  */
-export function trackRunInput(brief: TrackBrief): Result<string> {
+export function trackRunInput(brief: TrackBrief, previousRefusal?: string): Result<string> {
   if (!isBarCount(brief.bars)) {
     return {
       ok: false,
@@ -611,9 +842,9 @@ Its name and that description are what the part is FOR, and the arrangement was 
 
 One JSON object, exactly this shape and nothing else in it:
 
-{"events":[{"atTick":0,"durationTicks":${PPQ},"notes":[{"string":0,"fret":3}],"dynamic":"mf"}]}
+{"events":[{"atTick":0,"durationTicks":${PPQ},"notes":[{"string":0,"fret":3}],"dynamic":"mf"},{"atTick":${PPQ},"durationTicks":${PPQ},"strum":"top-3"}]}
 
-One entry of \`events\` is one attack: \`atTick\` is when it starts, \`durationTicks\` is how long it rings, and \`notes\` is what sounds at that instant — one note for a single line, several for a chord. \`dynamic\` is optional and says how hard it is played, from ${DYNAMICS[0]} to ${DYNAMICS[DYNAMICS.length - 1]}.
+One entry of \`events\` is one attack: \`atTick\` is when it starts and \`durationTicks\` is how long it rings. What sounds on it is written one of the two ways above, and never both in the same entry — \`notes\` is the notes YOU compose at that instant, and \`strum\` plays the chord already in force at that tick, filled in for you. \`dynamic\` is optional on either and says how hard it is played, from ${DYNAMICS[0]} to ${DYNAMICS[DYNAMICS.length - 1]}.
 
 Write the events in time order, earliest first.
 
@@ -643,6 +874,22 @@ THERE IS NO CHORD LOOKUP IN THIS RUN. The above is that lookup's answer for this
 
 This is MATERIAL, not the part. You choose which of these notes get played, in what order, at which ticks, for how long and how hard — a bass line takes one at a time and walks between them, a comping part spreads them across the bar. Notes outside the shape are yours where the line asks for one: an approach note, a passing note, a chromatic step into the next bar. If you want a tone an octave away, the same string twelve frets up is the same note an octave higher — that is the only fret arithmetic here.
 
+# Playing a chord: ask for it, do not copy it
+
+Never write a shape's strings and frets out into \`notes\`. When this part plays a chord, put \`"strum"\` on the attack instead and the shape above is filled in from the tick you gave — you do not name the chord, you do not copy a number, and you cannot get one wrong. One number wrong in a copied shape is a different chord for the whole bar, and it sounds like a mistake nobody made on purpose.
+
+How much of the shape the attack hits:
+
+    "all"       every string the shape uses
+    "bottom-3"  its three lowest-numbered strings, "bottom-2" its two lowest
+    "top-3"     its three highest-numbered strings, "top-2" its two highest
+
+Lowest-numbered is nearest \`string\` 0, the bottom of the neck. A player does not hit the same strings every time: the bass end of the shape on the beat, the top of it on the answer, the whole thing where the bar wants weight. \`"all"\` on every attack is one chord banged out over and over.
+
+A strum holds every string it hits for the whole of its \`durationTicks\`, exactly as written-out notes do. So the next attack that touches any of those strings starts at or after this one ends: a chord left ringing for a bar with a second chord struck inside it is two notes on one string at once, and it is refused. Let a chord ring and then play the next thing, or give it the shorter length you actually meant.
+
+\`notes\` is for what you compose — the walking line, the melody, the fill, the note that leads into the next bar. Three or more notes written by hand at one instant are checked against the shape above, on the strings that shape uses, and refused if they are not it, because that is a chord you meant to copy.
+
 # What NOT to write
 
 Do not write the shape once at the top of the bar and stop. A stack of notes on beat 1 with silence behind it is not a part, it is the chord spelled out, and it is the exact failure this brief exists to prevent: the frets are right, the harmony is right, the length is right, and there is nothing to listen to.
@@ -655,7 +902,7 @@ Notes all at one volume read as typing, not as playing. Put a \`dynamic\` on wha
 
 # Answer
 
-The object alone. No fence, no preamble, no explanation after it — there is nobody reading the prose, and a sentence in front of the JSON costs you the whole part.`,
+The object alone. No fence, no preamble, no explanation after it — there is nobody reading the prose, and a sentence in front of the JSON costs you the whole part.${addendum(previousRefusal)}`,
   };
 }
 
@@ -676,8 +923,218 @@ export interface TrackRefusal {
  *  position is what the model can find in what it wrote, and the tick is what the
  *  sentence is about. A fractional tick prints as itself on purpose — seeing
  *  `480.5` is most of the repair. */
-const eventLabel = (index: number, event: IREvent): string =>
+const eventLabel = (index: number, event: { readonly atTick: number }): string =>
   `event ${index + 1} (tick ${event.atTick})`;
+
+// --------------------------------------------------------------- the shape ---
+
+/** One cell of a grip, as the seam spells it. Structural for {@link IRNote}'s
+ *  reason and named here so the two callers below agree on it. */
+interface GripCell {
+  readonly stringIndex: number;
+  readonly fret: number;
+}
+
+/** A chord and where it sits on THIS neck — the same answer the brief printed,
+ *  asked again by tick instead of by bar. */
+interface ChordShape {
+  readonly symbol: string;
+  /** Ascending by string, so "the bottom of the shape" is `slice(0, n)`
+   *  whatever order the voicer happened to return. */
+  readonly cells: readonly GripCell[];
+  /** Every bar this chord arrives at, ascending.
+   *
+   *  Carried for the ONE refusal that names a chord other than the one in force:
+   *  "the shape of F7, which belongs at bar 5" is a sentence the model can check
+   *  against its own brief in a second, and "another chord of this progression"
+   *  is one it has to go looking for. */
+  readonly bars: readonly number[];
+}
+
+/**
+ * The progression as this neck plays it: which chord is in force at a tick and
+ * what shape it has, plus every shape it uses. Memoized per symbol, and the memo
+ * is call-scoped.
+ *
+ * ⚠ THE MODEL IS NEVER ASKED WHICH CHORD IT IS PLAYING. The brief already
+ * carries the progression and the tick each chord arrives at, so the chord under
+ * an event is a fact this module holds; asking for it back is one more thing to
+ * get wrong, which is the whole lesson this card is applying.
+ *
+ * A chord holds until the next one, so it is the LATEST arrival at or before the
+ * tick. Scanned rather than assumed sorted — {@link trackRunInput} refuses an
+ * out-of-order progression, but this function is reached from two places and
+ * would otherwise be right only because of a check somewhere else.
+ *
+ * `null` where there is nothing to say: no chord has arrived yet (only reachable
+ * for a negative tick, which {@link reviewTrack} refuses on its own account), or
+ * the symbol does not voice on this neck (which {@link trackRunInput} refuses
+ * before a run happens). Neither case invents a shape.
+ */
+interface Progression {
+  /** The shape of the chord in force at a tick. */
+  readonly at: (tick: number) => ChordShape | null;
+  /** Every distinct shape the progression uses on this neck, for the stale-copy
+   *  half of the chord check — the one thing about a far-off stack this module
+   *  CAN say: that it is another bar's chord, spelled exactly. */
+  readonly shapes: () => readonly ChordShape[];
+}
+
+function shapeFinder(brief: TrackBrief): Progression {
+  const bySymbol = new Map<string, ChordShape | null>();
+  const lookUp = (symbol: string): ChordShape | null => {
+    const cached = bySymbol.get(symbol);
+    if (cached !== undefined) return cached;
+    const grip = chordGrip(symbol, brief.instrumentId);
+    const shape: ChordShape | null = grip.ok
+      ? {
+          // The symbol as the VOICER echoed it, for `trackRunInput`'s reason: the
+          // chord named in a refusal and the frets it is about cannot drift apart.
+          symbol: grip.value.symbol,
+          cells: [...grip.value.cells].sort((a, b) => a.stringIndex - b.stringIndex),
+          // Keyed on the symbol the BRIEF wrote, which is what the model was
+          // shown — the voicer's echo is what the refusal prints, and the two are
+          // the same string today.
+          bars: brief.chords
+            .filter((chord) => chord.symbol === symbol)
+            .map((chord) => chord.bar)
+            .sort((a, b) => a - b),
+        }
+      : null;
+    bySymbol.set(symbol, shape);
+    return shape;
+  };
+
+  const at = (tick: number): ChordShape | null => {
+    let inForce: BriefChord | null = null;
+    let arrived = -1;
+    for (const chord of brief.chords) {
+      const start = barStartTick(chord.bar);
+      if (start <= tick && start > arrived) {
+        inForce = chord;
+        arrived = start;
+      }
+    }
+    if (inForce === null) return null;
+    return lookUp(inForce.symbol);
+  };
+
+  // Built once per call rather than once per event: the stale check below now
+  // runs for EVERY stack of three notes, and rebuilding the array each time would
+  // be one array per event for an answer that is mostly chords.
+  let all: readonly ChordShape[] | null = null;
+
+  return {
+    at,
+    shapes: () => {
+      all ??= [...new Set(brief.chords.map((chord) => chord.symbol))].map(lookUp).filter(isPresent);
+      return all;
+    },
+  };
+}
+
+/** How much of the shape each span takes. A record rather than parsing the name,
+ *  so adding a span to {@link STRUM_SPANS} without saying what it means is a
+ *  compile error. `slice` past the end is the whole shape, which is what a
+ *  "top-3" of a two-cell grip should be. */
+const STRUM_SUBSET: Record<StrumSpan, (cells: readonly GripCell[]) => readonly GripCell[]> = {
+  all: (cells) => cells,
+  'bottom-2': (cells) => cells.slice(0, 2),
+  'bottom-3': (cells) => cells.slice(0, 3),
+  'top-2': (cells) => cells.slice(-2),
+  'top-3': (cells) => cells.slice(-3),
+};
+
+/**
+ * Fill in every `strum` from the shape this module already looked up.
+ *
+ * THE POINT OF THE WHOLE CARD, and it is four lines of arithmetic precisely
+ * because the alternative — the model copying five numbers per attack — is the
+ * defect the header opens on.
+ *
+ * ⚠ 1:1 AND IN ORDER. One answer entry becomes one event at the same index, so
+ * {@link eventLabel} in the review below still names the entry where the model
+ * wrote it. An expansion that dropped or merged entries would renumber every
+ * refusal after it.
+ *
+ * ⚠ IT INVENTS NOTHING WHEN IT CANNOT ANSWER. A strum with no shape behind it —
+ * a tick before the first chord, a symbol that does not voice — expands to an
+ * event with no notes, which {@link reviewTrack} already refuses by name. Both
+ * cases are refused earlier by {@link trackRunInput}, so this is the honest
+ * behaviour of an exported pure function rather than a path anything reaches.
+ *
+ * The one refusal it authors is the one only it can see: an entry that carries
+ * BOTH. The typed notes are kept so the rest of the review still speaks about the
+ * event, but the run is refused either way — an entry that says two things is an
+ * entry nobody can say what should sound on.
+ */
+export function expandStrums(
+  events: readonly IRAnswerEvent[],
+  brief: TrackBrief,
+): { readonly events: readonly IREvent[]; readonly refusals: readonly TrackRefusal[] } {
+  const shapeAt = shapeFinder(brief).at;
+  const refusals: TrackRefusal[] = [];
+
+  const expanded = events.map((event, index): IREvent => {
+    const base = {
+      atTick: event.atTick,
+      durationTicks: event.durationTicks,
+      ...(event.dynamic === undefined ? {} : { dynamic: event.dynamic }),
+    };
+    if (event.strum === undefined) return { ...base, notes: event.notes ?? [] };
+    // ⚠ AN EMPTY `notes` BESIDE A STRUM IS NOT "BOTH". `notes` is still an
+    // advertised property, so an entry that asked for the chord and left a
+    // vestigial `"notes": []` behind is one that said ONE thing — refusing it for
+    // saying two would cost the whole part over an empty array, with no retry.
+    if (event.notes !== undefined && event.notes.length > 0) {
+      refusals.push({
+        label: eventLabel(index, event),
+        reason: `It has both a "strum" and its own "notes". An attack is one or the other: "strum" plays the chord in force at that tick and fills the shape in for you, and "notes" is what you composed. Drop whichever one is not what you meant.`,
+      });
+      return { ...base, notes: event.notes };
+    }
+
+    const shape = shapeAt(event.atTick);
+    const cells = shape === null ? [] : STRUM_SUBSET[event.strum](shape.cells);
+    return {
+      ...base,
+      notes: cells.map((cell) => ({ string: cell.stringIndex, fret: cell.fret })),
+    };
+  });
+
+  return { events: expanded, refusals };
+}
+
+/** How many notes at one instant are a chord rather than a line. Argued in the
+ *  header: two is a double-stop, three is the smallest stack that claims to be a
+ *  chord. */
+const CHORD_AT_ONCE = 3;
+
+/** How many of them may sit off the shape before the stack is a mis-copy rather
+ *  than a voicing with colour in it. Argued in the header, and biased on purpose:
+ *  refusing real music costs more than passing an odd voicing, and a part gets one
+ *  retry rather than an unlimited number of them. */
+const MOVED_TOLERATED = 1;
+
+/**
+ * How far off the shape's own fret a note may be and still be read as a MIS-COPY
+ * of that cell rather than as a different position on the neck. Argued in the
+ * header: `chordGrip` returns one preferred voicing, so a stack five frets away is
+ * a chord this module cannot distinguish from the right one taken somewhere else,
+ * while both 2026-08-16 variants are a whole tone off every string they moved.
+ */
+const SLIP_FRETS = 3;
+
+/** Notes as the model would find them in what it wrote. */
+const noteList = (notes: readonly IRNote[]): string =>
+  notes.map((note) => `string ${note.string} fret ${note.fret}`).join(', ');
+
+/** Is this note exactly one of those cells — same string, same fret? */
+const sitsOn = (cells: readonly GripCell[], note: IRNote): boolean =>
+  cells.some((cell) => cell.stringIndex === note.string && cell.fret === note.fret);
+
+const cellList = (cells: readonly GripCell[]): string =>
+  cells.map((cell) => `string ${cell.stringIndex} fret ${cell.fret}`).join(', ');
 
 /** One note's reach on its string, for the overlap walk. */
 interface Sounding {
@@ -698,10 +1155,12 @@ interface Sounding {
  * brief before a run ever happens, so this is the same suppression `reviewChart`
  * applies for the same reason and not a second opinion about the form.
  *
- * DELIBERATELY NOT CHECKED: whether the part is any good, whether it uses the
+ * DELIBERATELY NOT CHECKED: whether the part is any good, whether a LINE uses the
  * chords it was given, or whether anything lands off the downbeat. All three are
  * a listening test's, the brief forbids the worst of them in advance, and a check
- * here that guessed at them would refuse real music.
+ * here that guessed at them would refuse real music. A stack of three or more
+ * notes at ONE instant is the exception and is checked — see the header for the
+ * threshold, the tolerance and what "off the shape" can be known to mean.
  */
 export function reviewTrack(
   events: readonly IREvent[],
@@ -727,6 +1186,7 @@ export function reviewTrack(
   const strings = instrumentStringCount(brief.instrumentId);
   const frets = neckFrets(brief.instrumentId);
   const onString = new Map<number, Sounding[]>();
+  const progression = shapeFinder(brief);
 
   for (const [index, event] of events.entries()) {
     const label = eventLabel(index, event);
@@ -758,10 +1218,15 @@ export function reviewTrack(
       refusals.push({
         label,
         reason:
-          'It has no notes in it, so it is a silence with a duration. An event is an attack — give it at least one note, or leave the gap out entirely.',
+          'It has no notes in it, so it is a silence with a duration. An event is an attack — give it the notes you composed, or a "strum" to play the chord in force there, or leave the gap out entirely.',
       });
       continue;
     }
+
+    // The notes that survived the range checks, and only those: a note already
+    // refused for the string it is on is a note whose string is not yet known, so
+    // it can be neither on nor off the shape.
+    const playable: IRNote[] = [];
 
     for (const note of event.notes) {
       if (!Number.isInteger(note.string) || note.string < 0 || note.string >= strings) {
@@ -789,6 +1254,65 @@ export function reviewTrack(
         fret: note.fret,
       });
       onString.set(note.string, reach);
+      playable.push(note);
+    }
+
+    // ── THE CHORD CHECK ─────────────────────────────────────────────────────
+    // Three notes IN ONE EVENT claim to BE a chord; two are a double-stop and
+    // carry no harmony of their own, and stacks spread over separate events are
+    // not gathered (header). A note on a string the shape does not use is never
+    // counted — nothing here can know its pitch — and neither is one far off that
+    // string's own fret, which is a position rather than a slip. What is measured
+    // is the shape mis-copied, which is what the 2026-08-16 guitar did.
+    const shape = playable.length >= CHORD_AT_ONCE ? progression.at(event.atTick) : null;
+    if (shape !== null) {
+      // ⚠ THE STALE SHAPE IS LOOKED FOR FIRST, and the order is the whole point.
+      // A stack that sits ENTIRELY inside another chord of this progression is the
+      // ONE wrong chord this module can name as one — it looked every chord of the
+      // progression up to write the brief — and naming it is the diagnosis a model
+      // can act on in one go: it copied the wrong line off its own sheet.
+      //
+      // ⚠ IT IS A SUBSET, NOT AN IDENTITY: three notes that are three cells of a
+      // six-cell barre satisfy this, so the sentence below says every note is a
+      // cell of that shape rather than that the stack IS that shape.
+      //
+      // It used to be computed only where the slip bound had NOT fired, which
+      // suppressed it exactly where it was most useful. The 2026-08-16 F7-over-C7
+      // is the proof: two of its six notes sit within `SLIP_FRETS` of C7's shape,
+      // so the slip branch claimed them and the answer came back as "two notes are
+      // a fret or two off" about a stack that was a different chord entirely.
+      const stale = progression
+        .shapes()
+        .find(
+          (other) =>
+            other.symbol !== shape.symbol &&
+            playable.every((note) => sitsOn(other.cells, note)) &&
+            playable.some((note) => !sitsOn(shape.cells, note)),
+        );
+      if (stale !== undefined) {
+        refusals.push({
+          label,
+          reason: `It sounds ${playable.length} notes at once in bar ${barOf(event.atTick)}, where ${shape.symbol} is in force — and every one of them is a cell of the ${stale.symbol} shape, which belongs at ${barList(stale.bars)}, rather than of ${shape.symbol}'s: ${noteList(playable)}. That is the wrong chord copied out of the brief. ${shape.symbol} sits at ${cellList(shape.cells)} here — and do not copy that one out either: write "strum" on the attack instead and the chord in force at that tick is filled in for you.`,
+        });
+      } else {
+        const moved = playable.filter((note) => {
+          const cell = shape.cells.find((candidate) => candidate.stringIndex === note.string);
+          if (cell === undefined) return false;
+          const off = note.fret - cell.fret;
+          // An octave of the shape's own fret on the SAME string is the same tone
+          // — the one piece of fret arithmetic the brief sanctions.
+          if (off % 12 === 0) return false;
+          // A near miss is the shape mis-read; a note further away than that is a
+          // position this module was never told about — see SLIP_FRETS.
+          return Math.abs(off) <= SLIP_FRETS;
+        });
+        if (moved.length > MOVED_TOLERATED) {
+          refusals.push({
+            label,
+            reason: `It sounds ${playable.length} notes at once over ${shape.symbol}, and ${moved.length} of them sit a fret or two off that chord's own shape on the strings it uses: ${noteList(moved)}. The shape here is ${cellList(shape.cells)}, so what sounds is not ${shape.symbol}. Do not copy a shape out by hand — write "strum" on the attack instead and it is filled in from the shape for you.`,
+          });
+        }
+      }
     }
   }
 
@@ -836,6 +1360,9 @@ const isPresent = <T,>(value: T | null): value is T => value !== null;
 const isDynamic = (value: unknown): value is DynamicMark =>
   typeof value === 'string' && (DYNAMICS as readonly string[]).includes(value);
 
+const isStrum = (value: unknown): value is StrumSpan =>
+  typeof value === 'string' && (STRUM_SPANS as readonly string[]).includes(value);
+
 /**
  * `AgentRunSummary.structured` — typed `unknown` — as a list of events, or null.
  *
@@ -859,25 +1386,38 @@ const isDynamic = (value: unknown): value is DynamicMark =>
  * the mapper to be ignored there, which is the same note at a different address
  * with nobody told.
  */
-export function asTrackEvents(value: unknown): readonly IREvent[] | null {
+export function asTrackEvents(value: unknown): readonly IRAnswerEvent[] | null {
   if (!isObject(value)) return null;
   const { events } = value;
   if (!Array.isArray(events)) return null;
 
-  const parsed = events.map((event): IREvent | null => {
+  const parsed = events.map((event): IRAnswerEvent | null => {
     if (!isObject(event)) return null;
     if (!isNumber(event.atTick) || !isNumber(event.durationTicks)) return null;
-    if (!Array.isArray(event.notes)) return null;
-    const notes = event.notes.map((note): IRNote | null =>
-      isObject(note) && isNumber(note.string) && isNumber(note.fret)
-        ? { string: note.string, fret: note.fret }
-        : null,
-    );
-    if (!notes.every(isPresent)) return null;
+    // ⚠ EACH IS OPTIONAL AND EACH IS ALL-OR-NOTHING. An entry carries `notes` or
+    // `strum`; an entry with neither is type-readable and is {@link reviewTrack}'s
+    // to name, and an entry with both is {@link expandStrums}'. What is NOT
+    // tolerated is a half-read one: a `notes` with an unreadable note in it, or a
+    // `strum` that is not one of `STRUM_SPANS`, is content that changes what
+    // sounds — unlike `dynamic` below, which is a mark on a note that is
+    // otherwise complete.
+    if (event.strum !== undefined && !isStrum(event.strum)) return null;
+    let notes: IRNote[] | undefined;
+    if (event.notes !== undefined) {
+      if (!Array.isArray(event.notes)) return null;
+      const read = event.notes.map((note): IRNote | null =>
+        isObject(note) && isNumber(note.string) && isNumber(note.fret)
+          ? { string: note.string, fret: note.fret }
+          : null,
+      );
+      if (!read.every(isPresent)) return null;
+      notes = read;
+    }
     return {
       atTick: event.atTick,
       durationTicks: event.durationTicks,
-      notes,
+      ...(notes === undefined ? {} : { notes }),
+      ...(event.strum === undefined ? {} : { strum: event.strum }),
       ...(isDynamic(event.dynamic) ? { dynamic: event.dynamic } : {}),
     };
   });
@@ -914,6 +1454,42 @@ export interface TrackRunDeps {
 const TRACK_RUN_DEPS: TrackRunDeps = { runTask: runAgentTask };
 
 /**
+ * WHY A RUN PRODUCED NO PART — typed, because exactly one of the four is worth
+ * asking again for and no caller should have to read English to tell which.
+ *
+ * ⚠ `'review'` IS THE ONLY RETRYABLE ONE, and that is the whole reason this
+ * discriminant exists. A review refusal is the one failure where the app has
+ * something NEW to say to the model: {@link reviewTrack} names the event, prints
+ * its notes and prints the shape that belongs there, and
+ * {@link trackRunInput}'s addendum carries that back. The other three have
+ * nothing to add — a dead provider is still dead, a brief that will not build
+ * will not build a second time, and an answer that was not a structure was not
+ * one the model was told to fix.
+ */
+export type TrackRunStop =
+  /** The brief could not be built at all: a neck this app has not got, a form or
+   *  a progression that does not add up, a part with no name. The caller's
+   *  mistake, not the model's — no run happened. */
+  | 'brief'
+  /** The run itself never produced an answer: nothing configured, a dead
+   *  provider, an error, an abort. The seam's own sentence, passed on. */
+  | 'run'
+  /** It answered, but not with a readable list of events — prose, a code fence,
+   *  a stop before it got there. */
+  | 'answer'
+  /** It wrote a part and the part breaks a rule the import pipeline would let
+   *  past in silence. THE ONE WORTH ASKING AGAIN FOR. */
+  | 'review';
+
+/**
+ * `Result<IRTrack>`-shaped, plus the discriminant — a caller that only reads `ok`
+ * and `reason` works unchanged.
+ */
+export type TrackRunOutcome =
+  | { readonly ok: true; readonly value: IRTrack }
+  | { readonly ok: false; readonly stopped: TrackRunStop; readonly reason: string };
+
+/**
  * Ask a model to write one part, and hand back the track it wrote.
  *
  * `options` is passed through to the seam untouched EXCEPT for `outputSchema`,
@@ -932,37 +1508,52 @@ const TRACK_RUN_DEPS: TrackRunDeps = { runTask: runAgentTask };
  * the transcript. Sorted AFTER the review, so a refusal names the event where the
  * model wrote it.
  *
- * Every failure is a RETURNED refusal, in the register the seams refuse in:
- *   - the brief cannot be built — an unreadable symbol, a neck this app has not
- *     got, a form or a progression that does not add up;
- *   - the run itself refused — no provider, a dead endpoint, an error — and that
- *     sentence is the seam's, passed on;
- *   - the run answered without a structure, which is a real outcome and not a bug;
- *   - the structure is not a list of events;
- *   - the part breaks a rule {@link reviewTrack} names.
+ * ⚠ IT RUNS ONCE AND NEVER TWICE. A second attempt is the CALLER's to make, by
+ * calling this again with `previousRefusal` set to the sentence it got back —
+ * which is what `irCompositionJob` does, once, for a `'review'` stop and nothing
+ * else. Retrying in here would hide the second model call from the caller that
+ * pays for it and from the transcript that has to show it.
+ *
+ * Every failure is a RETURNED refusal, in the register the seams refuse in, and
+ * each carries the {@link TrackRunStop} that says which kind it is:
+ *   - `'brief'` — the brief cannot be built: an unreadable symbol, a neck this
+ *     app has not got, a form or a progression that does not add up;
+ *   - `'run'` — the run itself refused: no provider, a dead endpoint, an error,
+ *     an abort — and that sentence is the seam's, passed on;
+ *   - `'answer'` — it answered without a structure, or with one that is not a
+ *     list of events. A real outcome, not a bug;
+ *   - `'review'` — an entry both asks for a chord and types its own notes, which
+ *     {@link expandStrums} names, or the part breaks a rule {@link reviewTrack}
+ *     names. The one a caller can usefully ask again about.
  */
 export async function runIRTrack(
   brief: TrackBrief,
-  options: RunAgentTaskOptions & { readonly deps?: TrackRunDeps } = {},
-): Promise<Result<IRTrack>> {
+  options: RunAgentTaskOptions & {
+    readonly deps?: TrackRunDeps;
+    /** The sentence a FIRST attempt at this part was refused with. Appended to
+     *  the brief as its own section — see {@link addendum}. */
+    readonly previousRefusal?: string;
+  } = {},
+): Promise<TrackRunOutcome> {
   // FIRST, and not only for the refusal: this is where `instrumentId` — a `string`
   // on the brief, because the caller declares its own shape — becomes the id union
   // the document's `instrumentHint` is typed as. `trackRunInput` refuses the same
   // case through `chordGrip` a line later, in the same words.
   const instrument = knownInstrument(brief.instrumentId);
   if (instrument === undefined) {
-    return { ok: false, reason: unknownInstrumentRefusal(brief.instrumentId) };
+    return { ok: false, stopped: 'brief', reason: unknownInstrumentRefusal(brief.instrumentId) };
   }
 
-  const input = trackRunInput(brief);
-  if (!input.ok) return input;
+  const { deps = TRACK_RUN_DEPS, previousRefusal, ...runOptions } = options;
 
-  const { deps = TRACK_RUN_DEPS, ...runOptions } = options;
+  const input = trackRunInput(brief, previousRefusal);
+  if (!input.ok) return { ok: false, stopped: 'brief', reason: input.reason };
+
   const run = await deps.runTask(IR_TRACK_AGENT, input.value, {
     ...runOptions,
     outputSchema: irTrackSchema(brief.instrumentId),
   });
-  if (!run.ok) return run;
+  if (!run.ok) return { ok: false, stopped: 'run', reason: run.reason };
 
   const events = asTrackEvents(run.value.structured);
   if (events === null) {
@@ -978,14 +1569,19 @@ export async function runIRTrack(
         : `it stopped with "${run.value.stoppedReason}" before it answered. Nothing was written, so there is nothing to fix in the part — run it again.`;
     return {
       ok: false,
+      stopped: 'answer',
       reason: `The run wrote no usable part for "${brief.name.trim()}" — ${detail}`,
     };
   }
 
-  const refusals = reviewTrack(events, brief);
+  // ⚠ EXPANDED BEFORE IT IS REVIEWED, so a filled-in chord is subject to every
+  // check the model's own notes are — there is no second path into the document.
+  const filled = expandStrums(events, brief);
+  const refusals = [...filled.refusals, ...reviewTrack(filled.events, brief)];
   if (refusals.length > 0) {
     return {
       ok: false,
+      stopped: 'review',
       reason: `"${brief.name.trim()}" cannot be imported as written. ${namedRefusals(refusals)}`,
     };
   }
@@ -998,7 +1594,7 @@ export async function runIRTrack(
       // The app's instrument id, which is also one of the lib's `InstrumentHint`
       // values — see {@link IRTrack}.
       instrumentHint: instrument.id,
-      events: [...events].sort((a, b) => a.atTick - b.atTick),
+      events: [...filled.events].sort((a, b) => a.atTick - b.atTick),
     },
   };
 }

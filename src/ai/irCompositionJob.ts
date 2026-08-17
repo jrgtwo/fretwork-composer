@@ -13,58 +13,70 @@
  *   3. `patternService.importIR` — the one call that writes, and it writes
  *      everything at once.
  *
- * Nothing exists in the library until step 3. That single fact is why the
- * failure policy below can be as strict as it is: a job that stops early has
- * cost model calls and nothing else, so there is no half-built arrangement to
- * salvage and no reason to ship one.
+ * Nothing exists in the library until step 3. That single fact is what makes the
+ * failure policy below possible at all: nothing is committed until every part
+ * that is going to be written has been, so what to do about a part that failed is
+ * still an open question when the answer is known.
  *
- * ── ⚠ A FAILED PART REFUSES THE WHOLE JOB ───────────────────────────────────
+ * ── ⚠ ONE RETRY PER PART, AND NEVER MORE THAN ONE ───────────────────────────
  *
- * Decided, not defaulted, and the two facts that bear on it pull the same way.
+ * A part whose own review refused it is asked AGAIN, once, with the refusal
+ * appended to its brief. What is bounded, exactly:
+ *   - ONE extra run per part, never chained. The second answer is reviewed and
+ *     that is the end of it; a third is never asked for, whatever the second says.
+ *   - ONLY on a review refusal — `runIRTrack`'s `'review'` stop. A dead provider,
+ *     a brief that will not build, an answer that was not a structure and an
+ *     aborted run are all asked for exactly once, because nothing the app knows
+ *     about them would make the second attempt different.
+ *   - The CHART is never re-asked. `runArrangementChart` refuses in its own
+ *     sentences and this module has no addendum to give it.
  *
- * FIRST, THE COMPOSITION IS NOT ROBUST TO DROPPING PARTS. The mapper picks
- * `composition` topology only when the document has MORE THAN ONE non-empty
- * track (pinned in tests/ImportIR.test.ts). Drop one part of two and the import
- * silently degrades to a single pattern with no composition, no tracks and no
- * placements — the same call, a different kind of object, and the caller finds
- * out by reading `topology`. Drop enough and what is left is loose patterns.
+ * ⚠ THIS REVERSES A DECISION, DELIBERATELY. Until 2026-08-16 nothing here was
+ * retried, and the reason given was that "the only thing this app knows about the
+ * first one is that it did not work". That is no longer true of a review refusal:
+ * `reviewTrack` names the offending event, prints the notes in it, prints the
+ * shape that belongs there and says to write `strum` instead. The 2026-08-16 run
+ * is the evidence — 'Guitar 2' typed F7's barre where the chart said C7, out of a
+ * brief that listed both — and feeding that sentence back is the cheapest repair
+ * available, at the cost of one model call and only when a part has failed.
  *
- * SECOND, IT IS NOT WHAT WAS ASKED FOR. A backing track minus its guitar is a
- * different piece, and delivering it as though it were the request — while the
- * refusal that would have explained it sits three fields down a report — is the
- * failure mode this whole area was rebuilt to stop. The parts are written
- * against ONE chart precisely so they fit each other; the arrangement is the
- * product, not the tracks.
- *
- * So a part that cannot be written ends the job with {@link
- * IrCompositionJobStop} `'track-failed'`, and the refusal NAMES the part, its
- * position in the run, and the sentence `runIRTrack` authored about it. The
- * `track.finished` event carries the same three, so a panel showing progress
- * marks the part that failed where the part is, rather than replacing the whole
- * display with one sentence. Nothing is ever silently absent: a part is either
- * in the imported document or in the refusal.
- *
- * (The cost of the alternative was weighed and is real — a part that came back
- * unusable throws away the parts that did not. That is what the transcript is
- * for: the log holds every run, so the good parts are re-runnable rather than
- * gone. Reversing this decision means deciding what a one-track "composition"
- * is, and that is a bigger claim than a job runner gets to make.)
- *
- * ── NO RETRIES. A FIXED PIPELINE, BOUNDED BY CONSTRUCTION ───────────────────
- *
- * ⚠ Each run happens exactly ONCE. A chart that fails review is never sent back
- * for a second try, and a part that comes back unusable is never re-asked. This
- * is deliberate: a retry is a second model call spent on the same failure, and
- * the only thing this app knows about the first one is that it did not work.
- *
- * The COUNT is bounded without a ceiling of this module's own, which is the
+ * The COUNT is still bounded without a ceiling of this module's own, which is the
  * difference from the job deleted at b8582bb — that one needed a `MAX_SUB_RUNS`
- * because the model chose how many patterns to write. Here the run count is
- * `1 + chart.tracks.length`, and `reviewChart` already refuses a chart naming
- * more than `MAX_COMPOSITION_TRACKS` (8) parts. So the worst case is nine runs,
- * comfortably under `runTranscript`'s 32-section cap — a job that ran to the end
+ * because the model chose how many patterns to write. Here the worst case is
+ * `1 + 2 * chart.tracks.length`, and `reviewChart` already refuses a chart naming
+ * more than `MAX_COMPOSITION_TRACKS` (8) parts. So the worst case is seventeen
+ * runs, still under `runTranscript`'s 32-section cap — a job that ran to the end
  * always has a complete log, which is the thing every failure since 2026-08-09
  * has been diagnosed from.
+ *
+ * ── ⚠ WHAT SURVIVED IS IMPORTED. THE FLOOR IS TWO PARTS ─────────────────────
+ *
+ * A part that fails BOTH attempts no longer throws the job away. The parts that
+ * were written are imported and the one that was not is reported, by name, with
+ * its reason. The 2026-08-16 run is the evidence for that too: a correct bass and
+ * a correct guitar were discarded over one bad event in a third part.
+ *
+ * ⚠ THE FLOOR IS TWO SURVIVING PARTS, and it is a fact about the mapper rather
+ * than a preference. `mapImportToLibrary` picks `composition` topology only when
+ * the document has MORE THAN ONE non-empty track (pinned in
+ * tests/ImportIR.test.ts). With one survivor there is no composition to import —
+ * only a loose pattern in the library — so that case refuses whole, and the
+ * refusal says so in those terms rather than as a generic failure.
+ *
+ * (A chart that named ONE part and wrote it is untouched by this: it never lost a
+ * part, and the mapper's `single-pattern` is the honest answer to a one-part
+ * chart. The floor applies only where something failed.)
+ *
+ * ⚠ A SHORT IMPORT IS NOT A CLEAN SUCCESS, and must not read as one. Two channels
+ * the panel ALREADY renders carry it, and no third is invented:
+ *   - the `track.finished` event for the failed part carries `ok: false` and its
+ *     reason, so the phase list marks the part where the part is;
+ *   - the missing part's sentence is appended to `documents.warnings`, which the
+ *     panel prints verbatim on a success — and the panel's own headline reads
+ *     `Incomplete` rather than `Done` because it compares the chart's part count
+ *     against the imported pattern count, which now differs.
+ * {@link IrCompositionJobResult.missing} carries the same facts structurally, for
+ * a caller that should not have to find ours among the pipeline's warnings.
  *
  * ── SEQUENTIAL, NOT CONCURRENT ──────────────────────────────────────────────
  *
@@ -202,7 +214,7 @@ import { IR_TIME_SIGNATURE, TICKS_PER_BAR, runIRTrack } from './irTrackRun';
 import { beginJobTranscript } from './runTranscript';
 import type { AgentEvent, AgentRunSummary, AgentSpec, RunAgentTaskOptions } from './agentService';
 import type { ArrangementChart, ChartTrack } from './arrangementChart';
-import type { IRTrack, TrackBrief } from './irTrackRun';
+import type { IRTrack, TrackBrief, TrackRunOutcome } from './irTrackRun';
 import type { ImportedDocuments, Result } from '../patterns/patternService';
 
 // -------------------------------------------------------------- the shape ---
@@ -265,8 +277,9 @@ export type IrCompositionJobStop =
    *  chart `reviewChart` refused. `runArrangementChart` collapses all five into
    *  one refusal, in its own sentences. */
   | 'chart-failed'
-  /** One part could not be written, so the whole job stops — see the header on
-   *  why that is the policy. The reason names the part. */
+  /** Too few parts survived to import anything. Fewer than TWO parts came back
+   *  usable after their retries, so there is no composition to make — see the
+   *  header on the floor. The reason names every part that failed and why. */
   | 'track-failed'
   /** Every part was written and the document was still refused by the import
    *  pipeline. Nothing was created. */
@@ -277,6 +290,22 @@ export type IrCompositionJobStop =
    *  guess at. */
   | 'job-error';
 
+/**
+ * A part the chart named that is NOT in the imported piece — see the header on
+ * why a job can now finish with one of these and still be `ok`.
+ */
+export interface MissingPart {
+  /** 1-based, the same number `track.started` and `track.finished` carried. */
+  readonly index: number;
+  /** The name it was filed under — {@link partNames}' derived one, which is what
+   *  every other account of this job says too. */
+  readonly name: string;
+  /** `runIRTrack`'s own sentence about its LAST attempt, unedited — the second
+   *  where the part was asked again, the first where it was not, because only a
+   *  review refusal is retried and the other three stops never get a second. */
+  readonly reason: string;
+}
+
 /** What a finished job hands back. */
 export interface IrCompositionJobResult {
   /** The chart every part was written against — carried so a caller can report
@@ -285,8 +314,23 @@ export interface IrCompositionJobResult {
   readonly chart: ArrangementChart;
   /** What the import put in the library: the pattern ids, the composition id
    *  (null for a one-part chart — see the header), the topology, and every
-   *  warning the pipeline produced. */
+   *  warning the pipeline produced.
+   *
+   *  ⚠ `warnings` CARRIES THIS JOB'S OWN SENTENCES TOO, appended after the
+   *  pipeline's: one per entry of {@link missing}. That is the channel the panel
+   *  already prints verbatim on a success, and a part absent from the piece is
+   *  exactly what a user reading warnings needs to be told. */
   readonly documents: ImportedDocuments;
+  /**
+   * The parts the chart named that are not in the piece. EMPTY on a job that
+   * wrote everything, which is the only shape that reads as a clean success.
+   *
+   * Structural as well as in `documents.warnings`, because a caller cannot tell
+   * our sentence from the validator's once both are strings in one array — and
+   * "is this the arrangement that was asked for" is a yes/no a report should not
+   * have to answer by reading English.
+   */
+  readonly missing: readonly MissingPart[];
   /** The whole job's log, as ONE artifact — see `runTranscript`. Also emitted on
    *  `job.started`, because the log of a job that hung is wanted while it is
    *  still hanging. */
@@ -354,9 +398,16 @@ export type IrCompositionJobEvent =
     }
   /**
    * Emitted for a part that failed as well as one that was written — `ok` says
-   * which, and `reason` is `runIRTrack`'s own sentence. A failed part also ends
-   * the job; this event is what lets a panel mark it where the part is rather
-   * than replacing the display with one line.
+   * which, and `reason` is `runIRTrack`'s own sentence.
+   *
+   * ⚠ ONE PER PART, NOT ONE PER RUN. A part that was refused and then asked
+   * again emits this once, when the SECOND answer has been reviewed, carrying
+   * that attempt's verdict, sentence and transcript section. A panel counting
+   * parts sees one `started` and one `finished` for each, whatever it cost.
+   *
+   * A failed part no longer ends the job — the parts that worked are still
+   * imported when two or more of them did — so this event is how a panel marks
+   * the part that is missing from a piece that was otherwise built.
    *
    * ⚠ A CANCELLED PART HAS NO `track.finished`, and that is deliberate rather
    * than a missing case: `ok: false` here means the model wrote something
@@ -454,14 +505,35 @@ function documentTitle(request: string): string {
 }
 
 /**
- * What became of the parts written before the one that failed — said out loud
- * because it is the whole cost of the refuse-the-whole-job decision, and a
- * refusal that hid it would read as though the job had barely started.
+ * How many usable parts the mapper needs before it makes a COMPOSITION rather
+ * than a loose pattern — `> 1` non-empty tracks, its own rule, pinned in
+ * tests/ImportIR.test.ts. Named here because it is the floor the header argues
+ * from, and a number nobody can read as a preference.
  */
-const alreadyWritten = (written: number): string => {
-  if (written === 0) return 'the job stopped there';
-  if (written === 1) return 'the part already written was not kept';
-  return `the ${written} parts already written were not kept`;
+const MIN_PARTS_FOR_A_COMPOSITION = 2;
+
+/** One part that failed both of its attempts, as a sentence — the same words
+ *  whether it ends up in a refusal or in the warnings of a piece that was built
+ *  without it. `runIRTrack`'s own account, unedited; what is added is the part's
+ *  place in the job, which only this module knows. */
+const missingPartLine = (missing: MissingPart, count: number): string =>
+  `"${missing.name}" — part ${missing.index} of ${count} — could not be written, and it is missing from this arrangement. ${missing.reason}`;
+
+/**
+ * Why a job that lost parts has nothing to import.
+ *
+ * Said in the mapper's own terms rather than as a generic failure, because the
+ * two cases fail for different reasons and only one of them is about the count:
+ * with nothing written there is no music at all, and with one part written there
+ * IS music but no composition to put it in — see the header on the floor.
+ */
+const tooFewParts = (survived: number, count: number): string => {
+  if (survived === 0) {
+    return count === 1
+      ? 'The one part this arrangement names could not be written, so nothing was imported.'
+      : `Not one of the ${count} parts could be written, so nothing was imported.`;
+  }
+  return `Only 1 of the ${count} parts could be written. A composition is made of two or more parts — one on its own imports as a loose pattern rather than as the arrangement that was asked for — so nothing was imported and the part already written was not kept.`;
 };
 
 /**
@@ -474,23 +546,43 @@ const alreadyWritten = (written: number): string => {
  *     one `compositionService.nextTrackName` hands a new lane, so an imported
  *     nameless part is indistinguishable from one added by hand.
  *   - a repeat is suffixed with the FIRST UNUSED number — "Guitar", "Guitar 2",
- *     "Guitar 3" — which is `nextTrackName`'s rule rather than a second one, and
- *     it counts the derived names so a chart that already wrote "Guitar 2"
- *     cannot be collided with.
+ *     "Guitar 3". In the SPIRIT of `compositionService.nextTrackName` rather than
+ *     lifted from it: that function is unexported, takes live `Track[]` and only
+ *     ever produces `Track ${n}`, so this is a second rule and says so.
  * The chart's own name is otherwise untouched: it is the model's word for the
  * part and the only one the user will recognise.
+ *
+ * ⚠ TWO PASSES, AND THE FIRST ONE IS WHY A DERIVED NAME CANNOT DISPLACE A GIVEN
+ * ONE. Counting only the names derived SO FAR, a chart of "Guitar", "Guitar",
+ * "Guitar 2" renames the second part to "Guitar 2" — which is the third part's
+ * OWN name, taken off it, so the collision is pushed one place along rather than
+ * resolved. So every name the chart actually wrote is collected first, and a
+ * derived name may land on none of them; a part keeps the name it was given
+ * unless an EARLIER part already took it.
+ *
+ * ⚠ COMPARED CASE-INSENSITIVELY, for the reason the derivation exists at all: a
+ * screen reader announcing "Mute Guitar" and "Mute guitar" has said the same
+ * thing twice. The name a part is FILED under is the chart's own casing — only
+ * the collision test is folded.
  */
 function partNames(tracks: readonly ChartTrack[]): ChartTrack[] {
+  const key = (name: string): string => name.toLowerCase();
+  const given = new Set(
+    tracks.map((track) => key(track.name.trim())).filter((name) => name !== ''),
+  );
   const taken = new Set<string>();
   return tracks.map((track, position) => {
-    const base = track.name.trim() === '' ? `Track ${position + 1}` : track.name.trim();
+    const written = track.name.trim();
+    const base = written === '' ? `Track ${position + 1}` : written;
     let name = base;
     let n = 2;
-    while (taken.has(name)) {
+    // `name !== written` is what lets a part keep its own name: the exemption is
+    // for the name the CHART gave this part, never for one derived here.
+    while (taken.has(key(name)) || (name !== written && given.has(key(name)))) {
       name = `${base} ${n}`;
       n++;
     }
-    taken.add(name);
+    taken.add(key(name));
     // The whole part, renamed — so the brief, the document, the transcript
     // section, the progress events and the refusal all say ONE name. A panel
     // showing the chart's word for a part the library filed under another is the
@@ -709,6 +801,38 @@ export async function runIrCompositionJob(
     const parts = partNames(chart.value.tracks);
     const count = parts.length;
     const tracks: IRTrack[] = [];
+    const missing: MissingPart[] = [];
+
+    /**
+     * ONE attempt at one part, recorded under its own transcript section.
+     *
+     * The section's command names the ATTEMPT, not just the part: two sections
+     * called "Compose — Guitar 2" in one log are two runs nobody can tell apart,
+     * and which of them the imported part came from is the first thing a reader
+     * of that log wants.
+     */
+    const attempt = async (
+      part: ChartTrack,
+      index: number,
+      previousRefusal?: string,
+    ): Promise<{ readonly outcome: TrackRunOutcome; readonly runTranscriptId?: string }> => {
+      let runId: string | undefined;
+      const outcome = await runIRTrack(briefFor(part, index, chart.value), {
+        ...(signal ? { signal } : {}),
+        ...(previousRefusal === undefined ? {} : { previousRefusal }),
+        deps: {
+          runTask: recorded(
+            previousRefusal === undefined
+              ? `${label} — ${part.name}`
+              : `${label} — ${part.name} (second attempt)`,
+            (id) => {
+              runId = id;
+            },
+          ),
+        },
+      });
+      return { outcome, ...(runId === undefined ? {} : { runTranscriptId: runId }) };
+    };
 
     for (const [position, part] of parts.entries()) {
       // ⚠ BEFORE THE RUN, not only inside it: this is the check that stops a job
@@ -722,57 +846,80 @@ export async function runIrCompositionJob(
       }
 
       const index = position + 1;
+      const where = `"${part.name}", part ${index} of ${count}`;
       emit({ type: 'track.started', index, count, track: part });
 
-      let runId: string | undefined;
-      const written = await runIRTrack(briefFor(part, index, chart.value), {
-        ...(signal ? { signal } : {}),
-        deps: {
-          runTask: recorded(`${label} — ${part.name}`, (id) => {
-            runId = id;
-          }),
-        },
-      });
-      const runTranscriptId = runId === undefined ? {} : { runTranscriptId: runId };
+      let written = await attempt(part, index);
+      if (signal?.aborted) return cancelled(`while it was writing ${where}`);
 
-      if (signal?.aborted) {
-        return cancelled(`while it was writing "${part.name}", part ${index} of ${count}`);
+      // ── THE ONE RETRY ─────────────────────────────────────────────────────
+      // Only for a review refusal, never chained, and only ever here — see the
+      // header. The refusal goes back as an addendum to the SAME brief, which
+      // `irTrackRun` owns; this module chooses when, not what to say.
+      if (!written.outcome.ok && written.outcome.stopped === 'review') {
+        written = await attempt(part, index, written.outcome.reason);
+        // Read again between the two: the second run is where the user's stop
+        // most often lands now, and a cancel reported as a bad part blames the
+        // model for a click.
+        if (signal?.aborted) return cancelled(`while it was writing ${where} a second time`);
       }
-      if (!written.ok) {
-        // Reported on the event stream AND in the refusal, because they are read
-        // by different people at different times — the panel marks the part that
-        // failed, and the sentence is what somebody pastes into a bug report.
+
+      const runTranscriptId =
+        written.runTranscriptId === undefined ? {} : { runTranscriptId: written.runTranscriptId };
+
+      if (!written.outcome.ok) {
+        // ⚠ THE JOB GOES ON. The part is recorded as missing and the next one is
+        // written; what happens to a piece that lost a part is decided once,
+        // below, when it is known how many survived.
+        //
+        // Reported on the event stream AND kept for the report, because they are
+        // read by different people at different times — the panel marks the part
+        // that failed, and the sentence is what somebody pastes into a bug
+        // report. `runIRTrack`'s own words, unedited: a second account of one
+        // mistake is what this codebase keeps paying for.
         emit({
           type: 'track.finished',
           index,
           count,
           track: part,
           ok: false,
-          reason: written.reason,
+          reason: written.outcome.reason,
           ...runTranscriptId,
         });
-        // `runIRTrack`'s own sentence, unedited — it is that module's product,
-        // and a second account of one mistake is what this codebase keeps
-        // paying for. What is added is the part's place in the job, which only
-        // this module knows.
-        return finish(
-          stop(
-            'track-failed',
-            `"${part.name}" — part ${index} of ${count} — could not be written, so nothing was imported and ${alreadyWritten(
-              position,
-            )}. ${written.reason}`,
-          ),
-        );
+        missing.push({ index, name: part.name, reason: written.outcome.reason });
+        continue;
       }
       emit({ type: 'track.finished', index, count, track: part, ok: true, ...runTranscriptId });
-      tracks.push(written.value);
+      tracks.push(written.outcome.value);
     }
 
     // -------------------------------------------------------- 3. the import ---
 
+    // ⚠ THE FLOOR, AND ONLY WHERE SOMETHING WAS LOST. A one-part chart that wrote
+    // its one part is a `single-pattern` import and always was; this is about a
+    // piece that came back short, where one surviving track is not a composition
+    // at all — see the header.
+    if (missing.length > 0 && tracks.length < MIN_PARTS_FOR_A_COMPOSITION) {
+      return finish(
+        stop(
+          'track-failed',
+          [
+            tooFewParts(tracks.length, count),
+            ...missing.map((part) => missingPartLine(part, count)),
+          ].join(' '),
+        ),
+      );
+    }
+
     // ⚠ THE LAST CHECK. `importDocument` is one `commitImport` and cannot be
     // interrupted, so after this line the job is committed — see the header.
-    if (signal?.aborted) return cancelled(`with all ${count} parts written`);
+    if (signal?.aborted) {
+      return cancelled(
+        missing.length === 0
+          ? `with all ${count} parts written`
+          : `with ${tracks.length} of ${count} parts written`,
+      );
+    }
 
     const document: IRDocument = {
       meta: { title: documentTitle(request), sourceFormat: 'ascii-tab' },
@@ -793,20 +940,39 @@ export async function runIrCompositionJob(
     emit({ type: 'import.started', trackCount: tracks.length });
     const imported = deps.importDocument(document);
     if (!imported.ok) return finish(stop('import-refused', imported.reason));
-    emit({ type: 'import.finished', documents: imported.value });
+
+    // ⚠ THE MISSING PARTS GO IN `warnings`, AFTER THE PIPELINE'S OWN. That is the
+    // channel a success already has for "what is not in what you just got", and
+    // it is the one the panel prints verbatim — see the header. Appended rather
+    // than prepended so the pipeline's account of its own document is not pushed
+    // down a list by ours.
+    const documents: ImportedDocuments =
+      missing.length === 0
+        ? imported.value
+        : {
+            ...imported.value,
+            warnings: [
+              ...imported.value.warnings,
+              ...missing.map((part) => missingPartLine(part, count)),
+            ],
+          };
+    emit({ type: 'import.finished', documents });
 
     return finish(
-      { ok: true, value: { chart: chart.value, documents: imported.value, transcriptId: job.id } },
+      { ok: true, value: { chart: chart.value, documents, missing, transcriptId: job.id } },
       // ⚠ THE WARNINGS GO IN THE LOG, not only on the returned value. They are
       // the pipeline's account of what it DROPPED and what it approximated —
       // silent clamps, dropped events, notes on strings the instrument hasn't
-      // got — and the log is the artifact that gets exported and pasted into a
-      // bug report. A caller may or may not render them; the log always has them.
+      // got — plus this job's own account of any part that is not there at all,
+      // and the log is the artifact that gets exported and pasted into a bug
+      // report. A caller may or may not render them; the log always has them.
       [
-        `Imported ${imported.value.patternIds.length} pattern${
-          imported.value.patternIds.length === 1 ? '' : 's'
-        } as ${imported.value.topology}.`,
-        ...imported.value.warnings,
+        `Imported ${documents.patternIds.length} pattern${
+          documents.patternIds.length === 1 ? '' : 's'
+        } as ${documents.topology}${
+          missing.length === 0 ? '' : `, ${missing.length} of ${count} parts missing`
+        }.`,
+        ...documents.warnings,
       ].join('\n'),
     );
   } catch (error) {

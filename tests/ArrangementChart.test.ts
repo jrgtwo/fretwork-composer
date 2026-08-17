@@ -23,6 +23,7 @@ import {
   type ChartRunDeps,
 } from '../src/ai/arrangementChart';
 import { MAX_COMPOSITION_TRACKS, TRACK_CAP_REASON } from '../src/composition/compositionService';
+import { INSTRUMENT_IDS, INSTRUMENT_LIST } from '../src/ai/tools/instrumentCatalog';
 import type { AgentRunSummary, AgentSpec, RunAgentTaskOptions } from '../src/ai/agentService';
 import type { Result } from '../src/patterns/patternService';
 
@@ -158,6 +159,44 @@ describe('the chart run is tool-free', () => {
     expect(prompt).toContain('no code fence');
     expect(prompt).toContain(`AT MOST ${MAX_COMPOSITION_TRACKS} TRACKS`);
     expect(prompt).toContain(TRACK_CAP_REASON);
+  });
+
+  /**
+   * The 2026-08-16 run planned Bass, Guitar, and a part called DRUMS carrying
+   * `instrumentId: "bass"` — a legal instrument with an unplayable part on it,
+   * and the piece shipped with two bass tracks. Nothing in the data catches
+   * that (see `reviewChart`'s DELIBERATELY NOT CHECKED for the argument), so
+   * the prompt is the entire repair and this is the entire test of it.
+   *
+   * The catalog is asserted as the LIVE value rather than as typed-out ids, and
+   * then EVERY id in it separately, so an instrument the lib adds fails here
+   * unless the prompt is offering it.
+   *
+   * ⚠ WHAT THIS CANNOT CATCH: the prompt builds its sentence at module eval, so
+   * no stub of the catalog can make it re-derive, and a relapse to a literal
+   * list that happened to match today's catalog would pass both assertions. That
+   * one is review's, not this file's. The `not.toBe('')` guard is here because
+   * `toContain('')` is vacuously true, which would leave the live-value claim
+   * resting on nothing the day the catalog is empty.
+   */
+  it('tells the model this app plays only the fretted instruments it has', () => {
+    const prompt = ARRANGEMENT_CHART_AGENT.systemPrompt;
+    expect(INSTRUMENT_LIST).not.toBe('');
+    expect(prompt).toContain(INSTRUMENT_LIST);
+    expect(INSTRUMENT_IDS).not.toEqual([]);
+    INSTRUMENT_IDS.forEach((id) => expect(prompt).toContain(id));
+    expect(prompt).toContain('FRETTED STRINGS AND NOTHING ELSE');
+    // Naming the catalog is not the instruction; this is.
+    expect(prompt).toContain('A part this app cannot play is a part not to plan');
+  });
+
+  /**
+   * The `role` is the entire brief the writing run is handed, so an exemplar
+   * naming a part this app has no neck for asks for a guitar written around a
+   * silence — the same defect the section above exists to stop, one field over.
+   */
+  it('gives no role example that leans on a part the app cannot play', () => {
+    expect(ARRANGEMENT_CHART_AGENT.systemPrompt).not.toContain('vocal');
   });
 
   /** The deleted step made the model author pattern ids, lengths and bar lists,
@@ -381,6 +420,25 @@ describe('the parts', () => {
       tracks: [...chart.tracks, { name: 'Horns', instrumentId: 'trumpet', role: 'stabs' }],
     });
     expect(refusals).toHaveLength(1);
+  });
+
+  /**
+   * THE DECLINED CHECK, PINNED SO REVERSING IT FAILS. The 2026-08-16 chart's
+   * "Drums" on a `bass` is exactly this chart, and `reviewChart` deliberately
+   * has nothing to say about it: the instrument is legal, the app builds that
+   * track correctly, and a percussive muted-string figure holding the pulse is a
+   * part a player would nickname exactly that. A name blocklist would refuse on
+   * a string rather than on a fact, take that legitimate part with it, and pass
+   * the moment the model wrote "Kit". The repair is the prompt, tested above;
+   * this is the guard on the argument in `reviewChart`'s own header.
+   */
+  it('does not refuse a part for what it is called', () => {
+    expect(
+      reviewChart({
+        ...blues(),
+        tracks: [{ name: 'Drums', instrumentId: 'bass', role: 'percussive muted-string pulse' }],
+      }),
+    ).toEqual([]);
   });
 
   it('refuses more parts than a composition can hold', () => {

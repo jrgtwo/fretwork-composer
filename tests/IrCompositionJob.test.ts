@@ -125,7 +125,14 @@ interface Rig {
 interface RigOptions {
   /** The chart run's answer. Defaults to {@link CHART}. */
   readonly chart?: Result<AgentRunSummary>;
-  /** The nth part run's answer, 1-based. Defaults to {@link EVENTS}. */
+  /**
+   * The nth part RUN's answer, 1-based. Defaults to {@link EVENTS}.
+   *
+   * ⚠ COUNTED IN RUNS, NOT IN PARTS, because a part whose review refused it is
+   * asked again and spends two of them — run 3 is the second part's retry when
+   * run 2 was refused, and is the third part's only attempt when it was not.
+   * That is what lets one callback say "refused, then fixed".
+   */
   readonly track?: (index: number) => Result<AgentRunSummary>;
   readonly imported?: Result<ImportedDocuments>;
   /** Called after each run returns, so a test can abort BETWEEN two of them. */
@@ -405,6 +412,51 @@ describe('the names the parts are filed under', () => {
     ]);
   });
 
+  it('does not take a later part\'s own name off it to settle an earlier collision', async () => {
+    // ⚠ THE ORDERING THAT BREAKS A ONE-PASS RULE. Counting only the names derived
+    // SO FAR, part 2 is renamed "Guitar 2" — which is part 3's own name, taken off
+    // it, so the collision is pushed one place along instead of resolved. Every
+    // name the chart actually wrote has to be known before the first suffix.
+    const fake = rig({
+      chart: answered({
+        ...CHART,
+        tracks: [
+          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'single-note lead' },
+          { name: 'Guitar 2', instrumentId: 'guitar', role: 'open-string drone' },
+        ],
+      }),
+    });
+
+    await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    expect(fake.documents[0].tracks.map((track) => track.name)).toEqual([
+      'Guitar',
+      'Guitar 3',
+      'Guitar 2',
+    ]);
+  });
+
+  it('tells two names apart the way a screen reader would, not the way a byte does', async () => {
+    // The justification for the whole derivation is that every control in a track
+    // header builds its accessible name out of this one — and "Mute Guitar" and
+    // "Mute guitar" are the same announcement. The chart's own casing is what
+    // each part is filed under; only the collision test is folded.
+    const fake = rig({
+      chart: answered({
+        ...CHART,
+        tracks: [
+          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping' },
+          { name: 'guitar', instrumentId: 'guitar', role: 'single-note lead' },
+        ],
+      }),
+    });
+
+    await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    expect(fake.documents[0].tracks.map((track) => track.name)).toEqual(['Guitar', 'guitar 2']);
+  });
+
   it('numbers a part the chart left nameless rather than losing the job over it', async () => {
     // A whitespace name passes the grammar (`minLength: 1` admits " ") and
     // `trackRunInput` refuses a part with no name — so without the derivation
@@ -500,89 +552,322 @@ describe('a chart that never arrives', () => {
 
 // -------------------------------------------------------- a part that fails ---
 
-describe('a part that cannot be written', () => {
-  /** The second part's run answers with a part that `reviewTrack` refuses — a
-   *  fractional tick, which the import pipeline would DROP in silence. */
-  const brokenSecond = rig.bind(null, {
-    track: (index: number) =>
-      index === 2
-        ? answered({ events: [{ atTick: 0.5, durationTicks: PPQ, notes: [{ string: 0, fret: 3 }] }] })
-        : answered({ events: EVENTS }),
-  });
+describe('a part that its own review refused', () => {
+  /**
+   * An answer `reviewTrack` refuses — a fractional tick, which the import
+   * pipeline would DROP in silence. The one failure kind that is worth asking
+   * again about, because the refusal names the event and says what is wrong with
+   * it.
+   */
+  const badPart = () =>
+    answered({ events: [{ atTick: 0.5, durationTicks: PPQ, notes: [{ string: 0, fret: 3 }] }] });
 
-  it('refuses the whole job rather than importing what is left', async () => {
-    // The decision, pinned: a composition needs two or more non-empty tracks,
-    // and a backing track minus one part is a different thing from the one that
-    // was asked for. See the job's header.
-    const fake = brokenSecond();
+  /** The nth part RUN, not the nth part — a part that is asked again spends two
+   *  of these. Run 2 is the second part's first attempt; run 3 is its retry. */
+  const good = () => answered({ events: EVENTS });
 
-    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
-
-    expect(outcome).toMatchObject({ ok: false, stopped: 'track-failed' });
-    expect(fake.documents).toHaveLength(0);
-  });
-
-  it('stops there rather than running the parts after it', async () => {
-    const fake = brokenSecond();
-
-    await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
-
-    expect(fake.agents).toEqual(['arrangement-chart', 'ir-track', 'ir-track']);
-  });
-
-  it('names the part, its place in the job, and why', async () => {
-    const fake = brokenSecond();
+  it('asks that part again, once, and imports the answer', async () => {
+    const fake = rig({ track: (run) => (run === 2 ? badPart() : good()) });
 
     const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
 
-    if (outcome.ok) throw new Error('expected a refusal');
-    expect(outcome.reason).toContain('Rhythm Guitar');
-    expect(outcome.reason).toContain('part 2 of 3');
-    // `runIRTrack`'s own account of it, passed on rather than re-worded.
-    expect(outcome.reason).toContain('atTick');
-    // ⚠ AND WHAT IT COST, which is the whole of the refuse-the-whole-job
-    // decision: a refusal that hid the thrown-away part would read as a job that
-    // had barely started.
-    expect(outcome.reason).toContain('the part already written was not kept');
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    // Five runs for four parts-worth of work: the chart, three parts, and one
+    // second attempt. EXACTLY two for the part that failed — never a loop.
+    expect(fake.agents).toEqual([
+      'arrangement-chart',
+      'ir-track',
+      'ir-track',
+      'ir-track',
+      'ir-track',
+    ]);
+    expect(fake.documents[0].tracks.map((track) => track.name)).toEqual([
+      'Bass',
+      'Rhythm Guitar',
+      'Uke',
+    ]);
+    // Nothing is missing, so it IS a clean success.
+    expect(outcome.value.missing).toEqual([]);
+    expect(outcome.value.documents.warnings).toEqual([]);
   });
 
-  it('says the job stopped there when the FIRST part is the one that failed', async () => {
-    const fake = rig({
-      track: (index) => (index === 1 ? answered({ events: [] }) : answered({ events: EVENTS })),
-    });
-
-    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
-
-    if (outcome.ok) throw new Error('expected a refusal');
-    expect(outcome.reason).toContain('the job stopped there');
-    expect(outcome.reason).not.toContain('already written');
-  });
-
-  it('reports it on the event stream as well, against the part it happened to', async () => {
-    const fake = brokenSecond();
+  it('emits ONE track.finished for a part it asked twice, and it says written', async () => {
+    // A panel counting parts must see one `started` and one `finished` each,
+    // whatever the part cost.
+    const fake = rig({ track: (run) => (run === 2 ? badPart() : good()) });
     const seen = progress();
 
     await runIrCompositionJob('a two-bar blues', { deps: fake.deps, onProgress: seen.onProgress });
 
-    const failed = seen.events.find(
-      (event) => event.type === 'track.finished' && !event.ok,
-    );
-    expect(failed).toMatchObject({ index: 2, count: 3, ok: false });
-    expect(failed).toHaveProperty('track.name', 'Rhythm Guitar');
+    const finished = seen.events.filter((event) => event.type === 'track.finished');
+    expect(finished).toHaveLength(3);
+    expect(finished.every((event) => event.type === 'track.finished' && event.ok)).toBe(true);
   });
 
-  it('refuses a part that came back empty, which the pipeline would commit', async () => {
-    // A track with no notes survives validation and commits as a pattern with
-    // nothing in it — `reviewTrack` is what stops that, and this is the job
-    // honouring its refusal.
-    const fake = rig({
-      track: (index) => (index === 1 ? answered({ events: [] }) : answered({ events: EVENTS })),
+  it('puts the refusal in the SECOND brief and in no other', async () => {
+    // The addendum, which is the whole reason a retry is worth a model call: the
+    // sentence `reviewTrack` authored, handed back verbatim, marked as feedback
+    // on an answer that was refused.
+    const fake = rig({ track: (run) => (run === 2 ? badPart() : good()) });
+
+    await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    // inputs[2] is the second part's FIRST attempt; inputs[3] is its retry.
+    expect(fake.inputs[2]).not.toContain('Your last answer was refused');
+    expect(fake.inputs[3]).toContain('Your last answer was refused');
+    expect(fake.inputs[3]).toContain('atTick');
+    // And nothing above the addendum moved: the brief the first attempt read is
+    // a prefix of the one the second attempt read.
+    expect(fake.inputs[3].startsWith(fake.inputs[2])).toBe(true);
+    // The parts that never failed are asked exactly once, with no addendum.
+    expect(fake.inputs[1]).not.toContain('Your last answer was refused');
+    expect(fake.inputs[4]).not.toContain('Your last answer was refused');
+  });
+
+  it('files the second attempt under its own section of the log', async () => {
+    const fake = rig({ track: (run) => (run === 2 ? badPart() : good()) });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', {
+      deps: fake.deps,
+      label: 'Arrange',
     });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    expect(getTranscript(outcome.value.transcriptId)?.runs?.map((run) => run.command)).toEqual([
+      'Arrange — chart',
+      'Arrange — Bass',
+      'Arrange — Rhythm Guitar',
+      'Arrange — Rhythm Guitar (second attempt)',
+      'Arrange — Uke',
+    ]);
+  });
+
+  it('does NOT ask again for a run that failed for any other reason', async () => {
+    // ⚠ THE BOUND. A retry exists because a review refusal has something new to
+    // say; a dead endpoint does not, and spending a second call on it is spending
+    // it on nothing. The part is simply missing.
+    const fake = rig({
+      track: (run) => (run === 2 ? dead('The endpoint is unreachable.') : good()),
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    expect(fake.agents).toEqual(['arrangement-chart', 'ir-track', 'ir-track', 'ir-track']);
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    expect(outcome.value.missing.map((part) => part.index)).toEqual([2]);
+  });
+
+  it('does not ask again for a brief that never reached a model', async () => {
+    // `reviewChart` deliberately does not check a part's ROLE, so a blank one
+    // passes review and `trackRunInput` refuses the brief. There is no answer to
+    // give feedback on, and the brief would refuse identically a second time.
+    const fake = rig({
+      chart: answered({
+        ...CHART,
+        tracks: [
+          CHART.tracks[0],
+          { name: 'Rhythm Guitar', instrumentId: 'guitar', role: '  ' },
+          CHART.tracks[2],
+        ],
+      }),
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    expect(fake.agents).toEqual(['arrangement-chart', 'ir-track', 'ir-track']);
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    expect(outcome.value.missing.map((part) => part.name)).toEqual(['Rhythm Guitar']);
+  });
+
+  it('asks again exactly once, never twice', async () => {
+    const fake = rig({ track: (run) => (run === 2 || run === 3 ? badPart() : good()) });
+
+    await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    // Chart, part 1, part 2, part 2 again, part 3 — and no third attempt.
+    expect(fake.agents).toHaveLength(5);
+  });
+});
+
+// ------------------------------------------------- a part that stays broken ---
+
+describe('a part that failed both attempts', () => {
+  /**
+   * The second part fails its review twice; the other two are fine.
+   *
+   * ⚠ THE TWO ATTEMPTS FAIL DIFFERENTLY ON PURPOSE — a fractional duration first,
+   * a fractional tick second — so `MissingPart.reason` can be shown to carry the
+   * LAST attempt's sentence rather than the first. With both attempts refused in
+   * the same words, keeping the wrong one would pass every assertion below.
+   */
+  const secondLost = () =>
+    rig({
+      track: (run) => {
+        if (run === 2) {
+          return answered({
+            events: [{ atTick: 0, durationTicks: PPQ + 0.5, notes: [{ string: 0, fret: 3 }] }],
+          });
+        }
+        if (run === 3) {
+          return answered({
+            events: [{ atTick: 0.5, durationTicks: PPQ, notes: [{ string: 0, fret: 3 }] }],
+          });
+        }
+        return answered({ events: EVENTS });
+      },
+    });
+
+  it('imports the parts that survived rather than throwing them away', async () => {
+    // ⚠ THE DECISION THIS REVERSED, pinned. The 2026-08-16 run discarded a
+    // correct bass and a correct guitar over one bad event in a third part.
+    const fake = secondLost();
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    expect(outcome.ok).toBe(true);
+    expect(fake.documents).toHaveLength(1);
+    expect(fake.documents[0].tracks.map((track) => track.name)).toEqual(['Bass', 'Uke']);
+  });
+
+  it('does not read as a clean success', async () => {
+    const fake = secondLost();
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    // Structurally, for a caller that must not have to read English…
+    expect(outcome.value.missing).toHaveLength(1);
+    expect(outcome.value.missing[0]).toMatchObject({ index: 2, name: 'Rhythm Guitar' });
+    // ⚠ THE LAST ATTEMPT'S SENTENCE, not the first's. The two attempts were
+    // refused for different things precisely so this can tell them apart: a
+    // report that quoted the answer the model has already replaced would send
+    // somebody looking for a fault that was fixed.
+    expect(outcome.value.missing[0].reason).toContain('atTick');
+    expect(outcome.value.missing[0].reason).not.toContain('durationTicks');
+    // …and in the channel the panel already prints verbatim on a success, after
+    // the pipeline's own warnings rather than in front of them.
+    const warnings = outcome.value.documents.warnings;
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('Rhythm Guitar');
+    expect(warnings[0]).toContain('part 2 of 3');
+    expect(warnings[0]).toContain('missing from this arrangement');
+    // The chart still names three parts against two imported patterns, which is
+    // what the panel heads `Incomplete` off.
+    expect(outcome.value.chart.tracks).toHaveLength(3);
+  });
+
+  it('says so in the log as well as on the returned value', async () => {
+    const fake = secondLost();
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    const content = getTranscript(outcome.value.transcriptId)?.outcome?.content ?? '';
+    expect(content).toContain('1 of 3 parts missing');
+    expect(content).toContain('Rhythm Guitar');
+  });
+
+  it('reports it on the event stream, against the part it happened to', async () => {
+    const fake = secondLost();
+    const seen = progress();
+
+    await runIrCompositionJob('a two-bar blues', { deps: fake.deps, onProgress: seen.onProgress });
+
+    const failed = seen.events.find((event) => event.type === 'track.finished' && !event.ok);
+    expect(failed).toMatchObject({ index: 2, count: 3, ok: false });
+    expect(failed).toHaveProperty('track.name', 'Rhythm Guitar');
+    // And the job went ON — the third part was started after it.
+    expect(types(seen.events).slice(-4)).toEqual([
+      'track.finished',
+      'import.started',
+      'import.finished',
+      'job.finished',
+    ]);
+  });
+
+  it('refuses the whole job when only ONE part is left, and says why', async () => {
+    // ⚠ THE FLOOR, AND IT IS THE MAPPER'S RULE RATHER THAN A PREFERENCE: a
+    // composition needs more than one non-empty track, so one survivor is a
+    // loose pattern and not an arrangement at all.
+    const broken = answered({
+      events: [{ atTick: 0.5, durationTicks: PPQ, notes: [{ string: 0, fret: 3 }] }],
+    });
+    const fake = rig({ track: (run) => (run === 1 ? answered({ events: EVENTS }) : broken) });
 
     const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
 
     expect(outcome).toMatchObject({ ok: false, stopped: 'track-failed' });
     expect(fake.documents).toHaveLength(0);
+    if (outcome.ok) throw new Error('expected a refusal');
+    expect(outcome.reason).toContain('Only 1 of the 3 parts could be written');
+    expect(outcome.reason).toContain('two or more parts');
+    expect(outcome.reason).toContain('the part already written was not kept');
+    // Both failures are named, with their places and their own sentences.
+    expect(outcome.reason).toContain('"Rhythm Guitar" — part 2 of 3');
+    expect(outcome.reason).toContain('"Uke" — part 3 of 3');
+  });
+
+  it('refuses with its own sentence when not one part could be written', async () => {
+    const fake = rig({ track: () => answered({ events: [] }) });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    expect(outcome).toMatchObject({ ok: false, stopped: 'track-failed' });
+    if (outcome.ok) throw new Error('expected a refusal');
+    expect(outcome.reason).toContain('Not one of the 3 parts could be written');
+    expect(outcome.reason).not.toContain('already written');
+    expect(fake.documents).toHaveLength(0);
+  });
+
+  it('says it in the singular for a chart that named ONE part', async () => {
+    // `reviewChart` allows a one-part chart, so "Not one of the 1 parts could be
+    // written" is reachable — and it is not a sentence anybody wrote on purpose.
+    const fake = rig({
+      chart: answered({ ...CHART, tracks: [CHART.tracks[0]] }),
+      track: () => answered({ events: [] }),
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    expect(outcome).toMatchObject({ ok: false, stopped: 'track-failed' });
+    if (outcome.ok) throw new Error('expected a refusal');
+    expect(outcome.reason).toContain('The one part this arrangement names could not be written');
+    expect(outcome.reason).not.toContain('the 1 parts');
+    expect(fake.documents).toHaveLength(0);
+  });
+
+  it('still refuses a part that came back empty, which the pipeline would commit', async () => {
+    // A track with no notes survives validation and commits as a pattern with
+    // nothing in it — `reviewTrack` is what stops that, and the retry does not
+    // soften it: an empty second answer is still an empty part.
+    const fake = rig({
+      track: (run) => (run === 2 || run === 3 ? answered({ events: [] }) : answered({ events: EVENTS })),
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    expect(outcome.value.missing.map((part) => part.name)).toEqual(['Rhythm Guitar']);
+    expect(fake.documents[0].tracks).toHaveLength(2);
+  });
+
+  it('keeps a one-part chart importing as it always did', async () => {
+    // ⚠ THE FLOOR IS ABOUT PARTS THAT WERE LOST, not about the count on its own.
+    // A chart that named one part and wrote it never lost anything, and the
+    // mapper's `single-pattern` is the honest answer to it.
+    const fake = rig({
+      chart: answered({ ...CHART, tracks: [CHART.tracks[0]] }),
+      imported: {
+        ok: true,
+        value: { patternIds: ['pat-1'], compositionId: null, topology: 'single-pattern', warnings: [] },
+      },
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error('expected a finished job');
+    expect(outcome.value.missing).toEqual([]);
   });
 });
 
@@ -657,6 +942,37 @@ describe('cancellation', () => {
     expect(fake.agents).toEqual(['arrangement-chart', 'ir-track']);
     expect(fake.documents).toHaveLength(0);
     expect(types(seen.events)).not.toContain('import.started');
+  });
+
+  it('reports a cancel during the RETRY as a cancel, not as a part that stayed bad', async () => {
+    // ⚠ THE SECOND ATTEMPT IS WHERE A STOP NOW LANDS MOST OFTEN — it is the run
+    // a user waiting on a slow job is most likely to give up during. Without the
+    // check between the retry and the next part, the aborted answer is read as
+    // "refused again" and the part is filed as one the model could not write.
+    const controller = new AbortController();
+    const fake = rig({
+      // Run 2 is the second part's first attempt, run 3 its retry.
+      track: (run) =>
+        run === 2
+          ? answered({ events: [{ atTick: 0.5, durationTicks: PPQ, notes: [{ string: 0, fret: 3 }] }] })
+          : answered({ events: EVENTS }),
+      afterRun: (agent, count) => {
+        if (agent === 'ir-track' && count === 3) controller.abort();
+      },
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', {
+      deps: fake.deps,
+      signal: controller.signal,
+    });
+
+    expect(outcome).toMatchObject({ ok: false, stopped: 'cancelled' });
+    if (outcome.ok) throw new Error('expected a refusal');
+    expect(outcome.reason).toContain('a second time');
+    expect(outcome.reason).toContain('Rhythm Guitar');
+    // Chart, part 1, part 2, part 2 again — and the third part never started.
+    expect(fake.agents).toHaveLength(4);
+    expect(fake.documents).toHaveLength(0);
   });
 
   it('emits only job.finished when the signal was already aborted', async () => {
@@ -1009,8 +1325,11 @@ describe('the transcript', () => {
   it('keeps the sections of a job that stopped half way', async () => {
     // The whole reason the log is written live rather than assembled at the
     // end: the job that failed is the one somebody wants the log of.
+    // Two of the three parts dead — a `'run'` failure, which is never retried —
+    // so one survives, which is under the floor and refuses the whole job.
     const fake = rig({
-      track: (index) => (index === 2 ? dead('The endpoint is unreachable.') : answered({ events: EVENTS })),
+      track: (run) =>
+        run === 1 ? answered({ events: EVENTS }) : dead('The endpoint is unreachable.'),
     });
     const seen = progress();
 
@@ -1021,7 +1340,7 @@ describe('the transcript', () => {
 
     if (outcome.ok) throw new Error('expected a refusal');
     const job = getTranscript(jobIdFrom(seen.events));
-    expect(job?.runs).toHaveLength(3);
+    expect(job?.runs).toHaveLength(4);
     expect(job?.finishedAt).toBeDefined();
     expect(job?.outcome).toMatchObject({ stoppedReason: 'track-failed' });
   });

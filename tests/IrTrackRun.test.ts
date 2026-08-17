@@ -23,12 +23,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   IR_TRACK_AGENT,
+  STRUM_SPANS,
   TICKS_PER_BAR,
   asTrackEvents,
+  expandStrums,
   irTrackSchema,
   reviewTrack,
   runIRTrack,
   trackRunInput,
+  type IRAnswerEvent,
   type IREvent,
   type TrackBrief,
   type TrackRunDeps,
@@ -79,6 +82,51 @@ const bassBrief = (overrides: Partial<TrackBrief> = {}): TrackBrief => ({
  *  note. */
 const oneBar = (overrides: Partial<TrackBrief> = {}): TrackBrief =>
   bassBrief({ bars: 1, chords: [{ bar: 1, symbol: 'C7' }], ...overrides });
+
+/** The same bar on a guitar — the neck the 2026-08-16 run got wrong, and the only
+ *  one in the catalog whose C7 shape leaves a string unused. */
+const guitarBar = (overrides: Partial<TrackBrief> = {}): TrackBrief =>
+  oneBar({
+    id: 'rhythm',
+    name: 'Rhythm',
+    instrumentId: 'guitar',
+    role: 'comping, off the beat',
+    ...overrides,
+  });
+
+/** The WHOLE twelve-bar on a guitar — the brief the 2026-08-16 'Guitar 2' was
+ *  given, and the only fixture with more than one chord on the neck that failed,
+ *  which is what a stale shape needs to be findable at all. */
+const guitarBlues = (overrides: Partial<TrackBrief> = {}): TrackBrief =>
+  bassBrief({
+    id: 'rhythm',
+    name: 'Guitar 2',
+    instrumentId: 'guitar',
+    role: 'comping, off the beat',
+    ...overrides,
+  });
+
+/**
+ * A chord's shape on a neck, ASKED OF THE SEAM and sorted the way the strum
+ * spans count. Every expectation below is built out of this rather than out of
+ * frets written here: a hardcoded grip is a grip that goes stale the day the lib
+ * revoices anything, and then the tests pass while the app is wrong.
+ */
+interface Cell {
+  readonly stringIndex: number;
+  readonly fret: number;
+}
+
+const shapeOf = (symbol: string, instrumentId: string): readonly Cell[] => {
+  const grip = chordGrip(symbol, instrumentId);
+  if (!grip.ok) throw new Error(grip.reason);
+  return [...grip.value.cells].sort((a, b) => a.stringIndex - b.stringIndex);
+};
+
+/** The shape as the model would have had to type it out — which is the thing this
+ *  card exists to stop it doing. */
+const asNotes = (cells: readonly Cell[]) =>
+  cells.map((cell) => ({ string: cell.stringIndex, fret: cell.fret }));
 
 /** A walkable bar: four quarter notes, none of them overlapping. */
 const fourOnTheFloor = (): readonly IREvent[] =>
@@ -192,19 +240,32 @@ describe('the schema is the neck it was built for', () => {
     expect(fretOf('guitar')).toBeLessThan(MAX_FRET);
   });
 
-  it('requires everything but the dynamic', () => {
+  it('requires the time and nothing else, because what sounds has two shapes', () => {
     const event = irTrackSchema('guitar').properties?.events.items;
 
-    expect(event?.required).toEqual(['atTick', 'durationTicks', 'notes']);
+    // `notes` OR `strum`, and this dialect has no `oneOf` to say so — the grammar
+    // can only require what every entry carries. `reviewTrack` refuses an entry
+    // with neither, in a sentence a model can act on.
+    expect(event?.required).toEqual(['atTick', 'durationTicks']);
     expect(Object.keys(event?.properties ?? {})).toEqual([
       'atTick',
       'durationTicks',
       'notes',
+      'strum',
       'dynamic',
     ]);
     // A field the model spends tokens on that reaches nothing is worse than no
     // field: bends, slides and harmonics are not offered.
     expect(event?.additionalProperties).toBe(false);
+  });
+
+  it('offers the strum as a closed list, so the model cannot invent a span', () => {
+    const strum = irTrackSchema('guitar').properties?.events.items?.properties?.strum;
+
+    expect(strum?.enum).toEqual([...STRUM_SPANS]);
+    // The whole point of the field: it carries no string and no fret, so there is
+    // nothing in it to copy wrong.
+    expect(strum?.type).toBe('string');
   });
 
   it('hands back the SAME object for one instrument', () => {
@@ -316,6 +377,52 @@ describe('the brief is voiced for THIS neck', () => {
     // an instrument this module explicitly supports.
     expect(brief(oneBar({ instrumentId: 'ukulele' }))).toContain('counts from the BOTTOM string');
     expect(brief(oneBar({ instrumentId: 'ukulele' }))).not.toContain('from the LOWEST string');
+  });
+});
+
+describe('the brief tells the model to ask for a chord rather than copy one', () => {
+  it('names the strum, every span it can ask for, and forbids the copy', () => {
+    const text = brief(guitarBar());
+
+    expect(text).toContain('"strum"');
+    for (const span of STRUM_SPANS) expect(text).toContain(`"${span}"`);
+    // The 2026-08-16 failure was a copied shape, so the brief says so in the
+    // imperative rather than leaving the strum as an option among equals.
+    expect(text).toContain('Never write a shape');
+    expect(text).toContain('refused if they are not it');
+    // ...and only about the strings the shape uses, which is all the check can
+    // know: a promise the code does not keep is a rule the model avoids legal
+    // writing to obey.
+    expect(text).toContain('on the strings that shape uses');
+  });
+
+  it('says how long a strum occupies its strings, which the model cannot see', () => {
+    // ⚠ THE ONE RULE THE FEATURE HIDES THE INPUTS TO. A strum's strings are never
+    // shown to the model, so it cannot work out that a chord left ringing under a
+    // second attack is two notes on one string — and the overlap walk refuses that
+    // pair, with no retry, for a figure a guitarist plays every day.
+    const text = brief(guitarBar());
+
+    expect(text).toContain('A strum holds every string it hits for the whole of its');
+    expect(text).toContain('starts at or after this one ends');
+  });
+
+  it('still hands over the shape, because the notes in it are the material', () => {
+    // The strum does not replace the grip in the brief: `notes` is still how a
+    // line is written, and the line is built out of these tones.
+    const text = brief(guitarBar());
+
+    for (const cell of shapeOf('C7', 'guitar')) {
+      expect(text).toContain(`string ${cell.stringIndex}, fret ${cell.fret}`);
+    }
+    // Printed ASCENDING BY STRING, the order `shapeOf` sorts into and the order
+    // the spans count in — the brief tells the model that "lowest-numbered" is
+    // nearest string 0, and a shape printed in some other order would make that
+    // sentence and the strum it describes disagree.
+    const block = shapeOf('C7', 'guitar')
+      .map((cell) => `    string ${cell.stringIndex}, fret ${cell.fret}`)
+      .join('\n');
+    expect(text).toContain(block);
   });
 });
 
@@ -586,6 +693,9 @@ describe('what the import pipeline would swallow, refused here', () => {
   });
 
   it('allows two notes at one tick on DIFFERENT strings', () => {
+    // TWO, as the name says: a double-stop carries no harmony of its own and the
+    // chord check below never looks at it. Three would be a chord and is judged
+    // as one — 'a typed chord is checked against the shape' has that.
     expect(
       reviewTrack(
         [
@@ -595,7 +705,6 @@ describe('what the import pipeline would swallow, refused here', () => {
             notes: [
               { string: 0, fret: 3 },
               { string: 1, fret: 2 },
-              { string: 2, fret: 3 },
             ],
           },
         ],
@@ -681,6 +790,509 @@ describe('what the import pipeline would swallow, refused here', () => {
   });
 });
 
+// ------------------------------------------------------------------ strum ---
+
+/**
+ * ⚠ THE DEFECT THIS SECTION IS ABOUT is the 2026-08-16 run: the C7 shape was
+ * handed over in full and the guitar retyped it right 8 times out of 24. The fix
+ * is that it never types it — it says WHEN, HOW LONG and HOW MUCH OF IT, and the
+ * cells come from the grip this module already looked up.
+ */
+describe('a chord the model does not have to transcribe', () => {
+  it('fills a strum in from the shape, at the tick and length it asked for', () => {
+    const filled = expandStrums(
+      [{ atTick: BEAT, durationTicks: BEAT * 2, strum: 'all', dynamic: 'ff' }],
+      guitarBar(),
+    );
+
+    expect(filled.refusals).toEqual([]);
+    expect(filled.events).toEqual([
+      {
+        atTick: BEAT,
+        durationTicks: BEAT * 2,
+        dynamic: 'ff',
+        notes: asNotes(shapeOf('C7', 'guitar')),
+      },
+    ]);
+  });
+
+  it('derives WHICH chord from the tick, so the model never names one', () => {
+    // Bar 5 of the twelve-bar is F7 and bar 1 is C7. The brief already carries
+    // both and the tick each arrives at; asking the model to say which one it is
+    // playing is one more fact to restate and get wrong.
+    const filled = expandStrums(
+      [
+        { atTick: 0, durationTicks: BEAT, strum: 'all' },
+        { atTick: TICKS_PER_BAR * 4, durationTicks: BEAT, strum: 'all' },
+      ],
+      bassBrief(),
+    );
+
+    expect(filled.events[0].notes).toEqual(asNotes(shapeOf('C7', 'bass')));
+    expect(filled.events[1].notes).toEqual(asNotes(shapeOf('F7', 'bass')));
+    expect(filled.events[0].notes).not.toEqual(filled.events[1].notes);
+  });
+
+  it('holds a chord until the next one arrives, mid-bar included', () => {
+    // A chord holds; the strum lands on the last eighth of bar 6, which is still
+    // the F7 that arrived at bar 5.
+    const filled = expandStrums(
+      [{ atTick: TICKS_PER_BAR * 6 - BEAT / 2, durationTicks: BEAT / 2, strum: 'all' }],
+      bassBrief(),
+    );
+
+    expect(filled.events[0].notes).toEqual(asNotes(shapeOf('F7', 'bass')));
+  });
+
+  it('takes only the part of the shape a partial strum asked for — every span', () => {
+    // A comping part does not hit every string every time, which is the whole
+    // reason this is a span and not a boolean.
+    //
+    // ⚠ DRIVEN OFF `STRUM_SPANS`, so a span added without an expectation here is a
+    // TYPE error rather than a span nothing checks: the record below is total over
+    // the union. Each slice is stated independently of the module's own table —
+    // the test says what a span MEANS, the module says how it is computed.
+    const expected: Record<(typeof STRUM_SPANS)[number], (cells: readonly Cell[]) => readonly Cell[]> =
+      {
+        all: (cells) => cells,
+        'bottom-2': (cells) => cells.slice(0, 2),
+        'bottom-3': (cells) => cells.slice(0, 3),
+        'top-2': (cells) => cells.slice(cells.length - 2),
+        'top-3': (cells) => cells.slice(cells.length - 3),
+      };
+    const shape = shapeOf('C7', 'guitar');
+    // ...and the five really are five different answers on this shape, or a span
+    // that quietly strummed everything would satisfy the loop below.
+    expect(shape).toHaveLength(5);
+
+    const seen = new Set<string>();
+    for (const span of STRUM_SPANS) {
+      const filled = expandStrums([{ atTick: 0, durationTicks: BEAT, strum: span }], guitarBar());
+
+      expect(filled.refusals).toEqual([]);
+      expect(filled.events[0].notes).toEqual(asNotes(expected[span](shape)));
+      seen.add(JSON.stringify(filled.events[0].notes));
+    }
+    expect(seen.size).toBe(STRUM_SPANS.length);
+  });
+
+  it('fills the chord in for an entry that left an empty `notes` behind', () => {
+    // `notes` is still an advertised property, so an entry that asked for the
+    // chord and emitted `"notes": []` said ONE thing. Refusing it for saying two
+    // would cost the whole part over an empty array, and there is no retry.
+    const filled = expandStrums(
+      [{ atTick: 0, durationTicks: BEAT, strum: 'all', notes: [] }],
+      guitarBar(),
+    );
+
+    expect(filled.refusals).toEqual([]);
+    expect(filled.events[0].notes).toEqual(asNotes(shapeOf('C7', 'guitar')));
+  });
+
+  it('leaves a written line exactly as it was written', () => {
+    const line = fourOnTheFloor();
+
+    expect(expandStrums(line, oneBar()).events).toEqual(line);
+  });
+
+  it('is caught by the EXISTING overlap check when it lands on a ringing string', () => {
+    // ⚠ THE POINT OF EXPANDING BEFORE THE REVIEW. A filled-in chord is subject to
+    // every check the model's own notes are — there is no second path into the
+    // document that skips them.
+    const shape = shapeOf('C7', 'guitar');
+    const held = shape[1];
+    const answer: IRAnswerEvent[] = [
+      {
+        atTick: 0,
+        durationTicks: BEAT * 2,
+        notes: [{ string: held.stringIndex, fret: held.fret }],
+      },
+      { atTick: BEAT, durationTicks: BEAT, strum: 'all' },
+    ];
+
+    const filled = expandStrums(answer, guitarBar());
+    const said = reviewTrack(filled.events, guitarBar());
+
+    expect(filled.refusals).toEqual([]);
+    expect(said).toHaveLength(1);
+    expect(said[0].label).toBe(`event 2 (tick ${BEAT})`);
+    expect(said[0].reason).toContain(`string ${held.stringIndex}`);
+    expect(said[0].reason).toContain('one note at a time');
+  });
+
+  it('refuses an entry that both asks for the chord and types its own notes', () => {
+    // Nothing else can see this one: after expansion it is just an event with
+    // notes on it, and both readings sound different.
+    const filled = expandStrums(
+      [{ atTick: 0, durationTicks: BEAT, strum: 'all', notes: [{ string: 0, fret: 3 }] }],
+      guitarBar(),
+    );
+
+    expect(filled.refusals).toHaveLength(1);
+    expect(filled.refusals[0].label).toBe('event 1 (tick 0)');
+    expect(filled.refusals[0].reason).toContain('both');
+    // What it typed is kept, so the rest of the review still speaks about it.
+    expect(filled.events[0].notes).toEqual([{ string: 0, fret: 3 }]);
+  });
+
+  it('leaves an entry with neither to the review, which already names it', () => {
+    const filled = expandStrums([{ atTick: 0, durationTicks: BEAT }], guitarBar());
+
+    expect(filled.refusals).toEqual([]);
+    expect(filled.events[0].notes).toEqual([]);
+    expect(reviewed(filled.events, guitarBar())).toContain('no notes');
+  });
+
+  it('numbers the events where the model wrote them', () => {
+    // Expansion is 1:1 and in order, so `event 3` in a refusal is the third entry
+    // of the answer. An expansion that dropped or merged entries would renumber
+    // every refusal after it.
+    const filled = expandStrums(
+      [
+        { atTick: 0, durationTicks: BEAT, strum: 'all' },
+        { atTick: BEAT, durationTicks: BEAT, strum: 'top-2' },
+        { atTick: BEAT * 2, durationTicks: 0.5, strum: 'all' },
+      ],
+      guitarBar(),
+    );
+
+    expect(filled.events).toHaveLength(3);
+    expect(reviewTrack(filled.events, guitarBar())[0].label).toBe(`event 3 (tick ${BEAT * 2})`);
+  });
+});
+
+// ----------------------------------------------------- the chord it did type ---
+
+describe('a typed chord is checked against the shape', () => {
+  /** The shape written out by hand — the 8 events of the run that were right. */
+  const typed = (cells: readonly { stringIndex: number; fret: number }[]): IREvent[] => [
+    { atTick: 0, durationTicks: BEAT, notes: asNotes(cells) },
+  ];
+
+  it('THE REGRESSION: refuses the 2026-08-16 voicing, every string shifted down one', () => {
+    // The exact failure. The brief was right, the shape was handed over in full,
+    // and a third of the section came back with the same frets on the wrong
+    // strings — which sounds G-D-F-C-D instead of C-G-Bb-E-G.
+    const shape = shapeOf('C7', 'guitar');
+    // The shift has to stay on the neck, or the range check would be what fires.
+    expect(shape[0].stringIndex).toBeGreaterThan(0);
+    const shifted = shape.map((cell) => ({ string: cell.stringIndex - 1, fret: cell.fret }));
+
+    const said = reviewTrack([{ atTick: 0, durationTicks: BEAT, notes: shifted }], guitarBar());
+
+    expect(said).toHaveLength(1);
+    expect(said[0].label).toBe('event 1 (tick 0)');
+    expect(said[0].reason).toContain('C7');
+    // Named, as the range refusals name theirs: every note that moved off the
+    // shape, and the shape it was measured against.
+    const onShape = new Map(shape.map((cell) => [cell.stringIndex, cell.fret]));
+    const moved = shifted.filter(
+      (note) => onShape.has(note.string) && onShape.get(note.string) !== note.fret,
+    );
+    expect(moved.length).toBeGreaterThan(1);
+    for (const note of moved) {
+      expect(said[0].reason).toContain(`string ${note.string} fret ${note.fret}`);
+    }
+    expect(said[0].reason).toContain(`string ${shape[0].stringIndex} fret ${shape[0].fret}`);
+    // And it says what to do instead, which is the only repair there is.
+    expect(said[0].reason).toContain('strum');
+  });
+
+  it('THE REGRESSION: names the chord it actually played, not "a fret or two off"', () => {
+    // ⚠ THE 2026-08-16 'Guitar 2' FAILURE, byte for byte. Its first event was six
+    // notes, strings 0..5 at frets 1,3,1,2,1,1 — the F7 barre — at bar 1, where
+    // the chart said C7. It had copied the wrong line out of its own brief.
+    //
+    // The check caught it and said the wrong thing: TWO of those six sit within
+    // `SLIP_FRETS` of C7's shape, so the slip branch claimed the event and
+    // reported "two notes are a fret or two off" about a stack that was a
+    // different chord entirely — while the stale branch, the one that could have
+    // named F7, was computed only where the slip branch had NOT fired.
+    const wrong = asNotes(shapeOf('F7', 'guitar'));
+    // Pinned as the literal event, so a revoicing in the lib says "this fixture
+    // is no longer the historical failure" rather than quietly testing something
+    // else under the same name.
+    expect(wrong).toEqual([
+      { string: 0, fret: 1 },
+      { string: 1, fret: 3 },
+      { string: 2, fret: 1 },
+      { string: 3, fret: 2 },
+      { string: 4, fret: 1 },
+      { string: 5, fret: 1 },
+    ]);
+
+    const said = reviewTrack(
+      [{ atTick: 0, durationTicks: BEAT, notes: wrong }],
+      guitarBlues(),
+    );
+
+    expect(said).toHaveLength(1);
+    expect(said[0].label).toBe('event 1 (tick 0)');
+    // The diagnosis a model can act on in one go: the chord it played, the bars
+    // that chord belongs to, and the chord that belongs here.
+    expect(said[0].reason).toContain('F7');
+    expect(said[0].reason).toContain('bars 5 and 10');
+    expect(said[0].reason).toContain('C7');
+    expect(said[0].reason).toContain('bar 1');
+    // And NOT the sentence that used to win this race.
+    expect(said[0].reason).not.toContain('a fret or two off');
+    expect(said[0].reason).toContain('strum');
+  });
+
+  it('names the other chord off a SUBSET of it, and claims no more than that', () => {
+    // ⚠ THE PREDICATE IS A SUBSET, NOT AN IDENTITY: three notes that are three
+    // cells of a six-cell barre satisfy it. The diagnosis is still the useful one
+    // — those cells are that chord's and not this one's — but the sentence must
+    // not say the stack IS the whole shape, which it has not checked.
+    const three = asNotes(shapeOf('F7', 'guitar').slice(0, 3));
+    const said = reviewTrack([{ atTick: 0, durationTicks: BEAT, notes: three }], guitarBlues());
+
+    expect(said).toHaveLength(1);
+    expect(said[0].reason).toContain('every one of them is a cell of the F7 shape');
+    expect(said[0].reason).not.toContain('they are the shape of F7');
+  });
+
+  it('does not call a voicing stale over ONE cell it shares with another chord', () => {
+    // ⚠ WHAT THE `every` IN THE STALE PREDICATE IS FOR, and the only assertion
+    // that would notice it loosening to `some`. The stale shape is now looked for
+    // FIRST and unconditionally, so the way it can newly cost music is by
+    // claiming a legitimate voicing that merely OVERLAPS another chord of the
+    // progression — and overlap is ordinary: two chords a fourth apart share
+    // cells. This is C7 with one note borrowed off F7's shape, which is the
+    // tolerated colour note the case above allows, and it must stay allowed.
+    const c7 = shapeOf('C7', 'guitar');
+    const f7 = shapeOf('F7', 'guitar');
+    const borrowed = f7.find((cell) =>
+      c7.some((own) => own.stringIndex === cell.stringIndex && own.fret !== cell.fret),
+    );
+    if (borrowed === undefined) throw new Error('expected F7 and C7 to share a string');
+
+    const notes = asNotes(c7).map((note) =>
+      note.string === borrowed.stringIndex ? { string: note.string, fret: borrowed.fret } : note,
+    );
+    // It OVERLAPS F7 without being it — a stack that is F7 cell for cell is the
+    // regression above, and this one has to stay on the other side of that line.
+    const shared = notes.filter((note) =>
+      f7.some((cell) => cell.stringIndex === note.string && cell.fret === note.fret),
+    );
+    expect(shared.length).toBeGreaterThan(0);
+    expect(shared.length).toBeLessThan(notes.length);
+    expect(notes.length).toBeGreaterThanOrEqual(3);
+
+    expect(reviewTrack([{ atTick: 0, durationTicks: BEAT, notes }], guitarBlues())).toEqual([]);
+  });
+
+  it('allows the shape typed out correctly, which is the other two thirds', () => {
+    expect(reviewTrack(typed(shapeOf('C7', 'guitar')), guitarBar())).toEqual([]);
+  });
+
+  it('allows the shape an octave up on the same string', () => {
+    // The one piece of fret arithmetic the brief sanctions: twelve frets up the
+    // same string is the same tone. Only the cells that still fit the neck.
+    const shape = shapeOf('C7', 'guitar')
+      .map((cell) => ({ stringIndex: cell.stringIndex, fret: cell.fret + 12 }))
+      .filter((cell) => cell.fret <= instrumentFretCount('guitar'));
+
+    expect(shape.length).toBeGreaterThanOrEqual(3);
+    expect(reviewTrack(typed(shape), guitarBar())).toEqual([]);
+  });
+
+  it('allows ONE note off the shape as colour', () => {
+    // The tolerance, pinned: a comper adds a tone the preferred voicing left out,
+    // and the run has no retry — refusing real music costs more than passing an
+    // odd voicing.
+    const shape = shapeOf('C7', 'guitar');
+    const coloured = asNotes(shape).map((note, index) =>
+      index === 0 ? { string: note.string, fret: note.fret + 1 } : note,
+    );
+
+    expect(reviewTrack([{ atTick: 0, durationTicks: BEAT, notes: coloured }], guitarBar())).toEqual(
+      [],
+    );
+    // ⚠ AND AGAINST A BRIEF WITH MORE THAN ONE CHORD ON IT, which is the only
+    // kind where the stale branch can fire at all: `guitarBar` has ONE chord, so
+    // `other.symbol !== shape.symbol` is never true and this case would pass with
+    // the stale check deleted. Since the stale shape is now looked for FIRST and
+    // unconditionally, over-refusing a legitimate voicing is exactly what it
+    // risks, and this is the assertion that would notice.
+    expect(
+      reviewTrack([{ atTick: 0, durationTicks: BEAT, notes: coloured }], guitarBlues()),
+    ).toEqual([]);
+  });
+
+  it('does not treat a two-note double-stop as a chord', () => {
+    // Two notes carry no harmony of their own — a tenth, a sixth, a root and
+    // fifth are ordinary line writing. Both of these are off the shape.
+    const shape = shapeOf('C7', 'guitar');
+    const doubleStop = [
+      { string: shape[0].stringIndex, fret: shape[0].fret + 1 },
+      { string: shape[1].stringIndex, fret: shape[1].fret + 1 },
+    ];
+
+    expect(reviewTrack([{ atTick: 0, durationTicks: BEAT, notes: doubleStop }], guitarBar())).toEqual(
+      [],
+    );
+  });
+
+  it('does not refuse a walking bass line of passing notes', () => {
+    // ⚠ THE THING THE CHECK MUST NOT DO. A walk is mostly notes that are not in
+    // the chord, and every one of them is a single note — the check never looks.
+    const walk: IREvent[] = Array.from({ length: 16 }, (_, step) => ({
+      atTick: step * BEAT,
+      durationTicks: BEAT,
+      notes: [{ string: step % 2, fret: 1 + (step % 12) }],
+    }));
+
+    expect(reviewTrack(walk, bassBrief())).toEqual([]);
+  });
+
+  it('does not let a THREE-note mis-copy through, which pins the threshold', () => {
+    // The threshold from above: at four, this stack would pass and only the
+    // five-note ones below would be refused. Every fret one off the shape, on
+    // three strings the shape uses.
+    const shape = shapeOf('C7', 'guitar');
+    const misread = shape
+      .slice(0, 3)
+      .map((cell) => ({ string: cell.stringIndex, fret: cell.fret + 1 }));
+    const said = reviewTrack([{ atTick: 0, durationTicks: BEAT, notes: misread }], guitarBar());
+
+    expect(said).toHaveLength(1);
+    expect(said[0].reason).toContain('C7');
+  });
+
+  it('allows a voicing taken somewhere else on the neck entirely', () => {
+    // ⚠ WHAT THE SLIP BOUND IS FOR. `chordGrip` returns ONE voicing, so "not this
+    // fret" is not "not this chord": a stack four frets away is a position this
+    // module was never told about, and refusing it would cost the whole piece for
+    // a chord that may well be right. One fret further than the bound, so raising
+    // the bound to reach it fails here.
+    const shape = shapeOf('C7', 'guitar');
+    const elsewhere = shape
+      .slice(0, 3)
+      .map((cell) => ({ string: cell.stringIndex, fret: cell.fret + 4 }));
+
+    expect(elsewhere.every((note) => note.fret <= instrumentFretCount('guitar'))).toBe(true);
+    expect(reviewTrack([{ atTick: 0, durationTicks: BEAT, notes: elsewhere }], guitarBar())).toEqual(
+      [],
+    );
+    // Against the whole progression too, for the reason given above: with F7 and
+    // G7 also on the sheet, the stale branch is live and this voicing is the
+    // shape of none of them.
+    expect(
+      reviewTrack([{ atTick: 0, durationTicks: BEAT, notes: elsewhere }], guitarBlues()),
+    ).toEqual([]);
+  });
+
+  it('says nothing about notes on strings the shape does not use', () => {
+    // ⚠ A LIMIT, NOT A CHOICE. `chordGrip` hands back cells and tone NAMES and no
+    // tuning — deliberately — so nothing on this side of the seam can say what
+    // pitch an arbitrary string and fret is. On a string the shape does not use,
+    // a chord tone and a wrong note are indistinguishable here, so neither is
+    // counted. The 2026-08-16 voicing is caught by the four strings it MOVED.
+    //
+    // ⚠ THE STACK IS FIVE NOTES AND ONE OF THEM IS ALREADY THE TOLERATED ONE, so
+    // that counting the stranger too would tip it over: three cells typed right,
+    // one a fret off as colour, and the stranger. A check that judged an off-shape
+    // string would refuse this, which is the whole claim.
+    const shape = shapeOf('C7', 'guitar');
+    const unused = [0, 1, 2, 3, 4, 5].filter(
+      (index) => !shape.some((cell) => cell.stringIndex === index),
+    );
+
+    expect(unused).not.toHaveLength(0);
+    const withStranger = [
+      ...asNotes(shape.slice(1, 4)),
+      { string: shape[0].stringIndex, fret: shape[0].fret + 1 },
+      { string: unused[0], fret: 7 },
+    ];
+    expect(withStranger).toHaveLength(5);
+    expect(
+      reviewTrack([{ atTick: 0, durationTicks: BEAT, notes: withStranger }], guitarBar()),
+    ).toEqual([]);
+  });
+
+  it('measures the chord on the notes that survived, not on the ones it threw out', () => {
+    // The `playable` filter, pinned: a note refused for its fret is a note whose
+    // fret is not yet known, so it can be neither on nor off the shape — and
+    // counting it would tip this stack past the tolerance and put two accounts of
+    // one mistake in a capped sentence.
+    const shape = shapeOf('C7', 'guitar');
+    const said = reviewTrack(
+      [
+        {
+          atTick: 0,
+          durationTicks: BEAT,
+          notes: [
+            ...asNotes(shape.slice(1, 3)),
+            { string: shape[0].stringIndex, fret: shape[0].fret + 1 },
+            { string: shape[3].stringIndex, fret: shape[3].fret + 0.5 },
+          ],
+        },
+      ],
+      guitarBar(),
+    );
+
+    expect(said).toHaveLength(1);
+    expect(said[0].reason).toContain(`fret ${shape[3].fret + 0.5}`);
+  });
+
+  it('says nothing about notes it has already refused for being off the neck', () => {
+    // A note refused for its string is a note whose string is not yet known, so it
+    // can be neither on nor off the shape — two accounts of one mistake is what
+    // the capped refusal sentence cannot afford.
+    const shape = shapeOf('C7', 'guitar');
+    const said = reviewTrack(
+      [
+        {
+          atTick: 0,
+          durationTicks: BEAT,
+          notes: [...asNotes(shape).slice(0, 2), { string: 9, fret: 3 }],
+        },
+      ],
+      guitarBar(),
+    );
+
+    expect(said).toHaveLength(1);
+    expect(said[0].reason).toContain('string 9');
+  });
+
+  it('judges each event on the chord in force at ITS tick, and names the stale one', () => {
+    // The same frets are C7's shape in bar 1 and the chord from the bar before in
+    // bar 5, which is what a copied shape looks like after a change. It is far
+    // enough from F7's own shape that the slip bound says nothing about it — the
+    // ONE thing that can still be said is that it is, cell for cell, another chord
+    // of this same progression, and that is what the refusal says.
+    const shape = shapeOf('C7', 'bass');
+    const said = reviewTrack(
+      [
+        { atTick: 0, durationTicks: BEAT, notes: asNotes(shape) },
+        { atTick: TICKS_PER_BAR * 4, durationTicks: BEAT, notes: asNotes(shape) },
+      ],
+      bassBrief(),
+    );
+
+    expect(said).toHaveLength(1);
+    expect(said[0].label).toBe(`event 2 (tick ${TICKS_PER_BAR * 4})`);
+    // Both chords by name — the one that should be sounding and the one that is.
+    expect(said[0].reason).toContain('F7');
+    expect(said[0].reason).toContain('C7');
+    expect(said[0].reason).toContain('strum');
+  });
+
+  it('does not call a stack stale for a chord that is not in this progression', () => {
+    // The stale half is not a general "is this some chord" check, and it cannot
+    // be: it is only ever the shapes this brief looked up. An E7 grip over C7 is
+    // far from C7's shape and belongs to no bar of this form, so nothing here can
+    // say what it is — which is the honest answer and not a pass by accident.
+    const said = reviewTrack(
+      [{ atTick: 0, durationTicks: BEAT, notes: asNotes(shapeOf('E7', 'bass')) }],
+      bassBrief({ chords: [{ bar: 1, symbol: 'C7' }] }),
+    );
+
+    expect(said).toEqual([]);
+  });
+});
+
 // -------------------------------------------------------------- narrowing ---
 
 describe('what comes back is narrowed before it is judged', () => {
@@ -725,6 +1337,30 @@ describe('what comes back is narrowed before it is judged', () => {
     });
 
     expect(events).toEqual([{ atTick: 0, durationTicks: BEAT, notes: [{ string: 0, fret: 3 }] }]);
+  });
+
+  it('reads an entry that asks for the chord instead of writing the notes', () => {
+    expect(
+      asTrackEvents({ events: [{ atTick: 0, durationTicks: BEAT, strum: 'top-3' }] }),
+    ).toEqual([{ atTick: 0, durationTicks: BEAT, strum: 'top-3' }]);
+  });
+
+  it('loses the reply to a strum span that is not one of the five', () => {
+    // Unlike `dynamic`, which is dropped: a strum is the CONTENT of the attack,
+    // and a dropped one is an event with nothing on it — silence where a chord
+    // was meant to be, in a document whose other tracks were written around it.
+    expect(STRUM_SPANS).not.toContain('down');
+    expect(
+      asTrackEvents({ events: [{ atTick: 0, durationTicks: BEAT, strum: 'down' }] }),
+    ).toBeNull();
+  });
+
+  it('reads an entry with neither, and leaves the refusal to the review', () => {
+    // Type-readable, and refused by name a step later — a grammar error is not a
+    // sentence a model can act on.
+    expect(asTrackEvents({ events: [{ atTick: 0, durationTicks: BEAT }] })).toEqual([
+      { atTick: 0, durationTicks: BEAT },
+    ]);
   });
 
   it('keeps a dynamic and drops one that is not a string', () => {
@@ -786,6 +1422,52 @@ describe('a run that answered with a part', () => {
     });
     expect(track.value.events.map((event) => event.atTick)).toEqual([0, 480, 960, 1440]);
     expect(track.value.events.every((event) => event.durationTicks === 480)).toBe(true);
+  });
+
+  it('hands back a comping part with the shapes already filled in', async () => {
+    // End to end: what the model wrote carries no string and no fret at all, and
+    // the track that reaches the seam is the grip for the chord in force at each
+    // tick. This is the whole card in one assertion.
+    const answer = [
+      { atTick: 0, durationTicks: BEAT, strum: 'bottom-2', dynamic: 'mf' },
+      { atTick: BEAT, durationTicks: BEAT, strum: 'top-3' },
+      { atTick: TICKS_PER_BAR * 4, durationTicks: BEAT, strum: 'all' },
+    ];
+    const track = await runIRTrack(guitarBar({ bars: 12, chords: bassBrief().chords }), {
+      deps: rig(answered({ events: answer })).deps,
+    });
+
+    if (!track.ok) throw new Error(track.reason);
+    const c7 = shapeOf('C7', 'guitar');
+    expect(track.value.events.map((event) => event.notes)).toEqual([
+      asNotes(c7.slice(0, 2)),
+      asNotes(c7.slice(-3)),
+      asNotes(shapeOf('F7', 'guitar')),
+    ]);
+    expect(track.value.events[0].dynamic).toBe('mf');
+    expect(track.value.instrumentHint).toBe('guitar');
+  });
+
+  it('reviews the filled-in chord too, because the RUN expands before it judges', async () => {
+    // ⚠ THE ORDER INSIDE `runIRTrack`, asserted through the run itself rather than
+    // by composing the two functions by hand: review first and a strum would reach
+    // the document unjudged, with the collision below committed in silence.
+    const held = shapeOf('C7', 'guitar')[1];
+    const answer = [
+      {
+        atTick: 0,
+        durationTicks: BEAT * 2,
+        notes: [{ string: held.stringIndex, fret: held.fret }],
+      },
+      { atTick: BEAT, durationTicks: BEAT, strum: 'all' },
+    ];
+    const track = await runIRTrack(guitarBar(), { deps: rig(answered({ events: answer })).deps });
+
+    expect(track.ok).toBe(false);
+    if (track.ok) return;
+    expect(track.reason).toContain(`string ${held.stringIndex}`);
+    expect(track.reason).toContain('one note at a time');
+    expect(track.reason).toContain(`event 2 (tick ${BEAT})`);
   });
 
   it('sends the brief and the neck’s own schema, and no tools', async () => {
@@ -863,6 +1545,94 @@ describe('a run that answered with a part', () => {
   });
 });
 
+// -------------------------------------------------------- the second attempt ---
+
+describe('a second attempt carries the refusal and changes nothing else', () => {
+  /** A refusal in the shape `reviewTrack` writes them — the sentence the caller
+   *  hands straight back. */
+  const REFUSED = '"Bass" cannot be imported as written. event 1 (tick 0.5): Its atTick is 0.5.';
+
+  const again = (of: TrackBrief, said: string): string => {
+    const built = trackRunInput(of, said);
+    if (!built.ok) throw new Error(`trackRunInput refused: ${built.reason}`);
+    return built.value;
+  };
+
+  it('says nothing about a previous attempt on the first one', () => {
+    expect(brief(oneBar())).not.toContain('Your last answer was refused');
+  });
+
+  it('appends it as its own marked section at the very end', () => {
+    // ⚠ THE MUSICAL PROSE IS UNTOUCHED, and this is the assertion that says so:
+    // the first brief is a PREFIX of the second. Reword one paragraph to
+    // accommodate the feedback and this fails, which is the point — that prose is
+    // a deferred tuning ticket's baseline.
+    const second = again(oneBar(), REFUSED);
+
+    expect(second.startsWith(brief(oneBar()))).toBe(true);
+    expect(second).toContain('Your last answer was refused');
+    expect(second).toContain('Its atTick is 0.5.');
+    // In the model's own words, not re-worded into ours.
+    expect(second).toContain(REFUSED);
+  });
+
+  it('tells it to write the whole part again rather than to patch it', () => {
+    // The brief it is reading is the same brief, not a diff — a model asked to
+    // "fix event 3" answers with event 3.
+    expect(again(oneBar(), REFUSED)).toContain('Write the whole part again');
+  });
+
+  it('points a mis-copied grip at "strum" rather than away from it', () => {
+    // ⚠ THE ONE CLAUSE THE WHOLE RETRY TURNS ON. Every item in that list
+    // describes the strum, so a dropped "not" tells the model that writing
+    // `strum` is the way to get the harmony wrong twice — the opposite of the
+    // instruction, at the last place it reads about it.
+    const second = again(oneBar(), REFUSED);
+
+    expect(second).toContain('not to get the harmony wrong twice in a row');
+    expect(second).not.toContain('is the one way to get the harmony wrong twice in a row');
+  });
+
+  it('restates the bare-object rule, which it otherwise displaces', () => {
+    // The addendum goes AFTER `# Answer`, so on a second attempt the last
+    // paragraph is feedback rather than "the object alone". An answer that came
+    // back as prose is an `'answer'` stop, which the job deliberately does NOT
+    // retry — so a retry that regressed into a sentence would lose the part.
+    const second = again(oneBar(), REFUSED);
+
+    expect(second.trimEnd().endsWith('no fence, no preamble, nothing after it.')).toBe(true);
+  });
+
+  it('adds nothing for a refusal that is blank once trimmed', () => {
+    // A heading with nothing under it is an instruction the model cannot follow.
+    expect(again(oneBar(), '   ')).toBe(brief(oneBar()));
+  });
+
+  it('puts it in the brief the model is actually sent, and not in the options', () => {
+    const run = rig(answered({ events: fourOnTheFloor() }));
+
+    return runIRTrack(oneBar(), { deps: run.deps, previousRefusal: REFUSED }).then(() => {
+      expect(run.calls[0].input).toBe(again(oneBar(), REFUSED));
+      // `previousRefusal` is this module's own parameter and is not part of the
+      // seam's shape — spread through and the harness gets a key it will not read.
+      expect(run.calls[0].options).not.toHaveProperty('previousRefusal');
+    });
+  });
+
+  it('still runs exactly once — a second attempt is the CALLER’s', async () => {
+    // Retrying in here would hide the second model call from the caller that pays
+    // for it and from the transcript that has to show it.
+    const run = rig(
+      answered({ events: [{ atTick: 0.5, durationTicks: BEAT, notes: [{ string: 0, fret: 3 }] }] }),
+    );
+
+    const track = await runIRTrack(oneBar(), { deps: run.deps });
+
+    expect(track.ok).toBe(false);
+    expect(run.calls).toHaveLength(1);
+  });
+});
+
 describe('a run that did not', () => {
   it('passes the seam’s refusal on untouched', async () => {
     const dead: Result<AgentRunSummary> = { ok: false, reason: 'No provider is configured.' };
@@ -871,6 +1641,9 @@ describe('a run that did not', () => {
     expect(track.ok).toBe(false);
     if (track.ok) return;
     expect(track.reason).toBe('No provider is configured.');
+    // ⚠ NOT `'review'`, which is the only stop a caller asks again for. A dead
+    // provider is still dead on a second call.
+    expect(track.stopped).toBe('run');
   });
 
   it('says what a prose answer cost, and names the stop reason', async () => {
@@ -884,6 +1657,7 @@ describe('a run that did not', () => {
     if (track.ok) return;
     expect(track.reason).toContain('answered');
     expect(track.reason).toContain('code fence');
+    expect(track.stopped).toBe('answer');
   });
 
   it('does not blame a run the user stopped for fencing its JSON', async () => {
@@ -901,6 +1675,9 @@ describe('a run that did not', () => {
     expect(track.reason).toContain('aborted');
     expect(track.reason).toContain('before it answered');
     expect(track.reason).not.toContain('code fence');
+    // ⚠ NOT `'review'`. Asking again for a part the user stopped would spend a
+    // model call answering their own click.
+    expect(track.stopped).toBe('answer');
   });
 
   it('refuses the whole part when the review found anything, naming the part', async () => {
@@ -914,6 +1691,9 @@ describe('a run that did not', () => {
     if (track.ok) return;
     expect(track.reason).toContain('"Bass"');
     expect(track.reason).toContain('0.5');
+    // ⚠ THE ONE STOP WORTH ASKING AGAIN ABOUT: the sentence above names the
+    // event and says what is wrong with it, which is what an addendum carries.
+    expect(track.stopped).toBe('review');
   });
 
   it('never reaches the model when the brief could not be built', async () => {
@@ -923,7 +1703,20 @@ describe('a run that did not', () => {
     });
 
     expect(track.ok).toBe(false);
+    if (track.ok) return;
     // A whole run spent finding out that the caller wrote a chord nobody can read.
+    expect(run.calls).toHaveLength(0);
+    // And there is no answer to give feedback on, so nobody asks again.
+    expect(track.stopped).toBe('brief');
+  });
+
+  it('reports a neck this app has not got as a brief failure, before any run', async () => {
+    const run = rig(answered({ events: fourOnTheFloor() }));
+    const track = await runIRTrack(oneBar({ instrumentId: 'trumpet' }), { deps: run.deps });
+
+    expect(track.ok).toBe(false);
+    if (track.ok) return;
+    expect(track.stopped).toBe('brief');
     expect(run.calls).toHaveLength(0);
   });
 });
