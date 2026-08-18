@@ -1,6 +1,6 @@
 import { useEffect, type RefObject } from 'react';
-import { PPQ, getTransportTicks } from '@fretwork/lib';
-import { wrapToDuration } from '../audio/transportClock';
+import { PPQ } from '@fretwork/lib';
+import { audibleTransportTicks, wrapToDuration } from '../audio/transportClock';
 import { tickToPx } from './timelineMath';
 
 /**
@@ -39,8 +39,8 @@ export function useTimelineAutoScroll(
       // The transport climbs forever while looping — the scheduler reschedules
       // at increasing absolute ticks — so wrap it to match what's audible.
       const headTick = loop
-        ? wrapToDuration(getTransportTicks(PPQ), durationTicks)
-        : getTransportTicks(PPQ);
+        ? wrapToDuration(audibleTransportTicks(PPQ), durationTicks)
+        : audibleTransportTicks(PPQ);
 
       const headX = tickToPx(headTick, pxPerBeat);
       const viewLeft = el.scrollLeft;

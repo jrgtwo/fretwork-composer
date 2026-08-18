@@ -33,7 +33,6 @@ import {
   Voice,
   audioNow,
   buildEffectiveVoice,
-  getTransportTicks,
   getTuning,
   getTuningsForInstrument,
   placementEndTick,
@@ -66,7 +65,7 @@ import {
   subscribeTrackVoiceDrafts,
   trackVoicePreset,
 } from '../voice/trackVoiceDrafts';
-import { wrapToDuration } from './transportClock';
+import { audibleTransportTicks, wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
 const CAPO = 0;
@@ -1169,9 +1168,15 @@ function onTrackActive(
  *
  * Read from the transport rather than subscribed to, for LIB-GAP(16)'s reason —
  * no scheduler in this path is a primary, so nothing emits a head at all. The
- * raw read is folded back into the loop boundary here, because the schedulers
+ * read is folded back into the loop boundary here, because the schedulers
  * reschedule each iteration at ever-increasing absolute ticks and an unwrapped
  * head simply runs off the end of the grid.
+ *
+ * Through `audibleTransportTicks`, never `getTransportTicks` — the lib's read is
+ * one lookAhead window (0.1 s, ~96 ticks at 120bpm) ahead of what has been
+ * rendered, so a head drawn from it leads the ear. Compensate BEFORE wrapping:
+ * just after a loop point the audible position is still in the tail of the
+ * previous pass, which is where the wrap should put it.
  *
  * The placement set is computed from the same tick in the same frame, so the lit
  * blocks and the playhead can never disagree about where playback is — the
@@ -1186,9 +1191,9 @@ function pollHead(active: CompositionEngine): void {
   // a session.
   if (!snapshot.isPlaying) return;
 
-  const raw = getTransportTicks(PPQ);
-  if (!Number.isFinite(raw)) return;
-  const headTick = active.loop ? wrapToDuration(raw, active.loopTicks) : raw;
+  const audible = audibleTransportTicks(PPQ);
+  if (!Number.isFinite(audible)) return;
+  const headTick = active.loop ? wrapToDuration(audible, active.loopTicks) : audible;
 
   const ids: string[] = [];
   for (const track of active.composition.tracks) {
