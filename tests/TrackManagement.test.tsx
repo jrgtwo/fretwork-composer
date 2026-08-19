@@ -13,7 +13,7 @@ import {
   TRACK_CAP_REASON,
   addPlacement,
   addTrack,
-  ensureComposition,
+
   getEditingComposition,
   getSelectedTrackId,
   getTracks,
@@ -110,7 +110,7 @@ function place(patternId: string, trackId: string, atTick = 0): string {
 
 describe('mute and solo', () => {
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
     addTrack('Rhythm');
     addTrack('Lead');
   });
@@ -226,7 +226,7 @@ describe('mute and solo', () => {
 // ---------------------------------------------------------------- volume ---
 
 describe('volume', () => {
-  beforeEach(() => ensureComposition());
+  beforeEach(() => openBlankComposition('Song'));
 
   it('is a dB fader, not a percentage', () => {
     render(<ArrangementGrid mode={MODE} />);
@@ -313,7 +313,7 @@ describe('volume', () => {
 // ------------------------------------------------------------------- cap ---
 
 describe('the track cap', () => {
-  beforeEach(() => ensureComposition());
+  beforeEach(() => openBlankComposition('Song'));
 
   it('refuses the ninth track at the seam, with the memory reason', () => {
     while (tracksNow().length < MAX_COMPOSITION_TRACKS) {
@@ -419,7 +419,7 @@ describe('the track cap', () => {
 // ---------------------------------------------------------------- remove ---
 
 describe('removing a track', () => {
-  beforeEach(() => ensureComposition());
+  beforeEach(() => openBlankComposition('Song'));
 
   it('confirms first when there are blocks to destroy, and undoes as one step', async () => {
     const user = userEvent.setup();
@@ -543,7 +543,7 @@ describe('removing a track', () => {
 
 describe('reordering', () => {
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
     addTrack('Second');
     addTrack('Third');
   });
@@ -644,7 +644,7 @@ describe('reordering', () => {
 // ---------------------------------------------------------------- rename ---
 
 describe('renaming', () => {
-  beforeEach(() => ensureComposition());
+  beforeEach(() => openBlankComposition('Song'));
 
   it('commits a draft to the seam on Enter', async () => {
     const user = userEvent.setup();
@@ -766,7 +766,7 @@ describe('renaming', () => {
 // ------------------------------------------------------------ instrument ---
 
 describe('changing a track’s instrument', () => {
-  beforeEach(() => ensureComposition());
+  beforeEach(() => openBlankComposition('Song'));
 
   it('applies straight away when nothing would be stranded', async () => {
     const user = userEvent.setup();
@@ -941,7 +941,7 @@ describe('changing a track’s instrument', () => {
 // -------------------------------------------------------- the two strips ---
 
 describe('the message strips', () => {
-  beforeEach(() => ensureComposition());
+  beforeEach(() => openBlankComposition('Song'));
 
   it('shows a gesture refusal and a track refusal at the same time', async () => {
     // They are unrelated events with unrelated causes, and the second must not

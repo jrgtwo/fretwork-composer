@@ -10,8 +10,8 @@ import { readNotePitch } from '../src/patterns/articulations';
 import {
   addPlacement,
   closePlacementEditing,
-  ensureComposition,
   getTracks,
+  openBlankComposition,
   openPlacementForEditing,
 } from '../src/composition/compositionService';
 import {
@@ -424,7 +424,7 @@ describe('NoteInspectorRail — ties that cannot sound are not offered', () => {
 describe('NoteInspectorRail — inside an open placement', () => {
   const openPlacement = () => {
     const patternId = getEditingPattern()!.id;
-    const composition = ensureComposition();
+    const composition = openBlankComposition('Song');
     if (!composition.ok) throw new Error(composition.reason);
     const placed = addPlacement(patternId, getTracks()[0].id, 0);
     if (!placed.ok) throw new Error(placed.reason);

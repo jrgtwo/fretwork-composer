@@ -19,8 +19,8 @@ import {
 import {
   addTrack,
   clearHistory,
-  ensureComposition,
   getTracks,
+  openBlankComposition,
   selectPlacements,
   selectTrack,
   setTrackInstrument,
@@ -77,7 +77,7 @@ const rowFor = (name: string) => screen.getByRole('button', { name: `Place patte
 
 describe('what the rail lists', () => {
   it('shows one row per library pattern, with its name, instrument and length in bars', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff', 4);
     seedPattern('Verse', 16);
     seedPattern('Walkline', 8, 'bass');
@@ -91,7 +91,7 @@ describe('what the rail lists', () => {
   });
 
   it('derives the bar count rather than remembering one — a longer pattern re-reads longer', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff', 4);
     const view = render(<PatternLibraryRail />);
     expect(within(rowFor('Riff')).getByText('1 bar')).toBeInTheDocument();
@@ -115,7 +115,7 @@ describe('what the rail lists', () => {
   });
 
   it('picks up a pattern created after it mounted, with no reload', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff');
     render(<PatternLibraryRail />);
     expect(rows()).toHaveLength(1);
@@ -130,14 +130,14 @@ describe('what the rail lists', () => {
   });
 
   it('says so when the library is empty rather than showing an empty box', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<PatternLibraryRail />);
     expect(rows()).toHaveLength(0);
     expect(screen.getByText(/No patterns yet/i)).toBeInTheDocument();
   });
 
   it('offers no authoring controls — read and drag only', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff');
     render(<PatternLibraryRail />);
 
@@ -151,7 +151,7 @@ describe('what the rail lists', () => {
 describe('placing from the rail', () => {
   it('appends to the focused track through the seam, as one undo step', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff');
     addTrack('Rhythm');
     const trackIds = getTracks().map((t) => t.id);
@@ -172,7 +172,7 @@ describe('placing from the rail', () => {
 
   it('butts each press against the last block rather than stacking them', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff', 4);
     render(<PatternLibraryRail />);
 
@@ -183,7 +183,7 @@ describe('placing from the rail', () => {
   });
 
   it('names the track a press will land on', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff');
     addTrack('Rhythm');
     selectTrack(getTracks()[1].id);
@@ -194,7 +194,7 @@ describe('placing from the rail', () => {
 
   it('refuses an instrument mismatch out loud, and places nothing', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Walkline', 4, 'bass');
     expect(getTracks()[0].instrumentId).toBe('guitar');
     render(<PatternLibraryRail />);
@@ -210,7 +210,7 @@ describe('placing from the rail', () => {
 
   it('accepts the same pattern once the track is on its instrument', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Walkline', 4, 'bass');
     setTrackInstrument(getTracks()[0].id, 'bass');
     render(<PatternLibraryRail />);
@@ -223,7 +223,7 @@ describe('placing from the rail', () => {
 
   it('hands a press over to the grid as a drag, without placing anything itself', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff');
     const presses: string[] = [];
     render(<PatternLibraryRail onPatternPointerDown={(id) => presses.push(id)} />);
@@ -244,7 +244,16 @@ describe('placing from the rail', () => {
 describe('where the rail appears', () => {
   it('is the rail in pattern mode', () => {
     seedPattern('Riff');
-    render(<CompositionPage mode="pattern" onModeChange={() => {}} />);
+    // CP-17 folded the library into a disclosure, and the page's UNCONTROLLED
+    // default is everything shut — `App` is what opens Patterns by default. So a
+    // test rendering the page directly has to say which sections are open.
+    render(
+      <CompositionPage
+        mode="pattern"
+        onModeChange={() => {}}
+        openRailSections={['patterns']}
+      />,
+    );
 
     const rail = screen.getByRole('complementary', { name: 'Pattern library' });
     expect(within(rail).getByRole('button', { name: 'Place pattern Riff' })).toBeInTheDocument();
@@ -268,7 +277,16 @@ describe('where the rail appears', () => {
   it('drags from the rail into a lane and places there', async () => {
     const user = userEvent.setup();
     seedPattern('Riff');
-    render(<CompositionPage mode="pattern" onModeChange={() => {}} />);
+    // A lane to drop into. CP-17 stopped the page creating a composition on
+    // mount, so without this the drop crosses into an empty state.
+    openBlankComposition('Song');
+    render(
+      <CompositionPage
+        mode="pattern"
+        onModeChange={() => {}}
+        openRailSections={['patterns']}
+      />,
+    );
     const twoBars = 2 * ticksPerBar(TS);
 
     await user.pointer([

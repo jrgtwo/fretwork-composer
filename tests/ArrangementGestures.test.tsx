@@ -25,10 +25,10 @@ import {
   addPlacement,
   addTrack,
   clearHistory,
-  ensureComposition,
   getEditingComposition,
   getSelectedPlacementIds,
   getTracks,
+  openBlankComposition,
   removePlacement,
   selectPlacements,
   selectTrack,
@@ -114,7 +114,10 @@ function place(patternId: string, trackId: string, atTick: number): string {
 
 /** Two tracks, both guitar. Track 0 holds two one-bar blocks, track 1 one. */
 function seedArrangement() {
-  ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
   const patternId = seedPattern('Riff');
   addTrack('Rhythm');
   const trackIds = getTracks().map((t) => t.id);
@@ -380,7 +383,7 @@ describe('moving a block', () => {
    */
   it('refuses to carry a block onto a track of another instrument, and keeps moving it along its own', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     const patternId = seedPattern('Riff');
     addTrack('Low', 'bass');
     const trackIds = getTracks().map((t) => t.id);
@@ -430,7 +433,10 @@ describe('trimming a block', () => {
   /** `atBars` rather than a tick, because the caller cannot ask how long a bar
    *  is until a composition is open — which is this function's first act. */
   function seedLongBlock(atBars = 0) {
-    ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
     const patternId = seedPattern('Verse', 16);
     const id = place(patternId, getTracks()[0].id, atBars * bar());
     selectPlacements([]);
@@ -632,7 +638,7 @@ describe('marquee selection', () => {
 describe('dragging a pattern in from the library', () => {
   it('previews the insertion at the snapped tick, then places it there', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     const patternId = seedPattern('Riff');
     addTrack('Rhythm');
     const trackIds = getTracks().map((t) => t.id);
@@ -666,7 +672,7 @@ describe('dragging a pattern in from the library', () => {
 
   it('is one undo step, and undo removes the block entirely', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff');
     clearHistory();
     render(<Harness />);
@@ -685,7 +691,7 @@ describe('dragging a pattern in from the library', () => {
 
   it('refuses an instrument-mismatched drop with a stated reason, and places nothing', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Walkline', 4, 'bass');
     expect(getTracks()[0].instrumentId).toBe('guitar');
     clearHistory();
@@ -710,7 +716,7 @@ describe('dragging a pattern in from the library', () => {
 
   it('places nothing when the release lands off the lane viewport', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff');
     clearHistory();
     // The rail is a horizontal SIBLING of the grid, so a release over it maps to
@@ -730,7 +736,7 @@ describe('dragging a pattern in from the library', () => {
 
   it('ignores a press that is not the primary button', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff');
     render(<Harness />);
 
@@ -753,7 +759,7 @@ describe('dragging a pattern in from the library', () => {
 
   it('shows no indicator while the pointer is off the lanes', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     seedPattern('Riff');
     render(<Harness />);
 
@@ -823,7 +829,7 @@ describe('drag-edge auto-scroll', () => {
 describe('splitting where the pointer last was', () => {
   it('cuts at the SNAPPED tick after a press, exactly as after a move', async () => {
     const user = userEvent.setup();
-    ensureComposition();
+    openBlankComposition('Song');
     const patternId = seedPattern('Verse', 16);
     const id = place(patternId, getTracks()[0].id, 0);
     selectPlacements([]);
@@ -1228,7 +1234,7 @@ describe('capabilities, reached without a pointer', () => {
   });
 
   it('appends a pattern to a named track, and to the focused one by default', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const patternId = seedPattern('Riff');
     addTrack('Rhythm');
     const trackIds = getTracks().map((t) => t.id);
@@ -1250,7 +1256,7 @@ describe('capabilities, reached without a pointer', () => {
   });
 
   it('refuses to append a pattern onto the wrong instrument', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const bassId = seedPattern('Walkline', 4, 'bass');
     const result = appendPatternToTrack(bassId, getTracks()[0].id);
     expect(result.ok).toBe(false);
@@ -1258,7 +1264,7 @@ describe('capabilities, reached without a pointer', () => {
   });
 
   it('states the refusal in terms of both instruments', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const bassId = seedPattern('Walkline', 4, 'bass');
     const pattern = getLibraryPatterns().find((p) => p.id === bassId)!;
     const reason = patternDropRefusal(pattern, getTracks()[0]);
@@ -1270,7 +1276,7 @@ describe('capabilities, reached without a pointer', () => {
 
 describe('out-of-range transposition', () => {
   it('counts the notes the lib would silently drop from playback', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     openBlankPattern('High');
     stampNote({ stringIndex: 0, fret: 20, tick: 0, durationTicks: PPQ });
     stampNote({ stringIndex: 1, fret: 2, tick: 0, durationTicks: PPQ });
@@ -1290,7 +1296,7 @@ describe('out-of-range transposition', () => {
   });
 
   it('says so ON THE BLOCK, so the loss is visible before playback', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     openBlankPattern('High');
     stampNote({ stringIndex: 0, fret: 20, tick: 0, durationTicks: PPQ });
     const id = place(getEditingPattern()!.id, getTracks()[0].id, 0);
@@ -1309,7 +1315,7 @@ describe('out-of-range transposition', () => {
   });
 
   it('is 0 at no transposition, whatever the frets', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     openBlankPattern('High');
     stampNote({ stringIndex: 0, fret: 24, tick: 0, durationTicks: PPQ });
     const id = place(getEditingPattern()!.id, getTracks()[0].id, 0);
@@ -1317,7 +1323,7 @@ describe('out-of-range transposition', () => {
   });
 
   it('ignores notes past a trim, which were already not sounding', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     openBlankPattern('High');
     stampNote({ stringIndex: 0, fret: 2, tick: 0, durationTicks: PPQ });
     stampNote({ stringIndex: 0, fret: 20, tick: 2 * PPQ, durationTicks: PPQ });

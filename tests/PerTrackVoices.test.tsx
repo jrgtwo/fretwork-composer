@@ -16,8 +16,9 @@ import { ArrangementGrid } from '../src/composition/ArrangementGrid';
 import {
   addPlacement,
   addTrack,
-  ensureComposition,
+  getEditingComposition,
   getTracks,
+  openBlankComposition,
   selectPlacements,
   selectTrack,
   setTrackInstrument,
@@ -261,7 +262,10 @@ function place(patternId: string, trackId: string, atTick = 0): string {
 /** Two tracks on the SAME instrument — the only shape that can catch the
  *  `selectVoice` trap. */
 function twoTracks(): readonly Track[] {
-  ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
   addTrack('Rhythm');
   return getTracks();
 }

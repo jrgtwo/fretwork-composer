@@ -36,6 +36,7 @@ import {
   TRACK_CAP_REASON,
   VOLUME_RANGE_DB,
   addTrack,
+  openBlankComposition,
   isTrackAudible,
   openPlacementForEditing,
   redo,
@@ -419,6 +420,10 @@ export function ArrangementGrid({
    * pieces of state, one place to read them.
    */
   const [trackNotice, setTrackNotice] = useState<string | null>(null);
+  /** Why the empty state's New press did nothing. Its own state rather than
+   *  `trackNotice`'s: they cannot be on screen together — one belongs to a
+   *  composition that exists and the other to there being none. */
+  const [newNotice, setNewNotice] = useState<string | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const rulerContentRef = useRef<HTMLDivElement>(null);
   const headerStackRef = useRef<HTMLDivElement>(null);
@@ -660,6 +665,33 @@ export function ArrangementGrid({
         <p className="font-mono text-[9px] tracking-[0.12em] text-ink-mut/70 uppercase">
           No composition open
         </p>
+        {/* CP-17. This state is now REACHABLE AND STABLE — `ensureComposition`
+            creates nothing on arrival and a delete leaves you here — so it needs
+            a way out. Without one it is a dead end, which is the only reason the
+            page used to mint an "Untitled composition" nobody asked for.
+
+            Here rather than in the rail's list, even though that list has a New
+            of its own: the rail is only mounted in pattern mode, and this state
+            is reachable in all three. */}
+        <button
+          type="button"
+          onClick={() => {
+            const created = openBlankComposition();
+            setNewNotice(created.ok ? null : created.reason);
+          }}
+          className="pressable control-accent mt-1 rounded-lg px-3 py-1.5 font-mono text-[9px] font-bold tracking-[0.12em] uppercase"
+        >
+          New composition
+        </button>
+        {newNotice && (
+          <p
+            role="alert"
+            aria-label="Composition message"
+            className="mt-1 max-w-[36ch] rounded-md border border-brass/50 px-2 py-1 font-mono text-[9.5px] text-ink"
+          >
+            {newNotice}
+          </p>
+        )}
       </div>
     );
   }

@@ -72,6 +72,12 @@ import {
   setTrackSoloed,
   setTrackVolumeDb,
   splitPlacement,
+  compositionEndTick,
+  deleteComposition,
+  duplicateComposition,
+  getLibraryCompositions,
+  openComposition,
+  renameComposition,
   strandedByInstrument,
   ticksPerBar,
   trackInstrumentId,
@@ -131,6 +137,110 @@ function oneUndoStep<T>(write: () => T): T {
     endEditGesture();
   }
 }
+
+/**
+ * The library, so a caller with no pointer can find the other compositions.
+ *
+ * Reported as ids plus what tells them apart — nothing here can be derived from
+ * an id, and `read_composition` answers only for the one that is open. The
+ * summary is the same pair the rail's rows show, for the reason the rail shows
+ * it: with every blank arriving as "Untitled composition N", the name is the
+ * least distinguishing thing about a row until someone renames it.
+ */
+const listCompositions = defineTool<Record<string, never>>({
+  name: 'composition_list',
+  description:
+    'List every composition in the library, with the one currently open marked. Use it to find a composition to open, rename, copy or delete — every other composition tool works on whatever is open.',
+  parameters: obj({}),
+  run: () => {
+    const openId = getEditingComposition()?.id ?? null;
+    return ok({
+      openCompositionId: openId,
+      compositions: getLibraryCompositions().map((composition) => ({
+        compositionId: composition.id,
+        name: composition.name,
+        isOpen: composition.id === openId,
+        trackCount: composition.tracks.length,
+        bars: Math.ceil(
+          compositionEndTick(composition) / ticksPerBar(composition.timeSignature),
+        ),
+      })),
+    });
+  },
+});
+
+/**
+ * ⚠ REFUSED WHILE A JOB IS RUNNING, and unlike almost everything else here that
+ * refusal reaches the AGENT too. Switching composition mid-job destroys the
+ * rollback a cancel depends on — the seam says why on `openComposition`. So a
+ * run that wants to work on another composition has to be started against it,
+ * not switched into halfway.
+ */
+const openCompositionTool = defineTool<{ compositionId: string }>({
+  name: 'composition_open',
+  description:
+    'Open another composition for arranging, by id from composition_list. Everything else on the composition side then works on it. Refused while a generation job is running.',
+  parameters: obj({ compositionId: str('From composition_list.') }, ['compositionId']),
+  run: ({ compositionId }) =>
+    fromResult(openComposition(compositionId), (composition) => ({
+      compositionId: composition.id,
+      name: composition.name,
+      bpm: composition.bpm,
+      trackIds: composition.tracks.map((track) => track.id),
+    })),
+});
+
+const renameCompositionTool = defineTool<{ compositionId: string; name: string }>({
+  name: 'composition_rename',
+  description:
+    'Rename a composition by id — it need not be the one that is open. Use composition_set_settings to rename the open one without knowing its id.',
+  parameters: obj(
+    { compositionId: str('From composition_list.'), name: nameOf('The new name.') },
+    ['compositionId', 'name'],
+  ),
+  run: ({ compositionId, name }) =>
+    fromResult(renameComposition(compositionId, name), (composition) => ({
+      compositionId: composition.id,
+      name: composition.name,
+    })),
+});
+
+/**
+ * The copy is NOT opened, which the description says out loud because it is the
+ * one thing a caller would otherwise assume: `composition_open_blank` opens what
+ * it makes, and two creation tools behaving differently is worth a sentence.
+ */
+const duplicateCompositionTool = defineTool<{ compositionId: string }>({
+  name: 'composition_duplicate',
+  description:
+    'Copy a composition, its tracks and its blocks. The copy is NOT opened — follow with composition_open if you want to work in it. Useful before a change you may want to undo across a save.',
+  parameters: obj({ compositionId: str('From composition_list.') }, ['compositionId']),
+  run: ({ compositionId }) =>
+    fromResult(duplicateComposition(compositionId), (composition) => ({
+      compositionId: composition.id,
+      name: composition.name,
+    })),
+});
+
+/**
+ * Deleting the OPEN composition leaves nothing open, deliberately — the page has
+ * an empty state for it and the seam does not chase a successor. Said in the
+ * description because a caller that assumed otherwise would follow this with a
+ * write and get "No composition is open", which reads as the delete having
+ * broken something.
+ */
+const deleteCompositionTool = defineTool<{ compositionId: string }>({
+  name: 'composition_delete',
+  description:
+    'Delete a composition and its blocks. The patterns its blocks were cut from are NOT deleted. Cannot be undone. If it was the open one, nothing is open afterwards — open another first if you need one. Refused while a generation job is running.',
+  parameters: obj({ compositionId: str('From composition_list.') }, ['compositionId']),
+  run: ({ compositionId }) =>
+    fromResult(deleteComposition(compositionId), (composition) => ({
+      compositionId: composition.id,
+      name: composition.name,
+      openCompositionId: getEditingComposition()?.id ?? null,
+    })),
+});
 
 // ----------------------------------------------------------------- tracks ---
 
@@ -1080,6 +1190,11 @@ const setSettings = defineTool<SettingsArgs>({
 
 export const COMPOSITION_TOOLS: readonly AgentTool[] = [
   openBlank,
+  listCompositions,
+  openCompositionTool,
+  renameCompositionTool,
+  duplicateCompositionTool,
+  deleteCompositionTool,
   addTrackTool,
   removeTrackTool,
   renameTrackTool,

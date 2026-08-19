@@ -9,6 +9,7 @@ import {
   useIsJobRunning,
 } from './compositionService';
 import { NoteInspectorRail } from './NoteInspectorRail';
+import { CompositionLibraryRail } from './CompositionLibraryRail';
 import { PatternLibraryRail } from './PatternLibraryRail';
 import { TransportBar } from './TransportBar';
 import { VoiceRail } from './VoiceRail';
@@ -24,7 +25,17 @@ import type { SectionId } from '../voice/paramSchema';
  * open-ids rather than collapsed-ids means a section nobody asked for is not
  * open by default.
  */
-export type CompositionRailSectionId = 'commands';
+/**
+ * The rail's foldable sections, and CP-17 made this a union of three.
+ *
+ * ⚠ 'patterns' and 'compositions' are PATTERN MODE's, not the page's — edit mode
+ * still swaps in the note inspector and voice mode the voice rail, neither of
+ * which is a section. That asymmetry is knowingly temporary: a document switcher
+ * living inside pattern mode is the wrong home, and the alternatives (a top-bar
+ * document menu, or the whole rail as sections with no mode swap) were both
+ * deferred rather than rejected. See CP-17 on the board.
+ */
+export type CompositionRailSectionId = 'commands' | 'patterns' | 'compositions';
 
 /** What an uncontrolled render opens: nothing. Which sections START open is the
  *  owner's policy and it lives with the owner, in `App` — see
@@ -310,11 +321,35 @@ export function CompositionPage({
           </Section>
 
           {mode === 'pattern' ? (
-            <PatternLibraryRail
-              onPatternPointerDown={(patternId, e) =>
-                patternDragRef.current?.(patternId, e)
-              }
-            />
+            <>
+              {/* `grow`, and the only section here that has it: the pattern list
+                  is what the grid is filled FROM, so it keeps the whole-rail
+                  behaviour it had before CP-17 wrapped it in a disclosure. */}
+              <Section
+                label="Patterns"
+                open={railSections.includes('patterns')}
+                onToggle={() => toggleRailSection('patterns')}
+                grow
+              >
+                <PatternLibraryRail
+                  onPatternPointerDown={(patternId, e) =>
+                    patternDragRef.current?.(patternId, e)
+                  }
+                />
+              </Section>
+              {/* Bounded rather than grown, for the reason the Commands section
+                  gives: the rail is a flex column with no scroller of its own, so
+                  an unbounded list would squeeze whatever sits above it towards
+                  zero. A library of any size scrolls inside its own section. */}
+              <Section
+                label="Compositions"
+                open={railSections.includes('compositions')}
+                onToggle={() => toggleRailSection('compositions')}
+                bodyClassName="max-h-[45vh] overflow-y-auto"
+              >
+                <CompositionLibraryRail />
+              </Section>
+            </>
           ) : mode === 'edit' ? (
             // Follows the NOTE selection, not the placement selection — see the
             // header of NoteInspectorRail. It is always mounted here, empty

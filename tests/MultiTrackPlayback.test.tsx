@@ -12,9 +12,10 @@ import {
 import {
   addPlacement,
   addTrack,
-  ensureComposition,
   getEditingComposition,
   getTracks,
+  openBlankComposition,
+  resizePlacement,
   selectPlacements,
   selectTrack,
   setCompositionBpm,
@@ -23,7 +24,6 @@ import {
   setTrackMuted,
   setTrackSoloed,
   setTrackVolumeDb,
-  resizePlacement,
   type Result,
 } from '../src/composition/compositionService';
 import { contentEndTick } from '../src/composition/arrangementMath';
@@ -389,7 +389,10 @@ beforeEach(() => {
  *  is the lib's, so a test that cares sets it explicitly. */
 function seedArrangement(): { patternId: string; placements: string[] } {
   const patternId = seedPattern('Riff');
-  ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
   addTrack('Rhythm');
   const tracks = getTracks();
   return {
@@ -477,7 +480,7 @@ describe('building the composition path', () => {
 
   it('refuses to run the transport for an empty arrangement', async () => {
     seedPattern('Riff');
-    ensureComposition();
+    openBlankComposition('Song');
     mount();
 
     const result = await start();

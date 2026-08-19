@@ -2472,6 +2472,85 @@ describe('arranging', () => {
 
 // ------------------------------------------------------------------ voices ---
 
+describe('the composition library (CP-17)', () => {
+  it('lists every composition, marking the one that is open', () => {
+    value(call('composition_open_blank', { name: 'First' }));
+    const second = value(call('composition_open_blank', { name: 'Second' }));
+
+    const listed = rows(value(call('composition_list')).compositions);
+
+    expect(listed.map((c) => c.name)).toEqual(['First', 'Second']);
+    expect(listed.map((c) => c.isOpen)).toEqual([false, true]);
+    expect(value(call('composition_list')).openCompositionId).toBe(second.compositionId);
+    // What tells two "Untitled composition N" rows apart, which an id cannot.
+    expect(listed[0]).toHaveProperty('trackCount');
+    expect(listed[0]).toHaveProperty('bars');
+  });
+
+  it('opens another by id and points every other tool at it', () => {
+    const first = value(call('composition_open_blank', { name: 'First' }));
+    value(call('composition_open_blank', { name: 'Second' }));
+
+    value(call('composition_open', { compositionId: first.compositionId as string }));
+
+    expect(value(call('read_composition')).name).toBe('First');
+  });
+
+  it('renames one that is not open', () => {
+    const first = value(call('composition_open_blank', { name: 'First' }));
+    value(call('composition_open_blank', { name: 'Second' }));
+
+    value(call('composition_rename', {
+      compositionId: first.compositionId as string,
+      name: 'Blues in C',
+    }));
+
+    expect(rows(value(call('composition_list')).compositions).map((c) => c.name)).toEqual([
+      'Blues in C',
+      'Second',
+    ]);
+    // Renaming another row must not switch what is open.
+    expect(value(call('read_composition')).name).toBe('Second');
+  });
+
+  it('duplicates WITHOUT opening the copy', () => {
+    const song = value(call('composition_open_blank', { name: 'Song' }));
+
+    const copy = value(call('composition_duplicate', {
+      compositionId: song.compositionId as string,
+    }));
+
+    expect(copy.compositionId).not.toBe(song.compositionId);
+    expect(copy.name).not.toBe('Song');
+    expect(value(call('composition_list')).openCompositionId).toBe(song.compositionId);
+  });
+
+  it('deletes, and says plainly that nothing is open afterwards', () => {
+    const song = value(call('composition_open_blank', { name: 'Song' }));
+
+    const deleted = value(call('composition_delete', {
+      compositionId: song.compositionId as string,
+    }));
+
+    // The reply carries it because a caller that assumed a successor would
+    // follow this with a write and get "No composition is open", which reads as
+    // the delete having broken something.
+    expect(deleted.openCompositionId).toBeNull();
+    expect(rows(value(call('composition_list')).compositions)).toEqual([]);
+  });
+
+  it('refuses an id the library has not got, on every one of them', () => {
+    value(call('composition_open_blank', { name: 'Song' }));
+
+    for (const tool of ['composition_open', 'composition_duplicate', 'composition_delete']) {
+      expect(reason(call(tool, { compositionId: 'nope' }))).toContain('No such composition');
+    }
+    expect(reason(call('composition_rename', { compositionId: 'nope', name: 'x' }))).toContain(
+      'No such composition',
+    );
+  });
+});
+
 describe('voices', () => {
   it('saves what a track sounds like, renames it and deletes it, all by id', () => {
     value(call('composition_open_blank', { name: 'Song' }));

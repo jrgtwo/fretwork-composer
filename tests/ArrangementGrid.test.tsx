@@ -29,10 +29,10 @@ import {
   addPlacement,
   addTrack,
   clearHistory,
-  ensureComposition,
   getEditingComposition,
   getSelectedTrackId,
   getTracks,
+  openBlankComposition,
   selectPlacements,
   selectTrack,
 } from '../src/composition/compositionService';
@@ -108,7 +108,10 @@ function place(patternId: string, trackId: string, atTick: number): string {
 
 /** Three tracks: two with blocks, one deliberately empty. */
 function seedArrangement(): { patternId: string; trackIds: string[] } {
-  ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
   const patternId = seedPattern('Riff');
   addTrack('Rhythm');
   addTrack('Lead');
@@ -261,7 +264,7 @@ describe('lanes and headers', () => {
   });
 
   it('renders every track up to the composition cap', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     while (getTracks().length < MAX_COMPOSITION_TRACKS) addTrack();
     render(<ArrangementGrid mode={MODE} />);
 
@@ -328,7 +331,7 @@ describe('placement blocks', () => {
   });
 
   it('divides a legacy repeated placement at its restart points', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const patternId = seedPattern('Riff');
     const trackId = getTracks()[0].id;
     const placementId = place(patternId, trackId, 0);
@@ -526,7 +529,7 @@ describe('ruler', () => {
   });
 
   it('leaves empty bars past the last block, so there is room to place after it', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const patternId = seedPattern('Riff');
     // Bar 13, well past the 8-bar minimum, so it is the trailing room being
     // measured and not the floor.
@@ -778,7 +781,7 @@ describe('track selection', () => {
 
 describe('empty states', () => {
   it('renders a usable grid for a composition with one empty track', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<ArrangementGrid mode={MODE} />);
 
     // A grid, not a blank box: a lane to drop into, a header, and a ruler that
@@ -810,14 +813,49 @@ describe('empty states', () => {
     expect(screen.getByText(/no composition open/i)).toBeInTheDocument();
     expect(screen.queryByTestId('arrangement-lanes-scroller')).not.toBeInTheDocument();
   });
+
+  it('offers a way out of the empty state', async () => {
+    // CP-17 made this state reachable and STABLE — `ensureComposition` no longer
+    // creates one on arrival, and a delete leaves you here. Without a way out it
+    // is a dead end, which is the only reason the auto-create existed.
+    const user = userEvent.setup();
+    render(<ArrangementGrid mode={MODE} />);
+
+    await user.click(screen.getByRole('button', { name: 'New composition' }));
+
+    expect(usePatternsStore.getState().library.compositions).toHaveLength(1);
+    expect(usePatternsStore.getState().editingCompositionId).not.toBeNull();
+    expect(await screen.findByTestId('arrangement-lanes-scroller')).toBeInTheDocument();
+    expect(screen.queryByText(/no composition open/i)).not.toBeInTheDocument();
+  });
+
+  it('says why when the library refuses to create one', async () => {
+    const user = userEvent.setup();
+    const real = usePatternsStore.getState().createComposition;
+    usePatternsStore.setState({ createComposition: () => '' });
+    try {
+      render(<ArrangementGrid mode={MODE} />);
+
+      await user.click(screen.getByRole('button', { name: 'New composition' }));
+
+      expect(screen.getByRole('alert')).toHaveTextContent(/refused/i);
+    } finally {
+      usePatternsStore.setState({ createComposition: real });
+    }
+  });
 });
 
 describe('on the composition page', () => {
   it('replaces the page placeholder with the grid', async () => {
     const patternId = seedPattern('Riff');
+    // Seeded rather than left to the page: CP-17 stopped `ensureComposition`
+    // creating one, so mounting an empty library lands on the empty state
+    // (asserted just above). What this test is about is that an ADOPTED
+    // composition fills the tray with the grid.
+    openBlankComposition('Song');
+    usePatternsStore.setState({ editingCompositionId: null });
     render(<CompositionPage mode={MODE} onModeChange={() => {}} />);
 
-    // The page opens a composition on mount, so the grid is what fills the tray.
     expect(await screen.findByTestId('arrangement-lanes-scroller')).toBeInTheDocument();
     expect(laneEls().length).toBeGreaterThan(0);
 

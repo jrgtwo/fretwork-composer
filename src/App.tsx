@@ -57,7 +57,15 @@ const DEFAULT_OPEN_RAIL_SECTIONS: readonly RailSectionId[] = ['library'];
  * inside that section, and a section that starts folded is a job the user cannot
  * stop without first discovering where it lives.
  */
-const DEFAULT_OPEN_COMPOSITION_RAIL_SECTIONS: readonly CompositionRailSectionId[] = ['commands'];
+// Patterns open because it is the grid's drag source and was the whole rail
+// before CP-17 folded it into a section — arriving with it shut would read as
+// the library having gone. Compositions shut: the page's own empty state carries
+// a New button, so the feature is reachable without spending rail height on a
+// list most sessions never touch.
+const DEFAULT_OPEN_COMPOSITION_RAIL_SECTIONS: readonly CompositionRailSectionId[] = [
+  'commands',
+  'patterns',
+];
 
 /** A switch that costs nothing: go ahead, and there is nothing to run after. */
 const NOTHING_STRANDED = () => {};

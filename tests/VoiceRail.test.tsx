@@ -12,8 +12,9 @@ import { CompositionPage } from '../src/composition/CompositionPage';
 import { VoiceRail } from '../src/composition/VoiceRail';
 import {
   addTrack,
-  ensureComposition,
+  getEditingComposition,
   getTracks,
+  openBlankComposition,
   selectTrack,
   setTrackInstrument,
   setTrackVoiceRef,
@@ -132,7 +133,10 @@ vi.mock('@fretwork/lib', async (importOriginal) => {
 const VOLUME_PATH = 'level.volumeDb';
 
 function twoTracks(): readonly Track[] {
-  ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
   addTrack('Rhythm');
   return getTracks();
 }

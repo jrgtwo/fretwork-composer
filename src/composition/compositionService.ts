@@ -334,8 +334,13 @@ export function findPlacement(
  * playback does), so summing it here is the whole workaround.
  *
  * Delete when the lib's `totalDurationTicks` routes through `placementEndTick`.
+ *
+ * Exported (CP-17) because the composition rail measures rows that are NOT the
+ * open document, and {@link totalDurationTicks} answers only for that one. A
+ * second sum written at the call site would be a second copy of this workaround,
+ * which is the thing the LIB-GAP registry exists to stop.
  */
-function arrangementEnd(composition: Composition): Tick {
+export function compositionEndTick(composition: Composition): Tick {
   let end = 0;
   for (const track of composition.tracks) {
     for (const placement of track.placements) {
@@ -348,14 +353,14 @@ function arrangementEnd(composition: Composition): Tick {
 /** How long the arrangement runs — the end of its longest track. */
 export function totalDurationTicks(): Tick {
   const composition = getEditingComposition();
-  return composition ? arrangementEnd(composition) : 0;
+  return composition ? compositionEndTick(composition) : 0;
 }
 
 /** React hook form of {@link totalDurationTicks}, for the ruler's extent. */
 export function useTotalDurationTicks(): Tick {
   return usePatternsStore((s) => {
     const composition = selectEditingComposition(s);
-    return composition ? arrangementEnd(composition) : 0;
+    return composition ? compositionEndTick(composition) : 0;
   });
 }
 
@@ -900,24 +905,238 @@ export function useHistoryState(): { canUndo: boolean; canRedo: boolean } {
 // ------------------------------------------------------------- lifecycle ---
 
 /**
- * Open whatever composition was last arranged, seeding a draft if there is none.
+ * Every composition in the library.
  *
- * Verified rather than assumed: `ensureEditingComposition` runs the subscription
- * gate and returns WITHOUT CREATING and WITHOUT ERROR if it is refused. The free
- * cap is 500 compositions so it succeeds in practice, but a page that renders
- * empty with no explanation is the worst possible way to find out otherwise.
+ * `usePatternsStore` selects the ARRAY, so the identity check that stops a
+ * re-render is the array's own — the store replaces it only when the library
+ * actually changes. Mirrors `patternService.useLibraryPatterns` exactly, and for
+ * the same reasons; the two rails are siblings.
  */
-export function ensureComposition(): Result<Composition> {
-  const openBefore = getEditingComposition()?.id ?? null;
-  store().ensureEditingComposition();
-  const composition = getEditingComposition();
-  if (!composition) {
-    return refuse("Couldn't open a composition — the library refused to create one.");
+export function useLibraryCompositions(): readonly Composition[] {
+  return usePatternsStore((s) => s.library.compositions);
+}
+
+export function getLibraryCompositions(): readonly Composition[] {
+  return store().library.compositions;
+}
+
+export function findLibraryComposition(id: string): Composition | undefined {
+  return getLibraryCompositions().find((composition) => composition.id === id);
+}
+
+/** The lib's own name for a blank composition, uniquified before use. */
+const BLANK_COMPOSITION_NAME = 'Untitled composition';
+
+/**
+ * A name no other composition in the library already has.
+ *
+ * `patternService.uniqueLibraryName`'s twin, and deliberately a second copy
+ * rather than a shared helper: the two seams own different libraries and
+ * `patternService` exports nothing that reaches `library.compositions` on
+ * purpose. Sharing it would mean one of them importing the other's store view.
+ */
+function uniqueCompositionName(base: string, exceptId?: string): string {
+  const taken = new Set(
+    getLibraryCompositions()
+      .filter((composition) => composition.id !== exceptId)
+      .map((composition) => composition.name),
+  );
+  if (!taken.has(base)) return base;
+  for (let n = 2; n <= taken.size + 1; n++) {
+    const candidate = `${base} ${n}`;
+    if (!taken.has(candidate)) return candidate;
   }
-  // Not always a no-op: when the remembered id is stale the store opens the
-  // most-recently-updated composition instead, which is a switch like any other.
-  if (composition.id !== openBefore) forgetPerCompositionState();
-  return ok(composition);
+  return base;
+}
+
+/**
+ * Open whatever composition was last arranged. **Creates nothing.**
+ *
+ * ⚠ CP-17 CHANGED THIS, and the change is the point rather than an
+ * optimisation. The lib's `ensureEditingComposition` does three things in order:
+ * keep the open one if it still exists, else adopt the most recently updated,
+ * else CREATE "Untitled composition". This does the first two and refuses the
+ * third, so arriving with an empty library lands on the page's empty state and
+ * its New button instead of minting a document nobody asked for. Two things
+ * follow that are worth more than the tidiness:
+ *
+ *   - `openBlankComposition` becomes the ONLY thing in the app that creates a
+ *     composition, so "where did this come from" always has one answer.
+ *   - the tier cap is reported when the user presses New, which is when it is
+ *     true, rather than as a refusal on page load — which used to read as the
+ *     page being broken.
+ *
+ * `null` IS A SUCCESS, not a failure, and the distinction is load-bearing:
+ * `CompositionPage` renders `openFailure` as an alert, so a refusal here would
+ * put an error on screen for the ordinary first visit. A refusal now means the
+ * store genuinely would not open a composition that exists.
+ *
+ * The stale-id case needs no handling of its own: `getEditingComposition` reads
+ * through `selectEditingComposition`, which finds nothing when the remembered id
+ * has been deleted, so it falls through to the adoption below.
+ */
+export function ensureComposition(): Result<Composition | null> {
+  const open = getEditingComposition();
+  if (open) return ok(open);
+
+  const library = getLibraryCompositions();
+  if (library.length === 0) return ok(null);
+
+  let mostRecent = library[0];
+  for (const composition of library) {
+    if (composition.updatedAt > mostRecent.updatedAt) mostRecent = composition;
+  }
+  store().openCompositionForArranging(mostRecent.id);
+  // Adopting is a switch like any other — the selection and history that are
+  // live belong to whatever was open before this page mounted.
+  forgetPerCompositionState();
+  const opened = getEditingComposition();
+  if (!opened || opened.id !== mostRecent.id) {
+    return refuse(`Couldn't open ${mostRecent.name}.`);
+  }
+  return ok(opened);
+}
+
+/**
+ * Switch to another composition in the library.
+ *
+ * ⚠ Guarded on `jobRunning` rather than `lockedOut()`, exactly as
+ * {@link openBlankComposition} is and for the same reason — the AGENT'S
+ * exemption must not reach it either. Switching mid-job destroys the rollback:
+ * `forgetPerCompositionState` calls `clearHistory`, which re-arms the open
+ * bracket on the NEW document, so the snapshot a cancel would restore becomes
+ * the wrong one and the pre-job composition is never put back.
+ *
+ * Re-opening what is already open still goes through the switch, unlike
+ * `patternService.openPattern`'s guard. `openCompositionForArranging` sets three
+ * fields and resets nothing the user would miss (there is no cursor and no
+ * pending stamp on this document), and pressing the row you are already in is a
+ * reasonable way to ask for a clean slate.
+ */
+export function openComposition(id: string): Result<Composition> {
+  if (jobRunning) return refuse(JOB_LOCK_REASON);
+  const target = findLibraryComposition(id);
+  if (!target) return refuse(`No such composition: ${id}.`);
+  store().openCompositionForArranging(id);
+  forgetPerCompositionState();
+  const opened = getEditingComposition();
+  if (!opened || opened.id !== id) return refuse(`Couldn't open ${target.name}.`);
+  return ok(opened);
+}
+
+/**
+ * Rename a library composition, by id — it need not be the one that is open.
+ *
+ * {@link setCompositionName} is the other half and they are not duplicates: that
+ * one renames whatever is OPEN and is what the header's field calls, this one
+ * takes an id and is what a row in a list calls. Both exist for the reason every
+ * capability here is a function first — a rename reachable only by opening the
+ * document first is one an agent cannot make on a document it isn't in.
+ *
+ * The trim and the emptiness check are ours, matching `renamePattern`: the lib's
+ * `renameComposition` writes whatever string it is given, and a composition
+ * named `''` has no handle left in any list that shows it.
+ *
+ * `lockedOut()` rather than `jobRunning`: this changes nothing about which
+ * document is open, so the agent naming the arrangement it just built is safe
+ * and is exactly what {@link setCompositionName} already allows.
+ */
+export function renameComposition(id: string, name: string): Result<Composition> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
+  const target = findLibraryComposition(id);
+  if (!target) return refuse(`No such composition: ${id}.`);
+  const trimmed = name.trim();
+  if (trimmed === '') return refuse('A composition needs a name.');
+  store().renameComposition(id, trimmed);
+  const renamed = findLibraryComposition(id);
+  if (!renamed || renamed.name !== trimmed) return refuse(`Couldn't rename ${target.name}.`);
+  return ok(renamed);
+}
+
+/**
+ * Copy a composition, tracks and placements and all. The copy is NOT opened.
+ *
+ * Deliberate, and `duplicatePattern`'s reasoning applies unchanged: a duplicate
+ * is usually made to keep the original safe before changing it, so switching the
+ * arranger away from what you were doing is the wrong default. A caller that
+ * wants it open follows with `openComposition(result.value.id)`.
+ *
+ * ⚠ LIB-GAP(22): there is no `duplicateComposition` in the lib to mirror
+ * `duplicatePattern`. The nearest action is `forkComposition(source)`, which is
+ * built for forking someone else's PUBLISHED work — it takes the composition
+ * object rather than an id, keeps the source's name verbatim, and stamps
+ * `forkedFromId` / `forkedFromCreatorName` as provenance. Nothing in this app
+ * reads those fields, so the fork is used and renamed after; the rename is not a
+ * nicety, since two rows sharing one name cannot be told apart in the rail. The
+ * deep copy itself is correct — fresh track ids and cloned placements — which is
+ * why this masks the gap rather than hand-rolling a clone.
+ */
+export function duplicateComposition(id: string): Result<Composition> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
+  const target = findLibraryComposition(id);
+  if (!target) return refuse(`No such composition: ${id}.`);
+  // ⚠ `forkComposition` OPENS what it makes and clobbers three other pointers on
+  // the way — `editingCompositionId`, `editingPatternId` (CP-02's defect: `App`
+  // re-seeds a demo pattern the moment nothing is open, so an uncorrected null
+  // appends a junk pattern to the library on every press), `editingPlacementId`
+  // and `selectedPlacementId`. It is written for forking someone's published
+  // work, where landing in the fork is the point. Here it is a copy, so all four
+  // are captured and put back: this function's contract is that NOTHING moves
+  // except the library gaining a row.
+  const before = {
+    editingCompositionId: store().editingCompositionId,
+    editingPatternId: store().editingPatternId,
+    editingPlacementId: store().editingPlacementId,
+    selectedPlacementId: store().selectedPlacementId,
+  };
+  const copyId = store().forkComposition(target);
+  if (copyId === '') {
+    usePatternsStore.setState(before);
+    return refuse(`Couldn't copy ${target.name} — the library refused.`);
+  }
+  const forked = findLibraryComposition(copyId);
+  if (!forked) {
+    usePatternsStore.setState(before);
+    return refuse(`Couldn't copy ${target.name}.`);
+  }
+  const unique = uniqueCompositionName(`${target.name} (copy)`, copyId);
+  store().renameComposition(copyId, unique);
+  usePatternsStore.setState(before);
+  const copy = findLibraryComposition(copyId);
+  if (!copy) return refuse(`Couldn't copy ${target.name}.`);
+  return ok(copy);
+}
+
+/**
+ * Remove a composition, and leave nothing in its place.
+ *
+ * ⚠ THE OPPOSITE OF `patternService.deletePattern`, deliberately. That one calls
+ * `ensurePattern` afterwards so the editor is never pointed at nothing. This one
+ * does NOT chase a successor, because "no composition open" is a state this page
+ * already renders properly — `ArrangementGrid` has an empty state for it,
+ * `syncComposition(null)` disposes the audio engine, and `TransportBar` draws
+ * nothing. Opening some other arrangement because you deleted this one is a
+ * surprise, and the only reason it was ever necessary is that the empty state
+ * had no way out; CP-17's New button is that way out.
+ *
+ * The lib does the pointer work: `deleteComposition` nulls `editingCompositionId`
+ * (and `editingPlacementId`) when it removes the one they point at, and leaves
+ * them alone otherwise. What it cannot know about is OUR per-composition
+ * state — the selection, the track selection and the undo stack — so that is
+ * cleared here, and only when the document that went was the one being arranged.
+ *
+ * `jobRunning` rather than `lockedOut()`, on {@link openComposition}'s terms: a
+ * job's rollback writes a snapshot back by id, and there is nothing to write it
+ * into if the document has been deleted underneath it.
+ */
+export function deleteComposition(id: string): Result<Composition> {
+  if (jobRunning) return refuse(JOB_LOCK_REASON);
+  const target = findLibraryComposition(id);
+  if (!target) return refuse(`No such composition: ${id}.`);
+  const wasOpen = store().editingCompositionId === id;
+  store().deleteComposition(id);
+  if (wasOpen) forgetPerCompositionState();
+  return ok(target);
 }
 
 /**
@@ -931,6 +1150,12 @@ export function ensureComposition(): Result<Composition> {
  * composition is never put back or even reopened. No composition command lists
  * this tool, but `Command.tools` is documented as not enforcement, so the model
  * choosing it anyway has to be answered here rather than assumed away.
+ *
+ * An unnamed composition gets a name that is unique in the library rather than
+ * the lib's flat "Untitled composition" — see {@link uniqueCompositionName}. A
+ * name the caller passed is used verbatim: it said what it wanted. Reachable in
+ * two clicks now that CP-17 put a New button in the rail, and two rows sharing
+ * one name cannot be told apart in it.
  */
 export function openBlankComposition(name?: string): Result<Composition> {
   if (jobRunning) return refuse(JOB_LOCK_REASON);
@@ -943,7 +1168,7 @@ export function openBlankComposition(name?: string): Result<Composition> {
   const priorPatternId = usePatternsStore.getState().editingPatternId;
   // `createComposition` returns '' when the tier gate declines, which is the
   // only signal it gives.
-  const id = store().createComposition(name);
+  const id = store().createComposition(name ?? uniqueCompositionName(BLANK_COMPOSITION_NAME));
   if (priorPatternId !== null && usePatternsStore.getState().editingPatternId === null) {
     usePatternsStore.setState({ editingPatternId: priorPatternId });
   }

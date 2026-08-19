@@ -850,7 +850,7 @@ function compositionTuning(composition: Composition): TuningDef | null {
  * Where composition playback wraps.
  *
  * LIB-GAP(11) is deliberately NOT corrected here, which is the opposite of what
- * `compositionService.arrangementEnd` and `arrangementMath.contentEndTick` do —
+ * `compositionService.compositionEndTick` and `arrangementMath.contentEndTick` do —
  * and the difference is the point. Those two answer "how wide is the
  * arrangement", which the ruler and the blocks are drawn from, so they have to
  * measure a truncated placement by its `lengthTicks`. This one answers "where

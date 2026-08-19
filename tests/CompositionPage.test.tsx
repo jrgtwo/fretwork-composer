@@ -6,8 +6,8 @@ import { CompositionPage } from '../src/composition/CompositionPage';
 import {
   beginJob,
   endJob,
-  ensureComposition,
   JOB_LOCK_REASON,
+  openBlankComposition,
 } from '../src/composition/compositionService';
 
 /**
@@ -33,6 +33,60 @@ beforeEach(() => {
 });
 
 const modeButton = (label: string) => screen.getByRole('button', { name: `${label} mode` });
+
+describe('the rail (CP-17)', () => {
+  const railSection = (name: string) =>
+    screen.getByRole('button', { name: new RegExp(`^${name}$`, 'i') });
+
+  it('holds three independently foldable sections in pattern mode', () => {
+    render(
+      <CompositionPage
+        mode="pattern"
+        onModeChange={() => {}}
+        openRailSections={['commands', 'patterns', 'compositions']}
+      />,
+    );
+
+    for (const name of ['Commands', 'Patterns', 'Compositions']) {
+      expect(screen.getByRole('region', { name: `${name} section` })).toBeInTheDocument();
+    }
+  });
+
+  it('folds one without touching the others', async () => {
+    const user = userEvent.setup();
+    const onOpenRailSectionsChange = vi.fn();
+    render(
+      <CompositionPage
+        mode="pattern"
+        onModeChange={() => {}}
+        openRailSections={['commands', 'patterns', 'compositions']}
+        onOpenRailSectionsChange={onOpenRailSectionsChange}
+      />,
+    );
+
+    await user.click(railSection('Compositions'));
+
+    // Controlled, like `mode`: the page reports the change and `App` owns it, so
+    // a fold survives the unmount every visit to the pattern page causes.
+    expect(onOpenRailSectionsChange).toHaveBeenCalled();
+    const next = onOpenRailSectionsChange.mock.calls[0][0](['commands', 'patterns', 'compositions']);
+    expect(next).toEqual(['commands', 'patterns']);
+  });
+
+  it('offers neither library outside pattern mode', () => {
+    render(
+      <CompositionPage
+        mode="voice"
+        onModeChange={() => {}}
+        openRailSections={['commands', 'patterns', 'compositions']}
+      />,
+    );
+
+    expect(screen.getByRole('region', { name: 'Commands section' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Patterns section' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Compositions section' })).not.toBeInTheDocument();
+  });
+});
 
 describe('CompositionPage mode bar', () => {
   it('presses the mode it is given, not a hard-coded default', () => {
@@ -74,7 +128,9 @@ describe('CompositionPage mode bar', () => {
    */
   it('closes the mode bar while a generation job owns the composition', async () => {
     const onModeChange = vi.fn();
-    ensureComposition();
+    // `beginJob` needs a document to own, and CP-17 stopped the page seeding one
+    // on mount — a composition has to exist before the job can take it.
+    openBlankComposition('Song');
     const { rerender } = render(
       <CompositionPage mode="pattern" onModeChange={onModeChange} />,
     );
@@ -112,7 +168,7 @@ describe('CompositionPage rail sections', () => {
   const commandsButton = () => screen.getByRole('button', { name: 'Commands' });
 
   it('opens and closes on its own when nobody is controlling it', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionPage mode="pattern" onModeChange={() => {}} />);
 
     expect(commandsButton()).toHaveAttribute('aria-expanded', 'false');
@@ -124,7 +180,7 @@ describe('CompositionPage rail sections', () => {
 
   it('defers to the owner when there is one, and never writes its own copy', async () => {
     const onOpenRailSectionsChange = vi.fn();
-    ensureComposition();
+    openBlankComposition('Song');
     render(
       <CompositionPage
         mode="pattern"

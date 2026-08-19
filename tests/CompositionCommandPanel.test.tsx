@@ -179,7 +179,6 @@ import {
   clearHistory,
   closePlacementEditing,
   endJob,
-  ensureComposition,
   getEditingComposition,
   getEditingPlacementId,
   getSelectedPlacementIds,
@@ -292,7 +291,10 @@ const report = () => screen.getByRole('button', { name: 'Cancel' }).parentElemen
  * rendered on its own here, with no grid to press.
  */
 function openBlock(): { placementId: string; patternId: string } {
-  ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
   const track = addTrack('Riff track');
   if (!track.ok) throw new Error(track.reason);
   const pattern = openBlankPattern('Riff');
@@ -314,7 +316,7 @@ function openBlock(): { placementId: string; patternId: string } {
 
 describe('which commands the panel offers', () => {
   it('offers the composition rows in pattern mode', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     expect(screen.getByRole('button', { name: BACKING_TRACK })).toBeInTheDocument();
@@ -327,7 +329,7 @@ describe('which commands the panel offers', () => {
   });
 
   it('offers the voice rows in voice mode, and not the pattern-mode ones', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="voice" />);
 
     expect(screen.getByRole('button', { name: 'Dial in a tone' })).toBeInTheDocument();
@@ -377,7 +379,7 @@ describe('which commands the panel offers', () => {
    * covered by neither the rollback nor the lock.
    */
   it('offers nothing in edit mode until a block is actually open', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     openBlankPattern('The user’s own pattern');
     render(<CompositionCommandPanel mode="edit" />);
 
@@ -394,7 +396,7 @@ describe('which commands the panel offers', () => {
 
 describe('a run in flight', () => {
   it('reports the tools as they run, and marks the one in flight', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -429,7 +431,7 @@ describe('a run in flight', () => {
    * nothing on screen saying why.
    */
   it('keeps the run — and Cancel — when another command is picked mid-run', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -456,7 +458,7 @@ describe('a run in flight', () => {
    * on screen.
    */
   it('keeps a finished run’s report across a mode change', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const { rerender } = render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -481,7 +483,7 @@ describe('a run in flight', () => {
    * fails.
    */
   it('would survive a mode change mid-run: the run is not rendered inside the form', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const { rerender } = render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -514,7 +516,7 @@ describe('a run in flight', () => {
    * these green while the wall clock silently stayed at fifteen minutes.
    */
   it('gives the run sixty round trips and an abort signal', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -530,7 +532,7 @@ describe('a run in flight', () => {
 
 describe('the document lock', () => {
   it('is held for the duration of a run and released when it answers', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -541,7 +543,7 @@ describe('the document lock', () => {
   });
 
   it('is released when the run is cancelled', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -551,7 +553,7 @@ describe('the document lock', () => {
   });
 
   it('is released when the run comes back refused', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     harness.throwWith = 'Failed to fetch';
     render(<CompositionCommandPanel mode="pattern" />);
 
@@ -562,7 +564,7 @@ describe('the document lock', () => {
   });
 
   it('is released when the panel is unmounted mid-run', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const { unmount } = render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -593,7 +595,7 @@ describe('the document lock', () => {
    * patterns in the library — cannot be spent on a dead id.
    */
   it('is never taken when the command no longer fills', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun('Lay a pattern down the timeline');
@@ -610,7 +612,7 @@ describe('the document lock', () => {
    * not set a provider yet.
    */
   it('is never taken when no provider is configured', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     setConnectorSettings({ baseUrl: '', token: '' });
     render(<CompositionCommandPanel mode="pattern" />);
 
@@ -626,7 +628,7 @@ describe('the document lock', () => {
 
 describe('a cancelled job', () => {
   it('puts the arrangement back exactly as it was', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const before = getTracks().length;
     render(<CompositionCommandPanel mode="pattern" />);
 
@@ -645,7 +647,7 @@ describe('a cancelled job', () => {
   });
 
   it('rolls back when the panel is unmounted mid-run, rather than leaving half an arrangement', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const before = getTracks().length;
     const { unmount } = render(<CompositionCommandPanel mode="pattern" />);
 
@@ -669,7 +671,7 @@ describe('a cancelled job', () => {
    * reaches it.
    */
   it('leaves the user’s own undo stack untouched — one press still reaches their edit', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const before = getTracks().length;
     // The user's own edit, before the job — one undo step of their own.
     expect(addTrack('Mine').ok).toBe(true);
@@ -697,7 +699,7 @@ describe('a cancelled job', () => {
    * safer than it is.
    */
   it('says the patterns it wrote are still in the library', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -709,7 +711,7 @@ describe('a cancelled job', () => {
   });
 
   it('does not say it when the run wrote no patterns', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -728,7 +730,7 @@ describe('a cancelled job', () => {
   it('gives up on the deadline, says so, and still rolls back', async () => {
     vi.useFakeTimers();
     try {
-      ensureComposition();
+      openBlankComposition('Song');
       const before = getTracks().length;
       render(<CompositionCommandPanel mode="pattern" />);
 
@@ -759,7 +761,7 @@ describe('a cancelled job', () => {
 
 describe('a finished job', () => {
   it('keeps its work, as ONE undo step', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const before = getTracks().length;
     render(<CompositionCommandPanel mode="pattern" />);
 
@@ -776,7 +778,7 @@ describe('a finished job', () => {
   });
 
   it('shows what the model said, under what it actually called', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -798,7 +800,7 @@ describe('refusals the run met along the way', () => {
    * difference between "the run stopped adding tracks" and a silent stop.
    */
   it('states the track cap rather than letting the model paper over it', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -819,7 +821,7 @@ describe('refusals the run met along the way', () => {
    *  five times is noise that buries the four other things a run may have been
    *  refused. */
   it('says each refusal once, however many times the run met it', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun();
@@ -967,7 +969,7 @@ describe('a command on the IR route', () => {
   });
 
   it('starts the job rather than an agent run, and the other rows still do not', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun(BACKING_TRACK);
@@ -989,7 +991,7 @@ describe('a command on the IR route', () => {
   });
 
   it('shows the phases the job emits — chart, then part N of M, then import', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun(BACKING_TRACK);
@@ -1098,7 +1100,7 @@ describe('a command on the IR route', () => {
   });
 
   it('drops the undo history, so a press cannot stamp the old composition back', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
     const added = addTrack('The user’s own track');
     if (!added.ok) throw new Error(added.reason);
@@ -1138,7 +1140,7 @@ describe('a command on the IR route', () => {
    * consequence the user cannot see coming from anywhere else.
    */
   it('says what the route costs, and says something else for the other route', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await userEvent.click(screen.getByRole('button', { name: BACKING_TRACK }));
@@ -1154,7 +1156,7 @@ describe('a command on the IR route', () => {
   });
 
   it('does not read as a clean success when a part is missing from the piece', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun(BACKING_TRACK);
@@ -1189,7 +1191,7 @@ describe('a command on the IR route', () => {
    * emitted no progress at all to say so.
    */
   it('builds the report from the outcome, not from the events it happened to see', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const transcript = beginJobTranscript({
       page: 'composition',
       command: BACKING_TRACK,
@@ -1215,7 +1217,7 @@ describe('a command on the IR route', () => {
   });
 
   it('puts the import’s warnings on the screen', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun(BACKING_TRACK);
@@ -1251,7 +1253,7 @@ describe('a command on the IR route', () => {
    * the collision, and the count the user is reading is wrong.
    */
   it('shows a repeated warning as many times as it arrived', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     // ⚠ THE COLLISION IS REPORTED TO THE CONSOLE, NOT TO THE DOM — React renders
     // both rows and logs "two children with the same key" — so the console is
     // where the assertion has to look. Restored in a `finally`: a swallowed
@@ -1281,7 +1283,7 @@ describe('a command on the IR route', () => {
   });
 
   it('marks the part that failed where the part is, and says nothing was imported', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun(BACKING_TRACK);
@@ -1321,7 +1323,7 @@ describe('a command on the IR route', () => {
    * One test apiece, because each needs the job to end at a different point.
    */
   it('says the chart was not written when the chart run is what failed', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun(BACKING_TRACK);
@@ -1344,7 +1346,7 @@ describe('a command on the IR route', () => {
   });
 
   it('says the import was refused when every part was written and the document was not', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun(BACKING_TRACK);
@@ -1366,7 +1368,7 @@ describe('a command on the IR route', () => {
   });
 
   it('leaves the part a cancel interrupted marked stopped, not failed', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun(BACKING_TRACK);
@@ -1398,7 +1400,7 @@ describe('a command on the IR route', () => {
    * control's absence just as happily as its presence.
    */
   it('offers the job’s run log, from the id the job emitted', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const transcript = beginJobTranscript({
       page: 'composition',
       command: BACKING_TRACK,
@@ -1424,7 +1426,7 @@ describe('a command on the IR route', () => {
   });
 
   it('stops on Cancel and imports nothing', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const tracksBefore = getTracks().length;
     const patternsBefore = usePatternsStore.getState().library.patterns.length;
     render(<CompositionCommandPanel mode="pattern" />);
@@ -1478,7 +1480,7 @@ describe('a command on the IR route', () => {
   it('gives up on its own deadline, and does not call that a cancel', async () => {
     vi.useFakeTimers();
     try {
-      ensureComposition();
+      openBlankComposition('Song');
       render(<CompositionCommandPanel mode="pattern" />);
 
       // `fireEvent`, not `userEvent`: the deadline is a `setTimeout` taken when
@@ -1505,7 +1507,7 @@ describe('a command on the IR route', () => {
   });
 
   it('refuses without a provider, and reports no phase the job never reached', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     setConnectorSettings({ baseUrl: '', token: '' });
     render(<CompositionCommandPanel mode="pattern" />);
 
@@ -1523,7 +1525,7 @@ describe('a command on the IR route', () => {
   });
 
   it('gives the lock back when the job runner itself throws', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     irJob.throwWith = 'the job runner is broken';
     render(<CompositionCommandPanel mode="pattern" />);
 
@@ -1544,7 +1546,7 @@ describe('a command on the IR route', () => {
   });
 
   it('cancels the job when the panel is unmounted mid-job', async () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const { unmount } = render(<CompositionCommandPanel mode="pattern" />);
 
     await startRun(BACKING_TRACK);

@@ -15,8 +15,9 @@ import { ArrangementGrid } from '../src/composition/ArrangementGrid';
 import {
   addPlacement,
   addTrack,
-  ensureComposition,
+  getEditingComposition,
   getTracks,
+  openBlankComposition,
   selectPlacements,
   selectTrack,
 } from '../src/composition/compositionService';
@@ -232,7 +233,10 @@ const BAR = 4 * PPQ;
 const VOLUME_PATH = 'level.volumeDb';
 
 function twoTracks(): readonly Track[] {
-  ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
   addTrack('Rhythm');
   return getTracks();
 }
@@ -897,8 +901,14 @@ const nav = () => within(screen.getByRole('navigation', { name: 'Editor' }));
 const modes = () => within(screen.getByRole('group', { name: 'Composition mode' }));
 
 describe('unsaved tone survives the things that unmount it', () => {
-  /** Go to the composition page and into voice mode. */
+  /** Go to the composition page and into voice mode.
+   *
+   *  Seeds the composition first: CP-17 stopped the page creating one on
+   *  arrival, so these tests would otherwise reach voice mode with no track to
+   *  hold a rack. Before `render` would be equivalent — this is where the App's
+   *  own navigation starts, so it reads with the thing it enables. */
   async function intoVoiceMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    if (getTracks().length === 0) openBlankComposition('Song');
     await user.click(nav().getByRole('button', { name: 'Composition' }));
     await user.click(modes().getByRole('button', { name: 'Voice mode' }));
   }

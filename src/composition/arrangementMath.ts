@@ -434,7 +434,7 @@ export function placementRepeatRects(
  * LIB-GAP(11): this is the lib's `totalDurationTicks(comp)` done correctly — that
  * one measures a placement as `startTick + patternSnapshot.durationTicks * repeat`
  * and never consults `lengthTicks`, so a trimmed block claims its snapshot's full
- * width and the ruler draws up to 4× too many bars. `compositionService.arrangementEnd`
+ * width and the ruler draws up to 4× too many bars. `compositionService.compositionEndTick`
  * masks the same gap on a whole `Composition`; delete both when the lib's
  * `totalDurationTicks` routes through `placementEndTick`.
  */

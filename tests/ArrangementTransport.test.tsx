@@ -62,9 +62,9 @@ import {
   addPlacement,
   addTrack,
   clearHistory,
-  ensureComposition,
   getEditingComposition,
   getTracks,
+  openBlankComposition,
   resizePlacement,
   selectPlacements,
   selectTrack,
@@ -103,7 +103,10 @@ function seedPattern(): string {
 /** Two tracks, a block on each — the second one truncated, so the drawn width
  *  and the engine's loop boundary are genuinely different numbers. */
 function seedArrangement(): { patternId: string; placements: string[] } {
-  ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
   const patternId = seedPattern();
   addTrack('Rhythm');
   const trackIds = getTracks().map((t) => t.id);

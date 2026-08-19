@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { DEFAULT_PATTERNS_STATE, usePatternsStore } from '@fretwork/lib';
 import { App } from '../src/App';
 import { stop } from '../src/audio/playbackService';
+import { openBlankComposition } from '../src/composition/compositionService';
 
 // Only `stop` is stood in for — jsdom has no Web Audio, so the transport's
 // having been released is not observable any other way. Everything else in the
@@ -99,16 +100,34 @@ describe('page routing', () => {
     expect(screen.queryByText('Instrument & Amp')).not.toBeInTheDocument();
   });
 
-  it('opens a composition through the seam and titles the header with it', async () => {
+  it('CREATES NO COMPOSITION on arrival, and lands on the empty state', async () => {
+    // CP-17. Arriving used to mint "Untitled composition" — a document nobody
+    // asked for, and the reason the empty state was previously unreachable.
     render(<App />);
     expect(usePatternsStore.getState().library.compositions).toHaveLength(0);
+
+    await goTo('Composition');
+
+    expect(usePatternsStore.getState().library.compositions).toHaveLength(0);
+    expect(usePatternsStore.getState().editingCompositionId).toBeNull();
+    // The page's own empty state, not the refusal — nothing may read as an error.
+    expect(screen.getByText('No composition open')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('opens the existing composition through the seam and titles the header with it', async () => {
+    openBlankComposition('Blues in C');
+    usePatternsStore.setState({ editingCompositionId: null });
+    render(<App />);
 
     await goTo('Composition');
 
     const composition = usePatternsStore.getState().library.compositions[0];
     expect(composition).toBeDefined();
     expect(usePatternsStore.getState().editingCompositionId).toBe(composition.id);
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(composition.name);
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Blues in C');
+    // Adopting the last-arranged one is not creating a second.
+    expect(usePatternsStore.getState().library.compositions).toHaveLength(1);
   });
 
   it('opening a composition does not close the pattern being edited', async () => {
@@ -143,23 +162,24 @@ describe('page routing', () => {
     expect(stopped).toHaveBeenCalled();
   });
 
-  it('says so when the library refuses to open a composition', async () => {
-    // `ensureEditingComposition` returns without creating and without error when
-    // the subscription gate declines. Store actions live in store state, so this
-    // stands in for that refusal.
-    const real = usePatternsStore.getState().ensureEditingComposition;
-    usePatternsStore.setState({ ensureEditingComposition: () => {} });
+  it('says so when the store will not open a composition that exists', async () => {
+    // CP-17 narrowed this path: with no auto-create left, the only way to fail
+    // is the store declining to open a composition the library is holding. An
+    // EMPTY library is not this case — that is the empty state above, and the
+    // two must not be confused on screen.
+    openBlankComposition('Blues in C');
+    usePatternsStore.setState({ editingCompositionId: null });
+    const real = usePatternsStore.getState().openCompositionForArranging;
+    usePatternsStore.setState({ openCompositionForArranging: () => {} });
     try {
       render(<App />);
 
       await goTo('Composition');
 
-      expect(screen.getByRole('alert')).toHaveTextContent(/refused/i);
-      // Not the ordinary empty page: nothing may read as a composition being open.
-      expect(screen.queryByText('Arrangement')).not.toBeInTheDocument();
+      expect(screen.getByRole('alert')).toHaveTextContent(/couldn.t open/i);
       expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('—');
     } finally {
-      usePatternsStore.setState({ ensureEditingComposition: real });
+      usePatternsStore.setState({ openCompositionForArranging: real });
     }
   });
 

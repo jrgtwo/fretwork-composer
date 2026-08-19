@@ -18,11 +18,16 @@ import {
   beginJob,
   clearHistory,
   compositionGrooveId,
+  deleteComposition,
+  duplicateComposition,
   duplicatePlacements,
   endEditGesture,
   endJob,
   ensureComposition,
+  findLibraryComposition,
   findPlacement,
+  getEditingComposition,
+  getLibraryCompositions,
   getEditingPlacementId,
   getSelectedPlacementIds,
   getSelectedTrackId,
@@ -31,7 +36,9 @@ import {
   moveTrack,
   movePlacement,
   openBlankComposition,
+  openComposition,
   openPlacementForEditing,
+  renameComposition,
   redo,
   removePlacement,
   removeTrack,
@@ -58,6 +65,7 @@ import {
   useEditingComposition,
   useHistoryState,
   useIsJobRunning,
+  useLibraryCompositions,
   useSelectedPlacementIds,
   useSelectedTrackId,
   useTotalDurationTicks,
@@ -144,50 +152,76 @@ beforeEach(() => {
 // ------------------------------------------------------------- lifecycle ---
 
 describe('ensureComposition', () => {
-  it('seeds a composition and reports the one it opened', () => {
+  it('CREATES NOTHING when the library is empty, and says so with ok(null)', () => {
+    // CP-17 changed this deliberately. It used to seed "Untitled composition"
+    // on arrival, which minted a document nobody asked for and made the empty
+    // state something you could only be in until you navigated. `null` is not a
+    // failure — the page renders its empty state and its New button — so the
+    // page's error branch must not fire.
     const result = ensureComposition();
 
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(usePatternsStore.getState().library.compositions).toHaveLength(1);
-    expect(result.value.id).toBe(usePatternsStore.getState().editingCompositionId);
-    // The lib's own invariant: never zero tracks.
-    expect(result.value.tracks.length).toBeGreaterThan(0);
+    expect(result).toEqual({ ok: true, value: null });
+    expect(usePatternsStore.getState().library.compositions).toEqual([]);
+    expect(usePatternsStore.getState().editingCompositionId).toBeNull();
   });
 
-  it('reopens the existing composition rather than creating a second', () => {
-    const first = ensureComposition();
-    const second = ensureComposition();
+  it('opens the most recently updated composition when one exists', () => {
+    openBlankComposition('Older');
+    const olderId = stored().id;
+    openBlankComposition('Newer');
+    const newerId = stored().id;
+    // Nothing open, both still in the library — the state after a delete, and
+    // the state on arriving at the page in a new tab.
+    usePatternsStore.setState({ editingCompositionId: null });
+    usePatternsStore.setState((state) => ({
+      library: {
+        ...state.library,
+        compositions: state.library.compositions.map((c) =>
+          c.id === newerId ? { ...c, updatedAt: 20_000 } : { ...c, updatedAt: 10_000 },
+        ),
+      },
+    }));
 
-    expect(first.ok && second.ok && first.value.id === second.value.id).toBe(true);
-    expect(usePatternsStore.getState().library.compositions).toHaveLength(1);
+    const result = ensureComposition();
+
+    expect(result.ok && result.value?.id).toBe(newerId);
+    expect(olderId).not.toBe(newerId);
+    expect(usePatternsStore.getState().library.compositions).toHaveLength(2);
   });
 
-  it('refuses rather than reporting success when nothing was opened', () => {
-    // `ensureEditingComposition` runs a subscription gate and returns silently
-    // when refused, so the seam has to verify. The gate can't be tripped from
-    // here (the free cap is 500), so the refusal path is provoked by emptying
-    // the library from under the action — the same observable end state.
-    const real = usePatternsStore.getState().ensureEditingComposition;
-    usePatternsStore.setState({ ensureEditingComposition: () => {} });
-    try {
-      const result = ensureComposition();
+  it('keeps the open composition rather than adopting another', () => {
+    openBlankComposition('First');
+    const firstId = stored().id;
+    openBlankComposition('Second');
+    const secondId = stored().id;
 
-      expect(result).toEqual({
-        ok: false,
-        reason: expect.stringContaining("Couldn't open a composition"),
-      });
-    } finally {
-      // The action is not part of the state `beforeEach` restores, so the stub
-      // would leak into every later test in the file.
-      usePatternsStore.setState({ ensureEditingComposition: real });
-    }
+    const result = ensureComposition();
+
+    expect(result.ok && result.value?.id).toBe(secondId);
+    expect(secondId).not.toBe(firstId);
+  });
+
+  it('forgets per-composition state when it adopts a different one', () => {
+    // Adopting is a switch like any other: a carried-over selection names
+    // blocks in a document that is no longer open.
+    openBlankComposition('Song');
+    const trackId = storedTracks()[0].id;
+    const patternId = seedPattern('Riff');
+    addPlacement(patternId, trackId);
+    selectTrack(trackId);
+    expect(getSelectedPlacementIds()).toHaveLength(1);
+    usePatternsStore.setState({ editingCompositionId: null });
+
+    ensureComposition();
+
+    expect(getSelectedPlacementIds()).toEqual([]);
+    expect(getSelectedTrackId()).toBeNull();
   });
 });
 
 describe('openBlankComposition', () => {
   it('creates a composition, opens it, and clears selection and history', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     const firstId = stored().id;
     const trackId = storedTracks()[0].id;
     const patternId = seedPattern('Riff');
@@ -231,11 +265,254 @@ describe('openBlankComposition', () => {
   });
 });
 
+describe('the composition library', () => {
+  it('lists what the store holds, and finds one by id', () => {
+    openBlankComposition('One');
+    const oneId = stored().id;
+    openBlankComposition('Two');
+
+    expect(getLibraryCompositions().map((c) => c.name)).toEqual(['One', 'Two']);
+    expect(findLibraryComposition(oneId)?.name).toBe('One');
+    expect(findLibraryComposition('nope')).toBeUndefined();
+  });
+
+  it('re-renders a subscriber when the library changes', () => {
+    const view = renderHook(() => useLibraryCompositions());
+    expect(view.result.current).toEqual([]);
+
+    act(() => {
+      openBlankComposition('One');
+    });
+
+    expect(view.result.current).toHaveLength(1);
+    view.unmount();
+  });
+
+  it('gives a new blank composition a name unique in the library', () => {
+    // The lib names every blank "Untitled composition" flat. With a New button
+    // in the rail this is reachable in two clicks, and two rows with one name
+    // between them cannot be told apart.
+    openBlankComposition();
+    openBlankComposition();
+
+    const names = getLibraryCompositions().map((c) => c.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+describe('openComposition', () => {
+  it('switches the open composition and forgets the previous one\'s state', () => {
+    openBlankComposition('First');
+    const firstId = stored().id;
+    const trackId = storedTracks()[0].id;
+    const patternId = seedPattern('Riff');
+    addPlacement(patternId, trackId);
+    selectTrack(trackId);
+    openBlankComposition('Second');
+
+    const result = openComposition(firstId);
+
+    expect(result.ok && result.value.id).toBe(firstId);
+    expect(usePatternsStore.getState().editingCompositionId).toBe(firstId);
+    expect(getSelectedPlacementIds()).toEqual([]);
+    expect(getSelectedTrackId()).toBeNull();
+  });
+
+  it('drops history, so an undo cannot write back into the composition it left', () => {
+    openBlankComposition('First');
+    const firstId = stored().id;
+    openBlankComposition('Second');
+    const secondId = stored().id;
+    const trackId = storedTracks()[0].id;
+    const patternId = seedPattern('Riff');
+    addPlacement(patternId, trackId);
+    expect(storedPlacements()).toHaveLength(1);
+
+    openComposition(firstId);
+    undo();
+
+    // The discriminating assertion is on SECOND: an uncleared stack would hold
+    // its pre-placement snapshot and this undo would write it back, deleting a
+    // block from a composition nobody is looking at.
+    const second = usePatternsStore
+      .getState()
+      .library.compositions.find((c) => c.id === secondId);
+    expect(second?.tracks[0].placements).toHaveLength(1);
+  });
+
+  it('refuses an id that is not in the library', () => {
+    openBlankComposition('Only');
+
+    expect(openComposition('nope')).toEqual({
+      ok: false,
+      reason: expect.stringContaining('No such composition'),
+    });
+  });
+
+  it('is refused while a job holds the document — the agent included', () => {
+    // Not `lockedOut()`: switching composition mid-job destroys the rollback,
+    // because `forgetPerCompositionState` re-arms the bracket on the NEW
+    // document. `openBlankComposition` is guarded the same way and says why.
+    openBlankComposition('First');
+    const firstId = stored().id;
+    openBlankComposition('Second');
+    const held = beginJob();
+    if (!held.ok) throw new Error('job refused');
+    try {
+      expect(openComposition(firstId)).toEqual({ ok: false, reason: JOB_LOCK_REASON });
+      const asAgent: Result<Composition> = asJobWrite(() => openComposition(firstId));
+      expect(asAgent).toEqual({ ok: false, reason: JOB_LOCK_REASON });
+    } finally {
+      held.value();
+    }
+  });
+});
+
+describe('renameComposition', () => {
+  it('renames by id, whether or not it is the one open', () => {
+    openBlankComposition('First');
+    const firstId = stored().id;
+    openBlankComposition('Second');
+
+    const result = renameComposition(firstId, '  Blues in C  ');
+
+    expect(result.ok).toBe(true);
+    expect(findLibraryComposition(firstId)?.name).toBe('Blues in C');
+    // Renaming another row must not switch what is open.
+    expect(stored().name).toBe('Second');
+  });
+
+  it('refuses an empty name', () => {
+    // Ours, not the lib's: `renameComposition` writes whatever it is given, and
+    // a composition named '' has no handle left in any list.
+    openBlankComposition('Song');
+    const id = stored().id;
+
+    expect(renameComposition(id, '   ')).toEqual({
+      ok: false,
+      reason: expect.stringContaining('needs a name'),
+    });
+    expect(findLibraryComposition(id)?.name).toBe('Song');
+  });
+
+  it('refuses an id that is not in the library', () => {
+    expect(renameComposition('nope', 'x')).toEqual({
+      ok: false,
+      reason: expect.stringContaining('No such composition'),
+    });
+  });
+});
+
+describe('duplicateComposition', () => {
+  it('copies the tracks and their placements without opening the copy', () => {
+    openBlankComposition('Song');
+    const sourceId = stored().id;
+    const trackId = storedTracks()[0].id;
+    const patternId = seedPattern('Riff');
+    addPlacement(patternId, trackId);
+
+    const result = duplicateComposition(sourceId);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.id).not.toBe(sourceId);
+    expect(result.value.tracks[0].placements).toHaveLength(1);
+    // Deep copy: editing the copy must not reach the original.
+    expect(result.value.tracks[0].id).not.toBe(trackId);
+    // Not opened — a duplicate is usually made to keep the original safe.
+    expect(usePatternsStore.getState().editingCompositionId).toBe(sourceId);
+  });
+
+  it('names the copy so the two can be told apart', () => {
+    // `forkComposition` keeps the source name verbatim — it is built for forking
+    // someone else's published work, not for a local copy. See LIB-GAP(22).
+    openBlankComposition('Song');
+    const sourceId = stored().id;
+
+    const result = duplicateComposition(sourceId);
+
+    expect(result.ok && result.value.name).not.toBe('Song');
+    const names = getLibraryCompositions().map((c) => c.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('refuses an id that is not in the library', () => {
+    expect(duplicateComposition('nope')).toEqual({
+      ok: false,
+      reason: expect.stringContaining('No such composition'),
+    });
+  });
+});
+
+describe('deleteComposition', () => {
+  it('removes it and leaves NOTHING open when it was the one being arranged', () => {
+    // CP-17: no successor is chased. "Nothing open" is a state the page renders
+    // properly, and this ticket is what gives it a way out.
+    openBlankComposition('Only');
+    const id = stored().id;
+
+    const result = deleteComposition(id);
+
+    expect(result.ok).toBe(true);
+    expect(getLibraryCompositions()).toEqual([]);
+    expect(usePatternsStore.getState().editingCompositionId).toBeNull();
+    expect(getEditingComposition()).toBeNull();
+  });
+
+  it('clears the selection and history that belonged to it', () => {
+    openBlankComposition('Song');
+    const id = stored().id;
+    const trackId = storedTracks()[0].id;
+    const patternId = seedPattern('Riff');
+    addPlacement(patternId, trackId);
+    selectTrack(trackId);
+
+    deleteComposition(id);
+
+    expect(getSelectedPlacementIds()).toEqual([]);
+    expect(getSelectedTrackId()).toBeNull();
+    expect(canUndo()).toBe(false);
+  });
+
+  it('leaves the open composition alone when another row is deleted', () => {
+    openBlankComposition('Other');
+    const otherId = stored().id;
+    openBlankComposition('Open');
+    const openId = stored().id;
+
+    deleteComposition(otherId);
+
+    expect(usePatternsStore.getState().editingCompositionId).toBe(openId);
+    expect(getLibraryCompositions().map((c) => c.name)).toEqual(['Open']);
+  });
+
+  it('refuses an id that is not in the library', () => {
+    expect(deleteComposition('nope')).toEqual({
+      ok: false,
+      reason: expect.stringContaining('No such composition'),
+    });
+  });
+
+  it('is refused while a job holds the document — the agent included', () => {
+    openBlankComposition('Song');
+    const id = stored().id;
+    const held = beginJob();
+    if (!held.ok) throw new Error('job refused');
+    try {
+      expect(deleteComposition(id)).toEqual({ ok: false, reason: JOB_LOCK_REASON });
+      const asAgent: Result<Composition> = asJobWrite(() => deleteComposition(id));
+      expect(asAgent).toEqual({ ok: false, reason: JOB_LOCK_REASON });
+    } finally {
+      held.value();
+    }
+  });
+});
+
 // ---------------------------------------------------------------- tracks ---
 
 describe('addTrack', () => {
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
   });
 
   it('appends a track and writes it through to the store', () => {
@@ -286,7 +563,7 @@ describe('addTrack', () => {
 
 describe('removeTrack', () => {
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
   });
 
   it('removes the track and clears any selection pointing into it', () => {
@@ -322,7 +599,7 @@ describe('removeTrack', () => {
 
 describe('track settings round-trip through the store', () => {
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
   });
 
   it('writes name, instrument, volume, mute and solo', () => {
@@ -426,7 +703,7 @@ describe('track settings round-trip through the store', () => {
 
 describe('trackInstrumentId', () => {
   it('falls back to the default for an instrument the lib catalog has never heard of', () => {
-    ensureComposition();
+    openBlankComposition('Song');
     // Straight through the store: the seam's own setter is typed to the catalog,
     // which is exactly why the resolver exists — persisted data isn't.
     const track = { ...storedTracks()[0], instrumentId: 'kazoo' } as Track;
@@ -439,7 +716,7 @@ describe('trackInstrumentId', () => {
 
 describe('composition settings round-trip through the store', () => {
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
   });
 
   it('writes name, bpm, time signature and loop', () => {
@@ -464,7 +741,7 @@ describe('placement writes round-trip through the store', () => {
   let patternId = '';
 
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
     trackId = storedTracks()[0].id;
     patternId = seedPattern('Riff');
   });
@@ -584,7 +861,7 @@ describe('placement selection', () => {
   let ids: string[] = [];
 
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
     trackId = storedTracks()[0].id;
     const patternId = seedPattern('Riff');
     ids = [];
@@ -648,7 +925,7 @@ describe('hooks re-render on the state they name', () => {
   let patternId = '';
 
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
     trackId = storedTracks()[0].id;
     patternId = seedPattern('Riff');
   });
@@ -717,7 +994,7 @@ describe('gesture batching', () => {
   let placementId = '';
 
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
     trackId = storedTracks()[0].id;
     const placed = addPlacement(seedPattern('Riff'), trackId, 0);
     if (!placed.ok) throw new Error('placement refused');
@@ -920,7 +1197,7 @@ describe('abortEditGesture', () => {
   let placementId = '';
 
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
     trackId = storedTracks()[0].id;
     const placed = addPlacement(seedPattern('Riff'), trackId, 0);
     if (!placed.ok) throw new Error('placement refused');
@@ -1095,7 +1372,7 @@ describe('the job lock', () => {
   let placementId = '';
 
   beforeEach(() => {
-    ensureComposition();
+    openBlankComposition('Song');
     trackId = storedTracks()[0].id;
     const placed = addPlacement(seedPattern('Riff'), trackId, 0);
     if (!placed.ok) throw new Error('placement refused');

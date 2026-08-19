@@ -23,7 +23,7 @@ import {
   addTrack,
   clearHistory,
   closePlacementEditing,
-  ensureComposition,
+  getEditingComposition,
   getEditingPlacementId,
   getTracks,
   movePlacement,
@@ -141,7 +141,10 @@ function seedPattern(name: string): string {
  * the global edit target instead of the surface it belongs to lands on both.
  */
 function seedArrangement() {
-  ensureComposition();
+  // Idempotent, as the `ensureComposition` this replaced was: a helper that
+  // CREATES unconditionally would switch away from a composition the test had
+  // already opened, and the switch is silent.
+  if (!getEditingComposition()) openBlankComposition('Song');
   const patternId = seedPattern('Riff');
   addTrack('Bass', 'bass');
   const [guitarTrack, bassTrack] = getTracks();
@@ -473,7 +476,7 @@ describe('the keyboard gate', () => {
     // TWO library patterns, deliberately: copies of one pattern share their
     // event ids, so a document-wide hit test would be indistinguishable from a
     // scoped one. Different patterns mean different ids.
-    ensureComposition();
+    openBlankComposition('Song');
     const patternA = seedPattern('A');
     const patternB = seedPattern('B');
     const [track] = getTracks();
