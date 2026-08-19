@@ -33,6 +33,7 @@ import {
   Voice,
   audioNow,
   buildEffectiveVoice,
+  getTimeSignature,
   getTuning,
   getTuningsForInstrument,
   placementEndTick,
@@ -44,8 +45,10 @@ import {
   type Composition,
   type Metronome,
   type Pattern,
+  type PatternTimeSignature,
   type Placement,
   type ScheduledEvent,
+  type SubdivisionId,
   type Track,
   type TuningDef,
   type VoicePreset,
@@ -389,6 +392,43 @@ export function usePlaybackEngine(): void {
   }, [metronome]);
 }
 
+
+/**
+ * Make the click match the document that is playing.
+ *
+ * ⚠ THE METRONOME IS ONE OBJECT SHARED BY BOTH PAGES, which is why this exists
+ * rather than each page setting its own meter once. `syncComposition` already
+ * says the same thing about tempo — "the metronome carries whatever the pattern
+ * page last left in it" — and time signature and subdivision have exactly that
+ * problem: play a 3/4 arrangement, go to the pattern page, and without this its
+ * 4/4 pattern clicks in 3/4.
+ *
+ * Pushed into `useMetronomeStore`, not into the `Metronome` instance: the lib's
+ * `useMetronome` subscribes to that store and forwards changes to the live
+ * metronome (`m.setTimeSignature`, `m.setSubdivision`), so a change lands
+ * mid-playback. Writing the instance directly would work once and be lost the
+ * next time the store notified.
+ *
+ * An unknown meter is IGNORED rather than refused. `setCompositionTimeSignature`
+ * checks against the same catalog on the way in, so this only sees one from a
+ * document written before that check existed — and a click in the wrong meter is
+ * a better failure than refusing to play. `null` subdivision is the lib's
+ * documented "use the metronome's current value", which for a document that has
+ * never been set reads as `off`.
+ */
+function applyClickSettings(
+  timeSignature: PatternTimeSignature,
+  subdivision: SubdivisionId | null,
+): void {
+  const metronomeStore = useMetronomeStore.getState();
+  const id = `${timeSignature.numerator}/${timeSignature.denominator}`;
+  if (getTimeSignature(id) && id !== metronomeStore.timeSignatureId) {
+    metronomeStore.setTimeSignatureId(id);
+  }
+  const next = subdivision ?? 'off';
+  if (next !== metronomeStore.subdivision) metronomeStore.setSubdivision(next);
+}
+
 /** Must be called from a user gesture — the AudioContext unlock demands one. */
 export async function play(): Promise<void> {
   // Re-entrant play is worse than a no-op: `metronome.start()` ignores the
@@ -407,6 +447,7 @@ export async function play(): Promise<void> {
 
     active.scheduler.setStream(new PatternSource(pattern));
     active.scheduler.setLoop(pattern.loop);
+    applyClickSettings(pattern.timeSignature, pattern.subdivision ?? null);
     emit({ isPlaying: true, headTick: 0, activeIds: NO_IDS });
     await active.metronome.start();
   } catch {
@@ -1327,6 +1368,10 @@ function syncComposition(composition: Composition | null): void {
       // the METRONOME store, not the patterns store this is subscribed to.
       const bpm = compositionTempo(composition);
       if (bpm !== useMetronomeStore.getState().bpm) setTempo(bpm);
+      // Same reasoning one line up, for the other two click settings: changing
+      // the meter or the subdivision mid-playback has to be heard, not stored
+      // and waited on until the next press of Play.
+      applyClickSettings(composition.timeSignature, composition.subdivision ?? null);
       // `EventScheduler.setTuning` only writes the field, and `updateComposition`
       // restreams only the tracks whose placements moved — so unchanged tracks
       // keep a `CompositionTrackSource` built with the OLD boundary and would
@@ -1416,6 +1461,7 @@ export async function playComposition(): Promise<Result> {
     if (!active) return refuse('Audio is unavailable in this browser.');
 
     setTempo(compositionTempo(composition));
+    applyClickSettings(composition.timeSignature, composition.subdivision ?? null);
     active.playback.setLoop(composition.loop);
     active.loop = composition.loop;
     active.loopTicks = loopBoundaryOf(composition);
@@ -1505,6 +1551,30 @@ export function useTempo(): number {
 
 export function setTempo(bpm: number): void {
   useMetronomeStore.getState().setBpm(bpm);
+}
+
+/**
+ * The click's meter and subdivision, for a control that has just written the
+ * same choice to the document.
+ *
+ * Two writes rather than one because the two values are two different things: a
+ * composition's meter is part of the DOCUMENT — it draws the bars and travels
+ * with the arrangement — while the click is TRANSPORT state, shared with the
+ * pattern page and not saved with anything. `setCompositionTimeSignature` owns
+ * the first; these own the second. `TransportBar` calls both, which is the same
+ * division guitar-tutor's `TimeSignatureSelect` documents ("the caller takes
+ * responsibility for persisting the choice").
+ *
+ * Here rather than in the component because this module is the only one allowed
+ * to touch the audio engine, and `useMetronomeStore` is the engine's own store.
+ */
+export function setClickTimeSignature(id: string): void {
+  if (!getTimeSignature(id)) return;
+  useMetronomeStore.getState().setTimeSignatureId(id);
+}
+
+export function setClickSubdivision(subdivision: SubdivisionId): void {
+  useMetronomeStore.getState().setSubdivision(subdivision);
 }
 
 export function toggleClick(): void {

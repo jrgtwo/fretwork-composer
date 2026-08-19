@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
-import { PPQ, usePatternsStore } from '@fretwork/lib';
+import { PPQ, useMetronomeStore, usePatternsStore } from '@fretwork/lib';
 import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/patternService';
 import {
   play,
@@ -290,6 +290,34 @@ describe('play', () => {
     expect(lib.metronome.stop).toHaveBeenCalled();
     expect(read('playing')).toBe('false');
     expect(read('head')).toBe('null');
+  });
+});
+
+describe('the click follows the document (CP-18)', () => {
+  it('sets the metronome to the PATTERN\'s meter and subdivision on play', async () => {
+    // The metronome is one object shared with the composition page, so a pattern
+    // that never says its meter would click in whatever an arrangement left behind.
+    mount();
+    usePatternsStore.getState().setEditingPatternTimeSignature({ numerator: 3, denominator: 4 });
+    usePatternsStore.getState().setEditingPatternSubdivision('8ths');
+    useMetronomeStore.setState({ timeSignatureId: '5/4', subdivision: 'sextuplets' });
+
+    await start();
+
+    expect(useMetronomeStore.getState().timeSignatureId).toBe('3/4');
+    expect(useMetronomeStore.getState().subdivision).toBe('8ths');
+  });
+
+  it('reads a null subdivision as off rather than leaving the last one running', async () => {
+    // The lib documents null as "use the metronome's current value at play
+    // time". A document that has never been set would otherwise inherit the
+    // sixteenths someone chose for something else.
+    mount();
+    useMetronomeStore.setState({ subdivision: '16ths' });
+
+    await start();
+
+    expect(useMetronomeStore.getState().subdivision).toBe('off');
   });
 });
 

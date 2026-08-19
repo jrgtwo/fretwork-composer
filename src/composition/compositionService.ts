@@ -26,6 +26,7 @@ import {
   GROOVE_PRESETS,
   INSTRUMENTS,
   MAX_COMPOSITION_TRACKS,
+  TIME_SIGNATURES,
   getInstrument,
   placementEffectiveLength,
   placementEndTick,
@@ -38,6 +39,7 @@ import {
   type GroovePresetId,
   type PatternTimeSignature,
   type Placement,
+  type SubdivisionId,
   type Tick,
   type Track,
 } from '@fretwork/lib';
@@ -1830,13 +1832,80 @@ export function setCompositionBpm(bpm: number): Result {
   return ok(undefined);
 }
 
+/** The meters this app offers, and the only ones it accepts — the lib's own
+ *  catalog rather than a list of our own, so the picker and the seam cannot
+ *  drift apart and a meter the metronome cannot click is never storable. */
+export const TIME_SIGNATURE_OPTIONS = TIME_SIGNATURES;
+
+/** The click subdivisions the metronome has settings for. Ours to state because
+ *  `SubdivisionId` is a type and a type cannot be iterated at runtime — a picker
+ *  needs the values and the seam needs to check them. */
+/** Re-exported so the tools file can name the type without importing the lib —
+ *  a charter test asserts it reaches the lib only through this seam. */
+export type { SubdivisionId };
+
+export const SUBDIVISION_OPTIONS: readonly SubdivisionId[] = [
+  'off',
+  '8ths',
+  'triplets',
+  '16ths',
+  'sextuplets',
+];
+
+/**
+ * The composition's meter — saved ON THE DOCUMENT, which is the whole point.
+ *
+ * It drives the arrangement's bars, its width and its ruler (`ArrangementGrid`
+ * reads `composition.timeSignature`), so it has to survive a reload and travel
+ * with the composition. Making the click follow it is a separate, additional
+ * write to the metronome store, and the caller does both — see `TransportBar`.
+ *
+ * ⚠ CHECKED AGAINST THE LIB'S CATALOG (CP-18), where it used to take anything.
+ * The seam is reachable by value with no pointer, and `ticksPerBar` is
+ * `numerator * (PPQ * 4 / denominator)` — so a 4/7 bar is 1097.142… ticks and no
+ * bar after the first starts on one. `composition_place_pattern` already has to
+ * refuse bar input in exactly that case; refusing the meter itself means it
+ * never arises, and it also means every stored meter is one the metronome can
+ * actually click.
+ */
 export function setCompositionTimeSignature(
   timeSignature: PatternTimeSignature,
 ): Result {
   if (lockedOut()) return refuse(JOB_LOCK_REASON);
   const composition = getEditingComposition();
   if (!composition) return refuse('No composition is open.');
+  const known = TIME_SIGNATURE_OPTIONS.some(
+    (option) =>
+      option.numerator === timeSignature.numerator &&
+      option.denominator === timeSignature.denominator,
+  );
+  if (!known) {
+    return refuse(
+      `${timeSignature.numerator}/${timeSignature.denominator} is not one of the meters this app plays: ${TIME_SIGNATURE_OPTIONS.map((option) => option.id).join(', ')}.`,
+    );
+  }
   store().setCompositionTimeSignature(composition.id, timeSignature);
+  return ok(undefined);
+}
+
+/**
+ * The composition's click subdivision — also saved on the document.
+ *
+ * The lib documents `null` as "use the metronome's current value at play time",
+ * which is what an untouched composition carries. Nothing here writes null back:
+ * `off` already means no sub-clicks, and two ways to say nearly-nothing is a
+ * worse control than one. A null on an older document reads as `off`.
+ */
+export function setCompositionSubdivision(subdivision: SubdivisionId): Result {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
+  const composition = getEditingComposition();
+  if (!composition) return refuse('No composition is open.');
+  if (!SUBDIVISION_OPTIONS.includes(subdivision)) {
+    return refuse(
+      `${subdivision} is not one of the click subdivisions: ${SUBDIVISION_OPTIONS.join(', ')}.`,
+    );
+  }
+  store().setEditingCompositionSubdivision(subdivision);
   return ok(undefined);
 }
 

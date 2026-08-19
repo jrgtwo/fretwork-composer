@@ -92,6 +92,20 @@ const reason = (result: ToolResult): string => {
   return result.reason;
 };
 
+/** Put a meter the seam would refuse onto the open composition, for the tests
+ *  that cover what happens when a document already holds one. */
+function storeOddMeter(numerator: number, denominator: number): void {
+  const id = usePatternsStore.getState().editingCompositionId;
+  usePatternsStore.setState((state) => ({
+    library: {
+      ...state.library,
+      compositions: state.library.compositions.map((composition) =>
+        composition.id === id ? { ...composition, timeSignature: { numerator, denominator } } : composition,
+      ),
+    },
+  }));
+}
+
 const rows = (v: JsonValue | undefined): Record<string, JsonValue>[] =>
   (v ?? []) as Record<string, JsonValue>[];
 
@@ -1546,7 +1560,12 @@ describe('arranging', () => {
      */
     it('refuses bar numbers when the signature makes a bar a fraction of a tick', () => {
       const { patternId, trackId } = openWithTrack();
-      value(call('composition_set_settings', { timeSignature: { numerator: 4, denominator: 7 } }));
+      // Written straight into the store, not through `composition_set_settings`:
+      // CP-18 refuses any meter outside the lib's catalog, and every catalog
+      // meter is a whole number of ticks. This guard is still live for a
+      // document that already HOLDS an odd one — an import, or anything written
+      // before that check existed — which is exactly what this sets up.
+      storeOddMeter(4, 7);
 
       const refused = reason(call('composition_place_pattern', { patternId, trackId, atBars: [3] }));
       expect(refused).toContain('4/7');
@@ -2471,6 +2490,36 @@ describe('arranging', () => {
 });
 
 // ------------------------------------------------------------------ voices ---
+
+describe('meter and click subdivision (CP-18)', () => {
+  it('saves both on the composition and reports them back', () => {
+    value(call('composition_open_blank', { name: 'Song' }));
+
+    const set = value(call('composition_set_settings', {
+      timeSignature: { numerator: 6, denominator: 8 },
+      subdivision: 'triplets',
+    }));
+
+    expect(set.timeSignature).toEqual({ numerator: 6, denominator: 8 });
+    expect(set.subdivision).toBe('triplets');
+    const read = value(call('read_composition'));
+    expect(read.timeSignature).toEqual({ numerator: 6, denominator: 8 });
+  });
+
+  it('refuses a meter that is not one the app plays, and names the ones that are', () => {
+    // A 4/7 bar is 1097.142… ticks, so no bar after the first starts on one.
+    // The schema still ACCEPTS the shape — the refusal is where the list gets
+    // taught, and a grammar-level rejection would teach nothing.
+    value(call('composition_open_blank', { name: 'Song' }));
+
+    const refused = reason(call('composition_set_settings', {
+      timeSignature: { numerator: 4, denominator: 7 },
+    }));
+
+    expect(refused).toContain('4/7');
+    expect(refused).toContain('4/4');
+  });
+});
 
 describe('the composition library (CP-17)', () => {
   it('lists every composition, marking the one that is open', () => {
@@ -4101,7 +4150,12 @@ describe('what a track is made of', () => {
   it('omits bar numbers where a bar is not a whole number of ticks', () => {
     const patternId = seedPattern('Riff');
     const trackId = openSong();
-    value(call('composition_set_settings', { timeSignature: { numerator: 4, denominator: 7 } }));
+    // Written straight into the store, not through `composition_set_settings`:
+      // CP-18 refuses any meter outside the lib's catalog, and every catalog
+      // meter is a whole number of ticks. This guard is still live for a
+      // document that already HOLDS an odd one — an import, or anything written
+      // before that check existed — which is exactly what this sets up.
+      storeOddMeter(4, 7);
     value(call('composition_place_pattern', { patternId, trackId, atTicks: [0, PPQ * 8] }));
 
     const track = rows(value(call('read_composition')).tracks)[0];
@@ -4336,7 +4390,12 @@ describe('what a track is made of', () => {
     it('omits the gaps entirely where bars do not convert exactly', () => {
       const patternId = barsLong('Riff', 1);
       const trackId = openSong();
-      value(call('composition_set_settings', { timeSignature: { numerator: 4, denominator: 7 } }));
+      // Written straight into the store, not through `composition_set_settings`:
+      // CP-18 refuses any meter outside the lib's catalog, and every catalog
+      // meter is a whole number of ticks. This guard is still live for a
+      // document that already HOLDS an odd one — an import, or anything written
+      // before that check existed — which is exactly what this sets up.
+      storeOddMeter(4, 7);
       value(call('composition_place_pattern', { patternId, trackId, atTicks: [0, PPQ * 16] }));
 
       const track = rows(value(call('read_composition')).tracks)[0];

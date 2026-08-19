@@ -4,8 +4,10 @@ import {
   DEFAULT_PATTERNS_STATE,
   MAX_COMPOSITION_TRACKS,
   PPQ,
+  TIME_SIGNATURES,
   usePatternsStore,
   type Composition,
+  type SubdivisionId,
   type Track,
 } from '@fretwork/lib';
 import { getEditingPattern, openBlankPattern } from '../patterns/patternService';
@@ -49,6 +51,7 @@ import {
   setCompositionGroove,
   setCompositionLoop,
   setCompositionName,
+  setCompositionSubdivision,
   setCompositionTimeSignature,
   setMasterVolumeDb,
   setPlacementTranspose,
@@ -713,6 +716,78 @@ describe('trackInstrumentId', () => {
 });
 
 // ----------------------------------------------------- composition settings ---
+
+describe('time signature and subdivision (CP-18)', () => {
+  it('saves the time signature ON THE COMPOSITION, where the grid reads it', () => {
+    openBlankComposition('Song');
+
+    const result = setCompositionTimeSignature({ numerator: 3, denominator: 4 });
+
+    expect(result.ok).toBe(true);
+    // Read through the STORE, not the seam's getter: a value cached in a module
+    // variable would pass a getter check and lose the user's meter on reload.
+    expect(stored().timeSignature).toEqual({ numerator: 3, denominator: 4 });
+  });
+
+  it('refuses a meter the lib has no catalog entry for', () => {
+    // The seam took ANY numerator/denominator, and the agent reaches it by value.
+    // A 4/7 bar is 1097.142… ticks, so no bar after the first starts on one —
+    // `composition_place_pattern` already has to refuse bar input in that case.
+    openBlankComposition('Song');
+
+    const result = setCompositionTimeSignature({ numerator: 4, denominator: 7 });
+
+    expect(result).toEqual({ ok: false, reason: expect.stringContaining('4/7') });
+    expect(stored().timeSignature).toEqual({ numerator: 4, denominator: 4 });
+  });
+
+  it('accepts every meter the catalog ships', () => {
+    openBlankComposition('Song');
+
+    for (const ts of TIME_SIGNATURES) {
+      const result = setCompositionTimeSignature({
+        numerator: ts.numerator,
+        denominator: ts.denominator,
+      });
+      expect(`${ts.id}: ${result.ok}`).toBe(`${ts.id}: true`);
+    }
+  });
+
+  it('saves the click subdivision on the composition', () => {
+    openBlankComposition('Song');
+
+    expect(setCompositionSubdivision('8ths').ok).toBe(true);
+
+    expect(stored().subdivision).toBe('8ths');
+  });
+
+  it('refuses a subdivision the metronome has no setting for', () => {
+    openBlankComposition('Song');
+
+    expect(setCompositionSubdivision('quintuplets' as SubdivisionId)).toEqual({
+      ok: false,
+      reason: expect.stringContaining('quintuplets'),
+    });
+  });
+
+  it('refuses both while a job holds the document', () => {
+    openBlankComposition('Song');
+    const held = beginJob();
+    if (!held.ok) throw new Error('job refused');
+    try {
+      expect(setCompositionTimeSignature({ numerator: 3, denominator: 4 })).toEqual({
+        ok: false,
+        reason: JOB_LOCK_REASON,
+      });
+      expect(setCompositionSubdivision('8ths')).toEqual({
+        ok: false,
+        reason: JOB_LOCK_REASON,
+      });
+    } finally {
+      held.value();
+    }
+  });
+});
 
 describe('composition settings round-trip through the store', () => {
   beforeEach(() => {

@@ -20,6 +20,8 @@ import {
   selectTrack,
   setCompositionBpm,
   setCompositionLoop,
+  setCompositionSubdivision,
+  setCompositionTimeSignature,
   setTrackInstrument,
   setTrackMuted,
   setTrackSoloed,
@@ -537,6 +539,38 @@ describe('building the composition path', () => {
 });
 
 // ---------------------------------------------------------------------- loop ---
+
+describe('the click follows the composition (CP-18)', () => {
+  it('sets the metronome to the arrangement\'s meter and subdivision on play', async () => {
+    seedArrangement();
+    setCompositionTimeSignature({ numerator: 3, denominator: 4 });
+    setCompositionSubdivision('8ths');
+    // Whatever the pattern page left in the shared metronome.
+    useMetronomeStore.setState({ timeSignatureId: '4/4', subdivision: 'off' });
+    mount();
+
+    await start();
+
+    expect(useMetronomeStore.getState().timeSignatureId).toBe('3/4');
+    expect(useMetronomeStore.getState().subdivision).toBe('8ths');
+  });
+
+  it('follows a change made WHILE it is playing', async () => {
+    // Stored and not heard until the next press of Play would make the control
+    // look broken — the tempo stepper beside it already works this way.
+    seedArrangement();
+    mount();
+    await start();
+
+    await act(async () => {
+      setCompositionTimeSignature({ numerator: 6, denominator: 8 });
+      setCompositionSubdivision('triplets');
+    });
+
+    expect(useMetronomeStore.getState().timeSignatureId).toBe('6/8');
+    expect(useMetronomeStore.getState().subdivision).toBe('triplets');
+  });
+});
 
 describe('looping', () => {
   it('pushes the composition loop flag into every scheduler', async () => {

@@ -1,12 +1,36 @@
 import { useState } from 'react';
+import type { SubdivisionId } from '@fretwork/lib';
 import {
   playComposition,
+  setClickSubdivision,
+  setClickTimeSignature,
   stop,
   toggleClick,
   useClickMuted,
   useIsPlaying,
 } from '../audio/playbackService';
-import { setCompositionBpm, setCompositionLoop, useEditingComposition } from './compositionService';
+import {
+  SUBDIVISION_OPTIONS,
+  TIME_SIGNATURE_OPTIONS,
+  setCompositionBpm,
+  setCompositionLoop,
+  setCompositionSubdivision,
+  setCompositionTimeSignature,
+  useEditingComposition,
+} from './compositionService';
+
+/** How each subdivision reads in the picker. The ids are the lib's and are not
+ *  all self-explanatory in a control this small. */
+const SUBDIVISION_LABEL: Record<SubdivisionId, string> = {
+  off: 'off',
+  '8ths': '8ths',
+  triplets: 'trips',
+  '16ths': '16ths',
+  sextuplets: 'sext',
+};
+
+const SELECT_CLASS =
+  'control pressable rounded-lg px-1.5 py-1 font-mono text-[9px] font-bold tracking-[0.08em] uppercase';
 
 /**
  * The lowest and highest tempo the arrows will walk to. The lib clamps nothing —
@@ -49,6 +73,35 @@ export function TransportBar() {
     setCompositionBpm(
       Math.max(BPM_RANGE.min, Math.min(BPM_RANGE.max, composition.bpm + delta)),
     );
+  };
+
+  /**
+   * TWO WRITES, and they are not a duplicate of each other.
+   *
+   * The meter belongs to the DOCUMENT: it draws the arrangement's bars, its
+   * width and its ruler, and it has to survive a reload and travel with the
+   * composition. The click is TRANSPORT state, shared with the pattern page and
+   * saved with nothing. `playComposition` and `syncComposition` already push the
+   * document's settings into the metronome, so the second call is what makes the
+   * change audible NOW rather than at the next press of Play — exactly what the
+   * tempo arrows above do, and for the same reason.
+   *
+   * The seam is asked first and the click follows only if it agreed: a meter the
+   * catalog has not got is refused there, and a click in a meter the document
+   * does not have would be the worse of the two failures.
+   */
+  const chooseTimeSignature = (id: string) => {
+    const option = TIME_SIGNATURE_OPTIONS.find((candidate) => candidate.id === id);
+    if (!option) return;
+    const saved = setCompositionTimeSignature({
+      numerator: option.numerator,
+      denominator: option.denominator,
+    });
+    if (saved.ok) setClickTimeSignature(id);
+  };
+
+  const chooseSubdivision = (subdivision: SubdivisionId) => {
+    if (setCompositionSubdivision(subdivision).ok) setClickSubdivision(subdivision);
   };
 
   return (
@@ -115,6 +168,41 @@ export function TransportBar() {
       >
         +
       </button>
+
+      <span className="mx-1 h-4 w-px bg-line" />
+
+      {/* The DOCUMENT's meter, not the metronome's — see `chooseTimeSignature`.
+          A native select: eight fixed options in a dense strip, where a custom
+          popover would be a bigger control for a smaller job. */}
+      <select
+        aria-label="Time signature"
+        value={`${composition.timeSignature.numerator}/${composition.timeSignature.denominator}`}
+        onChange={(e) => chooseTimeSignature(e.target.value)}
+        className={SELECT_CLASS}
+      >
+        {TIME_SIGNATURE_OPTIONS.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.id}
+          </option>
+        ))}
+      </select>
+
+      {/* `?? 'off'`: the lib documents a null subdivision as "use the
+          metronome's current value at play time", which is what an untouched
+          composition carries. The picker offers no such option — `off` already
+          means no sub-clicks — so null is shown, and played, as off. */}
+      <select
+        aria-label="Click subdivision"
+        value={composition.subdivision ?? 'off'}
+        onChange={(e) => chooseSubdivision(e.target.value as SubdivisionId)}
+        className={SELECT_CLASS}
+      >
+        {SUBDIVISION_OPTIONS.map((option) => (
+          <option key={option} value={option}>
+            {SUBDIVISION_LABEL[option]}
+          </option>
+        ))}
+      </select>
 
       <span className="mx-1 h-4 w-px bg-line" />
 

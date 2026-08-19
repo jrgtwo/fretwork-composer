@@ -63,6 +63,7 @@ import {
   setCompositionGroove,
   setCompositionLoop,
   setCompositionName,
+  setCompositionSubdivision,
   setCompositionTimeSignature,
   setMasterVolumeDb,
   setPlacementTranspose,
@@ -72,6 +73,7 @@ import {
   setTrackSoloed,
   setTrackVolumeDb,
   splitPlacement,
+  SUBDIVISION_OPTIONS,
   compositionEndTick,
   deleteComposition,
   duplicateComposition,
@@ -82,6 +84,7 @@ import {
   ticksPerBar,
   trackInstrumentId,
   type GrooveId,
+  type SubdivisionId,
 } from '../../composition/compositionService';
 import { PPQ, findLibraryPattern } from '../../patterns/patternService';
 import { barConverter, type BarConverter } from './barMath';
@@ -1136,6 +1139,7 @@ interface SettingsArgs {
   name?: string;
   bpm?: number;
   timeSignature?: { numerator: number; denominator: number };
+  subdivision?: SubdivisionId;
   loop?: boolean;
   groove?: GrooveId;
 }
@@ -1147,12 +1151,22 @@ const setSettings = defineTool<SettingsArgs>({
   parameters: obj({
     name: nameOf('What to call the composition.'),
     bpm: num('Tempo, pushed into the metronome when playback starts.', { min: 20, max: 400 }),
+    // ⚠ CP-18 narrowed what the SEAM accepts to the lib's catalog, and the
+    // schema still describes the wider shape on purpose: a numerator/denominator
+    // pair is what the model naturally writes, and the refusal it gets back names
+    // every meter that IS allowed. A closed enum of ids here would refuse at the
+    // grammar with no sentence attached, which is the one thing that teaches
+    // nothing. The bounds stay as the outer guard.
     timeSignature: obj(
       {
         numerator: int('Beats per bar.', { min: 1, max: 32 }),
         denominator: int('What kind of note gets the beat.', { min: 1, max: 32 }),
       },
       ['numerator', 'denominator'],
+    ),
+    subdivision: str(
+      `What the click divides the beat into: ${SUBDIVISION_OPTIONS.join(', ')}. Saved on the composition and heard on the next beat.`,
+      SUBDIVISION_OPTIONS as unknown as readonly string[],
     ),
     loop: bool('Whether arrangement playback repeats.'),
     groove: str(
@@ -1162,12 +1176,13 @@ const setSettings = defineTool<SettingsArgs>({
       GROOVE_IDS,
     ),
   }),
-  run: ({ name, bpm, timeSignature, loop, groove }) => {
+  run: ({ name, bpm, timeSignature, subdivision, loop, groove }) => {
     const named = name === undefined ? null : setCompositionName(name);
     const writes = [
       named,
       bpm === undefined ? null : setCompositionBpm(bpm),
       timeSignature === undefined ? null : setCompositionTimeSignature(timeSignature),
+      subdivision === undefined ? null : setCompositionSubdivision(subdivision),
       loop === undefined ? null : setCompositionLoop(loop),
       groove === undefined ? null : setCompositionGroove(groove),
     ];
@@ -1182,6 +1197,7 @@ const setSettings = defineTool<SettingsArgs>({
       name: named?.ok ? named.value : null,
       bpm: bpm ?? null,
       timeSignature: timeSignature ? { ...timeSignature } : null,
+      subdivision: subdivision ?? null,
       loop: loop ?? null,
       groove: compositionGrooveId(),
     });

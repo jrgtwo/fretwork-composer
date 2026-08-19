@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { DEFAULT_PATTERNS_STATE, PPQ, totalDurationTicks, usePatternsStore } from '@fretwork/lib';
+import {
+  DEFAULT_PATTERNS_STATE,
+  PPQ,
+  totalDurationTicks,
+  useMetronomeStore,
+  usePatternsStore,
+} from '@fretwork/lib';
 
 /**
  * The composition transport, as the DOM sees it.
@@ -26,6 +32,8 @@ vi.mock('../src/audio/playbackService', () => ({
   useLoopBoundaryTicks: vi.fn(() => 0),
   useClickMuted: vi.fn(() => false),
   toggleClick: vi.fn(),
+  setClickTimeSignature: vi.fn(),
+  setClickSubdivision: vi.fn(),
 }));
 
 // The follow-scroll loop reads the transport in its own rAF and writes
@@ -48,12 +56,14 @@ import {
 } from '../src/composition/arrangementMath';
 import {
   playComposition,
+  setClickSubdivision,
+  setClickTimeSignature,
   stop,
   toggleClick,
   useActivePlacementIds,
   useClickMuted,
-  useHeadTick,
   useCompositionPlayback,
+  useHeadTick,
   useIsPlaying,
   useLoopBoundaryTicks,
 } from '../src/audio/playbackService';
@@ -68,6 +78,7 @@ import {
   resizePlacement,
   selectPlacements,
   selectTrack,
+  setCompositionTimeSignature,
 } from '../src/composition/compositionService';
 import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/patternService';
 
@@ -128,6 +139,57 @@ const grid = () => render(<ArrangementGrid mode={MODE} />);
 const playhead = () => screen.queryByTestId('arrangement-playhead');
 const blockEl = (id: string) =>
   document.querySelector<HTMLElement>(`[data-placement="${id}"]`);
+
+describe('meter and click subdivision (CP-18)', () => {
+  const meter = () => screen.getByRole('combobox', { name: 'Time signature' });
+  const subdivision = () => screen.getByRole('combobox', { name: 'Click subdivision' });
+
+  it('shows the COMPOSITION\'s meter, not the metronome\'s', () => {
+    if (!getEditingComposition()) openBlankComposition('Song');
+    setCompositionTimeSignature({ numerator: 6, denominator: 8 });
+    useMetronomeStore.setState({ timeSignatureId: '4/4' });
+    render(<TransportBar />);
+
+    // The document is the source. A transport showing a meter belonging to a
+    // document you cannot see is the kind of wrong that reads as lost settings.
+    expect(meter()).toHaveValue('6/8');
+  });
+
+  it('SAVES the meter on the composition, and tells the click about it', async () => {
+    const user = userEvent.setup();
+    if (!getEditingComposition()) openBlankComposition('Song');
+    render(<TransportBar />);
+
+    await user.selectOptions(meter(), '3/4');
+
+    // Saved on the document — it draws the bars and travels with the arrangement.
+    expect(getEditingComposition()?.timeSignature).toEqual({ numerator: 3, denominator: 4 });
+    // And handed to the click too, so it is audible now rather than at the next
+    // press of Play. What that call DOES is covered where the module is real —
+    // tests/MultiTrackPlayback and tests/playbackService.
+    expect(vi.mocked(setClickTimeSignature)).toHaveBeenCalledWith('3/4');
+  });
+
+  it('saves the subdivision on the composition, and tells the click about it', async () => {
+    const user = userEvent.setup();
+    if (!getEditingComposition()) openBlankComposition('Song');
+    render(<TransportBar />);
+
+    await user.selectOptions(subdivision(), '8ths');
+
+    expect(getEditingComposition()?.subdivision).toBe('8ths');
+    expect(vi.mocked(setClickSubdivision)).toHaveBeenCalledWith('8ths');
+  });
+
+  it('reads a composition that never chose a subdivision as off', () => {
+    if (!getEditingComposition()) openBlankComposition('Song');
+    render(<TransportBar />);
+
+    // The lib's null means "use the metronome's current value"; the picker has
+    // no such option, and `off` is what it comes to.
+    expect(subdivision()).toHaveValue('off');
+  });
+});
 
 describe('the arrangement playhead', () => {
   it('draws nothing while the head is null', () => {
