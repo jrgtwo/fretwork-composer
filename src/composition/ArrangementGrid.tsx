@@ -22,6 +22,7 @@ import {
   type ArrangementMode,
   type EditableSpan,
 } from './arrangementMath';
+import type { PatternTimeSignature } from '@fretwork/lib';
 import { NoteSurface, type SurfaceGeometry } from '../timeline/NoteSurface';
 import { useEdgeAutoScroll, type EdgeAutoScroll } from '../timeline/useEdgeAutoScroll';
 import {
@@ -204,6 +205,7 @@ function ArrangementPlayhead({ pxPerBeat }: { pxPerBeat: number }) {
  */
 function PlacementSurface({
   placement,
+  timeSignature,
   span,
   focused,
   sounding,
@@ -218,6 +220,9 @@ function PlacementSurface({
   geometry,
 }: {
   placement: Placement;
+  /** The COMPOSITION's meter, threaded down rather than read from the snapshot
+   *  — see the `timeSignature` prop on `NoteSurface`. */
+  timeSignature: PatternTimeSignature;
   span: EditableSpan;
   focused: boolean;
   /** This block is the one the transport is inside. Event ids are shared across
@@ -293,6 +298,11 @@ function PlacementSurface({
         // TODO(CP-12): the note inspector takes these controls, so the popup a
         // selected note would otherwise offer is suppressed here.
         showNoteOptions={false}
+        // The COMPOSITION's meter, not the snapshot's — see `NoteSurface`'s prop.
+        // The ruler above these lanes measures the arrangement's bars, and a lane
+        // drawing its block's own meter would disagree with the bar lines it sits
+        // under.
+        timeSignature={timeSignature}
         pxPerBeat={pxPerBeat}
         laneAreaHeight={laneHeight}
         stringCount={stringCount}
@@ -1412,6 +1422,7 @@ export function ArrangementGrid({
                                 <PlacementSurface
                                   key={placement.id}
                                   placement={placement}
+                                  timeSignature={ts}
                                   span={span}
                                   focused={editingPlacementId === placement.id}
                                   sounding={playingPlacementIds.includes(placement.id)}

@@ -1,5 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { snapTick, type Pattern, type PatternEvent, type Tick } from '@fretwork/lib';
+import {
+  type Pattern,
+  type PatternEvent,
+  type PatternTimeSignature,
+  snapTick,
+  type Tick,
+} from '@fretwork/lib';
 import { readNotePitch } from '../patterns/articulations';
 import { pitchNamer } from './noteModel';
 import { stringLabels } from '../reference/tabLayout';
@@ -292,6 +298,21 @@ export interface NoteSurfaceProps {
    * selection in the rail beside it.
    */
   showNoteOptions?: boolean;
+  /**
+   * The meter this surface's gridlines are drawn in.
+   *
+   * ⚠ A PROP, NOT `pattern.timeSignature`, and that is the whole point (CP-18).
+   * The pattern page passes the pattern's own — there, the pattern IS the
+   * document. The composition page passes the COMPOSITION's, because a block
+   * sitting in an arrangement is heard and drawn in the arrangement's meter: its
+   * ruler measures the composition's bars, and lanes drawing the snapshot's
+   * meter instead would put beat lines under bar lines that disagree with them.
+   * A 3/4 pattern dropped into a 4/4 arrangement is the case.
+   *
+   * The snapshot keeps its own meter untouched either way — it is still that
+   * pattern's meter on the pattern page.
+   */
+  timeSignature: PatternTimeSignature;
   /** Zoom, owned by whatever chrome hosts this. */
   pxPerBeat: number;
   /**
@@ -359,6 +380,7 @@ export function NoteSurface({
   onFocus,
   windowTicks = null,
   showNoteOptions = true,
+  timeSignature,
   pxPerBeat,
   laneAreaHeight,
   stringCount,
@@ -572,7 +594,7 @@ export function NoteSurface({
   const snapToGrid = (tick: number) => (grid.ticks ? snapTick(tick, grid.ticks) : tick);
   /** A stamped note is one grid step long, so the grid sets the note length too. */
   const stampLength = grid.ticks ?? FREE_NOTE_TICKS;
-  const gridImage = laneGridImage(pxPerBeat, grid.ticks, pattern.timeSignature);
+  const gridImage = laneGridImage(pxPerBeat, grid.ticks, timeSignature);
 
   // Read fresh each render so the popup reflects edits made through it.
   const popupNote = popupFor ? pattern.events.find((e) => e.id === popupFor.id) : undefined;

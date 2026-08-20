@@ -112,9 +112,13 @@ import {
   setNoteDynamic,
   setNoteFret,
   setNotePitch,
+  SUBDIVISION_OPTIONS,
   setPatternBpm,
   setPatternGroove,
   setPatternLoop,
+  setPatternSubdivision,
+  setPatternTimeSignature,
+  type SubdivisionId,
   stampNote,
   type GrooveId,
 } from '../../patterns/patternService';
@@ -1144,6 +1148,8 @@ interface PlaybackArgs {
   bpm?: number | null;
   loop?: boolean;
   groove?: GrooveId;
+  timeSignature?: { numerator: number; denominator: number };
+  subdivision?: SubdivisionId;
 }
 
 const setPlayback = defineTool<PlaybackArgs>({
@@ -1159,8 +1165,22 @@ const setPlayback = defineTool<PlaybackArgs>({
         .join(', ')}.`,
       GROOVE_IDS,
     ),
+    // Refused against the lib's catalog by the seam, not narrowed to an enum
+    // here: the refusal is where the allowed meters get named, and a
+    // grammar-level rejection teaches nothing. Same call as the composition's.
+    timeSignature: obj(
+      {
+        numerator: int('Beats per bar.', { min: 1, max: 32 }),
+        denominator: int('What kind of note gets the beat.', { min: 1, max: 32 }),
+      },
+      ['numerator', 'denominator'],
+    ),
+    subdivision: str(
+      `What the click divides the beat into: ${SUBDIVISION_OPTIONS.join(', ')}. The COMPOSITION's own setting wins while this pattern is played from an arrangement.`,
+      SUBDIVISION_OPTIONS as unknown as readonly string[],
+    ),
   }),
-  run: ({ bpm, loop, groove }) => {
+  run: ({ bpm, loop, groove, timeSignature, subdivision }) => {
     // Several writes, no gesture: none of the three is part of the arrangement's
     // content, so none of them pushes an undo step in the first place — the same
     // rule the seam applies to the pattern's voice.
@@ -1176,6 +1196,14 @@ const setPlayback = defineTool<PlaybackArgs>({
       const result = setPatternGroove(groove);
       if (!result.ok) return fail(result.reason);
     }
+    if (timeSignature !== undefined) {
+      const result = setPatternTimeSignature(timeSignature);
+      if (!result.ok) return fail(result.reason);
+    }
+    if (subdivision !== undefined) {
+      const result = setPatternSubdivision(subdivision);
+      if (!result.ok) return fail(result.reason);
+    }
     // Read back rather than echoed: the reply is what the pattern now HOLDS, so
     // a caller can tell a cleared tempo from one it never sent, and can see the
     // feel it did not change.
@@ -1184,6 +1212,15 @@ const setPlayback = defineTool<PlaybackArgs>({
       bpm: pattern?.suggestedBpm ?? null,
       loop: pattern?.loop ?? null,
       groove: patternGrooveId(),
+      timeSignature: pattern
+        ? {
+            numerator: pattern.timeSignature.numerator,
+            denominator: pattern.timeSignature.denominator,
+          }
+        : null,
+      // `?? 'off'` for the lib's null, which means "use the metronome's current
+      // value" — the same reading the pickers give it.
+      subdivision: pattern?.subdivision ?? 'off',
     });
   },
 });

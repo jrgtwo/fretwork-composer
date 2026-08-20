@@ -39,7 +39,6 @@ import {
   type GroovePresetId,
   type PatternTimeSignature,
   type Placement,
-  type SubdivisionId,
   type Tick,
   type Track,
 } from '@fretwork/lib';
@@ -48,10 +47,12 @@ import { createHistory } from '../patterns/history';
 // `openPlacementForEditing`. One-directional: `patternService` imports nothing
 // from here, so there is no cycle to reason about.
 import {
+  SUBDIVISION_OPTIONS,
   clearHistory as clearPatternHistory,
   listGrooves,
   type GrooveId,
   type Result,
+  type SubdivisionId,
 } from '../patterns/patternService';
 // The transposition's COST, for the write that incurs it — see
 // `setPlacementTranspose`. A pure per-placement count with no store in it, so
@@ -1840,17 +1841,12 @@ export const TIME_SIGNATURE_OPTIONS = TIME_SIGNATURES;
 /** The click subdivisions the metronome has settings for. Ours to state because
  *  `SubdivisionId` is a type and a type cannot be iterated at runtime — a picker
  *  needs the values and the seam needs to check them. */
-/** Re-exported so the tools file can name the type without importing the lib —
- *  a charter test asserts it reaches the lib only through this seam. */
+/** Re-exported so the tools file can name both without importing the lib — a
+ *  charter test asserts it reaches the lib only through this seam. The list
+ *  itself belongs to `patternService`, which this module already imports and
+ *  which both seams need it for; one authoring, two addresses. */
 export type { SubdivisionId };
-
-export const SUBDIVISION_OPTIONS: readonly SubdivisionId[] = [
-  'off',
-  '8ths',
-  'triplets',
-  '16ths',
-  'sextuplets',
-];
+export { SUBDIVISION_OPTIONS };
 
 /**
  * The composition's meter — saved ON THE DOCUMENT, which is the whole point.

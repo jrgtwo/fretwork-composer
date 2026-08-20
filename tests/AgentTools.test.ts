@@ -2521,6 +2521,29 @@ describe('meter and click subdivision (CP-18)', () => {
   });
 });
 
+describe("a pattern's own meter (CP-18)", () => {
+  it('saves the meter and subdivision on the pattern and reads them back', () => {
+    value(call('pattern_open_blank', { name: 'Riff' }));
+    const applied = value(call('pattern_set_playback', {
+      timeSignature: { numerator: 6, denominator: 8 },
+      subdivision: 'triplets',
+    }));
+
+    expect(applied.timeSignature).toEqual({ numerator: 6, denominator: 8 });
+    expect(applied.subdivision).toBe('triplets');
+  });
+
+  it('refuses a meter that is not one the app plays', () => {
+    value(call('pattern_open_blank', { name: 'Riff' }));
+    const refused = reason(call('pattern_set_playback', {
+      timeSignature: { numerator: 4, denominator: 7 },
+    }));
+
+    expect(refused).toContain('4/7');
+    expect(refused).toContain('4/4');
+  });
+});
+
 describe('the composition library (CP-17)', () => {
   it('lists every composition, marking the one that is open', () => {
     value(call('composition_open_blank', { name: 'First' }));
@@ -2678,7 +2701,15 @@ describe('settings', () => {
     const applied = value(
       call('pattern_set_playback', { bpm: 92, loop: false, groove: 'swing-8ths' }),
     );
-    expect(applied).toEqual({ bpm: 92, loop: false, groove: 'swing-8ths' });
+    // The reply reads the pattern BACK, so the two settings this call did not
+    // touch come with it — CP-18 added them to the same tool.
+    expect(applied).toEqual({
+      bpm: 92,
+      loop: false,
+      groove: 'swing-8ths',
+      timeSignature: { numerator: 4, denominator: 4 },
+      subdivision: 'off',
+    });
 
     const pattern = value(call('read_pattern'));
     expect(pattern.suggestedBpm).toBe(92);

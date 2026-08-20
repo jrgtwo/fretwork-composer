@@ -52,6 +52,7 @@ function surface(instrumentId: string, stringCount: number) {
   return (
     <NoteSurface
       pattern={editing()}
+      timeSignature={editing().timeSignature}
       focused
       pxPerBeat={48}
       laneAreaHeight={LANE_AREA_H}
@@ -107,6 +108,7 @@ describe('NoteSurface at a string count other than six', () => {
     const { unmount } = render(
       <NoteSurface
         pattern={editing()}
+        timeSignature={editing().timeSignature}
         focused
         pxPerBeat={48}
         laneAreaHeight={300}
@@ -123,6 +125,7 @@ describe('NoteSurface at a string count other than six', () => {
     render(
       <NoteSurface
         pattern={editing()}
+        timeSignature={editing().timeSignature}
         focused
         pxPerBeat={48}
         laneAreaHeight={300}

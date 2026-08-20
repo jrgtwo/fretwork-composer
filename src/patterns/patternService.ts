@@ -22,6 +22,7 @@ import {
   DEFAULT_SCALE_ID,
   DYNAMIC_VELOCITY,
   GROOVE_PRESETS,
+  TIME_SIGNATURES,
   INSTRUMENTS,
   PPQ,
   SCALES,
@@ -40,6 +41,8 @@ import {
   type GroovePreset,
   type GroovePresetId,
   type Pattern,
+  type PatternTimeSignature,
+  type SubdivisionId,
   type PatternEvent,
   type Tick,
 } from '@fretwork/lib';
@@ -1547,6 +1550,76 @@ export function setPatternLoop(loop: boolean): Result {
 export function setPatternBpm(bpm: number | null): Result {
   if (!getEditingPattern()) return refuse('No pattern is open.');
   store().setEditingPatternSuggestedBpm(bpm);
+  return ok(undefined);
+}
+
+/** The click subdivisions the metronome has settings for — ours to state
+ *  because `SubdivisionId` is a type, and a type cannot be iterated at runtime
+ *  by a picker or checked by a seam. Here rather than in `compositionService`
+ *  because that module imports THIS one, so this is the end of the chain both
+ *  seams can reach; it re-exports this list under its own name. */
+export const SUBDIVISION_OPTIONS: readonly SubdivisionId[] = [
+  'off',
+  '8ths',
+  'triplets',
+  '16ths',
+  'sextuplets',
+];
+
+export type { SubdivisionId };
+
+/**
+ * The pattern's own meter, saved on the pattern.
+ *
+ * ⚠ THE COMPOSITION PAGE OVERRIDES THIS (CP-18). A pattern carries a meter
+ * because it is a document in its own right and the pattern page draws its bars
+ * from it — but a block sitting in an arrangement is heard and drawn in the
+ * ARRANGEMENT's meter, which is the only one its ruler can show. So this is the
+ * pattern page's setting, and `ArrangementGrid` passes the composition's meter
+ * to the note lanes instead of the snapshot's.
+ *
+ * Checked against the same catalog as `setCompositionTimeSignature`, and stated
+ * here rather than shared: `compositionService` imports from THIS module and not
+ * the other way round, so a shared constant would have to move to a third file
+ * for the sake of eight entries the lib already owns. Both read `TIME_SIGNATURES`.
+ *
+ * ⚠ CHANGING IT DOES NOT RESIZE THE PATTERN. The lib's `setPatternTimeSignature`
+ * swaps the field and nothing else, so a four-bar pattern in 4/4 becomes 5⅓ bars
+ * of 3/4 and the last bar draws short. `fitPatternDuration` runs on the next
+ * content edit and rounds back up to a whole bar. Deliberate: refitting here
+ * would silently lengthen a pattern nobody had edited.
+ */
+export function setPatternTimeSignature(timeSignature: PatternTimeSignature): Result {
+  if (!getEditingPattern()) return refuse('No pattern is open.');
+  const known = TIME_SIGNATURES.some(
+    (option) =>
+      option.numerator === timeSignature.numerator &&
+      option.denominator === timeSignature.denominator,
+  );
+  if (!known) {
+    return refuse(
+      `${timeSignature.numerator}/${timeSignature.denominator} is not one of the meters this app plays: ${TIME_SIGNATURES.map((option) => option.id).join(', ')}.`,
+    );
+  }
+  store().setEditingPatternTimeSignature(timeSignature);
+  return ok(undefined);
+}
+
+/**
+ * The pattern's click subdivision. Also overridden by the composition's while a
+ * block is played from the arrangement — see {@link setPatternTimeSignature}.
+ *
+ * The lib's `null` means "use the metronome's current value at play time"; this
+ * never writes it back, for the reason `setCompositionSubdivision` gives.
+ */
+export function setPatternSubdivision(subdivision: SubdivisionId): Result {
+  if (!getEditingPattern()) return refuse('No pattern is open.');
+  if (!SUBDIVISION_OPTIONS.includes(subdivision)) {
+    return refuse(
+      `${subdivision} is not one of the click subdivisions: ${SUBDIVISION_OPTIONS.join(', ')}.`,
+    );
+  }
+  store().setEditingPatternSubdivision(subdivision);
   return ok(undefined);
 }
 

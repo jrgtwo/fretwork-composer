@@ -1,27 +1,43 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { getInstrument, ticksPerBar } from '@fretwork/lib';
+import { TIME_SIGNATURES, getInstrument, ticksPerBar } from '@fretwork/lib';
 import { NoteSurface, type SurfaceGeometry } from './NoteSurface';
 import {
   play,
+  setClickSubdivision,
+  setClickTimeSignature,
+  setTempo,
   stop,
+  toggleClick,
   useClickMuted,
   useHeadTick,
-  useTempo,
-  setTempo,
   useIsPlaying,
   usePlaybackEngine,
-  toggleClick,
+  useTempo,
 } from '../audio/playbackService';
 import {
   patternInstrumentId,
   redo,
   setPatternBpm,
   setPatternLoop,
+  setPatternSubdivision,
+  setPatternTimeSignature,
+  SUBDIVISION_OPTIONS,
+  type SubdivisionId,
   undo,
   useEditingPattern,
   useHistoryState,
 } from '../patterns/patternService';
 import { stringLabels } from '../reference/tabLayout';
+
+/** How each subdivision reads in a control this small. The ids are the lib's
+ *  and are not all self-explanatory. Same labels as the arrangement's. */
+const SUBDIVISION_LABEL: Record<SubdivisionId, string> = {
+  off: 'off',
+  '8ths': '8ths',
+  triplets: 'trips',
+  '16ths': '16ths',
+  sextuplets: 'sext',
+};
 import { useTimelineAutoScroll } from './useTimelineAutoScroll';
 import { useEdgeAutoScroll } from './useEdgeAutoScroll';
 import {
@@ -130,6 +146,24 @@ export function Timeline() {
   const bars = Math.max(1, Math.ceil(pattern.durationTicks / ticksPerBar(ts)));
   const width = tickToPx(bars * ticksPerBar(ts), pxPerBeat);
   const lines = barBeatLines(bars, ts, pxPerBeat);
+  /** The document first, the click second — and the click only if the document
+   *  agreed. `setPatternTimeSignature` refuses a meter outside the lib's
+   *  catalog, and a click in a meter the pattern does not have is the worse of
+   *  the two failures. */
+  const chooseTimeSignature = (id: string) => {
+    const option = TIME_SIGNATURES.find((candidate) => candidate.id === id);
+    if (!option) return;
+    const saved = setPatternTimeSignature({
+      numerator: option.numerator,
+      denominator: option.denominator,
+    });
+    if (saved.ok) setClickTimeSignature(id);
+  };
+
+  const chooseSubdivision = (subdivision: SubdivisionId) => {
+    if (setPatternSubdivision(subdivision).ok) setClickSubdivision(subdivision);
+  };
+
   const grid = snapOptions(ts).find((o) => o.id === snapId) ?? snapOptions(ts)[3];
 
   // The neck this pattern is written on decides how many rows there are and what
@@ -254,6 +288,36 @@ export function Timeline() {
           </select>
         </label>
         <span className="mx-1 h-4 w-px bg-line" />
+        {/* The PATTERN's meter and click subdivision — the composition page has
+            the same pair for the arrangement, and overrides these while a block
+            is played from there. Two writes each: the document, so it persists
+            and the bars redraw, and the metronome, so it is audible now rather
+            than at the next press of Play. */}
+        <select
+          aria-label="Time signature"
+          value={`${ts.numerator}/${ts.denominator}`}
+          onChange={(e) => chooseTimeSignature(e.target.value)}
+          className="control rounded-lg px-1.5 py-1 font-mono text-[9px] font-bold text-ink"
+        >
+          {TIME_SIGNATURES.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.id}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Click subdivision"
+          value={pattern.subdivision ?? 'off'}
+          onChange={(e) => chooseSubdivision(e.target.value as SubdivisionId)}
+          className="control rounded-lg px-1.5 py-1 font-mono text-[9px] font-bold text-ink"
+        >
+          {SUBDIVISION_OPTIONS.map((option) => (
+            <option key={option} value={option}>
+              {SUBDIVISION_LABEL[option]}
+            </option>
+          ))}
+        </select>
+        <span className="mx-1 h-4 w-px bg-line" />
         <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">bpm</span>
         <button
           type="button"
@@ -352,6 +416,10 @@ export function Timeline() {
               // here, and it is what lets edit mode mount one surface per
               // placement without every one of them drawing the same notes.
               pattern={pattern}
+              // The PATTERN's own meter here — on this page the pattern IS the
+              // document. The composition page passes the arrangement's instead,
+              // which is the override CP-18 introduced.
+              timeSignature={ts}
               // Always. There is one surface on this page and it is never
               // mounted beside the composition page's — `App` swaps the whole
               // page — so the edit target is always this pattern.

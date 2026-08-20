@@ -9,13 +9,21 @@ import {
 } from '@fretwork/lib';
 import { App } from '../src/App';
 import { ArrangementGrid } from '../src/composition/ArrangementGrid';
+import { laneGridImage } from '../src/timeline/timelineMath';
+
+// Spied, not replaced: the real implementation still draws, and what this file
+// needs to see is WHICH METER the surface hands it — see the CP-18 block below.
+vi.mock('../src/timeline/timelineMath', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/timeline/timelineMath')>();
+  return { ...actual, laneGridImage: vi.fn(actual.laneGridImage) };
+});
 import { CompositionPage } from '../src/composition/CompositionPage';
 import {
   ARRANGEMENT_ZOOM_LEVELS,
-  DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   arrangementWidth,
-  editLaneHeight,
+  DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   editableSpans,
+  editLaneHeight,
   tickToPx,
 } from '../src/composition/arrangementMath';
 import {
@@ -32,6 +40,7 @@ import {
   removePlacement,
   selectPlacements,
   selectTrack,
+  setCompositionTimeSignature,
 } from '../src/composition/compositionService';
 import {
   clearHistory as clearPatternHistory,
@@ -184,6 +193,30 @@ const noteIn = (placementId: string) =>
   within(surfaceEl(placementId)).getAllByTitle(/^Fret /)[0];
 
 const editGrid = () => <ArrangementGrid mode="edit" />;
+
+describe("the composition overrides a block's own meter (CP-18)", () => {
+  it("computes the note lanes' grid from the ARRANGEMENT's meter, not the snapshot's", () => {
+    // A block's snapshot carries its own meter, but the ruler above these lanes
+    // measures the COMPOSITION's bars — so lanes drawn in the snapshot's meter
+    // would put bar lines where the ruler says there are none.
+    //
+    // Asserted on the CALL rather than on the rendered `background-image`:
+    // jsdom's CSS parser drops a comma-joined list of `repeating-linear-gradient`
+    // and hands back an empty string, so the DOM cannot show this.
+    seedArrangement();
+    setCompositionTimeSignature({ numerator: 3, denominator: 4 });
+    const snapshotMeter = getTracks()[0].placements[0].patternSnapshot.timeSignature;
+    expect(snapshotMeter).toEqual({ numerator: 4, denominator: 4 });
+    vi.mocked(laneGridImage).mockClear();
+
+    render(<ArrangementGrid mode="edit" />);
+
+    const meters = vi.mocked(laneGridImage).mock.calls.map((call) => call[2]);
+    expect(meters.length).toBeGreaterThan(0);
+    expect(meters).toContainEqual({ numerator: 3, denominator: 4 });
+    expect(meters).not.toContainEqual(snapshotMeter);
+  });
+});
 
 describe('what an edit-mode lane draws', () => {
   it('mounts one editable surface per placement, at the block’s own rect', () => {

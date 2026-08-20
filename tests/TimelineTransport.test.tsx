@@ -16,6 +16,8 @@ vi.mock('../src/audio/playbackService', () => ({
   toggleClick: vi.fn(),
   useTempo: vi.fn(() => 80),
   setTempo: vi.fn(),
+  setClickTimeSignature: vi.fn(),
+  setClickSubdivision: vi.fn(),
 }));
 
 // The follow-scroll loop's only observable act under jsdom is this read, so it
@@ -34,19 +36,22 @@ import { getTransportTicks } from '@fretwork/lib';
 import { installFrameClock } from './frameClock';
 import {
   play,
+  setClickSubdivision,
+  setClickTimeSignature,
+  setTempo,
   stop,
+  toggleClick,
   useActiveEventIds,
+  useClickMuted,
   useHeadTick,
   useIsPlaying,
   usePlaybackEngine,
-  useClickMuted,
-  toggleClick,
-  setTempo,
 } from '../src/audio/playbackService';
 import {
   clearHistory,
   getEditingPattern,
   openBlankPattern,
+  setPatternTimeSignature,
   stampNote,
 } from '../src/patterns/patternService';
 
@@ -66,6 +71,48 @@ beforeEach(() => {
   vi.mocked(useHeadTick).mockReturnValue(null);
   vi.mocked(useActiveEventIds).mockReturnValue([]);
   seedTwoNotes();
+});
+
+describe('meter and click subdivision (CP-18)', () => {
+  const meter = () => screen.getByRole('combobox', { name: 'Time signature' });
+  const subdivision = () => screen.getByRole('combobox', { name: 'Click subdivision' });
+
+  it("shows the PATTERN's own meter — on this page the pattern is the document", () => {
+    setPatternTimeSignature({ numerator: 6, denominator: 8 });
+    render(<Timeline />);
+
+    expect(meter()).toHaveValue('6/8');
+  });
+
+  it('saves the meter on the pattern, and tells the click about it', async () => {
+    const user = userEvent.setup();
+    render(<Timeline />);
+
+    await user.selectOptions(meter(), '3/4');
+
+    expect(getEditingPattern()?.timeSignature).toEqual({ numerator: 3, denominator: 4 });
+    expect(vi.mocked(setClickTimeSignature)).toHaveBeenCalledWith('3/4');
+  });
+
+  it('saves the subdivision on the pattern, and tells the click about it', async () => {
+    const user = userEvent.setup();
+    render(<Timeline />);
+
+    await user.selectOptions(subdivision(), 'triplets');
+
+    expect(getEditingPattern()?.subdivision).toBe('triplets');
+    expect(vi.mocked(setClickSubdivision)).toHaveBeenCalledWith('triplets');
+  });
+
+  it('does NOT resize the pattern when the meter changes', () => {
+    // The lib swaps the field and nothing else, so a four-bar 4/4 pattern is
+    // 5⅓ bars of 3/4 until the next content edit refits it. Deliberate:
+    // refitting here would silently lengthen a pattern nobody had edited.
+    const before = getEditingPattern()?.durationTicks;
+    setPatternTimeSignature({ numerator: 3, denominator: 4 });
+
+    expect(getEditingPattern()?.durationTicks).toBe(before);
+  });
 });
 
 describe('Timeline transport', () => {
