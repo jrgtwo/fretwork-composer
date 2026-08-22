@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FretInstrumentId, Track } from '@fretwork/lib';
 import {
+  PAN_RANGE,
   VOLUME_RANGE_DB,
   findTrack,
   listTrackInstruments,
@@ -9,6 +10,7 @@ import {
   removeTrack,
   setTrackInstrument,
   setTrackMuted,
+  setTrackPan,
   setTrackSoloed,
   setTrackVolumeDb,
   strandedByInstrument,
@@ -43,6 +45,35 @@ import {
  * `voiceService.setTrackVoice` writes on the call, so the agent is never
  * debounced, and one command stays one undo step.
  */
+/**
+ * How close to centre counts as centre.
+ *
+ * A pan pot has a physical detent and a range input has none, so the snap is
+ * the software half of that: anything inside this lands on exactly 0, which is
+ * what makes "put it back in the middle" a drag rather than a fiddle.
+ *
+ * Sized to swallow exactly one step. That does cost the ±0.05 positions — a 5%
+ * offset, which is below what the ear resolves in a mix and well worth a centre
+ * you can actually hit. Widening it further would start eating audible ones.
+ */
+const PAN_DETENT = 0.05;
+
+const withDetent = (pan: number) => (Math.abs(pan) <= PAN_DETENT ? 0 : pan);
+
+/**
+ * A pan position said the way a mixer says it: `C`, or a side and how far.
+ *
+ * Percent rather than the stored -1..+1, because "L35" is how the number is
+ * spoken and reading `-0.35` off a strip means converting it every time. Used
+ * as `aria-valuetext` too — a range announcing "minus zero point three five"
+ * is technically the value and practically noise.
+ */
+function panLabel(pan: number): string {
+  const percent = Math.round(Math.abs(pan) * 100);
+  if (percent === 0) return 'C';
+  return `${pan < 0 ? 'L' : 'R'}${percent}`;
+}
+
 const VOICE_COMMIT_MS = 120;
 
 /**
@@ -545,6 +576,7 @@ export function TrackControls({
           </button>
         </div>
       ) : (
+        <>
         <div className="flex items-center gap-1">
           {/* `aria-pressed` rather than a checkbox: these are latching switches
               on a mixer, and their state is the whole message. What they MEAN
@@ -614,6 +646,53 @@ export function TrackControls({
             {(track.volumeDb ?? 0).toFixed(1)}
           </span>
         </div>
+        {/* Pan gets a ROW rather than a place beside the fader (CP-19). The
+            strip's height was raised to hold it, deliberately: a pan pot needs
+            a centre you can land on, and a control squeezed in next to the
+            fader is one nobody can hit.
+
+            A second native range, for every reason the fader's comment gives —
+            already keyboard-operable, already announcing itself, no second unit
+            invented for it. `?? 0` for the same reason too, one field newer:
+            `pan` is OPTIONAL on the model, so a track saved before this existed
+            arrives with none at all and `value={undefined}` would quietly turn
+            a controlled range uncontrolled. */}
+        <div className="flex items-center gap-1">
+          <span
+            aria-hidden
+            className="w-[26px] flex-none font-mono text-[8.5px] font-bold leading-none text-ink-mut"
+          >
+            PAN
+          </span>
+          <input
+            type="range"
+            aria-label={`Pan for ${track.name}`}
+            // The raw value is -1..+1 and nobody speaks it: a reader announcing
+            // "minus zero point three five" has said the number and told you
+            // nothing. This is the same string the readout shows.
+            aria-valuetext={panLabel(track.pan ?? 0)}
+            min={PAN_RANGE.min}
+            max={PAN_RANGE.max}
+            step={0.05}
+            value={track.pan ?? 0}
+            onChange={(e) => report(setTrackPan(track.id, withDetent(e.currentTarget.valueAsNumber)))}
+            // Double-click re-centres. The detent makes centre reachable by
+            // drag; this makes it reachable without one, which is what a
+            // keyboard-free hand reaches for after moving a part too far.
+            onDoubleClick={() => report(setTrackPan(track.id, 0))}
+            className="h-1 min-w-0 flex-1 cursor-pointer accent-brass"
+          />
+          {/* `aria-hidden` for the fader's reason — `aria-valuetext` above
+              already says this, and read twice it becomes "pan for Rhythm L35
+              L35". */}
+          <span
+            aria-hidden
+            className="w-[30px] flex-none text-right font-mono text-[8.5px] tabular-nums text-ink-mut"
+          >
+            {panLabel(track.pan ?? 0)}
+          </span>
+        </div>
+        </>
       )}
     </>
   );

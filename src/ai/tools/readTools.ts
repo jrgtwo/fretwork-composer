@@ -372,6 +372,10 @@ const readComposition = defineTool<Record<string, never>>({
           // its pitch (LIB-GAP(15): only the composition has a tuning).
           instrumentId,
           volumeDb: track.volumeDb,
+          // `?? 0` because a track saved before pan existed carries none, and
+          // "centred" is where it actually is — reporting null would invite a
+          // write to fix a thing that is not wrong.
+          pan: track.pan ?? 0,
           muted: track.muted,
           soloed: track.soloed,
           audible: isTrackAudible(track, tracks),

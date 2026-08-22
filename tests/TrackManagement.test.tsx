@@ -30,6 +30,7 @@ import {
   setTrackName,
   setTrackSoloed,
   setTrackVolumeDb,
+  setTrackPan,
   strandedByInstrument,
   undo,
 } from '../src/composition/compositionService';
@@ -220,6 +221,120 @@ describe('mute and solo', () => {
     await user.click(mute());
 
     expect(tracksNow()[0].muted).toBe(false);
+  });
+});
+
+// ------------------------------------------------------------------- pan ---
+
+describe('pan (CP-19)', () => {
+  beforeEach(() => openBlankComposition('Song'));
+
+  function panFor(track: Track) {
+    return within(headerFor(track)).getByRole('slider', { name: `Pan for ${track.name}` });
+  }
+
+  it('is its own control on the strip, spanning hard left to hard right', () => {
+    render(<ArrangementGrid mode={MODE} />);
+    const [track] = tracksNow();
+
+    const pan = panFor(track);
+    expect(pan).toHaveAttribute('min', '-1');
+    expect(pan).toHaveAttribute('max', '1');
+    expect((pan as HTMLInputElement).value).toBe('0');
+
+    fireEvent.change(pan, { target: { value: '-0.5' } });
+
+    expect(tracksNow()[0].pan).toBe(-0.5);
+  });
+
+  it('says where it is the way a mixer says it, not as a signed fraction', () => {
+    render(<ArrangementGrid mode={MODE} />);
+    const [track] = tracksNow();
+
+    // `-0.35` is the value and tells a listener nothing. This is what both the
+    // readout and `aria-valuetext` carry.
+    expect(panFor(track)).toHaveAttribute('aria-valuetext', 'C');
+    fireEvent.change(panFor(track), { target: { value: '-0.35' } });
+    expect(panFor(tracksNow()[0])).toHaveAttribute('aria-valuetext', 'L35');
+    fireEvent.change(panFor(tracksNow()[0]), { target: { value: '0.2' } });
+    expect(panFor(tracksNow()[0])).toHaveAttribute('aria-valuetext', 'R20');
+  });
+
+  it('has a detent — a drag that lands near the middle lands ON it', () => {
+    // A pan pot has a physical centre you can feel; a range input has none.
+    // Without this, "put it back in the middle" is a fiddle rather than a drag.
+    render(<ArrangementGrid mode={MODE} />);
+    const [track] = tracksNow();
+
+    fireEvent.change(panFor(track), { target: { value: '0.05' } });
+
+    expect(tracksNow()[0].pan).toBe(0);
+  });
+
+  it('re-centres on a double-click', () => {
+    render(<ArrangementGrid mode={MODE} />);
+    const [track] = tracksNow();
+    fireEvent.change(panFor(track), { target: { value: '-0.8' } });
+    expect(tracksNow()[0].pan).toBe(-0.8);
+
+    fireEvent.doubleClick(panFor(tracksNow()[0]));
+
+    expect(tracksNow()[0].pan).toBe(0);
+  });
+
+  it('clamps an out-of-range value at the seam and reports what it stored', () => {
+    // The slider cannot produce this; the agent can.
+    const [track] = tracksNow();
+
+    expect(setTrackPan(track.id, 5)).toEqual({ ok: true, value: 1 });
+    expect(tracksNow()[0].pan).toBe(1);
+  });
+
+  it('refuses a pan that is not a number, rather than storing NaN', () => {
+    // A NaN reaching `Panner.pan` is not an error — the node keeps its last
+    // value and the track silently stops answering the control.
+    const [track] = tracksNow();
+
+    expect(setTrackPan(track.id, Number.NaN)).toEqual({
+      ok: false,
+      reason: 'That is not a pan position.',
+    });
+    expect(tracksNow()[0].pan).toBe(0);
+  });
+
+  it('shows centred for a track stored before pan existed', () => {
+    // `pan` is optional on the model and nothing backfills it, so the control
+    // meets `undefined` on any composition saved before this shipped. An
+    // uncontrolled range is the failure this prevents.
+    const comp = getEditingComposition();
+    expect(comp).toBeTruthy();
+    if (!comp) return;
+    usePatternsStore.setState((state) => ({
+      library: {
+        ...state.library,
+        compositions: state.library.compositions.map((c) =>
+          c.id === comp.id
+            ? {
+                ...c,
+                tracks: c.tracks.map((t) => {
+                  // Deleted rather than destructured-around: the field has to be
+                  // ABSENT, not undefined, to stand in for a track written
+                  // before it existed.
+                  const stripped = { ...t };
+                  delete (stripped as { pan?: number }).pan;
+                  return stripped;
+                }),
+              }
+            : c,
+        ),
+      },
+    }));
+
+    render(<ArrangementGrid mode={MODE} />);
+    const [track] = tracksNow();
+
+    expect((panFor(track) as HTMLInputElement).value).toBe('0');
+    expect(panFor(track)).toHaveAttribute('aria-valuetext', 'C');
   });
 });
 

@@ -189,9 +189,15 @@ export type ArrangementMode = (typeof ARRANGEMENT_MODES)[number];
 export type TimedArrangementMode = Exclude<ArrangementMode, 'voice'>;
 
 /**
- * Default lane height per timed mode. Pattern mode draws one block row, so eight
- * tracks plus a ruler fit a laptop viewport without scrolling; edit mode has to
- * hold a full set of string rows.
+ * Default lane height per timed mode. Pattern mode draws one block row and is
+ * sized by what the track HEADER needs beside it — see `VOICE_HEADER_HEIGHT`,
+ * which is derived from this rather than restated; edit mode has to hold a full
+ * set of string rows.
+ *
+ * Pattern mode was 88 until CP-19 added the pan row to the strip. The old figure
+ * was chosen so eight tracks plus a ruler fit a laptop viewport, and this costs
+ * roughly one of those — accepted knowingly when the alternative was squeezing
+ * pan in beside the fader.
  *
  * The EDIT figure is now a fallback rather than the number in use: CP-11 sizes
  * each edit lane to its own track's string count (`laneHeightsFor`), and this is
@@ -199,7 +205,7 @@ export type TimedArrangementMode = Exclude<ArrangementMode, 'voice'>;
  * from it so the two cannot drift.
  */
 export const DEFAULT_LANE_HEIGHTS: Record<TimedArrangementMode, number> = {
-  pattern: 88,
+  pattern: 104,
   edit: 192,
 };
 
@@ -209,10 +215,11 @@ export const DEFAULT_LANE_HEIGHTS: Record<TimedArrangementMode, number> = {
  * Voice rows are normal flow and grow with their rack, so nothing sizes the row
  * — but the header inside it still needs a number, because `TrackHeader` is an
  * `overflow-hidden` column that takes an explicit height (its own comment says
- * so). This is the figure it was drawn for: three control rows, a status line
- * and CP-13's voice picker. Anything smaller clips the mute, the solo, the fader
- * and the picker out of sight while leaving them in the DOM and tabbable — a
- * silently disabled mixer strip, which jsdom has no layout to catch.
+ * so). This is the figure it was drawn for: three control rows, a status line,
+ * CP-13's voice picker and CP-19's pan row. Anything smaller clips the mute, the
+ * solo, the fader, the pan and the picker out of sight while leaving them in the
+ * DOM and tabbable — a silently disabled mixer strip, which jsdom has no layout
+ * to catch.
  *
  * Derived from pattern mode's lane rather than restated, because it IS the same
  * strip: that is the one mode whose lane is sized by what the header needs.

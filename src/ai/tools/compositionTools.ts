@@ -37,6 +37,7 @@
 import {
   MAX_COMPOSITION_TRACKS,
   VOLUME_RANGE_DB,
+  PAN_RANGE,
   addPlacement,
   addTrack,
   beginEditGesture,
@@ -72,6 +73,7 @@ import {
   setTrackName,
   setTrackSoloed,
   setTrackVolumeDb,
+  setTrackPan,
   splitPlacement,
   SUBDIVISION_OPTIONS,
   compositionEndTick,
@@ -400,23 +402,28 @@ const setTrackInstrumentTool = defineTool<{ trackId: string; instrumentId: strin
 interface MixArgs {
   trackId: string;
   volumeDb?: number;
+  pan?: number;
   muted?: boolean;
   soloed?: boolean;
 }
 
 const setTrackMix = defineTool<MixArgs>({
   name: 'composition_set_track_mix',
-  description: `A track's level and its mute/solo state. Volume is in dB — 0 is unity, not a midpoint — and is clamped to ${VOLUME_RANGE_DB.min}..${VOLUME_RANGE_DB.max}. Any soloed track anywhere silences every un-soloed track, and mute beats solo: a track that is both is silent. The mix is not part of undo.`,
+  description: `A track's level, its place in the stereo field, and its mute/solo state. Volume is in dB — 0 is unity, not a midpoint — and is clamped to ${VOLUME_RANGE_DB.min}..${VOLUME_RANGE_DB.max}. Pan runs ${PAN_RANGE.min} (hard left) to ${PAN_RANGE.max} (hard right), 0 centre; spreading parts across it is what keeps several tracks from piling up on the same spot. Any soloed track anywhere silences every un-soloed track, and mute beats solo: a track that is both is silent. The mix is not part of undo.`,
   parameters: obj(
     {
       trackId: str('From read_composition.'),
       volumeDb: num('0 is unity gain.', { min: VOLUME_RANGE_DB.min, max: VOLUME_RANGE_DB.max }),
+      pan: num('-1 hard left, 0 centre, +1 hard right.', {
+        min: PAN_RANGE.min,
+        max: PAN_RANGE.max,
+      }),
       muted: bool('Silence this track.'),
       soloed: bool('Silence every track that is not soloed.'),
     },
     ['trackId'],
   ),
-  run: ({ trackId, volumeDb, muted, soloed }) => {
+  run: ({ trackId, volumeDb, pan, muted, soloed }) => {
     // No gesture: none of the three pushes an undo step by design (they are
     // settings, not arrangement content), so bracketing them would be a bracket
     // around nothing.
@@ -425,6 +432,15 @@ const setTrackMix = defineTool<MixArgs>({
       const result = setTrackVolumeDb(trackId, volumeDb);
       if (!result.ok) return fail(result.reason);
       storedVolume = result.value;
+    }
+    // Reported like the volume and for the same reason: the seam clamps, and a
+    // caller that asked for 2 needs to be told it got 1 rather than discover it
+    // by ear it cannot use.
+    let storedPan: number | null = null;
+    if (pan !== undefined) {
+      const result = setTrackPan(trackId, pan);
+      if (!result.ok) return fail(result.reason);
+      storedPan = result.value;
     }
     if (muted !== undefined) {
       const result = setTrackMuted(trackId, muted);
@@ -440,6 +456,9 @@ const setTrackMix = defineTool<MixArgs>({
     return ok({
       trackId,
       volumeDb: storedVolume ?? track?.volumeDb ?? null,
+      // `?? 0` before `?? null`: a track that has never been panned reads as
+      // centred, which is where it is, rather than as unknown.
+      pan: storedPan ?? track?.pan ?? 0,
       muted: track?.muted ?? null,
       soloed: track?.soloed ?? null,
     });

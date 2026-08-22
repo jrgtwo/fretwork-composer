@@ -409,6 +409,22 @@ const clampDb = (db: number) =>
   Math.max(VOLUME_RANGE_DB.min, Math.min(VOLUME_RANGE_DB.max, db));
 
 /**
+ * The pan pot's travel. -1 hard left, 0 centre, +1 hard right.
+ *
+ * Unlike the fader's, this range is not a restatement of a lib clamp for a
+ * pixel-free model's benefit — it is the `Tone.Panner` parameter's own domain,
+ * and the lib clamps to exactly this. Named here so the control, the seam and
+ * the agent's schema all read one number.
+ *
+ * Note it IS a midpoint control, which the fader deliberately is not: 0 means
+ * centre rather than unity, and that is why it gets a detent and the fader
+ * does not.
+ */
+export const PAN_RANGE = { min: -1, max: 1 } as const;
+
+const clampPan = (pan: number) => Math.max(PAN_RANGE.min, Math.min(PAN_RANGE.max, pan));
+
+/**
  * Whether this track will actually be HEARD, by the engine's own rule.
  *
  * The precedence, decided once here so the screen and the ear cannot disagree
@@ -666,6 +682,7 @@ function mergeSettingsForward(snapshot: Composition, live: Composition): Composi
         instrumentId: current.instrumentId,
         voiceRef: current.voiceRef,
         volumeDb: current.volumeDb,
+        pan: current.pan,
         muted: current.muted,
         soloed: current.soloed,
       };
@@ -1455,6 +1472,34 @@ export function setTrackVolumeDb(trackId: string, volumeDb: number): Result<numb
   const clamped = clampDb(volumeDb);
   if (track.volumeDb === clamped) return ok(clamped);
   store().setCompositionTrackVolumeDb(trackId, clamped);
+  return ok(clamped);
+}
+
+/**
+ * Where a track sits in the stereo field. Returns the value actually STORED.
+ *
+ * The fader's shape exactly, and for the fader's reasons: the lib clamps
+ * silently and returns a bumped composition either way, so comparing the
+ * REQUEST against the stored value would make `setTrackPan(id, 5)` write on
+ * every call forever. This control is DRAGGED, which makes that the difference
+ * between one write and one per pointermove.
+ *
+ * Not undoable, like the rest of the mix — track structure is undoable, where a
+ * track sits in the picture is not.
+ *
+ * The VOICE has a pan of its own and the two stack. This one is the mix
+ * decision; the voice's belongs to the sound and lives in the Sound Lab.
+ */
+export function setTrackPan(trackId: string, pan: number): Result<number> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
+  const track = findTrack(trackId);
+  if (!track) return refuse('No such track.');
+  if (!Number.isFinite(pan)) return refuse('That is not a pan position.');
+  const clamped = clampPan(pan);
+  // `?? 0` because a track persisted before CP-19 has no `pan` at all — a raw
+  // comparison would read undefined !== 0 and write on the first centring call.
+  if ((track.pan ?? 0) === clamped) return ok(clamped);
+  store().setCompositionTrackPan(trackId, clamped);
   return ok(clamped);
 }
 

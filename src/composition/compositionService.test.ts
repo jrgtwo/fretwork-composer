@@ -61,6 +61,7 @@ import {
   setTrackSoloed,
   setTrackVoiceRef,
   setTrackVolumeDb,
+  setTrackPan,
   splitPlacement,
   totalDurationTicks,
   trackInstrumentId,
@@ -624,6 +625,73 @@ describe('track settings round-trip through the store', () => {
     expect(storedTracks()[0].soloed).toBe(true);
   });
 
+  /* CP-19. Pan is the missing half of the pair volume already has: the VOICE
+     carries the sound's own stereo image, the TRACK carries where that sound
+     sits in this mix. Everything here mirrors the fader's seam, including
+     returning the value actually stored rather than the one requested. */
+  describe('pan', () => {
+    it('writes it, and reports the value actually stored', () => {
+      const id = storedTracks()[0].id;
+      const result = setTrackPan(id, -0.5);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value).toBe(-0.5);
+      expect(storedTracks()[0].pan).toBe(-0.5);
+    });
+
+    it('starts a new track centred', () => {
+      expect(storedTracks()[0].pan ?? 0).toBe(0);
+    });
+
+    it('clamps out of range and REPORTS the clamped value', () => {
+      // The agent is the caller that can send 2, and the one least able to
+      // notice a silent coercion — so the reply carries what is playing.
+      const id = storedTracks()[0].id;
+      const result = setTrackPan(id, 2);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value).toBe(1);
+      expect(storedTracks()[0].pan).toBe(1);
+    });
+
+    it('refuses a non-number rather than storing NaN', () => {
+      const id = storedTracks()[0].id;
+      expect(setTrackPan(id, Number.NaN).ok).toBe(false);
+      expect(storedTracks()[0].pan ?? 0).toBe(0);
+    });
+
+    it('skips a write that would set the value already there', () => {
+      // Identity, not equality: this control is DRAGGED, so every value it
+      // passes through would otherwise persist the whole composition and
+      // re-render every subscriber once per pointermove.
+      const id = storedTracks()[0].id;
+      setTrackPan(id, 0.25);
+      const settled = stored();
+      setTrackPan(id, 0.25);
+      expect(stored()).toBe(settled);
+    });
+
+    it('compares against the CLAMPED value, so a repeated out-of-range call settles', () => {
+      const id = storedTracks()[0].id;
+      setTrackPan(id, 5);
+      const settled = stored();
+      setTrackPan(id, 5);
+      expect(stored()).toBe(settled);
+    });
+
+    it('is not undoable — it is mix, not arrangement', () => {
+      const id = storedTracks()[0].id;
+      const placed = addPlacement(seedPattern('Riff'), id);
+      expect(placed.ok).toBe(true);
+      setTrackPan(id, -1);
+
+      undo();
+
+      expect(storedPlacements()).toHaveLength(0);
+      expect(storedTracks()[0].pan).toBe(-1);
+    });
+  });
+
   it('stores a voiceRef opaquely — the cast is voiceService’s, not this seam’s', () => {
     const id = storedTracks()[0].id;
     const ref = { kind: 'default', slotId: 'clean-amp' };
@@ -649,6 +717,7 @@ describe('track settings round-trip through the store', () => {
     expect(setTrackInstrument('nope', 'bass').ok).toBe(false);
     expect(setTrackVoiceRef('nope', { kind: 'default' }).ok).toBe(false);
     expect(setTrackVolumeDb('nope', -6).ok).toBe(false);
+    expect(setTrackPan('nope', -0.5).ok).toBe(false);
     expect(setTrackMuted('nope', true).ok).toBe(false);
     expect(setTrackSoloed('nope', true).ok).toBe(false);
 
@@ -1470,6 +1539,7 @@ describe('the job lock', () => {
       ['setTrackInstrument', () => setTrackInstrument(trackId, 'bass')],
       ['setTrackVoiceRef', () => setTrackVoiceRef(trackId, { id: 'x' })],
       ['setTrackVolumeDb', () => setTrackVolumeDb(trackId, -3)],
+      ['setTrackPan', () => setTrackPan(trackId, -0.5)],
       ['setTrackMuted', () => setTrackMuted(trackId, true)],
       ['setTrackSoloed', () => setTrackSoloed(trackId, true)],
       ['setMasterVolumeDb', () => setMasterVolumeDb(-3)],
