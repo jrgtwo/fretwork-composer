@@ -123,19 +123,22 @@
  * the bottom or top 2 or 3 strings of the shape, or all of it — the choice a
  * comper actually makes bar to bar.
  *
- * ⚠ EXPANSION HAPPENS BEFORE THE REVIEW, so an expanded event is subject to every
- * check above with no second path around them: a strum that collides with a line
- * already ringing on one of those strings is refused by the same overlap walk
- * that catches two typed notes. And the expansion is 1:1 — one answer event in,
- * one event out, at the same index — so {@link eventLabel} still names the entry
- * where the model wrote it.
+ * ⚠ EXPANSION HAPPENS BEFORE THE RESOLUTION AND THE REVIEW, so an expanded event
+ * is subject to every rule the model's own notes are, with no second path around
+ * them: a strum that lands on a string a line is already ringing on is cut back
+ * by the same walk that separates two typed notes. And the expansion is 1:1 —
+ * one answer entry in, one event out, at the same index — so {@link eventLabel}
+ * still names the entry where the model wrote it, and {@link resolveTrack}
+ * carries that numbering forward across the events it splits and drops.
  *
  * ⚠ WHICH IS WHY THE BRIEF SAYS HOW LONG A STRUM OCCUPIES ITS STRINGS. The whole
  * point of the span is that the model never learns which strings it just played,
- * so it cannot work out that a chord left ringing for a bar collides with the
- * next stab inside that bar — and the overlap walk would refuse the pair, with no
- * retry, for a figure a guitarist plays every day. A rule the answer is judged by
- * and cannot see has to be stated in the sentence that offers the feature.
+ * so it cannot work out that a chord left ringing for a bar overlaps the next
+ * stab inside that bar. That pair used to cost the part, with one retry, for a
+ * figure a guitarist plays every day; it is now resolved the way a player's hand
+ * resolves it — the chord keeps ringing on every string the stab does not touch
+ * — and the brief says so, because a rule the answer is judged by and cannot see
+ * has to be stated in the sentence that offers the feature.
  *
  * ── ⚠ AND A TYPED CHORD IS CHECKED AGAINST THAT SHAPE ───────────────────────
  *
@@ -201,6 +204,53 @@
  * the shape does not use, nothing here can tell a chord tone from a wrong one, so
  * it is never counted against the answer. The 2026-08-16 voicing is caught by the
  * four strings it moved, not by the one it added.
+ *
+ * ── ⚠ THREE THINGS ARE RESOLVED RATHER THAN REFUSED ─────────────────────────
+ *
+ * The twelve-bar run of 2026-08-23 came back with no bass at all: the part was
+ * written twice and refused twice. Every refusal across that run's three refused
+ * answers was classified by hand — 65 of them, in exactly three classes and
+ * nothing else. 52 were two notes overlapping on one string, 11 were an attack
+ * carrying both a `strum` and its own `notes`, and 2 were an event ringing past
+ * the end of the form. Zero wrong grips, zero out-of-range strings or frets,
+ * zero fractional ticks.
+ *
+ * Not one of the three is musical judgement. Each has exactly ONE thing a player
+ * would do and this module already knows what it is — the overlap refusal's own
+ * sentence said "shorten the one that is in the way", and then refused the part
+ * instead of shortening it.
+ *
+ * So {@link resolveTrack} does the shortening and the trimming, {@link
+ * expandStrums} lets the strum win, and both count what they did into a
+ * {@link TrackResolutions} that travels out with the part. THERE IS NO CEILING
+ * on any of it: a part is resolved however many times it needs to be, because
+ * where "too broken to resolve" sits is a question only a listening test can
+ * answer and inventing a threshold here would answer it wrongly and silently.
+ *
+ * WHAT IS STILL REFUSED IS EVERYTHING ELSE. The chord check, both range checks,
+ * the fractional tick, the event with no notes and the part with no events are
+ * untouched — those are mistakes with no single right repair, and guessing at
+ * one would be exactly the silent correction this project is already criticised
+ * for.
+ *
+ * ⚠ AND THE RULES ARE SAID OUT LOUD, in the schema's field descriptions (which
+ * are prompt — see {@link irTrackSchema}) and in the brief's prose. A resolution
+ * the model is not told about makes the format's semantics a lie: it would write
+ * `durationTicks` believing it a declaration when it is a maximum. Every
+ * sentence that used to end "and it is refused" now says what the app will do
+ * instead.
+ *
+ * ⚠ THE SPLIT MUST NOT REACH THE CHORD CHECK, and this is the one place the two
+ * halves of the card meet. `durationTicks` is per EVENT and `IRNote` has no
+ * duration of its own, so cutting ONE string of a chord means moving that note
+ * into its own event at the same tick ({@link resolveTrack} has the mechanism and
+ * why it is lossless). What the model wrote as one stack of four can therefore
+ * arrive at the review as a 2, a 1 and a 1 — and a check that judged THAT would
+ * be wrong in both directions: a mis-copied grip of three would fall under the
+ * threshold and ship, and three cells of a four-note stack could be a subset of
+ * another chord where the four were not, which is a refusal about a stack nobody
+ * wrote. Both are real and both are pinned. So {@link reviewTrack} gathers the
+ * notes by ANSWER ENTRY — `origins` — and judges the model's own grouping.
  *
  * ── THE BRIEF IS `patternSubRun`'s, LIFTED ──────────────────────────────────
  *
@@ -312,10 +362,10 @@ export type StrumSpan = (typeof STRUM_SPANS)[number];
  *
  * Both fields are optional because JSON Schema as this app spells it has no
  * `oneOf` (`src/ai/tools/types.ts`'s `JsonSchema`, and that file is another
- * card's), so "exactly one of them" is prose in the brief and a refusal here
- * rather than a grammar. An entry with BOTH is refused by {@link expandStrums};
- * an entry with NEITHER expands to no notes and is refused by
- * {@link reviewTrack}'s existing sentence about an event with nothing in it.
+ * card's), so "exactly one of them" is prose in the brief and a rule in code
+ * rather than a grammar. An entry with BOTH keeps the strum — {@link
+ * expandStrums}' rule 2 — and an entry with NEITHER expands to no notes and is
+ * refused by {@link reviewTrack}'s sentence about an event with nothing in it.
  *
  * {@link IREvent} is what survives expansion, and it is the only shape the
  * document ever sees.
@@ -455,9 +505,16 @@ const barList = (bars: readonly number[]): string => {
  *
  * ⚠ THE SCHEMA IS NOT THE VALIDATION. It can say a tick is an integer; it cannot
  * say the event ends inside the form, that two events do not fight over one
- * string, or that the answer has any events at all. Those are {@link reviewTrack}'s
- * — and a grammar is the PROVIDER's to honour, which this app cannot assume of an
- * arbitrary OpenAI-compatible backend.
+ * string, or that the answer has any events at all. The first two are
+ * {@link resolveTrack}'s to REPAIR and the last is {@link reviewTrack}'s to
+ * refuse — and a grammar is the PROVIDER's to honour, which this app cannot
+ * assume of an arbitrary OpenAI-compatible backend.
+ *
+ * ⚠ AND IT CANNOT SAY "ONE OF THESE TWO" EITHER. `src/ai/tools/types.ts`'s
+ * `JsonSchema` has no `oneOf` and no `anyOf`, so "`notes` or `strum`, never
+ * both" cannot be a grammar however it is spelled. It is prose in the
+ * descriptions below, prose in the brief, and {@link expandStrums}' rule 2 when
+ * the model writes both anyway.
  */
 const SCHEMA_BY_INSTRUMENT = new Map<string, JsonSchema>();
 
@@ -552,11 +609,18 @@ export function irTrackSchema(instrumentId: string): JsonSchema {
         obj(
           {
             atTick: int(
-              `When this attack starts, in ticks from the beginning of the piece. A WHOLE number — ${PPQ} ticks is a quarter note.`,
+              // ⚠ THIS DESCRIPTION IS PROMPT, as `durationTicks` below. It is
+              // where the OTHER half of the form rule is stated: a duration is
+              // trimmed, but an attack written outside the form has nothing to
+              // trim and goes whole.
+              `When this attack starts, in ticks from the beginning of the piece. A WHOLE number — ${PPQ} ticks is a quarter note. An attack written AT or past the end of the form is thrown away, notes and all.`,
               { min: 0 },
             ),
             durationTicks: int(
-              'How long it rings, in ticks. A WHOLE number, at least 1. Its start plus this must not run past the end of the form.',
+              // ⚠ THIS DESCRIPTION IS PROMPT, for the reason spelled out on
+              // `string` below — and it is where the format's semantics are
+              // stated. This is a MAXIMUM, and the model has to be told so.
+              'How long it rings, in ticks. A WHOLE number, at least 1. It is the LONGEST this attack will ring and not a promise: it is cut back at the end of the form, and cut short on any string a later attack needs.',
               { min: 1 },
             ),
             notes: arr(
@@ -581,10 +645,10 @@ export function irTrackSchema(instrumentId: string): JsonSchema {
                 },
                 ['string', 'fret'],
               ),
-              'The notes YOU compose at this instant — a line, a melody, a fill. A string can only ring one note at a time, so no two of them are on the same string. Leave it out and write `strum` instead to play a chord: never copy a shape out by hand.',
+              'The notes YOU compose at this instant — a line, a melody, a fill. A string can only ring one note at a time, so a note still ringing on a string one of these lands on is cut short there, and of two of these on the same string only the last one sounds. Leave it out and write `strum` instead to play a chord: never copy a shape out by hand.',
             ),
             strum: str(
-              `Play the chord already in force at this tick, filled in for you from its shape on this neck — write this INSTEAD of \`notes\` and you never copy a string, a fret or the chord's name. Which strings of the shape it hits: "all" every string the shape uses, "bottom-2"/"bottom-3" the 2 or 3 lowest-numbered strings of it, "top-2"/"top-3" the 2 or 3 highest-numbered.`,
+              `Play the chord already in force at this tick, filled in for you from its shape on this neck — write this INSTEAD of \`notes\` and you never copy a string, a fret or the chord's name. An entry that writes both keeps the strum, and the \`notes\` on it are thrown away. Which strings of the shape it hits: "all" every string the shape uses, "bottom-2"/"bottom-3" the 2 or 3 lowest-numbered strings of it, "top-2"/"top-3" the 2 or 3 highest-numbered.`,
               STRUM_SPANS,
             ),
             dynamic: str(`How hard it is played. Softest to loudest: ${DYNAMICS.join(', ')}.`, DYNAMICS),
@@ -593,7 +657,8 @@ export function irTrackSchema(instrumentId: string): JsonSchema {
           // sake: an entry carries `notes` or `strum`, and this dialect of JSON
           // Schema has no `oneOf` to say so. What the grammar can no longer refuse
           // — an entry with neither — {@link reviewTrack} refuses by name, in a
-          // sentence the model can act on, which a grammar error is not.
+          // sentence the model can act on, which a grammar error is not; an entry
+          // with BOTH is {@link expandStrums}' rule 2, which resolves it.
           //
           // `dynamic` is optional for its own reason: a part with none is playable
           // and one dynamic per event, all the same, is worse than none at all.
@@ -910,7 +975,7 @@ One JSON object, exactly this shape and nothing else in it:
 
 {"events":[{"atTick":0,"durationTicks":${PPQ},"notes":[{"string":0,"fret":3}],"dynamic":"mf"},{"atTick":${PPQ},"durationTicks":${PPQ},"strum":"top-3"}]}
 
-One entry of \`events\` is one attack: \`atTick\` is when it starts and \`durationTicks\` is how long it rings. What sounds on it is written one of the two ways above, and never both in the same entry — \`notes\` is the notes YOU compose at that instant, and \`strum\` plays the chord already in force at that tick, filled in for you. \`dynamic\` is optional on either and says how hard it is played, from ${DYNAMICS[0]} to ${DYNAMICS[DYNAMICS.length - 1]}.
+One entry of \`events\` is one attack: \`atTick\` is when it starts and \`durationTicks\` is how long it rings. What sounds on it is written one of the two ways above, and never both in the same entry — \`notes\` is the notes YOU compose at that instant, and \`strum\` plays the chord already in force at that tick, filled in for you. An entry that writes both is played as the strum and the \`notes\` on it are thrown away, so write the one you meant. \`dynamic\` is optional on either and says how hard it is played, from ${DYNAMICS[0]} to ${DYNAMICS[DYNAMICS.length - 1]}.
 
 Write the events in time order, earliest first.
 
@@ -920,13 +985,13 @@ EVERY NUMBER IS A WHOLE NUMBER. A tick with a fraction in it is thrown away alon
 
 \`string\` counts from the BOTTOM string of the neck. This ${instrument} has ${strings}, so \`string\` runs from 0 to ${strings - 1}. ${openStringSentences(brief.instrumentId, { namePitches: true }).join(' ')} Write the part where it belongs on THIS neck, not where the same shape would sit on a guitar. \`fret\` runs from 0, the open string, up to ${frets} — that is where this neck ends, and a fret past it is a note nothing will draw and nothing will play.
 
-A string can only ring one note at a time. Two notes on the same string must not overlap: the second one starts at or after the first one's \`atTick\` plus its \`durationTicks\`, and two notes in the same event are never on the same string.
+A string can only ring one note at a time, which is why \`durationTicks\` is the LONGEST a note rings rather than a promise that it will: when a later attack sounds a note on a string, whatever is ringing there is cut short at that attack, exactly as a player's finger cuts it. Nothing is refused for it and nothing is moved — but a note you want held is a note nothing else lands on, so write the lengths you actually mean. Two notes of the SAME event on one string are one instant with two answers, and only the last of them is kept.
 
 # Time, already worked out
 
 ${PPQ} ticks is a quarter note, so a bar is ${TICKS_PER_BAR} ticks: an eighth is ${PPQ / 2}, a quarter is ${PPQ}, a dotted quarter is ${PPQ + PPQ / 2}, a half is ${PPQ * 2}.
 
-The piece is ${bars} long and runs from tick 0 to tick ${totalTicks}. Every event must END inside it — \`atTick\` plus \`durationTicks\` is at most ${totalTicks}. Start plus duration, not start: a note that begins inside the last bar but rings past its barline is a note past the end of the piece.
+The piece is ${bars} long and runs from tick 0 to tick ${totalTicks}. Nothing sounds past that: an event that would ring past ${totalTicks} is cut back to it, and an attack written AT or after ${totalTicks} is thrown away with everything on it. Start plus duration, not start — a note that begins inside the last bar and rings past its barline is trimmed at the barline, so write the length you want heard.
 
 Every bar and every chord below is given to you in ticks. Do not work any of it out again.
 
@@ -952,7 +1017,7 @@ How much of the shape the attack hits:
 
 Lowest-numbered is nearest \`string\` 0, the bottom of the neck. A player does not hit the same strings every time: the bass end of the shape on the beat, the top of it on the answer, the whole thing where the bar wants weight. \`"all"\` on every attack is one chord banged out over and over.
 
-A strum holds every string it hits for the whole of its \`durationTicks\`, exactly as written-out notes do. So the next attack that touches any of those strings starts at or after this one ends: a chord left ringing for a bar with a second chord struck inside it is two notes on one string at once, and it is refused. Let a chord ring and then play the next thing, or give it the shorter length you actually meant.
+A strum holds every string it hits for the whole of its \`durationTicks\`, exactly as written-out notes do — and, exactly as they do, only until something else needs one of those strings. A chord left ringing for a bar with a stab struck inside it goes on ringing on every string the stab does not touch and is cut short on the one it does, which is what the hand playing it would have done. So let a chord ring and play over it, and give it the shorter length when you want the ring to stop.
 
 \`notes\` is for what you compose — the walking line, the melody, the fill, the note that leads into the next bar. Three or more notes written by hand at one instant are checked against the shape above, on the strings that shape uses, and refused if they are not it, because that is a chord you meant to copy.
 
@@ -1111,6 +1176,76 @@ const STRUM_SUBSET: Record<StrumSpan, (cells: readonly GripCell[]) => readonly G
   'top-3': (cells) => cells.slice(-3),
 };
 
+// ------------------------------------------------------------ resolution ---
+
+/**
+ * WHAT THE APP DID TO THE PART BEFORE ANYBODY LOOKED AT IT.
+ *
+ * Three things the model gets wrong have exactly one repair a player would make,
+ * so they are made rather than refused — the header has the run that decided it
+ * and the counts that classified it. This is the receipt: STRUCTURED, because a
+ * later card turns it into the sentence a human reads and a sentence assembled
+ * here would be one this module cannot help rewording.
+ *
+ * ⚠ EVERY FIELD IS A COUNT OF SOMETHING THAT CHANGED, never of something that
+ * was merely looked at. An all-zero tally therefore means the part was written
+ * as the brief asked, and that is the claim {@link resolveTrack}'s pass-through
+ * makes good: an untouched event comes back as the same object.
+ *
+ * ⚠ NO FIELD IS A CEILING AND NOTHING READS ONE AS A FAILURE. Where "too broken
+ * to resolve" sits is a listening test's answer, and a threshold invented here
+ * would give it silently and wrongly.
+ *
+ * Each producer fills only the fields it owns — {@link expandStrums} the first,
+ * {@link resolveTrack} the rest — and {@link runIRTrack} adds the two.
+ */
+export interface TrackResolutions {
+  /** RULE 2. Attacks that asked for a `strum` AND typed their own `notes`: the
+   *  strum was played and the typed notes were dropped.
+   *  ⚠ IT COUNTS THE DISCARD, not the chord that replaced it. An entry whose
+   *  strum finds no shape behind it — a tick before the first chord, which
+   *  `trackRunInput` refuses a brief for before any run happens — still had its
+   *  typed notes thrown away, and is then refused for having no notes. Counting
+   *  it is the honest report of what was done to it. */
+  readonly strumsOverNotes: number;
+  /** RULE 1. Events whose `durationTicks` was cut back to the end of the form. */
+  readonly trimmedToForm: number;
+  /** RULE 1. Events written AT or past the end of the form, dropped whole. */
+  readonly droppedPastForm: number;
+  /** RULE 3. Notes cut short because a later attack needed their string. Counted
+   *  per NOTE and not per event: cutting one string of a chord leaves the rest
+   *  of it ringing, which is the whole point of the split. */
+  readonly notesCutShort: number;
+  /** RULE 3. Notes a cut would have left with nothing to ring — a later attack
+   *  on the same string at the same tick — dropped instead. */
+  readonly notesDropped: number;
+  /** RULE 3. Events that went with their notes, having none left. */
+  readonly eventsEmptied: number;
+}
+
+/** A part nothing was done to. The base every tally is built from, so a field
+ *  added above without a producer is a zero rather than a hole. */
+const NOTHING_RESOLVED: TrackResolutions = {
+  strumsOverNotes: 0,
+  trimmedToForm: 0,
+  droppedPastForm: 0,
+  notesCutShort: 0,
+  notesDropped: 0,
+  eventsEmptied: 0,
+};
+
+/** The two passes' receipts, added. Written field by field on purpose: a field
+ *  added to {@link TrackResolutions} and forgotten here is a compile error,
+ *  where a fold over `Object.keys` would silently drop it. */
+const addResolutions = (a: TrackResolutions, b: TrackResolutions): TrackResolutions => ({
+  strumsOverNotes: a.strumsOverNotes + b.strumsOverNotes,
+  trimmedToForm: a.trimmedToForm + b.trimmedToForm,
+  droppedPastForm: a.droppedPastForm + b.droppedPastForm,
+  notesCutShort: a.notesCutShort + b.notesCutShort,
+  notesDropped: a.notesDropped + b.notesDropped,
+  eventsEmptied: a.eventsEmptied + b.eventsEmptied,
+});
+
 /**
  * Fill in every `strum` from the shape this module already looked up.
  *
@@ -1129,36 +1264,40 @@ const STRUM_SUBSET: Record<StrumSpan, (cells: readonly GripCell[]) => readonly G
  * cases are refused earlier by {@link trackRunInput}, so this is the honest
  * behaviour of an exported pure function rather than a path anything reaches.
  *
- * The one refusal it authors is the one only it can see: an entry that carries
- * BOTH. The typed notes are kept so the rest of the review still speaks about the
- * event, but the run is refused either way — an entry that says two things is an
- * entry nobody can say what should sound on.
+ * ── RULE 2: THE STRUM WINS ──────────────────────────────────────────────────
+ *
+ * An entry that carries BOTH is the one mistake only this function can see, and
+ * it used to cost the whole part: 11 of the 65 refusals in the 2026-08-23 run
+ * were this and nothing else. The strum is kept and the typed notes are thrown
+ * away, for the reason the whole strum feature exists — the model cannot copy a
+ * grip reliably, so the half of the entry it authored by hand is the half more
+ * likely to be wrong, and the half this module filled in cannot be wrong at all.
+ * It is counted, never refused, and the schema and the brief both say so before
+ * the model writes a word.
+ *
+ * ⚠ AN EMPTY `notes` BESIDE A STRUM IS STILL NOT "BOTH", and now that matters
+ * for the COUNT rather than for a refusal: nothing was thrown away, so nothing
+ * is reported. A tally that counted it would report a resolution on a part
+ * nobody touched.
  */
 export function expandStrums(
   events: readonly IRAnswerEvent[],
   brief: TrackBrief,
-): { readonly events: readonly IREvent[]; readonly refusals: readonly TrackRefusal[] } {
+): { readonly events: readonly IREvent[]; readonly resolutions: TrackResolutions } {
   const shapeAt = shapeFinder(brief).at;
-  const refusals: TrackRefusal[] = [];
+  let strumsOverNotes = 0;
 
-  const expanded = events.map((event, index): IREvent => {
+  const expanded = events.map((event): IREvent => {
     const base = {
       atTick: event.atTick,
       durationTicks: event.durationTicks,
       ...(event.dynamic === undefined ? {} : { dynamic: event.dynamic }),
     };
     if (event.strum === undefined) return { ...base, notes: event.notes ?? [] };
-    // ⚠ AN EMPTY `notes` BESIDE A STRUM IS NOT "BOTH". `notes` is still an
-    // advertised property, so an entry that asked for the chord and left a
-    // vestigial `"notes": []` behind is one that said ONE thing — refusing it for
-    // saying two would cost the whole part over an empty array, with no retry.
-    if (event.notes !== undefined && event.notes.length > 0) {
-      refusals.push({
-        label: eventLabel(index, event),
-        reason: `It has both a "strum" and its own "notes". An attack is one or the other: "strum" plays the chord in force at that tick and fills the shape in for you, and "notes" is what you composed. Drop whichever one is not what you meant.`,
-      });
-      return { ...base, notes: event.notes };
-    }
+    // RULE 2, and the only place the hand-typed half is still visible. `notes`
+    // is an advertised property, so a vestigial `"notes": []` beside a strum is
+    // an entry that said ONE thing and is not counted as a resolution.
+    if (event.notes !== undefined && event.notes.length > 0) strumsOverNotes += 1;
 
     const shape = shapeAt(event.atTick);
     const cells = shape === null ? [] : STRUM_SUBSET[event.strum](shape.cells);
@@ -1168,7 +1307,327 @@ export function expandStrums(
     };
   });
 
-  return { events: expanded, refusals };
+  return { events: expanded, resolutions: { ...NOTHING_RESOLVED, strumsOverNotes } };
+}
+
+
+/**
+ * One note's reach on its string while the resolution walk is running. Mutable
+ * on purpose — a cut moves `until` down and a drop sets `dropped`, and the
+ * regrouping below reads both off the same objects the walk held.
+ */
+interface Ringing {
+  readonly note: IRNote;
+  readonly from: number;
+  /** The tick it stops at. Starts at the event's end and only ever moves DOWN. */
+  until: number;
+  dropped: boolean;
+}
+
+/** One answer event, in flight: where it came from, what rule 1 left of it, and
+ *  every note on it as something rule 3 can shorten. */
+interface HeldEvent {
+  /** Its index in the events this pass was given — the number the model's own
+   *  entry has, which a split must not renumber. */
+  readonly origin: number;
+  readonly source: IREvent;
+  readonly atTick: number;
+  /** After rule 1. `source.durationTicks` where rule 1 left it alone. */
+  readonly durationTicks: number;
+  readonly notes: Ringing[];
+  /** Whether the rules may do arithmetic on it at all — see {@link isTimed}. */
+  readonly timed: boolean;
+}
+
+/**
+ * Is this event one the rules may touch?
+ *
+ * ⚠ AN EXCLUSION AND NOT A CHECK. A fractional or negative `atTick`, or a
+ * duration under a tick, is {@link reviewTrack}'s to refuse in its own sentence
+ * — and resolving such an event would put that fraction into the duration of an
+ * event that had none, so the part would come back refused for the wrong entry.
+ * Those events pass through this module untouched.
+ */
+const isTimed = (event: IREvent): boolean =>
+  Number.isInteger(event.atTick) &&
+  event.atTick >= 0 &&
+  Number.isInteger(event.durationTicks) &&
+  event.durationTicks >= 1;
+
+/**
+ * Is this note one the string walk may speak about?
+ *
+ * ⚠ THE SAME EXCLUSION {@link reviewTrack} MAKES, for the same reason and
+ * deliberately in step with it: a note refused for a string this neck has not
+ * got is a note whose string is not yet known, so cutting something short for it
+ * would be cutting for a note that is about to be refused anyway.
+ */
+const onTheNeck = (note: IRNote, strings: number, frets: number): boolean =>
+  Number.isInteger(note.string) &&
+  note.string >= 0 &&
+  note.string < strings &&
+  Number.isInteger(note.fret) &&
+  note.fret >= 0 &&
+  note.fret <= frets;
+
+/**
+ * THE THREE MECHANICAL REFUSALS, RESOLVED. Rules 1 and 3 — the header has why
+ * they are resolutions at all, and {@link expandStrums} owns rule 2 because it
+ * is the only thing that can still see a hand-typed `notes` beside a strum.
+ *
+ * ── THE ORDER, AND WHY IT IS THIS ONE ───────────────────────────────────────
+ *
+ * Rule 2 first (it decides which notes exist), then rule 1 (the form), then
+ * rule 3 (the strings). Rule 1 before rule 3 is not a preference:
+ *
+ *   - trimming only ever SHORTENS an event and dropping only ever removes one,
+ *     so rule 1 can remove an overlap and can never create one. Run first, every
+ *     cut rule 3 then makes is a cut the finished part actually needed;
+ *   - run the other way round and rule 3 would split an event for the sake of an
+ *     overlap that rule 1 was about to delete — a split, and a count, for
+ *     nothing — or cut a note short against an attack that rule 1 then drops for
+ *     being past the form;
+ *   - and rule 1 after rule 3 would have to trim BOTH halves of every split,
+ *     which is the same work done twice with a second chance to get it wrong.
+ *
+ * One pass each, in that order, converges. There is no fixed point to iterate to.
+ *
+ * ── RULE 1: TRIM TO THE END OF THE FORM ─────────────────────────────────────
+ *
+ * Only where `bars` is a real bar count — the same gate {@link reviewTrack} uses
+ * and for the same reason: a brief whose form is not a whole number of bars is
+ * {@link trackRunInput}'s to refuse before a run ever happens, and bounding a
+ * part against a number like that would trim every event in it against nonsense.
+ *
+ * ── RULE 3: A NOTE RINGS UNTIL ITS STRING IS NEEDED ─────────────────────────
+ *
+ * `durationTicks` is a maximum, not a declaration. When a later attack sounds a
+ * note on a string, whatever is ringing there is cut to that attack's `atTick`.
+ *
+ * ⚠ THE SAME INVARIANT THE LIB COMMITS TO, reproduced at IR level rather than
+ * invented: `patterns/pattern-ops` states it in the same words ("a single guitar
+ * string can only physically ring at one pitch at a time … the final committed
+ * state never has two events on the same string with overlapping intervals") and
+ * `stampEvent` enforces it through `nextEventStartOnString`. Those helpers take a
+ * `Pattern` of `PatternEvent`s, which is what this run's output BECOMES three
+ * seams later, and they neither split an event — a `PatternEvent` is one string,
+ * so they never have to — nor report what they clamped. Both are the whole point
+ * here, so the walk is ours; the RULE is not.
+ *
+ * ⚠ WHICH MEANS SPLITTING THE EVENT, and this is the crux of the whole card.
+ * `durationTicks` is per EVENT and is shared by every note on it; `IRNote` has
+ * no duration of its own. So "cut the note on string 0 short" cannot be done by
+ * shortening the event — that would shorten every other string of the chord with
+ * it, which is precisely the figure this rule exists to allow. The note that has
+ * to be cut moves into its OWN event at the same `atTick` with the shorter
+ * duration, and the rest keep the original.
+ *
+ * ⚠ AND THAT IS LOSSLESS, verified rather than assumed: the lib's mapper
+ * flattens per note (`import/mapper.ts` loops `for (const irNote of
+ * irEvent.notes)` and maps each one against the event's own offset), so two
+ * events at one tick produce exactly the pattern events one event with both
+ * notes would have. ⚠ `dynamic` IS COPIED ONTO EVERY HALF — it is event-level
+ * too, and a split that dropped it would silently flatten a part's accents.
+ *
+ * ⚠ THE WALK IS AGAINST THE FURTHEST-REACHING NOTE SO FAR, never the immediate
+ * predecessor — {@link reviewTrack}'s old overlap walk carries the argument for
+ * why that distinction is real. Here the cut MAKES the two coincide: after the
+ * current attack has cut whatever was sounding back to its own `atTick`, every
+ * earlier note on that string ends at or before it, so the attack just processed
+ * is the furthest-reaching one by construction. The invariant is what makes one
+ * pass enough, and it is worth knowing which way round the reasoning goes.
+ *
+ * A cut that would leave less than one tick — a second attack on the same string
+ * at the same tick, which is where two notes of one event on one string end up —
+ * drops the note instead of writing a duration under a tick — which
+ * {@link reviewTrack} refuses by name, and which the lib's mapper would otherwise
+ * silently LENGTHEN back to 1 tick (`Math.max(1, Math.round(…))`), sounding a
+ * note nobody wrote over the attack that took its string. An event that loses
+ * every note that way goes with them.
+ *
+ * PURE, and the tally is the whole account of what it did. An event no rule
+ * touched is returned as the SAME OBJECT, so a part written as the brief asked
+ * is passed through identically and reports an empty tally.
+ */
+export function resolveTrack(
+  events: readonly IREvent[],
+  brief: TrackBrief,
+): {
+  readonly events: readonly IREvent[];
+  /** Which answer entry each returned event came from, positionally. A split
+   *  emits two events with one origin and a drop emits none, so this is the only
+   *  thing that still knows what the model wrote — {@link reviewTrack} takes it
+   *  so a refusal goes on naming the entry rather than a row of the repair. */
+  readonly origins: readonly number[];
+  /** The notes rule 3 threw away, by answer entry — see {@link reviewTrack}'s
+   *  `resolved` parameter for the one thing that reads it. Keyed by origin and
+   *  not positional, because a dropped note has no event left to sit beside. */
+  readonly dropped: ReadonlyMap<number, readonly IRNote[]>;
+  readonly resolutions: TrackResolutions;
+} {
+  const formed = isBarCount(brief.bars);
+  const formEnd = brief.bars * TICKS_PER_BAR;
+  const strings = instrumentStringCount(brief.instrumentId);
+  const frets = neckFrets(brief.instrumentId);
+
+  let trimmedToForm = 0;
+  let droppedPastForm = 0;
+  let notesCutShort = 0;
+  let notesDropped = 0;
+  let eventsEmptied = 0;
+
+  // ── RULE 1 ────────────────────────────────────────────────────────────────
+  const held: HeldEvent[] = [];
+  for (const [origin, source] of events.entries()) {
+    const timed = isTimed(source);
+    let durationTicks = source.durationTicks;
+    if (timed && formed) {
+      if (source.atTick >= formEnd) {
+        droppedPastForm += 1;
+        continue;
+      }
+      if (source.atTick + durationTicks > formEnd) {
+        durationTicks = formEnd - source.atTick;
+        trimmedToForm += 1;
+      }
+    }
+    held.push({
+      origin,
+      source,
+      atTick: source.atTick,
+      durationTicks,
+      timed,
+      notes: source.notes.map((note) => ({
+        note,
+        from: source.atTick,
+        until: source.atTick + durationTicks,
+        dropped: false,
+      })),
+    });
+  }
+
+  // ── RULE 3 ────────────────────────────────────────────────────────────────
+  const onString = new Map<number, Ringing[]>();
+  for (const event of held) {
+    if (!event.timed) continue;
+    for (const ringing of event.notes) {
+      if (!onTheNeck(ringing.note, strings, frets)) continue;
+      const reach = onString.get(ringing.note.string) ?? [];
+      reach.push(ringing);
+      onString.set(ringing.note.string, reach);
+    }
+  }
+
+  for (const reach of onString.values()) {
+    // Sorted by start, and the sort is STABLE — so two notes at one tick are
+    // walked in the order the model wrote them and the LAST one keeps the
+    // string. Which of two simultaneous notes wins is arbitrary; that it is
+    // decided the same way every time is not.
+    const sorted = [...reach].sort((a, b) => a.from - b.from);
+    let sounding: Ringing | null = null;
+    for (const current of sorted) {
+      if (sounding !== null && sounding.until > current.from) {
+        if (current.from - sounding.from < 1) {
+          sounding.dropped = true;
+          notesDropped += 1;
+        } else {
+          sounding.until = current.from;
+          notesCutShort += 1;
+        }
+      }
+      // The furthest-reaching note so far IS this one, now: the branch above cut
+      // or dropped whatever reached past it, and every note before that ended at
+      // or before this attack. See the header of this function.
+      sounding = current;
+    }
+  }
+
+  // ── BACK INTO EVENTS ──────────────────────────────────────────────────────
+  const out: IREvent[] = [];
+  const origins: number[] = [];
+  const dropped = new Map<number, readonly IRNote[]>();
+  for (const event of held) {
+    const full = event.atTick + event.durationTicks;
+    const touched =
+      event.durationTicks !== event.source.durationTicks ||
+      event.notes.some((ringing) => ringing.dropped || ringing.until !== full);
+    if (!touched) {
+      // The same object, not a copy of it: "nothing was done to this event" is a
+      // claim worth being able to make by identity.
+      out.push(event.source);
+      origins.push(event.origin);
+      continue;
+    }
+
+    const emit = (notes: IRNote[], durationTicks: number): void => {
+      out.push({
+        atTick: event.atTick,
+        durationTicks,
+        // ⚠ ONTO EVERY HALF. `dynamic` is event-level, so a split that kept it on
+        // one half only would silently drop an accent off the other.
+        //
+        // ⚠ AND IT MAKES THE MAPPER'S OWN COUNT READ HIGH — LIB-GAP(23). The
+        // lib's `mapImportToLibrary` inventories dynamics PER IREvent, so a part
+        // whose attacks were split reports more "dynamic markings" than the model
+        // wrote, in the same warning list `irCompositionJob` puts its repair
+        // sentence in. The document is right and the count is the lib's; stated
+        // here rather than worked around, because the alternative — not copying
+        // it — loses an accent.
+        ...(event.source.dynamic === undefined ? {} : { dynamic: event.source.dynamic }),
+        notes,
+      });
+      origins.push(event.origin);
+    };
+
+    // An attack with nothing on it is trimmed like any other and then handed on:
+    // it is {@link reviewTrack}'s to refuse by name, and dropping it here would
+    // turn a sentence the model can act on into a silence.
+    if (event.notes.length === 0) {
+      emit([], event.durationTicks);
+      continue;
+    }
+    // ⚠ KEPT, NOT JUST COUNTED. A dropped note is still a note the model wrote,
+    // and the chord check judges the ANSWER ENTRY — so an entry that typed two
+    // notes onto one string would otherwise fall below `CHORD_AT_ONCE` here and
+    // never be judged at all, which is how a mis-copied grip with a duplicated
+    // string used to ship. See {@link reviewTrack}'s `resolved` parameter.
+    const gone = event.notes.filter((ringing) => ringing.dropped);
+    if (gone.length > 0) dropped.set(event.origin, gone.map((ringing) => ringing.note));
+
+    const surviving = event.notes.filter((ringing) => !ringing.dropped);
+    if (surviving.length === 0) {
+      eventsEmptied += 1;
+      continue;
+    }
+
+    // THE SPLIT. Notes that still end together stay together — a chord cut on one
+    // string emits two events and not one per note — and the group that kept the
+    // event's own length goes first, because that group IS the original event and
+    // the cut notes are what moved out of it.
+    const byEnd = new Map<number, IRNote[]>();
+    for (const ringing of surviving) {
+      const sharing = byEnd.get(ringing.until) ?? [];
+      sharing.push(ringing.note);
+      byEnd.set(ringing.until, sharing);
+    }
+    const ends = [...byEnd.keys()];
+    const ordered = byEnd.has(full) ? [full, ...ends.filter((end) => end !== full)] : ends;
+    for (const end of ordered) emit(byEnd.get(end) ?? [], end - event.atTick);
+  }
+
+  return {
+    events: out,
+    origins,
+    dropped,
+    resolutions: {
+      ...NOTHING_RESOLVED,
+      trimmedToForm,
+      droppedPastForm,
+      notesCutShort,
+      notesDropped,
+      eventsEmptied,
+    },
+  };
 }
 
 /** How many notes at one instant are a chord rather than a line. Argued in the
@@ -1191,6 +1650,33 @@ const MOVED_TOLERATED = 1;
  */
 const SLIP_FRETS = 3;
 
+/**
+ * One ANSWER ENTRY's playable notes, gathered across every event the resolution
+ * may have split that entry into.
+ *
+ * ⚠ THE CHORD CHECK JUDGES WHAT THE MODEL WROTE, NEVER WHAT THE APP MADE OF IT.
+ * `resolveTrack` splits an event to cut one string of it, so a four-note grip
+ * with a line played over two of its strings reaches the review as three events
+ * at one tick. Judging those would be wrong BOTH ways: a hand-typed stack of
+ * three that lost one string would fall under {@link CHORD_AT_ONCE} and ship a
+ * mis-copied grip, and a 3-of-4 subgroup can sit entirely inside another chord of
+ * the progression where the four notes did not — a stale-shape refusal about a
+ * stack nobody wrote, which the model cannot act on and the one retry cannot fix.
+ * Gathering by origin puts the check back where the mistake is, and the entry is
+ * also the only thing a refusal can usefully name.
+ */
+interface AnswerStack {
+  /** The answer entry these notes came from — {@link resolveTrack}'s `origins`. */
+  readonly origin: number;
+  readonly label: string;
+  /** Shared by every event of the entry: a split keeps the tick. */
+  readonly atTick: number;
+  /** The entry's notes that SURVIVED the range checks and the resolution.
+   *  {@link reviewTrack} adds back whatever rule 3 dropped before judging, so
+   *  what is judged is the entry as the model typed it. */
+  readonly playable: IRNote[];
+}
+
 /** Notes as the model would find them in what it wrote. */
 const noteList = (notes: readonly IRNote[]): string =>
   notes.map((note) => `string ${note.string} fret ${note.fret}`).join(', ');
@@ -1202,24 +1688,19 @@ const sitsOn = (cells: readonly GripCell[], note: IRNote): boolean =>
 const cellList = (cells: readonly GripCell[]): string =>
   cells.map((cell) => `string ${cell.stringIndex} fret ${cell.fret}`).join(', ');
 
-/** One note's reach on its string, for the overlap walk. */
-interface Sounding {
-  readonly from: number;
-  readonly until: number;
-  readonly label: string;
-  readonly fret: number;
-}
-
 /**
  * THE WHOLE VALIDATION, and every entry of it is something the import pipeline
  * would otherwise let past IN SILENCE. See the header for which fixture proved
  * which.
  *
- * ⚠ TAKES ITS BRIEF ON TRUST. `bars` is only read to bound the form, and a brief
- * whose `bars` is not a whole count SUPPRESSES that one check rather than
- * blaming every event for one bad number — {@link trackRunInput} refuses such a
- * brief before a run ever happens, so this is the same suppression `reviewChart`
- * applies for the same reason and not a second opinion about the form.
+ * ⚠ THREE THINGS IT NO LONGER REFUSES, and their absence is load-bearing rather
+ * than an omission: an event past the end of the form, an attack carrying both a
+ * strum and its own notes, and two notes overlapping on one string. All three
+ * are RESOLVED before this runs — {@link resolveTrack} and {@link expandStrums}
+ * — so by the time these events arrive none of the three can be here to find.
+ * ⚠ WHICH MEANS THE ORDER IN {@link runIRTrack} IS THE GUARANTEE. Call this on
+ * raw answer events, as several tests deliberately do, and it will pass a part
+ * with a note ringing three bars past the end of the piece.
  *
  * DELIBERATELY NOT CHECKED: whether the part is any good, whether a LINE uses the
  * chords it was given, or whether anything lands off the downbeat. All three are
@@ -1231,6 +1712,16 @@ interface Sounding {
 export function reviewTrack(
   events: readonly IREvent[],
   brief: TrackBrief,
+  /** What {@link resolveTrack} did to these events — pass its whole result.
+   *  ⚠ WITHOUT IT A REFUSAL NAMES THE WRONG ENTRY once anything has been split
+   *  or dropped, and "event 7" is the half of a refusal the model navigates by;
+   *  without `dropped` the chord check judges a stack the model did not write.
+   *  Absent means the events ARE the answer's, one for one, and nothing was
+   *  thrown away — which is true of raw answer events and of nothing else. */
+  resolved?: {
+    readonly origins: readonly number[];
+    readonly dropped: ReadonlyMap<number, readonly IRNote[]>;
+  },
 ): readonly TrackRefusal[] {
   const refusals: TrackRefusal[] = [];
 
@@ -1247,15 +1738,98 @@ export function reviewTrack(
     ];
   }
 
-  const formed = isBarCount(brief.bars);
-  const totalTicks = brief.bars * TICKS_PER_BAR;
   const strings = instrumentStringCount(brief.instrumentId);
   const frets = neckFrets(brief.instrumentId);
-  const onString = new Map<number, Sounding[]>();
   const progression = shapeFinder(brief);
 
+  // ── THE CHORD CHECK ───────────────────────────────────────────────────────
+  // Three notes IN ONE ANSWER ENTRY claim to BE a chord; two are a double-stop
+  // and carry no harmony of their own, and stacks spread over separate entries
+  // are not gathered (header). A note on a string the shape does not use is never
+  // counted — nothing here can know its pitch — and neither is one far off that
+  // string's own fret, which is a position rather than a slip. What is measured
+  // is the shape mis-copied, which is what the 2026-08-16 guitar did.
+  //
+  // ⚠ PER ENTRY AND NOT PER EVENT — see {@link AnswerStack} for what a split
+  // would otherwise do to this in both directions.
+  const judgeStack = (stack: AnswerStack): void => {
+    const { label } = stack;
+    // ⚠ THE NOTES RULE 3 THREW AWAY ARE JUDGED TOO. They are notes the model
+    // wrote, and this check is about what it wrote — an entry that put two notes
+    // on one string loses one of them to `resolveTrack` and would otherwise
+    // arrive here as a double-stop, under {@link CHORD_AT_ONCE}, with a
+    // mis-copied grip shipping unjudged. They are appended rather than woven
+    // back into the entry's own order: nothing here reads the order, and the
+    // refusal names cells rather than positions.
+    const playable = [...stack.playable, ...(resolved?.dropped.get(stack.origin) ?? [])];
+    const shape = playable.length >= CHORD_AT_ONCE ? progression.at(stack.atTick) : null;
+    if (shape === null) return;
+
+    // ⚠ THE STALE SHAPE IS LOOKED FOR FIRST, and the order is the whole point.
+    // A stack that sits ENTIRELY inside another chord of this progression is the
+    // ONE wrong chord this module can name as one — it looked every chord of the
+    // progression up to write the brief — and naming it is the diagnosis a model
+    // can act on in one go: it copied the wrong line off its own sheet.
+    //
+    // ⚠ IT IS A SUBSET, NOT AN IDENTITY: three notes that are three cells of a
+    // six-cell barre satisfy this, so the sentence below says every note is a
+    // cell of that shape rather than that the stack IS that shape.
+    //
+    // It used to be computed only where the slip bound had NOT fired, which
+    // suppressed it exactly where it was most useful. The 2026-08-16 F7-over-C7
+    // is the proof: two of its six notes sit within `SLIP_FRETS` of C7's shape,
+    // so the slip branch claimed them and the answer came back as "two notes are
+    // a fret or two off" about a stack that was a different chord entirely.
+    const stale = progression
+      .shapes()
+      .find(
+        (other) =>
+          other.symbol !== shape.symbol &&
+          playable.every((note) => sitsOn(other.cells, note)) &&
+          playable.some((note) => !sitsOn(shape.cells, note)),
+      );
+    if (stale !== undefined) {
+      refusals.push({
+        label,
+        reason: `It sounds ${playable.length} notes at once in bar ${barOf(stack.atTick)}, where ${shape.symbol} is in force — and every one of them is a cell of the ${stale.symbol} shape, which belongs at ${barList(stale.bars)}, rather than of ${shape.symbol}'s: ${noteList(playable)}. That is the wrong chord copied out of the brief. ${shape.symbol} sits at ${cellList(shape.cells)} here — and do not copy that one out either: write "strum" on the attack instead and the chord in force at that tick is filled in for you.`,
+      });
+      return;
+    }
+
+    const moved = playable.filter((note) => {
+      const cell = shape.cells.find((candidate) => candidate.stringIndex === note.string);
+      if (cell === undefined) return false;
+      const off = note.fret - cell.fret;
+      // An octave of the shape's own fret on the SAME string is the same tone
+      // — the one piece of fret arithmetic the brief sanctions.
+      if (off % 12 === 0) return false;
+      // A near miss is the shape mis-read; a note further away than that is a
+      // position this module was never told about — see SLIP_FRETS.
+      return Math.abs(off) <= SLIP_FRETS;
+    });
+    if (moved.length > MOVED_TOLERATED) {
+      refusals.push({
+        label,
+        reason: `It sounds ${playable.length} notes at once over ${shape.symbol}, and ${moved.length} of them sit a fret or two off that chord's own shape on the strings it uses: ${noteList(moved)}. The shape here is ${cellList(shape.cells)}, so what sounds is not ${shape.symbol}. Do not copy a shape out by hand — write "strum" on the attack instead and it is filled in from the shape for you.`,
+      });
+    }
+  };
+
+  /** The entry being gathered. Null before the first note survives its range
+   *  checks and between entries. */
+  let stack: AnswerStack | null = null;
+
   for (const [index, event] of events.entries()) {
-    const label = eventLabel(index, event);
+    const origin = resolved?.origins[index] ?? index;
+    // ⚠ THE HALVES OF A SPLIT ARRIVE TOGETHER — `resolveTrack` emits them one
+    // after the other — so a change of origin ENDS the entry. Judging at the
+    // boundary rather than after the loop keeps the refusals in the order the
+    // model's own entries are in, which is the order `namedRefusals` caps by.
+    if (stack !== null && stack.origin !== origin) {
+      judgeStack(stack);
+      stack = null;
+    }
+    const label = eventLabel(origin, event);
     // The two silent DROPS first, and `continue` after either: an event whose
     // tick or duration is not a whole number will not exist by the time anything
     // downstream could complain about where it ends, so a second sentence about
@@ -1274,12 +1848,6 @@ export function reviewTrack(
       });
       continue;
     }
-    if (formed && event.atTick + event.durationTicks > totalTicks) {
-      refusals.push({
-        label,
-        reason: `It starts at ${event.atTick} and rings for ${event.durationTicks}, which ends at ${event.atTick + event.durationTicks} — past the end of a ${barsPhrase(brief.bars)} form at tick ${totalTicks}. Start plus duration, not start.`,
-      });
-    }
     if (event.notes.length === 0) {
       refusals.push({
         label,
@@ -1289,11 +1857,9 @@ export function reviewTrack(
       continue;
     }
 
-    // The notes that survived the range checks, and only those: a note already
+    // Only the notes that survive the range checks are gathered: a note already
     // refused for the string it is on is a note whose string is not yet known, so
     // it can be neither on nor off the shape.
-    const playable: IRNote[] = [];
-
     for (const note of event.notes) {
       if (!Number.isInteger(note.string) || note.string < 0 || note.string >= strings) {
         refusals.push({
@@ -1310,105 +1876,19 @@ export function reviewTrack(
         continue;
       }
 
-      // Only notes that got this far are worth an overlap answer: a note already
-      // refused for the string it is on is a note whose string is not yet known.
-      const reach = onString.get(note.string) ?? [];
-      reach.push({
-        from: event.atTick,
-        until: event.atTick + event.durationTicks,
-        label,
-        fret: note.fret,
-      });
-      onString.set(note.string, reach);
-      playable.push(note);
-    }
-
-    // ── THE CHORD CHECK ─────────────────────────────────────────────────────
-    // Three notes IN ONE EVENT claim to BE a chord; two are a double-stop and
-    // carry no harmony of their own, and stacks spread over separate events are
-    // not gathered (header). A note on a string the shape does not use is never
-    // counted — nothing here can know its pitch — and neither is one far off that
-    // string's own fret, which is a position rather than a slip. What is measured
-    // is the shape mis-copied, which is what the 2026-08-16 guitar did.
-    const shape = playable.length >= CHORD_AT_ONCE ? progression.at(event.atTick) : null;
-    if (shape !== null) {
-      // ⚠ THE STALE SHAPE IS LOOKED FOR FIRST, and the order is the whole point.
-      // A stack that sits ENTIRELY inside another chord of this progression is the
-      // ONE wrong chord this module can name as one — it looked every chord of the
-      // progression up to write the brief — and naming it is the diagnosis a model
-      // can act on in one go: it copied the wrong line off its own sheet.
-      //
-      // ⚠ IT IS A SUBSET, NOT AN IDENTITY: three notes that are three cells of a
-      // six-cell barre satisfy this, so the sentence below says every note is a
-      // cell of that shape rather than that the stack IS that shape.
-      //
-      // It used to be computed only where the slip bound had NOT fired, which
-      // suppressed it exactly where it was most useful. The 2026-08-16 F7-over-C7
-      // is the proof: two of its six notes sit within `SLIP_FRETS` of C7's shape,
-      // so the slip branch claimed them and the answer came back as "two notes are
-      // a fret or two off" about a stack that was a different chord entirely.
-      const stale = progression
-        .shapes()
-        .find(
-          (other) =>
-            other.symbol !== shape.symbol &&
-            playable.every((note) => sitsOn(other.cells, note)) &&
-            playable.some((note) => !sitsOn(shape.cells, note)),
-        );
-      if (stale !== undefined) {
-        refusals.push({
-          label,
-          reason: `It sounds ${playable.length} notes at once in bar ${barOf(event.atTick)}, where ${shape.symbol} is in force — and every one of them is a cell of the ${stale.symbol} shape, which belongs at ${barList(stale.bars)}, rather than of ${shape.symbol}'s: ${noteList(playable)}. That is the wrong chord copied out of the brief. ${shape.symbol} sits at ${cellList(shape.cells)} here — and do not copy that one out either: write "strum" on the attack instead and the chord in force at that tick is filled in for you.`,
-        });
-      } else {
-        const moved = playable.filter((note) => {
-          const cell = shape.cells.find((candidate) => candidate.stringIndex === note.string);
-          if (cell === undefined) return false;
-          const off = note.fret - cell.fret;
-          // An octave of the shape's own fret on the SAME string is the same tone
-          // — the one piece of fret arithmetic the brief sanctions.
-          if (off % 12 === 0) return false;
-          // A near miss is the shape mis-read; a note further away than that is a
-          // position this module was never told about — see SLIP_FRETS.
-          return Math.abs(off) <= SLIP_FRETS;
-        });
-        if (moved.length > MOVED_TOLERATED) {
-          refusals.push({
-            label,
-            reason: `It sounds ${playable.length} notes at once over ${shape.symbol}, and ${moved.length} of them sit a fret or two off that chord's own shape on the strings it uses: ${noteList(moved)}. The shape here is ${cellList(shape.cells)}, so what sounds is not ${shape.symbol}. Do not copy a shape out by hand — write "strum" on the attack instead and it is filled in from the shape for you.`,
-          });
-        }
-      }
+      if (stack === null) stack = { origin, label, atTick: event.atTick, playable: [] };
+      stack.playable.push(note);
     }
   }
+  // The last entry has no boundary after it.
+  if (stack !== null) judgeStack(stack);
 
-  // The same rule `pattern_stamp_notes` enforces, and for the same reason: a
-  // string can only ring one note at a time, so a pair that overlaps is a pair
-  // the instrument cannot play — and the import path stores both without a word,
-  // where the editor's own seam would have refused the second.
-  //
-  // Sorted by start, then walked against the FURTHEST-REACHING note so far rather
-  // than against the immediate predecessor. A refused note stays in the array and
-  // would otherwise shadow the next comparison: with notes at [0,1920), [480,960)
-  // and [1440,1920) on one string, the predecessor walk reports the second and
-  // misses the third, though it sits wholly inside the first. It never passed a
-  // bad part — with sorted starts some adjacent pair always fires — but the
-  // itemised list is what the model gets to repair from, and one collision per
-  // round trip is one round trip per collision.
-  for (const [stringIndex, reach] of onString) {
-    const sorted = [...reach].sort((a, b) => a.from - b.from);
-    let sounding = sorted[0];
-    for (let i = 1; i < sorted.length; i += 1) {
-      const current = sorted[i];
-      if (current.from < sounding.until) {
-        refusals.push({
-          label: current.label,
-          reason: `Its note on string ${stringIndex} fret ${current.fret} starts at ${current.from}, while the note on that same string from ${sounding.label} is still sounding until ${sounding.until}. A string can only ring one note at a time — move one of them, or shorten the one that is in the way.`,
-        });
-      }
-      if (current.until > sounding.until) sounding = current;
-    }
-  }
+  // ⚠ NO OVERLAP WALK. It used to live here — "a string can only ring one note at
+  // a time" — and it was 52 of the 65 refusals in the run that decided this card.
+  // `resolveTrack` now CUTS the note that is in the way, which is what that
+  // refusal's own last sentence told the model to do, so there is nothing left
+  // here to find. The furthest-reaching argument that walk was written around did
+  // not go with it: it moved to `resolveTrack`, where it decides what gets cut.
 
   return refusals;
 }
@@ -1544,16 +2024,31 @@ export type TrackRunStop =
    *  a stop before it got there. */
   | 'answer'
   /** It wrote a part and the part breaks a rule the import pipeline would let
-   *  past in silence. THE ONE WORTH ASKING AGAIN FOR. */
+   *  past in silence AND the app will not repair for it. THE ONE WORTH ASKING
+   *  AGAIN FOR — the three mechanical mistakes are resolved rather than refused,
+   *  so what reaches here is a wrong chord, a cell off the neck, a fractional
+   *  tick, an attack with nothing on it, or a part with nothing in it. */
   | 'review';
 
 /**
  * `Result<IRTrack>`-shaped, plus the discriminant — a caller that only reads `ok`
  * and `reason` works unchanged.
+ *
+ * ⚠ `resolutions` IS ON BOTH BRANCHES, and that is not symmetry for its own sake:
+ * a part that was refused after forty notes were cut short is a part whose
+ * refusal reads very differently, and a caller that could only see the tally on
+ * success would never learn that. It is {@link NOTHING_RESOLVED} where no events
+ * were written at all — a `'brief'`, `'run'` or `'answer'` stop — which is the
+ * truth about those rather than a placeholder.
  */
 export type TrackRunOutcome =
-  | { readonly ok: true; readonly value: IRTrack }
-  | { readonly ok: false; readonly stopped: TrackRunStop; readonly reason: string };
+  | { readonly ok: true; readonly value: IRTrack; readonly resolutions: TrackResolutions }
+  | {
+      readonly ok: false;
+      readonly stopped: TrackRunStop;
+      readonly reason: string;
+      readonly resolutions: TrackResolutions;
+    };
 
 /**
  * Ask a model to write one part, and hand back the track it wrote.
@@ -1588,9 +2083,14 @@ export type TrackRunOutcome =
  *     an abort — and that sentence is the seam's, passed on;
  *   - `'answer'` — it answered without a structure, or with one that is not a
  *     list of events. A real outcome, not a bug;
- *   - `'review'` — an entry both asks for a chord and types its own notes, which
- *     {@link expandStrums} names, or the part breaks a rule {@link reviewTrack}
- *     names. The one a caller can usefully ask again about.
+ *   - `'review'` — the part breaks a rule {@link reviewTrack} names. The one a
+ *     caller can usefully ask again about.
+ *
+ * ⚠ AND IT REPORTS WHAT IT REPAIRED. `resolutions` counts every mechanical
+ * mistake the two passes below resolved instead of refusing — see
+ * {@link TrackResolutions}. It rides on the failure branch too, because a part
+ * that was refused after its form was trimmed forty times is a different story
+ * from one refused as written.
  */
 export async function runIRTrack(
   brief: TrackBrief,
@@ -1607,19 +2107,28 @@ export async function runIRTrack(
   // case through `chordGrip` a line later, in the same words.
   const instrument = knownInstrument(brief.instrumentId);
   if (instrument === undefined) {
-    return { ok: false, stopped: 'brief', reason: unknownInstrumentRefusal(brief.instrumentId) };
+    return {
+      ok: false,
+      stopped: 'brief',
+      reason: unknownInstrumentRefusal(brief.instrumentId),
+      resolutions: NOTHING_RESOLVED,
+    };
   }
 
   const { deps = TRACK_RUN_DEPS, previousRefusal, ...runOptions } = options;
 
   const input = trackRunInput(brief, previousRefusal);
-  if (!input.ok) return { ok: false, stopped: 'brief', reason: input.reason };
+  if (!input.ok) {
+    return { ok: false, stopped: 'brief', reason: input.reason, resolutions: NOTHING_RESOLVED };
+  }
 
   const run = await deps.runTask(IR_TRACK_AGENT, input.value, {
     ...runOptions,
     outputSchema: irTrackSchema(brief.instrumentId),
   });
-  if (!run.ok) return { ok: false, stopped: 'run', reason: run.reason };
+  if (!run.ok) {
+    return { ok: false, stopped: 'run', reason: run.reason, resolutions: NOTHING_RESOLVED };
+  }
 
   const events = asTrackEvents(run.value.structured);
   if (events === null) {
@@ -1637,18 +2146,56 @@ export async function runIRTrack(
       ok: false,
       stopped: 'answer',
       reason: `The run wrote no usable part for "${brief.name.trim()}" — ${detail}`,
+      resolutions: NOTHING_RESOLVED,
     };
   }
 
-  // ⚠ EXPANDED BEFORE IT IS REVIEWED, so a filled-in chord is subject to every
-  // check the model's own notes are — there is no second path into the document.
+  // ⚠ EXPAND, RESOLVE, REVIEW — IN THAT ORDER, AND THE ORDER IS THE WHOLE DESIGN.
+  //
+  //   - expanded first, so a filled-in chord is subject to every rule the model's
+  //     own notes are and there is no second path into the document. It is also
+  //     the last point at which an entry that wrote BOTH a strum and its own
+  //     notes can still be seen, which is why rule 2 lives there;
+  //   - resolved second, so the string rule walks REAL notes rather than a strum
+  //     span nobody has filled in yet — a strum's strings are exactly what the
+  //     model was never shown;
+  //   - reviewed last, on the resolved events, so the three mechanical refusals
+  //     cannot be produced at all: by the time this runs there is no event past
+  //     the form and no string sounding twice at once.
+  //
+  // `origins` is what keeps a refusal honest across a split — see `resolveTrack`.
   const filled = expandStrums(events, brief);
-  const refusals = [...filled.refusals, ...reviewTrack(filled.events, brief)];
+  const resolved = resolveTrack(filled.events, brief);
+  const resolutions = addResolutions(filled.resolutions, resolved.resolutions);
+
+  // ⚠ A PART WRITTEN OUTSIDE THE FORM IS NOT A PART THAT WROTE NOTHING, and only
+  // here can the two be told apart. Rule 1 drops every attack at or past the end
+  // of the form, so `resolveTrack` can legitimately hand back an empty list —
+  // whereupon `reviewTrack`'s empty-part sentence would say the run wrote no
+  // events at all. That sentence is exactly what `irCompositionJob` feeds back as
+  // `previousRefusal` for its ONE retry, so it has to name the real mistake.
+  if (resolved.events.length === 0 && resolutions.droppedPastForm > 0) {
+    const formEnd = brief.bars * TICKS_PER_BAR;
+    return {
+      ok: false,
+      stopped: 'review',
+      reason: `"${brief.name.trim()}" cannot be imported as written. ${namedRefusals([
+        {
+          label: `"${brief.name.trim()}"`,
+          reason: `${resolutions.droppedPastForm} of its attacks were written at or past tick ${formEnd}, which is where this ${brief.bars}-bar form ends — an attack outside the form is thrown away, notes and all — and nothing is left of the part. The piece runs from tick 0 up to but not including ${formEnd}: write the whole part inside it.`,
+        },
+      ])}`,
+      resolutions,
+    };
+  }
+
+  const refusals = reviewTrack(resolved.events, brief, resolved);
   if (refusals.length > 0) {
     return {
       ok: false,
       stopped: 'review',
       reason: `"${brief.name.trim()}" cannot be imported as written. ${namedRefusals(refusals)}`,
+      resolutions,
     };
   }
 
@@ -1660,7 +2207,8 @@ export async function runIRTrack(
       // The app's instrument id, which is also one of the lib's `InstrumentHint`
       // values — see {@link IRTrack}.
       instrumentHint: instrument.id,
-      events: [...filled.events].sort((a, b) => a.atTick - b.atTick),
+      events: [...resolved.events].sort((a, b) => a.atTick - b.atTick),
     },
+    resolutions,
   };
 }

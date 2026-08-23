@@ -1409,6 +1409,257 @@ describe('the transcript', () => {
   });
 });
 
+// ------------------------------------------------- a part that was repaired ---
+
+describe('a part the app had to repair', () => {
+  /**
+   * A part with two of the three mechanical mistakes in it, written so BOTH are
+   * repaired rather than refused:
+   *   - a whole-bar note on string 0 with a second attack on the same string a
+   *     quarter in, which cuts the first one short;
+   *   - an attack written AT the end of the form, which is dropped whole.
+   * The two survivors keep the part non-empty, so the job imports it and the
+   * repairs are the only thing there is to say about it.
+   *
+   * ⚠ THE COUNTS ARE 1 AND 1 ON PURPOSE — a singular count is the one that
+   * catches a report saying "1 notes".
+   */
+  const MENDED = [
+    { atTick: 0, durationTicks: TICKS_PER_BAR, notes: [{ string: 0, fret: 3 }] },
+    { atTick: PPQ, durationTicks: PPQ, notes: [{ string: 0, fret: 5 }] },
+    { atTick: BARS * TICKS_PER_BAR, durationTicks: PPQ, notes: [{ string: 0, fret: 7 }] },
+  ];
+
+  /** Parts 1 and 3 need repairing; part 2 is written exactly as briefed. */
+  const twoRepaired = () =>
+    rig({ track: (run) => answered({ events: run === 2 ? EVENTS : MENDED }) });
+
+  it('says what was repaired, one labelled line per part', async () => {
+    const fake = twoRepaired();
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    // ⚠ ALL THREE PARTS WERE IMPORTED. The repairs are a report about parts that
+    // are IN the piece — a part is never refused for these three mistakes now,
+    // which is the whole point of counting them instead.
+    expect(fake.documents[0].tracks).toHaveLength(3);
+    expect(outcome.value.missing).toEqual([]);
+    expect(outcome.value.documents.warnings).toEqual([
+      '[Bass] 1 note cut short where another note needed the string, 1 event dropped past the end of the form',
+      '[Uke] 1 note cut short where another note needed the string, 1 event dropped past the end of the form',
+    ]);
+  });
+
+  /**
+   * ONE PART WITH ALL SIX REPAIRS IN IT, on the guitar so a `strum` has a shape
+   * to expand into. Written to survive the review, because a part that is
+   * refused reports its repairs somewhere else entirely:
+   *   - two whole-bar notes on strings 0 and 1, both cut by a double-stop a beat
+   *     in — TWO, so the report's plural is exercised as well as its singular;
+   *   - two attacks on string 0 at ONE tick, where a cut would leave nothing to
+   *     ring: the first loses its note, and the attack goes with it;
+   *   - an attack in bar 2 carrying a `strum` AND its own typed notes;
+   *   - an attack ringing past the end of the form, and one written AT it.
+   *
+   * ⚠ NOTHING HERE OVERLAPS THE STRUM. Bar 1 is where the string rule works and
+   * the strum is a bar later, so which strings the C7 shape happens to use
+   * cannot change a single count in the expectation below.
+   */
+  const ALL_SIX = [
+    { atTick: 0, durationTicks: TICKS_PER_BAR, notes: [{ string: 0, fret: 3 }] },
+    { atTick: 0, durationTicks: TICKS_PER_BAR, notes: [{ string: 1, fret: 2 }] },
+    {
+      atTick: PPQ,
+      durationTicks: PPQ,
+      notes: [
+        { string: 0, fret: 5 },
+        { string: 1, fret: 5 },
+      ],
+    },
+    { atTick: PPQ * 2, durationTicks: PPQ, notes: [{ string: 0, fret: 7 }] },
+    { atTick: PPQ * 2, durationTicks: PPQ, notes: [{ string: 0, fret: 8 }] },
+    { atTick: TICKS_PER_BAR, durationTicks: PPQ, strum: 'bottom-3', notes: [{ string: 5, fret: 1 }] },
+    { atTick: BARS * TICKS_PER_BAR - PPQ, durationTicks: PPQ * 2, notes: [{ string: 3, fret: 5 }] },
+    { atTick: BARS * TICKS_PER_BAR, durationTicks: PPQ, notes: [{ string: 0, fret: 3 }] },
+  ];
+
+  it('says every repair it made, in words, with the counts it counted', async () => {
+    // ⚠ THE WHOLE SENTENCE, not a fragment of it. Every clause the report can
+    // say is in this one line, so a clause deleted, misspelled or wired to the
+    // wrong counter fails here — and nowhere else, because this is the only
+    // place four of the six are ever put into words.
+    const fake = rig({ track: (run) => answered({ events: run === 2 ? ALL_SIX : EVENTS }) });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    expect(outcome.value.missing).toEqual([]);
+    expect(outcome.value.documents.warnings).toEqual([
+      '[Rhythm Guitar] 2 notes cut short where another note needed the string, ' +
+        '1 note dropped where another note took the same string at the same moment, ' +
+        '1 event removed after losing every note that way, ' +
+        '1 event played as the chord strum that was asked for, in place of the notes typed beside it, ' +
+        '1 event shortened to end with the form, ' +
+        '1 event dropped past the end of the form',
+    ]);
+  });
+
+  it('says what it repaired in a part it refused anyway, in the refusal', async () => {
+    // ⚠ ONE LINE, NOT TWO. A part that is not in the arrangement is reported by
+    // name with its refusal, and the repairs made on the way to that refusal
+    // belong in the same sentence — a second `[Name] ...` line about a part the
+    // piece has not got would read as a part that is in it.
+    const fake = rig({
+      track: (run) => {
+        // Part 2, both attempts: an event ringing past the end of the form,
+        // which is REPAIRED, beside a fret this neck has not got, which is not.
+        if (run === 2 || run === 3) {
+          return answered({
+            events: [
+              { atTick: 0, durationTicks: PPQ, notes: [{ string: 0, fret: 99 }] },
+              {
+                atTick: BARS * TICKS_PER_BAR - PPQ,
+                durationTicks: PPQ * 2,
+                notes: [{ string: 1, fret: 3 }],
+              },
+            ],
+          });
+        }
+        return answered({ events: EVENTS });
+      },
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    const warnings = outcome.value.documents.warnings;
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('missing from this arrangement');
+    expect(warnings[0]).toContain('fret 99');
+    expect(warnings[0]).toContain(
+      'Before it was refused, the app had already repaired 1 event shortened to end with the form.',
+    );
+    expect(warnings[0]).not.toContain('[Rhythm Guitar]');
+  });
+
+  it('labels the line with the name the pipeline labels its own with', async () => {
+    // ⚠ ONE NAME FOR ONE PART. `partNames` trims and de-duplicates before the
+    // first run and its derived name is what reaches `IRTrack.name`, which is
+    // what the mapper prefixes ITS per-track warnings with — so a chart name
+    // written with spaces around it must reach this line already trimmed.
+    // `[ Bass ]` sitting beside `[Bass]` in one list is all it takes for the two
+    // accounts to stop reading as one.
+    const fake = rig({
+      chart: answered({
+        ...CHART,
+        tracks: [
+          { ...CHART.tracks[0], name: '  Bass  ' },
+          CHART.tracks[1],
+          CHART.tracks[2],
+        ],
+      }),
+      track: (run) => answered({ events: run === 1 ? MENDED : EVENTS }),
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    expect(outcome.value.documents.warnings[0].startsWith('[Bass] ')).toBe(true);
+  });
+
+  it('says nothing about a part that needed nothing', async () => {
+    const fake = twoRepaired();
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    // The middle part was written as briefed, and a line saying it needed no
+    // repairs is a line that trains a reader to skip the ones that matter.
+    expect(outcome.value.documents.warnings.join('\n')).not.toContain('Rhythm Guitar');
+  });
+
+  it('adds nothing at all to a job that needed no repairs', async () => {
+    const fake = rig();
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    expect(outcome.value.documents.warnings).toEqual([]);
+  });
+
+  it('leaves the pipeline\'s own warnings where they were', async () => {
+    // ⚠ THE PIPELINE'S ACCOUNT OF ITS OWN DOCUMENT COMES FIRST AND IN ITS OWN
+    // ORDER. Ours is appended; a reader who learned where the mapper's warnings
+    // are must not have to find them again because a part needed repairing.
+    const fake = rig({
+      track: (run) => answered({ events: run === 2 ? EVENTS : MENDED }),
+      imported: {
+        ok: true,
+        value: {
+          ...IMPORTED,
+          warnings: [
+            'Dropped 3 notes that fell outside the range',
+            '[Bass] 24 dynamic markings (ppp..fff translated to per-note velocity) — applied during playback',
+          ],
+        },
+      },
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    const warnings = outcome.value.documents.warnings;
+    expect(warnings.slice(0, 2)).toEqual([
+      'Dropped 3 notes that fell outside the range',
+      '[Bass] 24 dynamic markings (ppp..fff translated to per-note velocity) — applied during playback',
+    ]);
+    expect(warnings).toHaveLength(4);
+    expect(warnings[2]).toContain('[Bass] 1 note cut short');
+    expect(warnings[3]).toContain('[Uke] 1 note cut short');
+  });
+
+  it('puts a missing part ahead of a repaired one', async () => {
+    // Both are this job's own sentences and both are appended, but a part that
+    // is NOT in the arrangement is the bigger fact and reads first.
+    const fake = rig({
+      track: (run) => {
+        // Part 2, both attempts: a fractional tick, which is refused rather than
+        // repaired — see `irTrackRun` on which mistakes are which.
+        if (run === 2 || run === 3) {
+          return answered({
+            events: [{ atTick: 0.5, durationTicks: PPQ, notes: [{ string: 0, fret: 3 }] }],
+          });
+        }
+        return answered({ events: MENDED });
+      },
+    });
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    const warnings = outcome.value.documents.warnings;
+    expect(warnings).toHaveLength(3);
+    expect(warnings[0]).toContain('missing from this arrangement');
+    expect(warnings[1]).toContain('[Bass] 1 note cut short');
+    expect(warnings[2]).toContain('[Uke] 1 note cut short');
+  });
+
+  it('says it in the log as well as on the returned value', async () => {
+    // The log is the artifact that gets exported and pasted into a bug report —
+    // and it is spread from the SAME array the panel renders, so this is the
+    // assertion that keeps the two from drifting apart.
+    const fake = twoRepaired();
+
+    const outcome = await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    if (!outcome.ok) throw new Error(`expected a finished job, got: ${outcome.reason}`);
+    const content = getTranscript(outcome.value.transcriptId)?.outcome?.content ?? '';
+    expect(content).toContain('[Bass] 1 note cut short where another note needed the string');
+    expect(content).toContain('[Uke] 1 note cut short where another note needed the string');
+  });
+});
+
 // ------------------------------------------------------------- the defaults ---
 
 describe('what ships', () => {

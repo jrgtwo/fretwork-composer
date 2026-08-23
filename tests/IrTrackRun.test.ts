@@ -28,12 +28,14 @@ import {
   asTrackEvents,
   expandStrums,
   irTrackSchema,
+  resolveTrack,
   reviewTrack,
   runIRTrack,
   trackRunInput,
   type IRAnswerEvent,
   type IREvent,
   type TrackBrief,
+  type TrackResolutions,
   type TrackRunDeps,
 } from '../src/ai/irTrackRun';
 import { patternRunInput } from '../src/ai/patternSubRun';
@@ -183,6 +185,20 @@ const reviewed = (events: readonly IREvent[], of: TrackBrief = oneBar()): string
   reviewTrack(events, of)
     .map((refusal) => `${refusal.label}: ${refusal.reason}`)
     .join(' ');
+
+/** A part nothing was done to. Written out rather than imported so that a field
+ *  added to the tally without a thought fails every `toEqual` below. */
+const NOTHING: TrackResolutions = {
+  strumsOverNotes: 0,
+  trimmedToForm: 0,
+  droppedPastForm: 0,
+  notesCutShort: 0,
+  notesDropped: 0,
+  eventsEmptied: 0,
+};
+
+/** The tally a test expects, stated as only what it expects to have CHANGED. */
+const tally = (did: Partial<TrackResolutions>): TrackResolutions => ({ ...NOTHING, ...did });
 
 // ------------------------------------------------------------------ tools ---
 
@@ -482,12 +498,15 @@ describe('the brief tells the model to ask for a chord rather than copy one', ()
   it('says how long a strum occupies its strings, which the model cannot see', () => {
     // ⚠ THE ONE RULE THE FEATURE HIDES THE INPUTS TO. A strum's strings are never
     // shown to the model, so it cannot work out that a chord left ringing under a
-    // second attack is two notes on one string — and the overlap walk refuses that
-    // pair, with no retry, for a figure a guitarist plays every day.
+    // second attack is two notes on one string. That used to cost the part; it is
+    // now resolved, and the sentence has to say which — a model told the chord
+    // rings for the whole duration, full stop, is a model writing to a rule the
+    // app does not keep.
     const text = brief(guitarBar());
 
     expect(text).toContain('A strum holds every string it hits for the whole of its');
-    expect(text).toContain('starts at or after this one ends');
+    expect(text).toContain('is cut short on the one it does');
+    expect(text).not.toContain('starts at or after this one ends');
   });
 
   it('still hands over the shape, because the notes in it are the material', () => {
@@ -506,6 +525,59 @@ describe('the brief tells the model to ask for a chord rather than copy one', ()
       .map((cell) => `    string ${cell.stringIndex}, fret ${cell.fret}`)
       .join('\n');
     expect(text).toContain(block);
+  });
+});
+
+
+/**
+ * ⚠ A RESOLUTION THE MODEL IS NOT TOLD ABOUT IS A FORMAT WHOSE SEMANTICS LIE.
+ * It would write `durationTicks` believing it a declaration when the app treats
+ * it as a maximum, and every sentence that used to end "and it is refused" would
+ * be a rule the app does not keep. This is the pin on all three being stated in
+ * the two places the model reads — the brief's prose and the schema's field
+ * descriptions, which are prompt because these runs are tool-free.
+ */
+describe('the brief says what the app will DO, where it used to say “refused”', () => {
+  it('says a duration is the longest a note rings, and what stops it', () => {
+    const text = brief(guitarBar());
+
+    expect(text).toContain('the LONGEST a note rings');
+    expect(text).toContain('is cut short at that attack');
+    // The old promise is gone, not sitting beside the new one.
+    expect(text).not.toContain('Two notes on the same string must not overlap');
+  });
+
+  it('says both halves of what happens at the end of the form', () => {
+    const text = brief(oneBar());
+
+    expect(text).toContain(`an event that would ring past ${TICKS_PER_BAR} is cut back to it`);
+    expect(text).toContain('thrown away with everything on it');
+    expect(text).not.toContain('Every event must END inside it');
+  });
+
+  it('says the strum wins over notes typed beside it', () => {
+    expect(brief(guitarBar())).toContain(
+      'An entry that writes both is played as the strum and the `notes` on it are thrown away',
+    );
+  });
+
+  it('says all three in the schema too, which ships as the grammar', () => {
+    // The descriptions reach the model in the same request as the prose and must
+    // not contradict it — see `irTrackSchema`.
+    const schema = JSON.stringify(irTrackSchema('guitar'));
+
+    expect(schema).toContain('LONGEST this attack will ring');
+    expect(schema).toContain('cut short on any string a later attack needs');
+    expect(schema).toContain('cut short there');
+    expect(schema).toContain('An entry that writes both keeps the strum');
+    expect(schema).not.toContain('must not run past the end of the form');
+  });
+
+  it('still says the chord check IS a refusal, because that one still is', () => {
+    // The bias only goes one way. A wrong chord has no single right repair, so it
+    // costs the part — and the brief has to go on saying so or the one refusal
+    // left about harmony reads as another thing the app will fix.
+    expect(brief(guitarBar())).toContain('refused if they are not it');
   });
 });
 
@@ -750,31 +822,6 @@ describe('what the import pipeline would swallow, refused here', () => {
     expect(refusals[0].reason).toContain('no events at all');
   });
 
-  it('refuses two notes that overlap on one string', () => {
-    // The same rule `pattern_stamp_notes` enforces, and for the same reason: a
-    // string can only ring one note at a time. The import path stores both without
-    // a word, where the editor's own seam would have refused the second.
-    const said = reviewed([
-      { atTick: 0, durationTicks: BEAT, notes: [{ string: 1, fret: 3 }] },
-      { atTick: BEAT / 2, durationTicks: BEAT, notes: [{ string: 1, fret: 5 }] },
-    ]);
-
-    expect(said).toContain('string 1');
-    expect(said).toContain('still sounding until 480');
-    expect(said).toContain('one note at a time');
-  });
-
-  it('refuses two notes of ONE event that land on the same string', () => {
-    // A grip written back with a doubled string is the commonest way to write an
-    // unplayable chord, and it looks exactly like a legal one.
-    const said = reviewed([
-      { atTick: 0, durationTicks: BEAT, notes: [{ string: 2, fret: 3 }, { string: 2, fret: 5 }] },
-    ]);
-
-    expect(said).toContain('string 2');
-    expect(said).toContain('one note at a time');
-  });
-
   it('allows two notes at one tick on DIFFERENT strings', () => {
     // TWO, as the name says: a double-stop carries no harmony of its own and the
     // chord check below never looks at it. Three would be a chord and is judged
@@ -796,69 +843,6 @@ describe('what the import pipeline would swallow, refused here', () => {
     ).toEqual([]);
   });
 
-  it('allows a note that ends exactly where the next one on that string begins', () => {
-    // The bound is half-open, as it has to be: back-to-back quarter notes on one
-    // string is the most ordinary bass line there is.
-    expect(
-      reviewTrack(
-        [
-          { atTick: 0, durationTicks: BEAT, notes: [{ string: 0, fret: 3 }] },
-          { atTick: BEAT, durationTicks: BEAT, notes: [{ string: 0, fret: 5 }] },
-        ],
-        oneBar({ bars: 1 }),
-      ),
-    ).toEqual([]);
-  });
-
-  it('refuses an event that rings past the end of the form', () => {
-    // `atTick + durationTicks`, not `atTick`: a note that begins inside the last
-    // bar and rings past its barline is still a note past the end of the piece.
-    const said = reviewed([
-      { atTick: TICKS_PER_BAR - BEAT, durationTicks: BEAT * 2, notes: [{ string: 0, fret: 3 }] },
-    ]);
-
-    expect(said).toContain(String(TICKS_PER_BAR));
-    expect(said).toContain('past the end');
-  });
-
-  it('says nothing about the form when the brief’s own form is not a whole count', () => {
-    // `trackRunInput` refuses such a brief before a run ever happens, so this is a
-    // suppression and not a second opinion: blaming every event for one bad number
-    // in the brief fills the capped refusal with noise about the wrong thing.
-    const pastAnyForm = [
-      { atTick: 0, durationTicks: TICKS_PER_BAR * 9, notes: [{ string: 0, fret: 3 }] },
-    ];
-
-    expect(reviewTrack(pastAnyForm, oneBar({ bars: 4.5 }))).toEqual([]);
-    // ...and the same events against a real form ARE refused, or the assertion
-    // above would hold for a check that had simply been deleted.
-    expect(reviewed(pastAnyForm, oneBar({ bars: 4 }))).toContain('past the end');
-  });
-
-  it('names EVERY note a long one is sitting on top of, not just the first', () => {
-    // Sorted by start and compared only with the immediate predecessor, the third
-    // note here is missed: it sits wholly inside the first, but the second (already
-    // refused, and still in the array) ends before it begins. Detection was never
-    // wrong — the part is refused either way — but the model repairs from the list,
-    // and one collision per round trip is one round trip per collision.
-    const said = reviewTrack(
-      [
-        { atTick: 0, durationTicks: TICKS_PER_BAR, notes: [{ string: 1, fret: 3 }] },
-        { atTick: BEAT, durationTicks: BEAT, notes: [{ string: 1, fret: 5 }] },
-        { atTick: BEAT * 3, durationTicks: BEAT, notes: [{ string: 1, fret: 7 }] },
-      ],
-      oneBar(),
-    );
-
-    expect(said).toHaveLength(2);
-    // Both are named against the note that is actually still ringing — event 1.
-    for (const refusal of said) {
-      expect(refusal.reason).toContain('event 1');
-      expect(refusal.reason).toContain(`sounding until ${TICKS_PER_BAR}`);
-    }
-    expect(said.map((refusal) => refusal.label)).toEqual(['event 2 (tick 480)', 'event 3 (tick 1440)']);
-  });
-
   it('says nothing about the range of an event it has already thrown out', () => {
     // A fractional tick means the event will not exist by the time anything could
     // complain about where it ends. Two accounts of one mistake fill the capped
@@ -870,6 +854,357 @@ describe('what the import pipeline would swallow, refused here', () => {
 
     expect(refusals).toHaveLength(1);
     expect(refusals[0].reason).toContain('0.5');
+  });
+});
+
+
+// ------------------------------------------------------------- resolution ---
+
+/**
+ * ⚠ THE RUN THIS SECTION IS ABOUT lost a whole bass part twice over. Every one of
+ * the 65 refusals across that run's three refused answers was classified by hand
+ * and they fell into exactly three classes: 52 notes overlapping on one string,
+ * 11 attacks carrying both a `strum` and typed `notes`, 2 events ringing past the
+ * end of the form. Zero wrong grips, zero out-of-range cells, zero fractional
+ * ticks. None of the three is a musical judgement and each has exactly one thing
+ * a player would do, so all three are now DONE rather than refused — and counted,
+ * because a repair nobody can see is the silent correction this project is
+ * already criticised for.
+ *
+ * What is still refused is everything else, and the block above is the pin on
+ * that: a wrong chord, a cell off the neck, a fractional tick, an attack with
+ * nothing on it and a part with nothing in it all still cost the run.
+ */
+describe('the three mechanical mistakes are resolved rather than refused', () => {
+  it('passes a part nothing is wrong with through as the very same objects', () => {
+    const clean = fourOnTheFloor();
+    const done = resolveTrack(clean, oneBar());
+
+    expect(done.resolutions).toEqual(NOTHING);
+    expect(done.origins).toEqual([0, 1, 2, 3]);
+    // Identity, not equality: "nothing was done to this event" is a claim worth
+    // making by reference, and a deep compare would pass just as well for a pass
+    // that rebuilt every event out of the same numbers.
+    done.events.forEach((event, index) => expect(event).toBe(clean[index]));
+  });
+
+  it('leaves back-to-back notes on one string alone — the bound is half-open', () => {
+    // The most ordinary bass line there is. A note that ENDS where the next one
+    // begins is not in its way, and a rule that cut it would shorten every
+    // quarter note in the part by nothing and count it as a repair.
+    const line = [
+      { atTick: 0, durationTicks: BEAT, notes: [{ string: 0, fret: 3 }] },
+      { atTick: BEAT, durationTicks: BEAT, notes: [{ string: 0, fret: 5 }] },
+    ];
+    const done = resolveTrack(line, oneBar());
+
+    expect(done.events).toEqual(line);
+    expect(done.resolutions).toEqual(NOTHING);
+  });
+
+  // ── RULE 1 ────────────────────────────────────────────────────────────────
+
+  it('trims an event that rings past the end of the form instead of refusing it', () => {
+    // `atTick + durationTicks`, not `atTick`: a note that begins inside the last
+    // bar and rings past its barline used to cost the whole part.
+    const over: readonly IREvent[] = [
+      {
+        atTick: TICKS_PER_BAR - BEAT,
+        durationTicks: BEAT * 2,
+        notes: [{ string: 0, fret: 3 }],
+        dynamic: 'ff',
+      },
+    ];
+    const done = resolveTrack(over, oneBar());
+
+    expect(done.events).toEqual([
+      {
+        atTick: TICKS_PER_BAR - BEAT,
+        durationTicks: BEAT,
+        notes: [{ string: 0, fret: 3 }],
+        dynamic: 'ff',
+      },
+    ]);
+    expect(done.resolutions).toEqual(tally({ trimmedToForm: 1 }));
+    // Trimmed, not dropped — the attack still sounds where it was written.
+    expect(reviewTrack(done.events, oneBar(), done)).toEqual([]);
+  });
+
+  it('drops a chord written AT the end of the form, which has no room to sound', () => {
+    // The other half of rule 1, and it is a DROP rather than a trim because there
+    // is no length left to trim to. `bars * TICKS_PER_BAR` is the tick after the
+    // last one, so an attack there is outside the piece however short it is.
+    const done = resolveTrack(
+      [
+        { atTick: 0, durationTicks: BEAT, notes: [{ string: 0, fret: 3 }] },
+        { atTick: TICKS_PER_BAR, durationTicks: BEAT, notes: asNotes(shapeOf('C7', 'bass')) },
+      ],
+      oneBar(),
+    );
+
+    expect(done.events).toHaveLength(1);
+    expect(done.events[0].atTick).toBe(0);
+    expect(done.origins).toEqual([0]);
+    expect(done.resolutions).toEqual(tally({ droppedPastForm: 1 }));
+  });
+
+  it('leaves the form alone when the brief’s own form is not a whole count', () => {
+    // `trackRunInput` refuses such a brief before a run ever happens, so this is a
+    // suppression and not a second opinion: trimming a part against a form of 4.5
+    // bars would rewrite every event in it around a number nobody meant.
+    const pastAnyForm = [
+      { atTick: 0, durationTicks: TICKS_PER_BAR * 9, notes: [{ string: 0, fret: 3 }] },
+    ];
+
+    const loose = resolveTrack(pastAnyForm, oneBar({ bars: 4.5 }));
+    expect(loose.events).toEqual(pastAnyForm);
+    expect(loose.resolutions).toEqual(NOTHING);
+
+    // ...and the same events against a real form ARE trimmed, or the assertion
+    // above would hold for a rule that had simply been deleted.
+    const formed = resolveTrack(pastAnyForm, oneBar({ bars: 4 }));
+    expect(formed.events[0].durationTicks).toBe(TICKS_PER_BAR * 4);
+    expect(formed.resolutions).toEqual(tally({ trimmedToForm: 1 }));
+  });
+
+  // ── RULE 3 ────────────────────────────────────────────────────────────────
+
+  it('cuts the note that is in the way rather than refusing the pair', () => {
+    // 52 of the 65. `durationTicks` is the LONGEST a note rings, and the next
+    // attack on that string is what stops it — which is what the old refusal's own
+    // last sentence told the model to do, and then did not do.
+    const done = resolveTrack(
+      [
+        { atTick: 0, durationTicks: BEAT, notes: [{ string: 1, fret: 3 }] },
+        { atTick: BEAT / 2, durationTicks: BEAT, notes: [{ string: 1, fret: 5 }] },
+      ],
+      oneBar(),
+    );
+
+    expect(done.events).toEqual([
+      { atTick: 0, durationTicks: BEAT / 2, notes: [{ string: 1, fret: 3 }] },
+      { atTick: BEAT / 2, durationTicks: BEAT, notes: [{ string: 1, fret: 5 }] },
+    ]);
+    expect(done.resolutions).toEqual(tally({ notesCutShort: 1 }));
+    expect(reviewTrack(done.events, oneBar(), done)).toEqual([]);
+  });
+
+  it('THE SHAPE OF THE FAILURE: cuts ONE string of a ringing chord and no other', () => {
+    // ⚠ A `bottom-3` strum ringing a beat with an eighth struck on one of its
+    // strings inside it — the figure a comping guitarist plays every bar, and the
+    // exact shape of most of those 52 refusals.
+    //
+    // `durationTicks` is per EVENT and `IRNote` has no duration, so cutting that
+    // one string means SPLITTING the event. The strum's other strings have to come
+    // out at their full length or a chord turns into a stab.
+    const shape = shapeOf('C7', 'guitar');
+    const bottom = shape.slice(0, 3);
+    const taken = bottom[0];
+
+    const filled = expandStrums(
+      [
+        { atTick: 0, durationTicks: BEAT, strum: 'bottom-3', dynamic: 'ff' },
+        {
+          atTick: BEAT / 2,
+          durationTicks: BEAT / 2,
+          notes: [{ string: taken.stringIndex, fret: 7 }],
+        },
+      ],
+      guitarBar(),
+    );
+    const done = resolveTrack(filled.events, guitarBar());
+
+    expect(done.events).toEqual([
+      // What nothing needed keeps the whole beat...
+      { atTick: 0, durationTicks: BEAT, dynamic: 'ff', notes: asNotes(bottom.slice(1)) },
+      // ...and the one string that was needed rings until it was needed.
+      { atTick: 0, durationTicks: BEAT / 2, dynamic: 'ff', notes: asNotes([taken]) },
+      { atTick: BEAT / 2, durationTicks: BEAT / 2, notes: [{ string: taken.stringIndex, fret: 7 }] },
+    ]);
+    // ⚠ THE DYNAMIC IS ON BOTH HALVES. It is an EVENT field, so a split that kept
+    // it on one of them would silently flatten the accent on the other.
+    expect(done.events[0].dynamic).toBe('ff');
+    expect(done.events[1].dynamic).toBe('ff');
+    expect(done.resolutions).toEqual(tally({ notesCutShort: 1 }));
+    // Counted once, per NOTE: two strings of that chord were never touched.
+    expect(reviewTrack(done.events, guitarBar(), done)).toEqual([]);
+  });
+
+  it('cuts against the note that is really ringing, not against the last one written', () => {
+    // The walk this replaced compared against the FURTHEST-REACHING note so far
+    // because a refused note stayed in the array and shadowed the next comparison.
+    // Cutting removes the shadow — every note cut back ends at or before the
+    // attack that cut it — so these three come out as three lengths, and only the
+    // long first one was ever in anyone's way.
+    const done = resolveTrack(
+      [
+        { atTick: 0, durationTicks: TICKS_PER_BAR, notes: [{ string: 1, fret: 3 }] },
+        { atTick: BEAT, durationTicks: BEAT, notes: [{ string: 1, fret: 5 }] },
+        { atTick: BEAT * 3, durationTicks: BEAT, notes: [{ string: 1, fret: 7 }] },
+      ],
+      oneBar(),
+    );
+
+    expect(done.events.map((event) => [event.atTick, event.durationTicks])).toEqual([
+      [0, BEAT],
+      [BEAT, BEAT],
+      [BEAT * 3, BEAT],
+    ]);
+    expect(done.resolutions).toEqual(tally({ notesCutShort: 1 }));
+  });
+
+  it('keeps only the last of two notes of ONE event on the same string', () => {
+    // A grip written back with a doubled string is the commonest way to write an
+    // unplayable chord. There is no length to cut the first one to — both are at
+    // one instant — so it is dropped rather than given a duration of 0, which the
+    // lib's mapper would silently lengthen back to 1 tick rather than throw away.
+    const done = resolveTrack(
+      [
+        {
+          atTick: 0,
+          durationTicks: BEAT,
+          notes: [
+            { string: 2, fret: 3 },
+            { string: 2, fret: 5 },
+          ],
+        },
+      ],
+      oneBar(),
+    );
+
+    expect(done.events).toEqual([
+      { atTick: 0, durationTicks: BEAT, notes: [{ string: 2, fret: 5 }] },
+    ]);
+    expect(done.resolutions).toEqual(tally({ notesDropped: 1 }));
+  });
+
+  it('drops the event too when its last note goes', () => {
+    const done = resolveTrack(
+      [
+        { atTick: 0, durationTicks: BEAT, notes: [{ string: 2, fret: 3 }] },
+        { atTick: 0, durationTicks: BEAT, notes: [{ string: 2, fret: 5 }] },
+      ],
+      oneBar(),
+    );
+
+    expect(done.events).toEqual([
+      { atTick: 0, durationTicks: BEAT, notes: [{ string: 2, fret: 5 }] },
+    ]);
+    expect(done.origins).toEqual([1]);
+    expect(done.resolutions).toEqual(tally({ notesDropped: 1, eventsEmptied: 1 }));
+  });
+
+  // ── THE ORDER ─────────────────────────────────────────────────────────────
+
+  it('trims the form BEFORE the strings, so a dropped attack cuts nothing short', () => {
+    // ⚠ THE ASSERTION THAT PINS THE ORDER, and the only one: rule 1 can REMOVE an
+    // overlap, because the attack that was in the way is past the end of the form
+    // and goes whole. Run rule 3 first and it cuts the long note short against an
+    // attack that will not exist, and counts the cut — so `notesCutShort` below is
+    // 1 for the two passes in the other order and 0 for this one.
+    const done = resolveTrack(
+      [
+        { atTick: 0, durationTicks: TICKS_PER_BAR * 20, notes: [{ string: 0, fret: 3 }] },
+        { atTick: TICKS_PER_BAR * 12, durationTicks: BEAT, notes: [{ string: 0, fret: 5 }] },
+      ],
+      bassBrief(),
+    );
+
+    expect(done.events).toEqual([
+      { atTick: 0, durationTicks: TICKS_PER_BAR * 12, notes: [{ string: 0, fret: 3 }] },
+    ]);
+    expect(done.resolutions).toEqual(tally({ trimmedToForm: 1, droppedPastForm: 1 }));
+  });
+
+  // ── WHAT IT WILL NOT TOUCH ────────────────────────────────────────────────
+
+  it('leaves an event the review is about to throw out exactly as it was', () => {
+    // A fractional tick is `reviewTrack`'s, in its own sentence. Trimming or
+    // cutting one would put that fraction into the duration of an event that had
+    // none, and the part would come back refused for the wrong entry.
+    const broken: readonly IREvent[] = [
+      { atTick: 0.5, durationTicks: TICKS_PER_BAR * 9, notes: [{ string: 0, fret: 3 }] },
+      { atTick: 0, durationTicks: 240.5, notes: [{ string: 0, fret: 5 }] },
+    ];
+    const done = resolveTrack(broken, oneBar());
+
+    expect(done.events).toEqual(broken);
+    expect(done.resolutions).toEqual(NOTHING);
+    expect(reviewed(done.events)).toContain('0.5');
+  });
+
+  it('never cuts anything short for a note that is off the neck', () => {
+    // The same exclusion `reviewTrack` makes: a note on a string this bass has not
+    // got is a note whose string is not yet known, and shortening a real one for
+    // it would repair the part around a note about to be refused.
+    const done = resolveTrack(
+      [
+        { atTick: 0, durationTicks: BEAT, notes: [{ string: 0, fret: 3 }] },
+        { atTick: BEAT / 2, durationTicks: BEAT, notes: [{ string: 0, fret: 99 }] },
+      ],
+      oneBar(),
+    );
+
+    expect(done.resolutions).toEqual(NOTHING);
+    expect(done.events[0].durationTicks).toBe(BEAT);
+    expect(reviewed(done.events)).toContain('fret 99');
+  });
+
+  it('hands an attack with nothing on it to the review rather than dropping it', () => {
+    // An event with no notes is a silence with a duration, and the pipeline
+    // commits it. Dropping it here would turn a sentence the model can act on
+    // into nothing at all.
+    const done = resolveTrack([{ atTick: 0, durationTicks: BEAT, notes: [] }], oneBar());
+
+    expect(done.events).toHaveLength(1);
+    expect(done.resolutions).toEqual(NOTHING);
+    expect(reviewed(done.events)).toContain('no notes');
+  });
+
+  it('trims an empty attack like any other and STILL hands it to the review', () => {
+    // ⚠ THE OTHER SIDE OF THE CASE ABOVE, and the branch it never reaches. An
+    // untouched event comes back by identity, so the case above never runs the
+    // code that rebuilds an event with no notes on it. One that rule 1 trimmed
+    // does — and dropping it there would swallow the one sentence the model can
+    // act on, silently, which is the whole thing this pass must not do.
+    const done = resolveTrack(
+      [{ atTick: 0, durationTicks: TICKS_PER_BAR * 3, notes: [] }],
+      oneBar(),
+    );
+
+    expect(done.events).toEqual([{ atTick: 0, durationTicks: TICKS_PER_BAR, notes: [] }]);
+    expect(done.resolutions).toEqual(tally({ trimmedToForm: 1 }));
+    expect(reviewed(done.events)).toContain('no notes');
+  });
+
+  // ── THE NUMBERING ─────────────────────────────────────────────────────────
+
+  it('keeps a refusal naming the entry the MODEL wrote, across a split', () => {
+    // ⚠ THE COST OF SPLITTING, PAID. An event that becomes two renumbers every
+    // event after it, and `event 3` is the half of a refusal the model navigates
+    // by — so the pass carries the answer's own numbering forward.
+    const shape = shapeOf('C7', 'guitar');
+    const filled = expandStrums(
+      [
+        { atTick: 0, durationTicks: BEAT * 2, strum: 'all' },
+        { atTick: BEAT, durationTicks: BEAT, notes: [{ string: shape[0].stringIndex, fret: 7 }] },
+        { atTick: BEAT * 2, durationTicks: BEAT, notes: [{ string: 0, fret: 99 }] },
+      ],
+      guitarBar(),
+    );
+    const done = resolveTrack(filled.events, guitarBar());
+
+    // Four events out of three entries: the strum split in two.
+    expect(done.events).toHaveLength(4);
+    expect(done.origins).toEqual([0, 0, 1, 2]);
+
+    const said = reviewTrack(done.events, guitarBar(), done);
+    expect(said).toHaveLength(1);
+    expect(said[0].label).toBe(`event 3 (tick ${BEAT * 2})`);
+    expect(said[0].reason).toContain('fret 99');
+
+    // ...and without them it names the fourth, which is the entry nobody wrote.
+    expect(reviewTrack(done.events, guitarBar())[0].label).toBe(`event 4 (tick ${BEAT * 2})`);
   });
 });
 
@@ -888,7 +1223,7 @@ describe('a chord the model does not have to transcribe', () => {
       guitarBar(),
     );
 
-    expect(filled.refusals).toEqual([]);
+    expect(filled.resolutions).toEqual(NOTHING);
     expect(filled.events).toEqual([
       {
         atTick: BEAT,
@@ -952,7 +1287,7 @@ describe('a chord the model does not have to transcribe', () => {
     for (const span of STRUM_SPANS) {
       const filled = expandStrums([{ atTick: 0, durationTicks: BEAT, strum: span }], guitarBar());
 
-      expect(filled.refusals).toEqual([]);
+      expect(filled.resolutions).toEqual(NOTHING);
       expect(filled.events[0].notes).toEqual(asNotes(expected[span](shape)));
       seen.add(JSON.stringify(filled.events[0].notes));
     }
@@ -968,7 +1303,9 @@ describe('a chord the model does not have to transcribe', () => {
       guitarBar(),
     );
 
-    expect(filled.refusals).toEqual([]);
+    // Nothing was thrown away, so nothing is reported: a tally that counted this
+    // would claim a resolution on a part nobody touched.
+    expect(filled.resolutions).toEqual(NOTHING);
     expect(filled.events[0].notes).toEqual(asNotes(shapeOf('C7', 'guitar')));
   });
 
@@ -978,10 +1315,12 @@ describe('a chord the model does not have to transcribe', () => {
     expect(expandStrums(line, oneBar()).events).toEqual(line);
   });
 
-  it('is caught by the EXISTING overlap check when it lands on a ringing string', () => {
-    // ⚠ THE POINT OF EXPANDING BEFORE THE REVIEW. A filled-in chord is subject to
-    // every check the model's own notes are — there is no second path into the
-    // document that skips them.
+  it('is CUT SHORT by the string rule when it lands on a ringing string', () => {
+    // ⚠ THE POINT OF EXPANDING BEFORE THE RESOLUTION. A filled-in chord is subject
+    // to every rule the model's own notes are — there is no second path into the
+    // document that skips them — and a strum's strings are exactly the thing the
+    // model was never shown, so this is the one collision it could not have
+    // avoided. It used to cost the part.
     const shape = shapeOf('C7', 'guitar');
     const held = shape[1];
     const answer: IRAnswerEvent[] = [
@@ -994,34 +1333,49 @@ describe('a chord the model does not have to transcribe', () => {
     ];
 
     const filled = expandStrums(answer, guitarBar());
-    const said = reviewTrack(filled.events, guitarBar());
+    const done = resolveTrack(filled.events, guitarBar());
 
-    expect(filled.refusals).toEqual([]);
-    expect(said).toHaveLength(1);
-    expect(said[0].label).toBe(`event 2 (tick ${BEAT})`);
-    expect(said[0].reason).toContain(`string ${held.stringIndex}`);
-    expect(said[0].reason).toContain('one note at a time');
+    expect(filled.resolutions).toEqual(NOTHING);
+    // The held note gives its string up at the strum and not before.
+    expect(done.events[0]).toEqual({
+      atTick: 0,
+      durationTicks: BEAT,
+      notes: [{ string: held.stringIndex, fret: held.fret }],
+    });
+    // The strum itself is untouched — nothing came after it.
+    expect(done.events[1].notes).toEqual(asNotes(shape));
+    expect(done.resolutions).toEqual(tally({ notesCutShort: 1 }));
+    expect(reviewTrack(done.events, guitarBar(), done)).toEqual([]);
   });
 
-  it('refuses an entry that both asks for the chord and types its own notes', () => {
-    // Nothing else can see this one: after expansion it is just an event with
-    // notes on it, and both readings sound different.
+  it('plays the strum and throws away the notes typed beside it', () => {
+    // RULE 2, and nothing else can see it: after expansion it is just an event
+    // with notes on it, and the two readings sound different. The strum wins
+    // because the half the model typed by hand is the only half that CAN be
+    // wrong — the other half is the grip this module looked up.
     const filled = expandStrums(
-      [{ atTick: 0, durationTicks: BEAT, strum: 'all', notes: [{ string: 0, fret: 3 }] }],
+      [
+        {
+          atTick: 0,
+          durationTicks: BEAT,
+          strum: 'all',
+          notes: [{ string: 0, fret: 3 }],
+          dynamic: 'mp',
+        },
+      ],
       guitarBar(),
     );
 
-    expect(filled.refusals).toHaveLength(1);
-    expect(filled.refusals[0].label).toBe('event 1 (tick 0)');
-    expect(filled.refusals[0].reason).toContain('both');
-    // What it typed is kept, so the rest of the review still speaks about it.
-    expect(filled.events[0].notes).toEqual([{ string: 0, fret: 3 }]);
+    expect(filled.events).toEqual([
+      { atTick: 0, durationTicks: BEAT, dynamic: 'mp', notes: asNotes(shapeOf('C7', 'guitar')) },
+    ]);
+    expect(filled.resolutions).toEqual(tally({ strumsOverNotes: 1 }));
   });
 
   it('leaves an entry with neither to the review, which already names it', () => {
     const filled = expandStrums([{ atTick: 0, durationTicks: BEAT }], guitarBar());
 
-    expect(filled.refusals).toEqual([]);
+    expect(filled.resolutions).toEqual(NOTHING);
     expect(filled.events[0].notes).toEqual([]);
     expect(reviewed(filled.events, guitarBar())).toContain('no notes');
   });
@@ -1051,6 +1405,42 @@ describe('a typed chord is checked against the shape', () => {
   const typed = (cells: readonly { stringIndex: number; fret: number }[]): IREvent[] => [
     { atTick: 0, durationTicks: BEAT, notes: asNotes(cells) },
   ];
+
+  it('judges the entry the model TYPED, not what was left after a note was dropped', () => {
+    // ⚠ THE HOLE THE RESOLUTION WOULD OTHERWISE HAVE OPENED. Two notes of one
+    // entry on one string used to be an outright refusal; rule 3 now drops one
+    // of them instead, so a hand-typed stack of three arrives here as a
+    // double-stop — under CHORD_AT_ONCE, never judged, and a mis-copied grip
+    // shipping in silence. `resolveTrack` hands the dropped notes back for
+    // exactly this, and this is the test that says so.
+    const shape = shapeOf('C7', 'guitar');
+    const misread = [
+      { string: shape[0].stringIndex, fret: shape[0].fret },
+      // Both on ONE string and both off that string's own cell, so the entry is
+      // a mis-copy however you read it — and one of them will not survive.
+      { string: shape[1].stringIndex, fret: shape[1].fret + 1 },
+      { string: shape[1].stringIndex, fret: shape[1].fret + 2 },
+    ];
+
+    const done = resolveTrack([{ atTick: 0, durationTicks: BEAT, notes: misread }], guitarBar());
+
+    // Three were written and two reach the review.
+    expect(done.resolutions.notesDropped).toBe(1);
+    expect(done.events[0].notes).toHaveLength(2);
+
+    const said = reviewTrack(done.events, guitarBar(), done);
+    expect(said).toHaveLength(1);
+    // ⚠ THREE, not two: the refusal counts what the model wrote, so the sentence
+    // is one the model can find in its own answer.
+    expect(said[0].reason).toContain('It sounds 3 notes at once');
+    for (const note of misread.slice(1)) {
+      expect(said[0].reason).toContain(`string ${note.string} fret ${note.fret}`);
+    }
+
+    // And WITHOUT the record of what was dropped there is nothing left to judge
+    // — which is the whole reason it is handed back.
+    expect(reviewTrack(done.events, guitarBar())).toEqual([]);
+  });
 
   it('THE REGRESSION: refuses the 2026-08-16 voicing, every string shifted down one', () => {
     // The exact failure. The brief was right, the shape was handed over in full,
@@ -1376,6 +1766,94 @@ describe('a typed chord is checked against the shape', () => {
   });
 });
 
+// ------------------------------------------- the chord check across a split ---
+
+/**
+ * ⚠ THE ONE PLACE THE TWO HALVES OF THIS CARD MEET, and it goes wrong in BOTH
+ * directions if the chord check is left judging events. `resolveTrack` splits an
+ * event to cut one string of it, so what the model wrote as ONE stack arrives at
+ * the review as two or three events at one tick — and the threshold counts a
+ * stack in one event. Judged as the repair left it, a four-note voicing becomes a
+ * refusal about a three-note subgroup nobody wrote, and a three-note grip that is
+ * simply the wrong chord becomes a 2 and a 1 that nothing looks at. The check is
+ * run per ANSWER ENTRY, which is the whole reason `origins` is carried.
+ */
+describe('a chord is judged as the model grouped it, not as the repair left it', () => {
+  it('invents no refusal about a subgroup the split made', () => {
+    // Three cells of the F7 barre and one that is C7's own, at bar 1 where C7 is
+    // in force: a voicing with borrowed colour in it, which the tolerance allows
+    // and which the review passes as written. Take the C7 string away with a later
+    // attack and what is left of the entry is three F7 cells and nothing else.
+    const f7 = shapeOf('F7', 'guitar');
+    const c7 = shapeOf('C7', 'guitar');
+    // F7's own cells, none of which C7 plays — so no smaller group of them can be
+    // read as C7 — and one cell that is C7's alone, on a string the other three
+    // leave free.
+    const offC7 = f7
+      .filter((cell) => c7.every((own) => own.stringIndex !== cell.stringIndex || own.fret !== cell.fret))
+      .slice(0, 3);
+    const shared = c7.find(
+      (own) =>
+        offC7.every((cell) => cell.stringIndex !== own.stringIndex) &&
+        f7.every((cell) => cell.stringIndex !== own.stringIndex || cell.fret !== own.fret),
+    );
+    if (shared === undefined) throw new Error('expected a C7 cell of its own on a free string');
+    const stack = asNotes([...offC7, shared]);
+
+    // As written, this is clean — and it has to be, or the case below proves
+    // nothing about what the split did to it.
+    const written: IREvent = { atTick: 0, durationTicks: BEAT * 2, notes: stack };
+    expect(stack).toHaveLength(4);
+    expect(reviewTrack([written], guitarBlues())).toEqual([]);
+
+    const done = resolveTrack(
+      [
+        written,
+        { atTick: BEAT, durationTicks: BEAT, notes: [{ string: shared.stringIndex, fret: 8 }] },
+      ],
+      guitarBlues(),
+    );
+
+    // The split really happened: three events out of two entries.
+    expect(done.events).toHaveLength(3);
+    expect(done.origins).toEqual([0, 0, 1]);
+    expect(done.resolutions).toEqual(tally({ notesCutShort: 1 }));
+    expect(reviewTrack(done.events, guitarBlues(), done)).toEqual([]);
+
+    // ⚠ AND THIS IS WHAT JUDGING THE REPAIR ITSELF SAYS. Without `origins` the
+    // three notes that kept their length are a stack of three F7 cells, and the
+    // run comes back refusing an entry the model never wrote — which it cannot
+    // act on and its one retry cannot fix.
+    const blind = reviewTrack(done.events, guitarBlues());
+    expect(blind).toHaveLength(1);
+    expect(blind[0].reason).toContain('every one of them is a cell of the F7 shape');
+  });
+
+  it('still refuses a wrong grip a later attack took a string from', () => {
+    // The other direction, and the one the card called a non-goal: a hand-typed
+    // three-note stack is the common comping shape, and three F7 cells over C7 is
+    // the wrong chord. Play a line over one of its strings and the split leaves a
+    // 2 and a 1 — both under the threshold — so the wrong chord would import in
+    // silence.
+    const three = asNotes(shapeOf('F7', 'guitar').slice(0, 3));
+    const written: IREvent = { atTick: 0, durationTicks: BEAT * 2, notes: three };
+    expect(reviewTrack([written], guitarBlues())).toHaveLength(1);
+
+    const done = resolveTrack(
+      [written, { atTick: BEAT, durationTicks: BEAT, notes: [{ string: three[1].string, fret: 8 }] }],
+      guitarBlues(),
+    );
+
+    expect(done.events).toHaveLength(3);
+    const said = reviewTrack(done.events, guitarBlues(), done);
+    expect(said).toHaveLength(1);
+    // Named where the model wrote it, and about the stack it wrote.
+    expect(said[0].label).toBe('event 1 (tick 0)');
+    expect(said[0].reason).toContain('It sounds 3 notes at once');
+    expect(said[0].reason).toContain('every one of them is a cell of the F7 shape');
+  });
+});
+
 // -------------------------------------------------------------- narrowing ---
 
 describe('what comes back is narrowed before it is judged', () => {
@@ -1531,10 +2009,12 @@ describe('a run that answered with a part', () => {
     expect(track.value.instrumentHint).toBe('guitar');
   });
 
-  it('reviews the filled-in chord too, because the RUN expands before it judges', async () => {
-    // ⚠ THE ORDER INSIDE `runIRTrack`, asserted through the run itself rather than
-    // by composing the two functions by hand: review first and a strum would reach
-    // the document unjudged, with the collision below committed in silence.
+  it('expands, then resolves, then reviews — asserted through the run itself', async () => {
+    // ⚠ THE ORDER INSIDE `runIRTrack`, asserted end to end rather than by
+    // composing the functions by hand. Resolve before expand and the string rule
+    // would walk a strum span nobody had filled in yet, so the collision below
+    // would reach the document untouched; review before resolve and it would cost
+    // the part, which is the refusal this card deleted.
     const held = shapeOf('C7', 'guitar')[1];
     const answer = [
       {
@@ -1546,11 +2026,71 @@ describe('a run that answered with a part', () => {
     ];
     const track = await runIRTrack(guitarBar(), { deps: rig(answered({ events: answer })).deps });
 
-    expect(track.ok).toBe(false);
-    if (track.ok) return;
-    expect(track.reason).toContain(`string ${held.stringIndex}`);
-    expect(track.reason).toContain('one note at a time');
-    expect(track.reason).toContain(`event 2 (tick ${BEAT})`);
+    if (!track.ok) throw new Error(track.reason);
+    expect(track.value.events[0]).toEqual({
+      atTick: 0,
+      durationTicks: BEAT,
+      notes: [{ string: held.stringIndex, fret: held.fret }],
+    });
+    expect(track.resolutions).toEqual(tally({ notesCutShort: 1 }));
+  });
+
+  it('reports on the part it hands back everything it repaired to get there', async () => {
+    // The tally rides out with the track, and a later card turns it into the
+    // sentence a human reads. All three rules in one answer.
+    const events = [
+      // Rings a bar past the end of a twelve-bar form.
+      { atTick: 0, durationTicks: TICKS_PER_BAR * 13, notes: [{ string: 3, fret: 3 }] },
+      // Both a strum and its own notes.
+      {
+        atTick: TICKS_PER_BAR * 11,
+        durationTicks: BEAT,
+        strum: 'all',
+        notes: [{ string: 1, fret: 5 }],
+      },
+      // ...and something landing on the string the first event is still ringing.
+      { atTick: BEAT, durationTicks: BEAT, notes: [{ string: 3, fret: 5 }] },
+    ];
+    const track = await runIRTrack(bassBrief(), { deps: rig(answered({ events })).deps });
+
+    if (!track.ok) throw new Error(track.reason);
+    expect(track.resolutions.trimmedToForm).toBe(1);
+    expect(track.resolutions.strumsOverNotes).toBe(1);
+    // Exactly one: the fixture has a single collision on string 3, so an
+    // over-count — a note cut twice, or a cut counted per event — fails here.
+    expect(track.resolutions.notesCutShort).toBe(1);
+    expect(track.resolutions.droppedPastForm).toBe(0);
+  });
+
+  it('counts the notes it dropped and the events they emptied, through the run', async () => {
+    // ⚠ THE SUM IS ONLY EVER REACHED HERE. `runIRTrack` adds the two passes'
+    // receipts, and these two fields have exactly one producer — so a sum that
+    // forgot either would be invisible to every test that calls the passes
+    // directly. A grip written back with a doubled string is how they arise.
+    const track = await runIRTrack(oneBar(), {
+      deps: rig(
+        answered({
+          events: [
+            { atTick: 0, durationTicks: BEAT, notes: [{ string: 2, fret: 3 }] },
+            { atTick: 0, durationTicks: BEAT, notes: [{ string: 2, fret: 5 }] },
+          ],
+        }),
+      ).deps,
+    });
+
+    if (!track.ok) throw new Error(track.reason);
+    expect(track.value.events).toEqual([
+      { atTick: 0, durationTicks: BEAT, notes: [{ string: 2, fret: 5 }] },
+    ]);
+    expect(track.resolutions).toEqual(tally({ notesDropped: 1, eventsEmptied: 1 }));
+  });
+
+  it('reports an empty tally for a part that needed nothing done to it', async () => {
+    const track = await runIRTrack(bassBrief(), {
+      deps: rig(answered({ events: fourOnTheFloor() })).deps,
+    });
+
+    expect(track.resolutions).toEqual(NOTHING);
   });
 
   it('sends the brief and the neck’s own schema, and no tools', async () => {
@@ -1777,6 +2317,98 @@ describe('a run that did not', () => {
     // ⚠ THE ONE STOP WORTH ASKING AGAIN ABOUT: the sentence above names the
     // event and says what is wrong with it, which is what an addendum carries.
     expect(track.stopped).toBe('review');
+  });
+
+  it('reports what it repaired on the part it could NOT hand back', async () => {
+    // The tally rides the failure branch too: a part refused after its form was
+    // trimmed forty times is a different story from one refused as written, and
+    // the caller has one sentence to tell a human about the whole run.
+    const track = await runIRTrack(oneBar(), {
+      deps: rig(
+        answered({
+          events: [
+            { atTick: 0, durationTicks: TICKS_PER_BAR * 9, notes: [{ string: 0, fret: 3 }] },
+            { atTick: BEAT, durationTicks: BEAT, notes: [{ string: 1, fret: 99 }] },
+          ],
+        }),
+      ).deps,
+    });
+
+    expect(track.ok).toBe(false);
+    if (track.ok) return;
+    expect(track.stopped).toBe('review');
+    expect(track.reason).toContain('fret 99');
+    expect(track.resolutions).toEqual(tally({ trimmedToForm: 1 }));
+  });
+
+  it('says a part was written OUTSIDE the form rather than that it wrote nothing', async () => {
+    // ⚠ RULE 1 CAN DROP EVERY ATTACK THERE IS, and the empty-part sentence would
+    // then tell a model that wrote a whole part starting one bar late that it
+    // wrote no events at all. That sentence is what the caller feeds back for its
+    // one retry, so it has to name the mistake that was actually made.
+    const track = await runIRTrack(oneBar(), {
+      deps: rig(
+        answered({
+          events: [
+            { atTick: TICKS_PER_BAR, durationTicks: BEAT, notes: [{ string: 0, fret: 3 }] },
+            { atTick: TICKS_PER_BAR + BEAT, durationTicks: BEAT, notes: [{ string: 0, fret: 5 }] },
+          ],
+        }),
+      ).deps,
+    });
+
+    expect(track.ok).toBe(false);
+    if (track.ok) return;
+    expect(track.stopped).toBe('review');
+    expect(track.reason).toContain(`tick ${TICKS_PER_BAR}`);
+    expect(track.reason).toContain('1-bar form');
+    expect(track.reason).not.toContain('no events at all');
+    expect(track.resolutions).toEqual(tally({ droppedPastForm: 2 }));
+  });
+
+  // ⚠ THE THREE THAT STILL COST THE PART, asserted THROUGH THE RUN. Every other
+  // test of them calls `reviewTrack` directly, which is the one path the
+  // resolution passes are not on — so a repair that quietly disarmed one of these
+  // would pass the whole of the rest of this file.
+
+  it('still loses the part to a chord copied off the wrong line of the brief', async () => {
+    const track = await runIRTrack(guitarBlues(), {
+      deps: rig(
+        answered({
+          events: [
+            { atTick: 0, durationTicks: BEAT, notes: asNotes(shapeOf('F7', 'guitar')) },
+          ],
+        }),
+      ).deps,
+    });
+
+    expect(track.ok).toBe(false);
+    if (track.ok) return;
+    expect(track.stopped).toBe('review');
+    expect(track.reason).toContain('F7');
+    expect(track.resolutions).toEqual(NOTHING);
+  });
+
+  it('still loses the part to a cell that is off the neck', async () => {
+    const track = await runIRTrack(oneBar(), {
+      deps: rig(
+        answered({ events: [{ atTick: 0, durationTicks: BEAT, notes: [{ string: 0, fret: 99 }] }] }),
+      ).deps,
+    });
+
+    expect(track.ok).toBe(false);
+    if (track.ok) return;
+    expect(track.stopped).toBe('review');
+    expect(track.reason).toContain('fret 99');
+  });
+
+  it('still loses the part to an answer with no events in it', async () => {
+    const track = await runIRTrack(oneBar(), { deps: rig(answered({ events: [] })).deps });
+
+    expect(track.ok).toBe(false);
+    if (track.ok) return;
+    expect(track.stopped).toBe('review');
+    expect(track.reason).toContain('no events at all');
   });
 
   it('never reaches the model when the brief could not be built', async () => {

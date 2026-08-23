@@ -78,6 +78,24 @@
  * {@link IrCompositionJobResult.missing} carries the same facts structurally, for
  * a caller that should not have to find ours among the pipeline's warnings.
  *
+ * ── ⚠ A REPAIRED PART SAYS SO ───────────────────────────────────────────────
+ *
+ * `runIRTrack` no longer refuses a part over the three mechanical mistakes it can
+ * repair itself — a note left ringing into another note's string, a strum typed
+ * beside its own notes, an attack written past the end of the form — and hands
+ * back a count of what it did instead. That count is USELESS on the outcome
+ * alone: a part with twenty-six notes cut short imports exactly like a part with
+ * none, and the person deciding whether to keep it would never know.
+ *
+ * So each imported part's tally becomes ONE SENTENCE in `documents.warnings`,
+ * labelled with the part name, in the same channel and the same shape as the
+ * pipeline's own per-track warnings. A part nothing was done to says nothing.
+ *
+ * ⚠ NO VERDICT AND NO THRESHOLD, here or anywhere below it. Nothing counts a
+ * repair against a part, downgrades it, or heads it as suspect: where "too
+ * repaired to keep" sits is an answer a listening test gives, and a number
+ * invented in this file would give it silently and wrongly.
+ *
  * ── SEQUENTIAL, NOT CONCURRENT ──────────────────────────────────────────────
  *
  * The runs go one at a time. They are model calls against ONE provider, and a
@@ -214,7 +232,7 @@ import { IR_TIME_SIGNATURE, TICKS_PER_BAR, runIRTrack } from './irTrackRun';
 import { beginJobTranscript } from './runTranscript';
 import type { AgentEvent, AgentRunSummary, AgentSpec, RunAgentTaskOptions } from './agentService';
 import type { ArrangementChart, ChartTrack } from './arrangementChart';
-import type { IRTrack, TrackBrief, TrackRunOutcome } from './irTrackRun';
+import type { IRTrack, TrackBrief, TrackResolutions, TrackRunOutcome } from './irTrackRun';
 import type { ImportedDocuments, Result } from '../patterns/patternService';
 
 // -------------------------------------------------------------- the shape ---
@@ -304,6 +322,12 @@ export interface MissingPart {
    *  where the part was asked again, the first where it was not, because only a
    *  review refusal is retried and the other three stops never get a second. */
   readonly reason: string;
+  /** What the app repaired in this part before refusing it anyway — the LAST
+   *  attempt's, like `reason`. A part refused after forty of its notes were cut
+   *  short is a different story from one refused as written, and this is the only
+   *  place that story can be told: the refusal itself is `runIRTrack`'s sentence
+   *  about the rules the part still broke and says nothing about the repairs. */
+  readonly resolutions: TrackResolutions;
 }
 
 /** What a finished job hands back. */
@@ -317,9 +341,11 @@ export interface IrCompositionJobResult {
    *  warning the pipeline produced.
    *
    *  ⚠ `warnings` CARRIES THIS JOB'S OWN SENTENCES TOO, appended after the
-   *  pipeline's: one per entry of {@link missing}. That is the channel the panel
-   *  already prints verbatim on a success, and a part absent from the piece is
-   *  exactly what a user reading warnings needs to be told. */
+   *  pipeline's: one per entry of {@link missing}, then one per part the app had
+   *  to repair to import — see {@link resolutionLine}. That is the channel the
+   *  panel already prints verbatim on a success, and a part absent from the piece
+   *  or silently rewritten on the way in is exactly what a user reading warnings
+   *  needs to be told. */
   readonly documents: ImportedDocuments;
   /**
    * The parts the chart named that are not in the piece. EMPTY on a job that
@@ -516,8 +542,134 @@ const MIN_PARTS_FOR_A_COMPOSITION = 2;
  *  whether it ends up in a refusal or in the warnings of a piece that was built
  *  without it. `runIRTrack`'s own account, unedited; what is added is the part's
  *  place in the job, which only this module knows. */
-const missingPartLine = (missing: MissingPart, count: number): string =>
-  `"${missing.name}" — part ${missing.index} of ${count} — could not be written, and it is missing from this arrangement. ${missing.reason}`;
+const missingPartLine = (missing: MissingPart, count: number): string => {
+  // ⚠ AND WHAT WAS REPAIRED ON THE WAY TO BEING REFUSED, in the same sentence
+  // rather than as a second line about a part the arrangement has not got. The
+  // refusal is `runIRTrack`'s account of the rules the part STILL broke; the
+  // clauses are the app's account of the ones it fixed for it, and a reader
+  // deciding whether the model is close needs both.
+  const repaired = resolutionClauses(missing.resolutions);
+  return [
+    `"${missing.name}" — part ${missing.index} of ${count} — could not be written, and it is missing from this arrangement.`,
+    missing.reason,
+    repaired.length === 0
+      ? null
+      : `Before it was refused, the app had already repaired ${repaired.join(', ')}.`,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(' ');
+};
+
+/** `1 note` / `2 notes`. The counts here are of real things a reader is going to
+ *  compare against the part, so "1 notes" reads as a bug in the report. */
+const plural = (count: number, one: string, many: string): string =>
+  `${count} ${count === 1 ? one : many}`;
+
+/**
+ * The order the repairs are said in — what a reader would ask about first. The
+ * string rule accounts for the overwhelming majority of them and the form rule
+ * is the rarest.
+ *
+ * ⚠ IT IS ALSO WHAT DECIDES WHETHER A COUNTER IS SAID AT ALL: {@link CLAUSE} is
+ * read through this list, so a counter left out of it would be tallied, carried
+ * out of the run and then silent. Which is why {@link EveryCounter} exists —
+ * between the two of them, a field added to {@link TrackResolutions} cannot
+ * reach a user's screen unsaid without failing to compile first.
+ */
+const CLAUSE_ORDER = [
+  'notesCutShort',
+  'notesDropped',
+  'eventsEmptied',
+  'strumsOverNotes',
+  'trimmedToForm',
+  'droppedPastForm',
+] as const satisfies readonly (keyof TrackResolutions)[];
+
+/**
+ * {@link TrackResolutions} — but only while {@link CLAUSE_ORDER} names every one
+ * of its counters. Leave one out and this collapses to `never`, and every caller
+ * of {@link resolutionClauses} stops compiling with its argument "not assignable
+ * to parameter of type 'never'".
+ *
+ * ⚠ WHICH IS THE POINT. `CLAUSE`'s `Record` already catches a counter with no
+ * WORDS written for it; this catches the other half — words written and then
+ * never said, which is the failure with no symptom: the tally is right, the count
+ * is carried, and the one sentence a user reads quietly omits it.
+ */
+type EveryCounter = [
+  Exclude<keyof TrackResolutions, (typeof CLAUSE_ORDER)[number]>,
+] extends [never]
+  ? TrackResolutions
+  : never;
+
+/**
+ * One repair, in the words a player would use — never in the schema's.
+ *
+ * ⚠ ONE NOUN FOR ONE THING. Everything counted per event says "event" and
+ * everything counted per note says "note", because a sentence that calls the
+ * same object an attack in one clause and an event in the next reads as two
+ * different repairs.
+ *
+ * ⚠ TYPED AS A RECORD OVER THE WHOLE TALLY on purpose: a counter added to
+ * {@link TrackResolutions} with no clause here is a compile error rather than a
+ * repair the only sentence a user sees never mentions.
+ */
+const CLAUSE: Record<keyof TrackResolutions, (count: number) => string> = {
+  notesCutShort: (count) =>
+    `${plural(count, 'note', 'notes')} cut short where another note needed the string`,
+  notesDropped: (count) =>
+    `${plural(count, 'note', 'notes')} dropped where another note took the same string at the same moment`,
+  eventsEmptied: (count) =>
+    `${plural(count, 'event', 'events')} removed after losing every note that way`,
+  strumsOverNotes: (count) =>
+    `${plural(count, 'event', 'events')} played as the chord strum that was asked for, in place of the notes typed beside it`,
+  trimmedToForm: (count) =>
+    `${plural(count, 'event', 'events')} shortened to end with the form`,
+  droppedPastForm: (count) =>
+    `${plural(count, 'event', 'events')} dropped past the end of the form`,
+};
+
+/**
+ * WHAT THE APP REPAIRED IN ONE PART, AS CLAUSES — empty for a part it did not
+ * touch.
+ *
+ * `runIRTrack` resolves three mechanical mistakes rather than refusing the part
+ * over them, and hands back a {@link TrackResolutions} counting what it did. A
+ * repair nobody is told about is the thing this project is already criticised
+ * for, so every count that is not zero gets a clause and the clauses reach the
+ * warnings the panel prints and the log carries.
+ *
+ * ⚠ IT STATES, IT DOES NOT JUDGE. No verdict, no score, no threshold, no "this
+ * part may be low quality" — where "too repaired to keep" sits is the listener's
+ * answer and not this module's. The reader gets the counts and decides.
+ *
+ * ⚠ THE SENTENCE IS BUILT HERE AND NOT IN `irTrackRun`, on that module's own
+ * instruction: the tally is structured precisely so the card that reports it can
+ * word it for its own audience. This one's audience is somebody looking at a
+ * finished arrangement deciding whether to keep a part.
+ */
+const resolutionClauses = (resolutions: EveryCounter): readonly string[] =>
+  CLAUSE_ORDER.filter((counter) => resolutions[counter] > 0).map((counter) =>
+    CLAUSE[counter](resolutions[counter]),
+  );
+
+/**
+ * The same, as the one line an IMPORTED part contributes to the warnings — or
+ * `null` for a part nothing was done to.
+ *
+ * Shaped like the mapper's per-track warnings — `[Name] ...`, the form
+ * `mapImportToLibrary` prefixes every one of its own with — so the job's account
+ * of a part and the pipeline's read as one list rather than two. ⚠ WHICH MEANS
+ * THE NAME MUST BE THE ONE THE MAPPER USES, and it is for one reason only:
+ * {@link partNames} trims and de-duplicates every part name BEFORE the first run,
+ * and that derived name is what the brief carries and what `runIRTrack` writes
+ * into `IRTrack.name` for the mapper to label with. Pass the caller anything else
+ * — a raw chart name — and `[ Bass ]` sits beside `[Bass]` in one list.
+ */
+function resolutionLine(name: string, resolutions: TrackResolutions): string | null {
+  const clauses = resolutionClauses(resolutions);
+  return clauses.length === 0 ? null : `[${name}] ${clauses.join(', ')}`;
+}
 
 /**
  * Why a job that lost parts has nothing to import.
@@ -802,6 +954,18 @@ export async function runIrCompositionJob(
     const count = parts.length;
     const tracks: IRTrack[] = [];
     const missing: MissingPart[] = [];
+    /**
+     * One sentence per IMPORTED part the app had to repair, in the chart's order
+     * — see {@link resolutionLine}. A part it did not touch contributes nothing,
+     * so a clean job's list is empty and its warnings are unchanged.
+     *
+     * ⚠ ONLY PARTS THAT ARE IN THE PIECE. A part that failed both attempts is
+     * reported by name with its refusal, and what was repaired on the way to
+     * being refused is said THERE — {@link missingPartLine} appends the same
+     * clauses — rather than as a second line about a part the arrangement has
+     * not got.
+     */
+    const repaired: string[] = [];
 
     /**
      * ONE attempt at one part, recorded under its own transcript section.
@@ -886,11 +1050,18 @@ export async function runIrCompositionJob(
           reason: written.outcome.reason,
           ...runTranscriptId,
         });
-        missing.push({ index, name: part.name, reason: written.outcome.reason });
+        missing.push({
+          index,
+          name: part.name,
+          reason: written.outcome.reason,
+          resolutions: written.outcome.resolutions,
+        });
         continue;
       }
       emit({ type: 'track.finished', index, count, track: part, ok: true, ...runTranscriptId });
       tracks.push(written.outcome.value);
+      const repairs = resolutionLine(part.name, written.outcome.resolutions);
+      if (repairs !== null) repaired.push(repairs);
     }
 
     // -------------------------------------------------------- 3. the import ---
@@ -941,21 +1112,18 @@ export async function runIrCompositionJob(
     const imported = deps.importDocument(document);
     if (!imported.ok) return finish(stop('import-refused', imported.reason));
 
-    // ⚠ THE MISSING PARTS GO IN `warnings`, AFTER THE PIPELINE'S OWN. That is the
-    // channel a success already has for "what is not in what you just got", and
-    // it is the one the panel prints verbatim — see the header. Appended rather
-    // than prepended so the pipeline's account of its own document is not pushed
-    // down a list by ours.
+    // ⚠ THIS JOB'S OWN SENTENCES GO IN `warnings`, AFTER THE PIPELINE'S OWN. That
+    // is the channel a success already has for "what is not in what you just got
+    // and what was changed on the way", and it is the one the panel prints
+    // verbatim — see the header. Appended rather than prepended so the pipeline's
+    // account of its own document is not pushed down a list by ours, and in this
+    // order because a part that is MISSING is a bigger fact about the arrangement
+    // than a part that is present and was repaired.
+    const ours = [...missing.map((part) => missingPartLine(part, count)), ...repaired];
     const documents: ImportedDocuments =
-      missing.length === 0
+      ours.length === 0
         ? imported.value
-        : {
-            ...imported.value,
-            warnings: [
-              ...imported.value.warnings,
-              ...missing.map((part) => missingPartLine(part, count)),
-            ],
-          };
+        : { ...imported.value, warnings: [...imported.value.warnings, ...ours] };
     emit({ type: 'import.finished', documents });
 
     return finish(
@@ -963,9 +1131,15 @@ export async function runIrCompositionJob(
       // ⚠ THE WARNINGS GO IN THE LOG, not only on the returned value. They are
       // the pipeline's account of what it DROPPED and what it approximated —
       // silent clamps, dropped events, notes on strings the instrument hasn't
-      // got — plus this job's own account of any part that is not there at all,
-      // and the log is the artifact that gets exported and pasted into a bug
-      // report. A caller may or may not render them; the log always has them.
+      // got — plus this job's own account of any part that is not there at all
+      // and of every part the app had to repair to import, and the log is the
+      // artifact that gets exported and pasted into a bug report. A caller may or
+      // may not render them; the log always has them.
+      //
+      // ⚠ ONE ARRAY FEEDS BOTH, and that is deliberate: `documents.warnings` is
+      // spread here rather than rebuilt, so a sentence added above reaches the
+      // panel and the log together and cannot be added to one and forgotten in
+      // the other.
       [
         `Imported ${documents.patternIds.length} pattern${
           documents.patternIds.length === 1 ? '' : 's'
