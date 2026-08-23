@@ -97,6 +97,21 @@
    *    categories, secondary states). Not used in the base theme. --------- */
   --color-slate: #7089a9;
   --color-slate-hi: #87a0bf;
+  /* Meters. These three are the only place in the palette where colour carries
+     a READING rather than a mood, and they are the one set allowed to break the
+     brass-only rule: green / amber / red on a level meter is a convention older
+     than the software, and anyone who has stood in front of a mixing desk knows
+     what a red bar means without being told. Brass was tried here first and was
+     wrong — it is the accent every ordinary control already wears, so it said
+     nothing about the signal.
+
+     Desaturated to sit in charcoal without glowing. The red is additionally
+     reserved for "this signal is being damaged": nothing decorative may use it,
+     or it stops meaning anything. */
+  --color-meter-ok: #4f9d61;
+  --color-meter-warn: #d2a13e;
+  --color-clip: #c2503c;
+  --color-clip-hi: #e0705a;
   --color-plum: #9a7290;
   --color-plum-hi: #b085a5;
 
@@ -227,6 +242,83 @@
     border: 1px solid #101116;
     border-radius: 0.75rem;
     box-shadow: var(--shadow-sunken);
+  }
+
+  /* ── Meters (AU-04) ───────────────────────────────────────────────────
+     The bar is scaled with `transform`, never `width`, because it is written
+     every frame from a subscription callback: a transform is composited and a
+     width is a layout. The gradient runs left to right along the FULL groove
+     and the fill is a window onto it, so a given level always lands on the same
+     colour — brass while there is headroom, warming as it runs out, and the
+     clip red only at the very top where the signal is being damaged. Scaling a
+     single flat colour would say nothing about how hot the signal is. */
+  .meter-fill {
+    /* ── The colour must not move with the level ────────────────────────────
+       The bar is revealed with `clip-path`, NOT scaled with `transform`. That
+       is the whole trick and it was got wrong first time round: a transform
+       scales the painted gradient along with the box, so every bar showed the
+       entire green-to-red ramp squeezed into whatever width it happened to
+       have, and a quiet track looked exactly like a clipping one. Clipping
+       leaves the gradient painted at full groove width and moves only the
+       window onto it, so a given dB always lands on the same colour — which is
+       the only reason the colour means anything.
+
+       `clip-path` is composited, same as a transform: no layout, no paint, at
+       30 fps per meter.
+
+       The stops are POSITIONS ON THE dB SCALE, not decoration. The groove spans
+       METER_MIN_DB..METER_MAX_DB (-60..+6, so 66 dB across):
+
+         68%  ≈ -15 dB   green up to here — healthy, headroom to spare
+         80%  ≈  -7 dB   amber: getting close, watch it
+         86%  ≈  -3 dB   still amber, the last of the warning
+         91%  ≈   0 dB   red — full scale, being damaged from here up
+
+       Change METER_MIN_DB or METER_MAX_DB in `LevelMeter.tsx` and these stops
+       are wrong until they are recomputed. */
+    background-image: linear-gradient(
+      90deg,
+      var(--color-meter-ok) 0%,
+      var(--color-meter-ok) 68%,
+      var(--color-meter-warn) 80%,
+      var(--color-meter-warn) 86%,
+      var(--color-clip) 91%,
+      var(--color-clip) 100%
+    );
+    /* The groove is only 5 px tall, so the fill's own edge is the only thing
+       that gives it an above/below. */
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.14);
+  }
+
+  /* The held peak — a hairline, not a block. It marks a level; anything wider
+     would read as more signal than there is. */
+  .meter-peak {
+    background: var(--color-ink-hi);
+    box-shadow: 0 0 3px rgb(230 234 240 / 0.5);
+    transition: opacity 120ms linear;
+  }
+
+  /* The clip LED. Dark and inert until it latches, then lit with a real glow —
+     this is the one element in the palette allowed to shout. Sized as a lamp,
+     not a button, but it IS a button: clicking clears the latch. */
+  .meter-clip {
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    background: var(--color-clip);
+    opacity: 0.16;
+    box-shadow: none;
+    transition:
+      opacity 90ms linear,
+      box-shadow 90ms linear;
+  }
+
+  .meter-clip[data-lit='true'] {
+    background: var(--color-clip-hi);
+    opacity: 1;
+    box-shadow:
+      0 0 4px var(--color-clip-hi),
+      0 0 9px rgb(224 112 90 / 0.55);
   }
 
   /* Anything you can push: buttons, note blocks, steppers. */

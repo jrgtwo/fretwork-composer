@@ -1,3 +1,4 @@
+import { LevelMeter } from './LevelMeter';
 import { useState } from 'react';
 import type { SubdivisionId } from '@fretwork/lib';
 import {
@@ -221,6 +222,25 @@ export function TransportBar() {
       >
         {clickMuted ? '🔇' : '🔊'} click
       </button>
+
+      <span className="mx-1 h-4 w-px bg-line" />
+
+      {/* Master output (AU-04). This is the LAST thing before the sound card —
+          `MasterBus` taps it after the limiter and the safety clip — so it is
+          what actually leaves, not what the mix asked for.
+
+          Which is why it is the least useful of the three meters for finding a
+          level problem, and worth having anyway: it stays comfortable while a
+          voice upstream is being destroyed, because the amp's saturators hand
+          back a normalised level however hard they were hit and the limiter
+          catches whatever is left. When this reads fine and it still sounds
+          wrong, the track meters are where the answer is.
+
+          Fixed width: `LevelMeter`'s bar is `flex-1`, and in a transport row
+          that would take every pixel the controls left behind. */}
+      <div className="w-[150px] flex-none">
+        <LevelMeter source={{ kind: 'master' }} label="MSTR" title="Master output level" />
+      </div>
 
       {refusal ? (
         <span role="alert" className="ml-1 font-mono text-[9px] text-ink-mut">

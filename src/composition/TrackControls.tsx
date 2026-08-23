@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FretInstrumentId, Track } from '@fretwork/lib';
+import { LevelMeter } from './LevelMeter';
 import {
   PAN_RANGE,
   VOLUME_RANGE_DB,
@@ -692,6 +693,34 @@ export function TrackControls({
             {panLabel(track.pan ?? 0)}
           </span>
         </div>
+        {/* Meters (AU-04). Two taps, and they are NOT the two ends of this
+            strip — worth knowing before reading them.
+
+            IN is the instrument arriving at the voice, ahead of the pedals, the
+            EQ and the amp. It is the only number that says whether a level
+            problem starts before any control on this page can affect it.
+
+            OUT is the voice's last node — after the amp, the cab and the final
+            EQ — with this track's fader, mute and solo applied on top. The taps
+            themselves are inside the voice and the fader is outside it, so the
+            measured tap alone cannot see the fader; `setTrackFaders` adds it in
+            dB, which is exact because the stage in between is one linear gain.
+            A meter that did not move with its own fader would be wrong.
+
+            What sits between IN and OUT — the amp's drive stage — has no tap of
+            its own yet. That needs a lib change and is the second half of
+            AU-04, and it is the number that would show the drive being
+            overloaded while both of these look reasonable. */}
+        <LevelMeter
+          source={{ kind: 'track-in', trackId: track.id }}
+          label="IN"
+          title={`${track.name} input level`}
+        />
+        <LevelMeter
+          source={{ kind: 'track-out', trackId: track.id }}
+          label="OUT"
+          title={`${track.name} output level, after the fader`}
+        />
         </>
       )}
     </>

@@ -68,6 +68,7 @@ import {
   subscribeTrackVoiceDrafts,
   trackVoicePreset,
 } from '../voice/trackVoiceDrafts';
+import { clearTrackVoices, registerTrackVoice, setTrackFaders } from './levelMeters';
 import { audibleTransportTicks, wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
@@ -940,6 +941,16 @@ const loopBoundaryOf = (composition: Composition): number =>
  * changed ref win over a stale edit.
  */
 function buildTrackVoice(track: Track): Voice {
+  const voice = buildTrackVoiceUnregistered(track);
+  // AU-04. This factory is the only place a track's voice is constructed, and
+  // the lib calls it BOTH when it builds the engine and when a track's voice is
+  // swapped live — so registering here is what lets the mixer meter every track
+  // without `MultiTrackPlayback` having to expose its voices.
+  registerTrackVoice(track.id, voice);
+  return voice;
+}
+
+function buildTrackVoiceUnregistered(track: Track): Voice {
   const draft = readTrackVoiceDraft(track);
   if (draft) return new Voice(draft, { autoConnectToMaster: false });
   return buildEffectiveVoice(trackInstrumentId(track), {
@@ -1096,6 +1107,11 @@ function ensureCompositionEngine(composition: Composition): CompositionEngine | 
   // with a bare `return null` would strand all of that with no handle left to
   // dispose it.
   try {
+    // The OUT meters read post-fader by applying these on top of the measured
+    // voice output — see `setTrackFaders`. Pushed wherever the engine is handed
+    // a composition, so the meters and the audio graph move together.
+    setTrackFaders(composition.tracks ?? []);
+
     const engineForComposition: CompositionEngine = {
       metronome,
       playback,
@@ -1166,6 +1182,10 @@ function disposeCompositionEngine(): void {
   // reason, as `disposeEngine` above.
   attempt(() => current.metronome.stop());
   attempt(() => current.playback.dispose());
+  // After the dispose, not before: the voices are only stale once the lib has
+  // torn them down, and a meter reading a live voice one frame longer is
+  // harmless where reading a disposed one takes the catch on every frame.
+  clearTrackVoices();
   emit(IDLE);
 }
 
@@ -1332,6 +1352,10 @@ function syncComposition(composition: Composition | null): void {
     // the NEXT `voiceSwapsMissedByDiff` diff against it.
     const nextLoopTicks = loopBoundaryOf(composition);
     const boundaryMoved = nextLoopTicks !== active.loopTicks;
+    // Beside the mirror write, because this is the same fact: a fader drag, a
+    // mute or a solo arrives HERE and nowhere else, and it is what the OUT
+    // meters have to move with.
+    setTrackFaders(composition.tracks ?? []);
     active.composition = composition;
     active.loop = composition.loop;
     active.loopTicks = nextLoopTicks;

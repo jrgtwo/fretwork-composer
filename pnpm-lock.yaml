@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@fretwork/lib':
-        specifier: github:jrgtwo/fretwork-lib#v0.4.0
-        version: https://codeload.github.com/jrgtwo/fretwork-lib/tar.gz/af7e598dd4fa9cfcf69c4a810b09677ade6d9e7c(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tone@15.1.22)(zustand@5.0.14(@types/react@19.2.17)(react@19.2.8))
+        specifier: github:jrgtwo/fretwork-lib#v0.5.0
+        version: https://codeload.github.com/jrgtwo/fretwork-lib/tar.gz/3c6fd849356d65e8c9351bae49846d6e28430c03(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tone@15.1.22)(zustand@5.0.14(@types/react@19.2.17)(react@19.2.8))
       agent-harness:
         specifier: file:../agent-harness
         version: file:../agent-harness
@@ -195,8 +195,8 @@ packages:
   '@floating-ui/utils@0.2.12':
     resolution: {integrity: sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww==}
 
-  '@fretwork/lib@https://codeload.github.com/jrgtwo/fretwork-lib/tar.gz/af7e598dd4fa9cfcf69c4a810b09677ade6d9e7c':
-    resolution: {tarball: https://codeload.github.com/jrgtwo/fretwork-lib/tar.gz/af7e598dd4fa9cfcf69c4a810b09677ade6d9e7c}
+  '@fretwork/lib@https://codeload.github.com/jrgtwo/fretwork-lib/tar.gz/3c6fd849356d65e8c9351bae49846d6e28430c03':
+    resolution: {tarball: https://codeload.github.com/jrgtwo/fretwork-lib/tar.gz/3c6fd849356d65e8c9351bae49846d6e28430c03}
     version: 0.3.0
     peerDependencies:
       react: '>=18'
@@ -2169,7 +2169,7 @@ snapshots:
 
   '@floating-ui/utils@0.2.12': {}
 
-  '@fretwork/lib@https://codeload.github.com/jrgtwo/fretwork-lib/tar.gz/af7e598dd4fa9cfcf69c4a810b09677ade6d9e7c(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tone@15.1.22)(zustand@5.0.14(@types/react@19.2.17)(react@19.2.8))':
+  '@fretwork/lib@https://codeload.github.com/jrgtwo/fretwork-lib/tar.gz/3c6fd849356d65e8c9351bae49846d6e28430c03(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(tone@15.1.22)(zustand@5.0.14(@types/react@19.2.17)(react@19.2.8))':
     dependencies:
       '@radix-ui/react-dialog': 1.1.23(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@radix-ui/react-radio-group': 1.4.7(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
