@@ -62,6 +62,8 @@ import {
   setTrackVoiceRef,
   setTrackVolumeDb,
   setTrackPan,
+  setTrackInputGainDb,
+  TRACK_INPUT_GAIN_RANGE_DB,
   splitPlacement,
   totalDurationTicks,
   trackInstrumentId,
@@ -689,6 +691,81 @@ describe('track settings round-trip through the store', () => {
 
       expect(storedPlacements()).toHaveLength(0);
       expect(storedTracks()[0].pan).toBe(-1);
+    });
+  });
+
+  /* AU-03. Input gain is the amp-sim input control, and it is on the TRACK
+     rather than the voice preset because a preset is chosen and swapped: a value
+     stored there is thrown away every time the user auditions another amp.
+
+     It is NOT the fader. The fader sits downstream of the whole voice and
+     changes how loud its output is; this sits upstream of the amp and changes
+     how hard the amp is driven. */
+  describe('input gain', () => {
+    it('writes it, and reports the value actually stored', () => {
+      const id = storedTracks()[0].id;
+      const result = setTrackInputGainDb(id, -18);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value).toBe(-18);
+      expect(storedTracks()[0].inputGainDb).toBe(-18);
+    });
+
+    it('leaves a new track with none at all, not with a zero', () => {
+      // Undefined and 0 are different to the voice: undefined means "the preset
+      // decides", 0 means "unity whatever the preset said". A track nobody has
+      // touched must not silently override every preset's own input level.
+      expect(storedTracks()[0].inputGainDb).toBeUndefined();
+    });
+
+    it('clamps out of range and REPORTS the clamped value', () => {
+      const id = storedTracks()[0].id;
+      const result = setTrackInputGainDb(id, 999);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value).toBe(TRACK_INPUT_GAIN_RANGE_DB.max);
+      expect(storedTracks()[0].inputGainDb).toBe(TRACK_INPUT_GAIN_RANGE_DB.max);
+    });
+
+    it('refuses a non-number rather than storing NaN', () => {
+      const id = storedTracks()[0].id;
+      expect(setTrackInputGainDb(id, Number.NaN).ok).toBe(false);
+      expect(storedTracks()[0].inputGainDb).toBeUndefined();
+    });
+
+    it('skips a write that would set the value already there', () => {
+      // Dragged, like the fader and the pan — every intermediate value would
+      // otherwise persist the document and re-render every subscriber.
+      const id = storedTracks()[0].id;
+      setTrackInputGainDb(id, -6);
+      const settled = stored();
+      setTrackInputGainDb(id, -6);
+      expect(stored()).toBe(settled);
+    });
+
+    it('treats an untouched track as unity, so the first call asking for 0 settles', () => {
+      const id = storedTracks()[0].id;
+      const before = stored();
+      setTrackInputGainDb(id, 0);
+      expect(stored()).toBe(before);
+    });
+
+    it('SURVIVES an undo of an unrelated edit', () => {
+      // ⚠ The one that matters. Undo restores a whole Composition, so a field
+      // that pushes no undo step of its own is rolled back unless
+      // `mergeSettingsForward` carries it over the snapshot — from a list
+      // maintained by hand. AG-07's `groove` and CP-19's `pan` both shipped
+      // missing from it, and both presented as "the control sometimes forgets
+      // itself" long after the edit that caused it. This is the third.
+      const id = storedTracks()[0].id;
+      const placed = addPlacement(seedPattern('Riff'), id);
+      expect(placed.ok).toBe(true);
+      setTrackInputGainDb(id, -24);
+
+      undo();
+
+      expect(storedPlacements()).toHaveLength(0);
+      expect(storedTracks()[0].inputGainDb).toBe(-24);
     });
   });
 

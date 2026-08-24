@@ -27,6 +27,7 @@ import {
   INSTRUMENTS,
   MAX_COMPOSITION_TRACKS,
   TIME_SIGNATURES,
+  TRACK_INPUT_GAIN_RANGE_DB,
   getInstrument,
   placementEffectiveLength,
   placementEndTick,
@@ -425,6 +426,17 @@ export const PAN_RANGE = { min: -1, max: 1 } as const;
 const clampPan = (pan: number) => Math.max(PAN_RANGE.min, Math.min(PAN_RANGE.max, pan));
 
 /**
+ * Bounds for a track's input gain, re-exported from the lib.
+ *
+ * Re-exported rather than restated so the control, the seam and the agent's
+ * schema all read the same number, and so that number stays the audio engine's:
+ * these are the voice's own input-gain bounds, not a UI preference. `PAN_RANGE`
+ * above is declared here for the same reason but from the opposite direction —
+ * that one IS the `Tone.Panner` domain and has no lib constant to borrow.
+ */
+export { TRACK_INPUT_GAIN_RANGE_DB };
+
+/**
  * Whether this track will actually be HEARD, by the engine's own rule.
  *
  * The precedence, decided once here so the screen and the ear cannot disagree
@@ -683,6 +695,12 @@ function mergeSettingsForward(snapshot: Composition, live: Composition): Composi
         voiceRef: current.voiceRef,
         volumeDb: current.volumeDb,
         pan: current.pan,
+        // AU-03. THIRD time a field has had to be added to this list — AG-07's
+        // `groove` and CP-19's `pan` were the first two, both found by a test
+        // after the control had already shipped forgetting itself. Undo restores
+        // a whole document, so anything that pushes no undo step of its own has
+        // to be carried forward here or an unrelated undo silently reverts it.
+        inputGainDb: current.inputGainDb,
         muted: current.muted,
         soloed: current.soloed,
       };
@@ -1500,6 +1518,35 @@ export function setTrackPan(trackId: string, pan: number): Result<number> {
   // comparison would read undefined !== 0 and write on the first centring call.
   if ((track.pan ?? 0) === clamped) return ok(clamped);
   store().setCompositionTrackPan(trackId, clamped);
+  return ok(clamped);
+}
+
+/**
+ * How hard a track drives its own voice, in dB, at the front of the chain.
+ *
+ * NOT the fader. `setTrackVolumeDb` is downstream of the whole voice and changes
+ * how loud its output is; this is upstream of the pedals, the EQ and the amp and
+ * changes how hard the amp is driven. Pulling the fader down on an overdriven
+ * track gives a quieter copy of the same distortion, which is the confusion this
+ * control exists to end.
+ *
+ * On the TRACK rather than the voice preset on purpose: a preset is chosen and
+ * swapped, so an input level stored there is reset every time the user auditions
+ * another amp. See `Track.inputGainDb` in the lib for the whole argument.
+ */
+export function setTrackInputGainDb(trackId: string, inputGainDb: number): Result<number> {
+  if (lockedOut()) return refuse(JOB_LOCK_REASON);
+  const track = findTrack(trackId);
+  if (!track) return refuse('No such track.');
+  if (!Number.isFinite(inputGainDb)) return refuse('That is not an input gain.');
+  const clamped = Math.max(
+    TRACK_INPUT_GAIN_RANGE_DB.min,
+    Math.min(TRACK_INPUT_GAIN_RANGE_DB.max, inputGainDb),
+  );
+  // `?? 0` for `pan`'s reason — a track that has never had one reads undefined,
+  // and a raw comparison would write on the first call that asks for unity.
+  if ((track.inputGainDb ?? 0) === clamped) return ok(clamped);
+  store().setCompositionTrackInputGainDb(trackId, clamped);
   return ok(clamped);
 }
 

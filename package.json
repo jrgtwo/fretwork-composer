@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "AI pattern/composition app on @fretwork/lib — the agent creates riffs & compositions on request, with the harness embedded in-process (no app server).",
+  "description": "AI pattern/composition app on @fretwork/lib \u2014 the agent creates riffs & compositions on request, with the harness embedded in-process (no app server).",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -13,7 +13,7 @@
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {
-    "@fretwork/lib": "github:jrgtwo/fretwork-lib#v0.5.0",
+    "@fretwork/lib": "github:jrgtwo/fretwork-lib#v0.5.1",
     "agent-harness": "file:../agent-harness",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

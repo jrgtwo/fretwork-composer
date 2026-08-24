@@ -38,6 +38,8 @@ import {
   MAX_COMPOSITION_TRACKS,
   VOLUME_RANGE_DB,
   PAN_RANGE,
+  TRACK_INPUT_GAIN_RANGE_DB,
+  setTrackInputGainDb,
   addPlacement,
   addTrack,
   beginEditGesture,
@@ -403,13 +405,15 @@ interface MixArgs {
   trackId: string;
   volumeDb?: number;
   pan?: number;
+  /** Drive into the track's own instrument, ahead of its amp — not loudness. */
+  inputGainDb?: number;
   muted?: boolean;
   soloed?: boolean;
 }
 
 const setTrackMix = defineTool<MixArgs>({
   name: 'composition_set_track_mix',
-  description: `A track's level, its place in the stereo field, and its mute/solo state. Volume is in dB — 0 is unity, not a midpoint — and is clamped to ${VOLUME_RANGE_DB.min}..${VOLUME_RANGE_DB.max}. Pan runs ${PAN_RANGE.min} (hard left) to ${PAN_RANGE.max} (hard right), 0 centre; spreading parts across it is what keeps several tracks from piling up on the same spot. Any soloed track anywhere silences every un-soloed track, and mute beats solo: a track that is both is silent. The mix is not part of undo.`,
+  description: `A track's level, how hard it drives its own instrument, its place in the stereo field, and its mute/solo state. Volume is in dB — 0 is unity, not a midpoint — and is clamped to ${VOLUME_RANGE_DB.min}..${VOLUME_RANGE_DB.max}. Pan runs ${PAN_RANGE.min} (hard left) to ${PAN_RANGE.max} (hard right), 0 centre; spreading parts across it is what keeps several tracks from piling up on the same spot. inputGainDb is NOT loudness: it sits at the front of the instrument's chain, ahead of its amp, so it changes how hard the amp is driven and therefore how distorted the track sounds — turning volumeDb down on a track that is distorting gives you a quieter copy of the same distortion, and inputGainDb is the one that cleans it up. Any soloed track anywhere silences every un-soloed track, and mute beats solo: a track that is both is silent. The mix is not part of undo.`,
   parameters: obj(
     {
       trackId: str('From read_composition.'),
@@ -418,12 +422,16 @@ const setTrackMix = defineTool<MixArgs>({
         min: PAN_RANGE.min,
         max: PAN_RANGE.max,
       }),
+      inputGainDb: num(
+        'How hard this track drives its instrument, in dB, before the amp. 0 is unity. Negative cleans up a distorting track; positive pushes it harder.',
+        { min: TRACK_INPUT_GAIN_RANGE_DB.min, max: TRACK_INPUT_GAIN_RANGE_DB.max },
+      ),
       muted: bool('Silence this track.'),
       soloed: bool('Silence every track that is not soloed.'),
     },
     ['trackId'],
   ),
-  run: ({ trackId, volumeDb, pan, muted, soloed }) => {
+  run: ({ trackId, volumeDb, pan, inputGainDb, muted, soloed }) => {
     // No gesture: none of the three pushes an undo step by design (they are
     // settings, not arrangement content), so bracketing them would be a bracket
     // around nothing.
@@ -442,6 +450,14 @@ const setTrackMix = defineTool<MixArgs>({
       if (!result.ok) return fail(result.reason);
       storedPan = result.value;
     }
+    // Reported like the volume and the pan, for the same reason: the seam
+    // clamps, and a caller that asked for +30 needs to be told it got +24.
+    let storedInputGain: number | null = null;
+    if (inputGainDb !== undefined) {
+      const result = setTrackInputGainDb(trackId, inputGainDb);
+      if (!result.ok) return fail(result.reason);
+      storedInputGain = result.value;
+    }
     if (muted !== undefined) {
       const result = setTrackMuted(trackId, muted);
       if (!result.ok) return fail(result.reason);
@@ -459,6 +475,9 @@ const setTrackMix = defineTool<MixArgs>({
       // `?? 0` before `?? null`: a track that has never been panned reads as
       // centred, which is where it is, rather than as unknown.
       pan: storedPan ?? track?.pan ?? 0,
+      // `?? 0` before `?? null` for pan's reason — a track that has never had an
+      // input gain set is running at unity, which is a fact, not an unknown.
+      inputGainDb: storedInputGain ?? track?.inputGainDb ?? 0,
       muted: track?.muted ?? null,
       soloed: track?.soloed ?? null,
     });

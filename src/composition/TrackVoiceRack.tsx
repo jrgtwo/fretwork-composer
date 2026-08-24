@@ -116,7 +116,11 @@ import { CabinetGraphic } from '../voice/rack/CabinetGraphic';
 import { Knob } from '../voice/controls/Knob';
 import { ParamEnum } from '../voice/controls/ParamEnum';
 import { ParamToggle } from '../voice/controls/ParamToggle';
-import type { Result } from './compositionService';
+import {
+  setTrackInputGainDb,
+  TRACK_INPUT_GAIN_RANGE_DB,
+  type Result,
+} from './compositionService';
 
 /** Smaller than the pattern pane's 56 px default: eight amp knobs plus a cabinet
  *  and a level stage have to fit one lane's width, and `Knob` scales its own
@@ -199,7 +203,11 @@ export function TrackVoiceRack({
         : [...collapsedSections, id],
     );
 
-  const report = (result: Result) => {
+  // Generic in the payload: every seam here is called for its refusal, not its
+  // value, but some of them CARRY one (the clamped level a fader was actually
+  // given, say). Narrowing to `Result<void>` would refuse those at the type
+  // level for a value this surface never reads.
+  const report = (result: Result<unknown>) => {
     if (!result.ok) onNotice(result.reason);
   };
 
@@ -305,6 +313,43 @@ export function TrackVoiceRack({
         return renderKnob(param, SMALL_KNOB_PX);
     }
   };
+
+  /**
+   * The Level stage, where the track's own input gain replaces the preset's.
+   *
+   * `inputGainDb` exists in two places and they are NOT both shown here. The
+   * preset carries one, and it is the wrong one to put on a track: a preset is
+   * chosen and swapped, so an input level stored there is thrown away every time
+   * the user auditions a different amp — which is the complaint this whole
+   * ticket came from. The TRACK's value overrides it and survives the swap, so
+   * this surface shows the track's and hides the preset's rather than offering
+   * two sliders that fight over one job.
+   *
+   * The pattern page still shows the preset's, because a pattern has no track to
+   * hold one. Same schema, different surface — which is why this filters here
+   * rather than removing the param from `paramSchema`.
+   */
+  const renderLevel = (section: ParamSection) => (
+    <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
+      <Knob
+        label="Input"
+        size={SMALL_KNOB_PX}
+        // `?? 0` reads an untouched track as unity. Note the STORED value stays
+        // undefined until the knob is turned — see `Track.inputGainDb`, where
+        // undefined means "the preset decides" and 0 means "unity regardless".
+        value={track.inputGainDb ?? 0}
+        min={TRACK_INPUT_GAIN_RANGE_DB.min}
+        max={TRACK_INPUT_GAIN_RANGE_DB.max}
+        step={0.5}
+        defaultValue={0}
+        formatValue={(v) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`}
+        onChange={(value) => report(setTrackInputGainDb(track.id, value))}
+      />
+      {section.params
+        .filter((param) => param.path !== 'inputGainDb')
+        .map((param) => renderParam(section, param))}
+    </div>
+  );
 
   const stageActions = (section: ParamSection, present: boolean) =>
     section.removableBranch ? (
@@ -441,6 +486,8 @@ export function TrackVoiceRack({
           renderAmp(section)
         ) : section.id === 'cabinet' ? (
           renderCabinet(section)
+        ) : section.id === 'level' ? (
+          renderLevel(section)
         ) : (
           <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
             {section.params.map((param) => renderParam(section, param))}
