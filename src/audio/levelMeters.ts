@@ -18,29 +18,39 @@
  * clip, so the master figure is what actually leaves for the sound card. This
  * app has simply never read any of them.
  *
- * The two per-voice taps are NOT the two ends of the mixer strip, and the
+ * The three per-voice taps are NOT the ends of the mixer strip, and the
  * difference matters when reading them:
  *
  *  - **in** taps at the voice's `inputGain`, the very front — before the body
  *    filter, the pedals, the graphic EQ and the amp. This is the instrument
  *    arriving, and it is the number that says whether a level problem starts
  *    upstream of every control.
+ *  - **drive** taps the amp's `ampPreGain` output — after the pedals, the graphic
+ *    EQ and `preGainDb`, immediately before the bass split and the saturators.
+ *    This is what the amp's drive stage is actually being FED, and it was the
+ *    gap between the other two until AF-01 closed it.
  *  - **out** taps the last node of the voice chain, after the amp, the cab, the
  *    final EQ and the voice's own volume. It is PRE-FADER: the track's gain,
  *    pan, mute and solo all live outside the voice, in the lib's
  *    `MultiTrackPlayback`. So a muted track still reads a level here, which is
  *    correct — it says the voice is producing signal, not that you can hear it.
  *
- * What sits BETWEEN them is unmetered, and that is the gap worth knowing about:
- * the amp's drive stage has no tap of its own, so neither number can tell you
- * what the saturators are being fed. That needs a lib change and is the second
- * half of AU-04.
+ * **Expect drive to read higher than the other two on a gain preset, and expect
+ * out not to follow it.** Every amp curve is normalised at its ENDPOINT —
+ * `tanh(x·k) / tanh(k)` — so a saturator hands back an ordinary-looking level
+ * however hard it was hit. Metal's pre-stage has +22.8 dB of small-signal gain;
+ * a -12 dBFS input leaves it at 0.998. That divergence is the thing these three
+ * meters exist to show, not a fault in the tap.
+ *
+ * A voice with no amp stage reads `-Infinity` at the drive tap: the meter is
+ * built but nothing is connected to it, and there is no drive stage to report.
  */
 import { MasterBus, type Track, type Voice } from '@fretwork/lib';
 
 /** Which point in the graph a meter is watching. */
 export type MeterSource =
   | { readonly kind: 'track-in'; readonly trackId: string }
+  | { readonly kind: 'track-drive'; readonly trackId: string }
   | { readonly kind: 'track-out'; readonly trackId: string }
   | { readonly kind: 'master' };
 
@@ -115,6 +125,10 @@ function readSource(source: MeterSource): number {
     const voice = trackVoices.get(source.trackId);
     if (!voice) return SILENCE_DB;
     if (source.kind === 'track-in') return voice.getInputLevelDb();
+    // PRE-FADER and deliberately not adjusted: the drive tap is inside the amp,
+    // and the track fader is two stages past the end of the voice. Adding it
+    // here would report a number that exists nowhere in the graph.
+    if (source.kind === 'track-drive') return voice.getDriveLevelDb();
     const out = voice.getOutputLevelDb();
     if (!Number.isFinite(out)) return SILENCE_DB;
     // POST-FADER, by construction — see `trackFaders`. A track whose fader we

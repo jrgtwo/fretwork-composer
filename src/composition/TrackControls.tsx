@@ -707,14 +707,31 @@ export function TrackControls({
             dB, which is exact because the stage in between is one linear gain.
             A meter that did not move with its own fader would be wrong.
 
-            What sits between IN and OUT — the amp's drive stage — has no tap of
-            its own yet. That needs a lib change and is the second half of
-            AU-04, and it is the number that would show the drive being
-            overloaded while both of these look reasonable. */}
+            DRIVE is what the amp's saturators are being fed, taken at the amp's
+            pre-gain output — after the pedals, the graphic EQ and preGainDb,
+            before the bass split. AF-01 added it; until then the drive stage was
+            invisible from both sides, because every amp curve is normalised at
+            its endpoint and hands back an ordinary level however hard it was hit.
+
+            So DRIVE reading hotter than either of its neighbours — while OUT
+            barely moves — is the expected reading on a gain preset, not a fault.
+            It is the number the artifacting report needed and nothing had.
+
+            ⚠ DRIVE IS IN THE WRONG PLACE and is booked to move — AU-06. Only the
+            seven `*-amp` presets build an amp stage, so on any other voice this
+            meter is permanently empty and reads as broken. It belongs in the
+            rack's amp section beside the drive controls it describes, which also
+            returns this lane to 130 px. Don't paper over it with a conditional
+            here; move it. */}
         <LevelMeter
           source={{ kind: 'track-in', trackId: track.id }}
           label="IN"
           title={`${track.name} input level`}
+        />
+        <LevelMeter
+          source={{ kind: 'track-drive', trackId: track.id }}
+          label="DRV"
+          title={`${track.name} amp drive input — what the saturators are fed`}
         />
         <LevelMeter
           source={{ kind: 'track-out', trackId: track.id }}

@@ -21,10 +21,13 @@ vi.mock('@fretwork/lib', () => ({
 
 type Meters = typeof import('./levelMeters');
 
-/** A stand-in for the lib's `Voice` — only the two readings are used. */
-function fakeVoice(inDb: number, outDb: number) {
+/** A stand-in for the lib's `Voice` — only the three readings are used.
+ *  `driveDb` defaults to silence, which is what a voice with no amp stage
+ *  reports. */
+function fakeVoice(inDb: number, outDb: number, driveDb = -Infinity) {
   return {
     getInputLevelDb: vi.fn(() => inDb),
+    getDriveLevelDb: vi.fn(() => driveDb),
     getOutputLevelDb: vi.fn(() => outDb),
   } as unknown as import('@fretwork/lib').Voice;
 }
@@ -63,16 +66,66 @@ afterEach(() => {
 });
 
 describe('subscribeMeter', () => {
-  it('reports a registered track voice’s input and output separately', () => {
-    meters.registerTrackVoice('t1', fakeVoice(-3, -18));
+  it('reports a registered track voice’s three taps separately', () => {
+    meters.registerTrackVoice('t1', fakeVoice(-3, -18, -9));
     const seen: Record<string, number> = {};
     meters.subscribeMeter({ kind: 'track-in', trackId: 't1' }, (db) => (seen.in = db));
+    meters.subscribeMeter({ kind: 'track-drive', trackId: 't1' }, (db) => (seen.drive = db));
     meters.subscribeMeter({ kind: 'track-out', trackId: 't1' }, (db) => (seen.out = db));
 
     flushFrame();
 
     expect(seen.in).toBe(-3);
+    expect(seen.drive).toBe(-9);
     expect(seen.out).toBe(-18);
+  });
+
+  it('does NOT apply the fader to the drive tap', () => {
+    // The drive tap is inside the amp; the fader is two stages past the end of
+    // the voice. `track-out` adds it because the meter would otherwise not move
+    // with its own fader — but doing the same here would report a level that
+    // exists at no point in the graph.
+    meters.registerTrackVoice('t1', fakeVoice(-3, -18, -9));
+    meters.setTrackFaders([
+      { id: 't1', name: 'T', volumeDb: -6, muted: false, soloed: false } as never,
+    ]);
+    const seen: Record<string, number> = {};
+    meters.subscribeMeter({ kind: 'track-drive', trackId: 't1' }, (db) => (seen.drive = db));
+    meters.subscribeMeter({ kind: 'track-out', trackId: 't1' }, (db) => (seen.out = db));
+
+    flushFrame();
+
+    expect(seen.drive).toBe(-9);
+    expect(seen.out).toBe(-24);
+  });
+
+  it('a voice with no amp stage reads silence at the drive tap, not zero', () => {
+    // The lib builds the meter unconditionally and connects it only when the
+    // preset has an amp, so `getDriveLevelDb` returns -Infinity. Zero would read
+    // as "this stage is at full scale" on a voice that has no such stage.
+    meters.registerTrackVoice('t1', fakeVoice(-3, -18));
+    let db = 0;
+    meters.subscribeMeter({ kind: 'track-drive', trackId: 't1' }, (value) => (db = value));
+
+    flushFrame();
+
+    expect(db).toBe(meters.SILENCE_DB);
+  });
+
+  it('keys the drive tap separately, so it is not deduped against in or out', () => {
+    // `sourceKey` keys any non-master source by `${kind}:${trackId}`, so this
+    // needs no change for a third kind — but a regression there would make two
+    // of the three meters silently show the same number.
+    const voice = fakeVoice(-3, -18, -9);
+    meters.registerTrackVoice('t1', voice);
+    const seen: Record<string, number> = {};
+    meters.subscribeMeter({ kind: 'track-in', trackId: 't1' }, (db) => (seen.in = db));
+    meters.subscribeMeter({ kind: 'track-drive', trackId: 't1' }, (db) => (seen.drive = db));
+    meters.subscribeMeter({ kind: 'track-out', trackId: 't1' }, (db) => (seen.out = db));
+
+    flushFrame();
+
+    expect(new Set([seen.in, seen.drive, seen.out]).size).toBe(3);
   });
 
   it('reads the master through MasterBus', () => {

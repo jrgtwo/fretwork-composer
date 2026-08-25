@@ -44,6 +44,7 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "@fretwork/lib"
-    ]
+    ],
+     "overrides": { "@fretwork/lib": "link:../fretwork-lib" }
   }
 }

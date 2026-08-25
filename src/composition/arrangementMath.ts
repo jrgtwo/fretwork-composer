@@ -199,12 +199,13 @@ export type TimedArrangementMode = Exclude<ArrangementMode, 'voice'>;
  * roughly one of those — accepted knowingly when the alternative was squeezing
  * pan in beside the fader.
  *
- * 104 -> 130 for AU-04's two meter rows, and this one is NOT yet a decision the
- * user has taken. It costs roughly another track and a half of laptop viewport.
- * The cheaper layout is one row carrying both bars, which fits in ~13 px instead
- * of ~26 — at the price of the per-tap dB readouts, which are the reason the
- * meters were asked for. Put the trade to the user rather than quietly picking
- * the compact one; CP-19's pan row was settled in a single line that way.
+ * 104 -> 130 for AU-04's two meter rows, then 130 -> 143 for AF-01's third: the
+ * amp drive tap. Neither growth is a decision the user has taken, and the total
+ * now costs roughly two tracks of laptop viewport against the pre-meter strip.
+ * The cheaper layout is one row carrying every bar, ~13 px instead of ~39 — at
+ * the price of the per-tap dB readouts, which are the reason the meters were
+ * asked for. Put the trade to the user rather than quietly picking the compact
+ * one; CP-19's pan row was settled in a single line that way.
  *
  * The EDIT figure is now a fallback rather than the number in use: CP-11 sizes
  * each edit lane to its own track's string count (`laneHeightsFor`), and this is
@@ -212,7 +213,7 @@ export type TimedArrangementMode = Exclude<ArrangementMode, 'voice'>;
  * from it so the two cannot drift.
  */
 export const DEFAULT_LANE_HEIGHTS: Record<TimedArrangementMode, number> = {
-  pattern: 130,
+  pattern: 143,
   edit: 192,
 };
 
