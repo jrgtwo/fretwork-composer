@@ -8,6 +8,16 @@
  *
  * The module keeps its registry and its subscriber set at module scope, so every
  * test re-imports it rather than sharing one instance.
+ *
+ * ⚠ **What this file structurally CANNOT catch.** `fakeVoice` returns canned dB
+ * numbers, so every test here is about the plumbing — routing, deduping, the
+ * fader arithmetic, teardown — and none of them can see what STATISTIC the lib's
+ * taps report. That is not an oversight to fix here: stubbing the lib is what
+ * makes these tests fast and focused. But it is why the meters shipped reporting
+ * RMS under names that said peak, and why the test that would have caught it
+ * lives in the lib, against real sample buffers (`tests/voices.test.ts`,
+ * "the level taps report PEAK, not RMS"). Do not add a level-statistic
+ * assertion here — it would only assert that the stub agrees with itself.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 

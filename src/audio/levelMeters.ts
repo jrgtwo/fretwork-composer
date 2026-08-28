@@ -11,12 +11,18 @@
  *
  * ── Where the numbers come from ─────────────────────────────────────────────
  *
- * Nothing here creates a meter. The lib already builds an input and an output
- * `Tone.Meter` on EVERY voice, unconditionally — see `buildChain` in the lib's
- * `Voice.ts`, whose comment notes a `Tone.Meter` is an `AnalyserNode` and costs
- * effectively nothing — and `MasterBus` taps its own output after the safety
- * clip, so the master figure is what actually leaves for the sound card. This
- * app has simply never read any of them.
+ * Nothing here creates a meter. The lib builds three taps on EVERY voice,
+ * unconditionally — see `buildChain` in the lib's `Voice.ts` — and `MasterBus`
+ * taps its own output after the safety clip, so the master figure is what
+ * actually leaves for the sound card.
+ *
+ * **Every reading is a SAMPLE PEAK.** It is worth knowing that they were RMS
+ * until the peak-meter fix: `Tone.Meter` returns the RMS of its window, and on a
+ * plucked note that sits 12-20 dB below the peak. So the app showed comfortable
+ * numbers, the clip lamps never latched, and the audio clipped audibly the whole
+ * time. Sample peak is still not TRUE peak — an intersample over of up to ~3 dB
+ * can pass one of these readings and clip at the converter — see the lib's
+ * `voices/peak-meter.ts`.
  *
  * The three per-voice taps are NOT the ends of the mixer strip, and the
  * difference matters when reading them:
