@@ -13,8 +13,22 @@
  *
  * Nothing here creates a meter. The lib builds three taps on EVERY voice,
  * unconditionally — see `buildChain` in the lib's `Voice.ts` — and `MasterBus`
- * taps its own output after the safety clip, so the master figure is what
- * actually leaves for the sound card.
+ * offers two of its own.
+ *
+ * **The master figure is the PRE-LIMITER tap** — what the master is being asked
+ * to pass. It was `getOutputPeakDb()` until this fix, which taps after the
+ * limiter AND after a WaveShaper that hard-clips at -0.5 dBFS: that reading is
+ * bounded below -0.5 BY CONSTRUCTION, so it cannot report an overload however
+ * hard the bus is driven. A signal arriving at +10 dBFS is squashed, chopped,
+ * and reported as a tidy -0.5 — audible distortion, clean meter. It is the same
+ * failure as the RMS-vs-peak bug one stage on: a meter placed where the answer
+ * is already known.
+ *
+ * It is still not a headroom figure, and the difference matters when reading it.
+ * The tap sits downstream of the bus compressor and of `MasterBus`'s own gain,
+ * both of which CHANGE the level, so it says whether the output stage is being
+ * overdriven — not how hot the mix itself is. Nothing in the app meters the bus
+ * input, where that question would be answered.
  *
  * **Every reading is a SAMPLE PEAK.** It is worth knowing that they were RMS
  * until the peak-meter fix: `Tone.Meter` returns the RMS of its window, and on a
@@ -127,7 +141,7 @@ function sourceKey(source: MeterSource): string {
 
 function readSource(source: MeterSource): number {
   try {
-    if (source.kind === 'master') return MasterBus.getOutputPeakDb();
+    if (source.kind === 'master') return MasterBus.getPreLimiterPeakDb();
     const voice = trackVoices.get(source.trackId);
     if (!voice) return SILENCE_DB;
     if (source.kind === 'track-in') return voice.getInputLevelDb();

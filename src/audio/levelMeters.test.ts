@@ -21,11 +21,13 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const masterPeak = vi.fn(() => -12);
+const masterPreLimiterPeak = vi.fn(() => -12);
+const masterOutputPeak = vi.fn(() => -0.5);
 
 vi.mock('@fretwork/lib', () => ({
   MasterBus: {
-    getOutputPeakDb: () => masterPeak(),
+    getPreLimiterPeakDb: () => masterPreLimiterPeak(),
+    getOutputPeakDb: () => masterOutputPeak(),
   },
 }));
 
@@ -59,7 +61,8 @@ let meters: Meters;
 beforeEach(async () => {
   pending = [];
   clockMs = 0;
-  masterPeak.mockReturnValue(-12);
+  masterPreLimiterPeak.mockReturnValue(-12);
+  masterOutputPeak.mockReturnValue(-0.5);
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
     pending.push(cb);
     return pending.length;
@@ -139,13 +142,37 @@ describe('subscribeMeter', () => {
   });
 
   it('reads the master through MasterBus', () => {
-    masterPeak.mockReturnValue(-0.4);
+    masterPreLimiterPeak.mockReturnValue(-0.4);
     let db = 0;
     meters.subscribeMeter({ kind: 'master' }, (value) => (db = value));
 
     flushFrame();
 
     expect(db).toBe(-0.4);
+  });
+
+  /**
+   * The master must read the PRE-LIMITER tap, not the output tap.
+   *
+   * `getOutputPeakDb` is measured after the limiter and after a WaveShaper that
+   * hard-clips at -0.5 dBFS, so its reading is bounded below -0.5 by
+   * construction — it cannot report an overload whatever the bus is fed. Wiring
+   * the mixer's only master reading to it makes that meter incapable of showing
+   * the one fault it exists to show, which is what shipped until this test.
+   *
+   * The two stubs are deliberately far apart, and the output stub is pinned at
+   * the value the clip ceiling would actually produce, so a regression cannot
+   * pass by coincidence.
+   */
+  it('reads the pre-limiter tap, so an overload can register', () => {
+    masterPreLimiterPeak.mockReturnValue(9.3);
+    masterOutputPeak.mockReturnValue(-0.5);
+    let db = 0;
+    meters.subscribeMeter({ kind: 'master' }, (value) => (db = value));
+
+    flushFrame();
+
+    expect(db).toBe(9.3);
   });
 
   it('reports silence for a track with no voice registered', () => {
