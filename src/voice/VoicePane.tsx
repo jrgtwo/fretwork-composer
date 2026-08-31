@@ -54,18 +54,22 @@ import {
 import {
   PARAM_SECTIONS,
   enabledParamOf,
+  paramApplies,
   sectionPresence,
+  visibleParams,
   type EnumParam,
   type Param,
   type ParamSection,
   type SectionId,
   type SliderParam,
 } from './paramSchema';
+import { isSourceKind, withSourceKind } from './sourceDefaults';
 import { getAtPath, removeAtPath, setAtPath } from './presetPaths';
 import { VoiceSection, type SectionStatus } from './VoiceSection';
 import { ParamSlider } from './controls/ParamSlider';
 import { ParamEnum } from './controls/ParamEnum';
 import { ParamToggle } from './controls/ParamToggle';
+import { ParamEncoder } from './controls/ParamEncoder';
 import { Knob } from './controls/Knob';
 import { SHARED_VOICE_REFUSAL_TEXT, useNameForm, voiceButtonClass, voiceLabelClass } from './voiceChrome';
 import { DirtyPill } from './DirtyPill';
@@ -385,8 +389,28 @@ function VoiceEditor({
   const addSection = (section: ParamSection) => {
     let next = preset;
     for (const param of section.params) {
-      if (param.optional || param.kind === 'sample-pack') continue;
-      next = setAtPath(next, param.path, param.fallback);
+      if (param.optional) continue;
+      if (!paramApplies(next, param)) continue;
+      // A `switch` rather than a list of kinds to skip, and the exhaustive `default` is
+      // the point: `source-kind` and `sample-pack` are both rows whose value is NOT what
+      // `setAtPath(path, fallback)` would write — a bare `source.kind: 'sampler'` leaves
+      // `source.params` beside a sampler tag with no banks, the malformed union
+      // `sourceDefaults` exists to make unrepresentable. Unreachable today (no section
+      // holding one is removable, so nothing calls this for them), which is exactly why
+      // it has to be a `tsc` failure rather than a silent write the day one is.
+      switch (param.kind) {
+        case 'slider':
+        case 'encoder':
+        case 'enum':
+        case 'toggle':
+          next = setAtPath(next, param.path, param.fallback);
+          break;
+        case 'sample-pack':
+        case 'source-kind':
+          break;
+        default:
+          param satisfies never;
+      }
     }
     commit(next);
   };
@@ -444,6 +468,47 @@ function VoiceEditor({
             options={param.options}
             badgeOf={param.badgeOf}
             onChange={(next) => commit(setAtPath(preset, param.path, next))}
+          />
+        );
+
+      case 'encoder':
+        return (
+          <ParamEncoder
+            key={param.path}
+            label={param.label}
+            value={typeof raw === 'number' ? raw : param.fallback}
+            step={param.step}
+            precision={param.precision}
+            unit={param.unit}
+            fallback={param.fallback}
+            onChange={(value) => commit(setAtPath(preset, param.path, value))}
+          />
+        );
+
+      case 'source-kind':
+        return (
+          <ParamEnum
+            key={param.path}
+            id={id}
+            label={param.label}
+            value={param.resolve(raw)}
+            options={param.options}
+            // Not the default placeholder ("Not in the registry"): there is no registry
+            // of source kinds to be missing from — an unrecognised discriminant is a
+            // stored variant this build cannot play.
+            placeholder="Unrecognised source"
+            // NOT `setAtPath(preset, param.path, …)`. The discriminant cannot move
+            // on its own — see `sourceDefaults.withSourceKind`, which swaps the
+            // whole branch and returns the same object when the kind is unchanged.
+            onChange={(next) => {
+              if (!isSourceKind(next)) return;
+              const swapped = withSourceKind(preset, next);
+              // A fresh sampler is a fresh set of banks nothing has fetched, and
+              // `reconcile` will not build a graph on a silent page — same reason
+              // the pack picker warms.
+              if (swapped.source.kind === 'sampler') warmSampleBanks(swapped.source.samples);
+              commit(swapped);
+            }}
           />
         );
 
@@ -515,6 +580,7 @@ function VoiceEditor({
    * charge of what exists.
    */
   const renderAmpSection = (section: ParamSection) => {
+    const rows = visibleParams(preset, section);
     const power = enabledParamOf(section);
     const enabled = power ? getAtPath(preset, power.path) !== false : true;
     const rawModel = getAtPath(preset, AMP_MODEL_PATH);
@@ -536,11 +602,11 @@ function VoiceEditor({
               : undefined
           }
         >
-          {section.params
+          {rows
             .filter((param): param is SliderParam => param.kind === 'slider')
             .map(renderKnob)}
         </AmpHead>
-        {section.params
+        {rows
           .filter((param) => param.kind !== 'slider' && param !== power)
           .map((param) => renderParam(section, param))}
         {renderSuggestedCab()}
@@ -554,7 +620,8 @@ function VoiceEditor({
    * registry's description of a capture is readable, which no dot can carry.
    */
   const renderCabinetSection = (section: ParamSection) => {
-    const cab = section.params.find(
+    const rows = visibleParams(preset, section);
+    const cab = rows.find(
       (param): param is EnumParam => param.kind === 'enum' && param.path === CAB_URL_PATH,
     );
 
@@ -569,12 +636,12 @@ function VoiceEditor({
             />
           ) : null}
           <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
-            {section.params
+            {rows
               .filter((param): param is SliderParam => param.kind === 'slider')
               .map(renderKnob)}
           </div>
         </div>
-        {section.params
+        {rows
           .filter((param) => param.kind !== 'slider')
           .map((param) => renderParam(section, param))}
       </>
@@ -611,32 +678,6 @@ function VoiceEditor({
       >
         Use suggested cab · {suggested.label}
       </button>
-    );
-  };
-
-  /** The one non-sampler guitar slot (`electric-guitar`) is a pluck synth. Shown, not
-   *  editable: synth params are a later slice, and a section that renders nothing at all
-   *  reads as a bug. Only scalar params are listed — FM's nested envelopes are two more
-   *  sections' worth of controls. */
-  const renderReadOnlySource = () => {
-    const source = preset.source;
-    const params = 'params' in source ? source.params : {};
-    return (
-      <>
-        <p className="font-mono text-[9px] leading-snug text-ink-mut">
-          {source.kind} source — synth editing lands in a later slice.
-        </p>
-        <dl className="grid grid-cols-[1fr_auto] gap-x-2 font-mono text-[9px] text-ink-mut">
-          {Object.entries(params)
-            .filter(([, value]) => typeof value === 'number' || typeof value === 'string')
-            .map(([key, value]) => (
-              <div key={key} className="col-span-2 grid grid-cols-subgrid">
-                <dt className="tracking-[0.06em] uppercase">{key}</dt>
-                <dd className="text-right tabular-nums text-ink">{String(value)}</dd>
-              </div>
-            ))}
-        </dl>
-      </>
     );
   };
 
@@ -794,7 +835,7 @@ function VoiceEditor({
               }
             >
               {status !== 'absent' ? (
-                // Amp and Cabinet are gear and are drawn as gear. Samples and Level are
+                // Amp and Cabinet are gear and are drawn as gear. Source and Level are
                 // not — a sample pack is a list and a fader is a fader — so they keep
                 // the descriptor-driven rows.
                 section.id === 'amp' ? (
@@ -802,15 +843,17 @@ function VoiceEditor({
                 ) : section.id === 'cabinet' ? (
                   renderCabinetSection(section)
                 ) : (
-                  <>{section.params.map((param) => renderParam(section, param))}</>
+                  <>
+                    {visibleParams(preset, section).map((param) => renderParam(section, param))}
+                  </>
                 )
-              ) : section.removableBranch ? (
+              ) : (
+                /* Only a removable section can be absent: Source and Level both have a
+                   null probe, so `sectionApplies` is true for them on every preset. */
                 <p className="font-mono text-[9px] leading-snug text-ink-mut">
                   This preset has no {section.label.toLowerCase()} stage at all. Adding one seeds
                   it with neutral values you can then tune.
                 </p>
-              ) : (
-                renderReadOnlySource()
               )}
             </VoiceSection>
           );

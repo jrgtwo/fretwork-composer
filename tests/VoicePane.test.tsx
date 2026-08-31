@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import {
   ACOUSTIC_GUITAR_PRESET,
   CABINET_IRS,
+  detectSamplePack,
   useFretworkStore,
   useVoiceStore,
   type CabIRParams,
@@ -12,6 +13,7 @@ import {
 } from '@fretwork/lib';
 import { VoicePane, type WorkingVoice } from '../src/voice/VoicePane';
 import type { SectionId } from '../src/voice/paramSchema';
+import { getAtPath } from '../src/voice/presetPaths';
 import { openBlankPattern } from '../src/patterns/patternService';
 
 /**
@@ -101,7 +103,7 @@ describe('VoicePane', () => {
 
     // Section disclosures carry the label alone — no status text folded into the
     // accessible name, which is why the status note sits outside the button.
-    for (const name of ['Samples', 'Amp', 'Cabinet', 'Level']) {
+    for (const name of ['Source', 'Amp', 'Cabinet', 'Level']) {
       expect(section(name)).toBeInTheDocument();
     }
 
@@ -117,7 +119,7 @@ describe('VoicePane', () => {
   it('folds a section without unmounting it — aria-controls needs the region to exist', async () => {
     render(<Host />);
     const pack = screen.getByLabelText('Pack');
-    const samples = section('Samples');
+    const samples = section('Source');
     expect(samples).toHaveAttribute(
       'aria-controls',
       // the region the button claims to control is the one holding the controls
@@ -230,7 +232,7 @@ describe('VoicePane', () => {
 
   it('highlights the active sample pack by shape, not by id', async () => {
     render(<Host />);
-    await userEvent.click(section('Samples'));
+    await userEvent.click(section('Source'));
     // The preset stores note→URL maps; `detectSamplePack` is what recognises them.
     expect((screen.getByLabelText('Pack') as HTMLSelectElement).value).toBe(
       'philharmonia-classical',
@@ -245,7 +247,7 @@ describe('VoicePane', () => {
     vi.stubGlobal('fetch', fetched);
 
     render(<Host />);
-    await userEvent.click(section('Samples'));
+    await userEvent.click(section('Source'));
     await userEvent.selectOptions(screen.getByLabelText('Pack'), 'casio-piano-demo');
 
     // The preset holds the pack's banks, not its id — which is why reading the
@@ -505,15 +507,100 @@ describe('VoicePane', () => {
     expect(screen.getByText(/no voice of its own/)).toBeInTheDocument();
   });
 
-  it('renders a synth source read-only rather than pretending to edit it', async () => {
+  /**
+   * ── The Source panel ───────────────────────────────────────────────────────
+   *
+   * These four replace "renders a synth source read-only", which asserted the
+   * old behaviour: the section probed `source.samples`, so on the four
+   * synth-sourced built-ins it was absent and the pane printed a read-only dump
+   * of the params instead. Every one of them asserts against the WORKING PRESET
+   * — the object handed to `onWorkingChange` and, in the same `commit`, to
+   * `applyVoicePreset`. A control that renders and writes nothing is invisible
+   * from the row's side and obvious from the preset's.
+   */
+  it('shows a synth voice`s own controls, not an empty panel', async () => {
     render(<Host />);
     // `electric-guitar` is the one guitar slot that isn't sampler-sourced.
     await pickVoice('default:electric-guitar');
-    await userEvent.click(section('Samples'));
+    await userEvent.click(section('Source'));
 
-    expect(screen.getByText(/synth editing lands in a later slice/)).toBeInTheDocument();
-    expect(screen.getByText('dampening')).toBeInTheDocument();
+    // The kind picker is there on every voice, and it says what this one is.
+    expect((screen.getByLabelText('Source') as HTMLSelectElement).value).toBe('pluck-synth');
+    // Its two bounded params are sliders; its two unbounded ones are encoders.
+    expect(screen.getByLabelText('Attack noise')).toBeInTheDocument();
+    expect(screen.getByLabelText('Dampening')).toBeInTheDocument();
+    expect(screen.getByRole('spinbutton', { name: 'Resonance' })).toBeInTheDocument();
+    expect(screen.getByRole('spinbutton', { name: 'Release' })).toBeInTheDocument();
+    // Nothing belonging to the other two kinds.
     expect(screen.queryByLabelText('Pack')).not.toBeInTheDocument();
+    expect(screen.queryByRole('spinbutton', { name: 'Harmonicity' })).not.toBeInTheDocument();
+  });
+
+  it('switches the source and hands over a well-formed one', async () => {
+    render(<Host />);
+    await userEvent.click(section('Source'));
+    expect(ACOUSTIC_GUITAR_PRESET.source.kind).toBe('sampler');
+
+    await userEvent.selectOptions(screen.getByLabelText('Source'), 'fm-synth');
+
+    // The WHOLE branch was replaced. `source.kind = 'fm-synth'` on its own would
+    // leave `samples` beside it — an object matching no arm of `VoiceSource`,
+    // which `Voice` reads `params` off and gets `undefined` from.
+    const source = workingPreset().source;
+    expect(source.kind).toBe('fm-synth');
+    expect(Object.keys(source).sort()).toEqual(['kind', 'params']);
+    expect('samples' in source).toBe(false);
+
+    // …and the rows followed the value, in both directions.
+    expect(screen.getByRole('spinbutton', { name: 'Harmonicity' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Carrier')).toBeInTheDocument();
+    expect(screen.getByLabelText('Env attack')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Pack')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Attack noise')).not.toBeInTheDocument();
+  });
+
+  it('switches back to samples and lands on a pack that has samples in it', async () => {
+    // `SAMPLE_PACKS[0]` is `empty`, whose one bank is `{}` — the switch has to
+    // land on something audible, not merely on something well-typed.
+    const fetched = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('fetch', fetched);
+    render(<Host />);
+    await userEvent.click(section('Source'));
+
+    await userEvent.selectOptions(screen.getByLabelText('Source'), 'pluck-synth');
+    await userEvent.selectOptions(screen.getByLabelText('Source'), 'sampler');
+
+    const source = workingPreset().source;
+    expect(source.kind).toBe('sampler');
+    if (source.kind !== 'sampler') throw new Error('unreachable');
+    expect(detectSamplePack(source.samples)?.id).toBe('philharmonia-classical');
+    expect((screen.getByLabelText('Pack') as HTMLSelectElement).value).toBe(
+      'philharmonia-classical',
+    );
+
+    // …and the banks were put in flight. Without this the `warmSampleBanks` call in
+    // the kind picker's handler could be deleted and this test would still pass —
+    // stubbing `fetch` is not the same as asserting it was used. A fresh sampler's
+    // banks are ones nothing has fetched, and `reconcile` will not build a graph on
+    // a silent page, so the prefetch is the only thing standing between the switch
+    // and a first Play that stalls on the whole pack.
+    await waitFor(() => expect(fetched).toHaveBeenCalled());
+  });
+
+  it('writes an encoder turn into the preset the engine is handed', async () => {
+    // The silent-failure guard. An encoder is a `<div role="spinbutton">` with no
+    // form value, so "the control is on screen" says nothing about whether its
+    // `onChange` reaches the preset. Only the working copy can.
+    render(<Host />);
+    await pickVoice('default:electric-guitar');
+    await userEvent.click(section('Source'));
+
+    const resonance = screen.getByRole('spinbutton', { name: 'Resonance' });
+    const start = Number(resonance.getAttribute('aria-valuenow'));
+    fireEvent.keyDown(resonance, { key: 'ArrowUp' });
+
+    // The descriptor's step is 0.01, and an encoder is relative: start + one step.
+    expect(getAtPath(workingPreset(), 'source.params.resonance')).toBeCloseTo(start + 0.01, 6);
   });
 
   it('changing instrument re-offers that instrument’s voices', async () => {

@@ -88,7 +88,10 @@ export function Knob({
 
   // A value outside [min, max] pins the dial to the bound while the readout shows the
   // true number — the same trade `ParamSlider` documents, for the same reason: hiding
-  // it would hide that the preset holds something this editor cannot represent.
+  // it would hide that the preset holds something this editor cannot represent. Reached
+  // in the shipped app, not only by a hand-authored variant: ten built-ins carry a
+  // `source.release` above the documented 1 s (`STALE_PRESET_VALUES` in
+  // `voice/paramSchema.test.ts`), so this rack draws that dial pinned on most voices.
   const fraction = max === min ? 0 : Math.min(1, Math.max(0, (value - min) / (max - min)));
   const angle = -SWEEP_DEGREES / 2 + fraction * SWEEP_DEGREES;
   const formatted = formatValue ? formatValue(value) : value.toFixed(2);

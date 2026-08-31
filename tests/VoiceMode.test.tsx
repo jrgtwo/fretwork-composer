@@ -278,7 +278,7 @@ const DEFAULT_FOLDED = PARAM_SECTIONS.filter(
  * Unfold one stage of one rack, idempotently.
  *
  * A rack opens on Amp and Cabinet, exactly as the pattern page's pane does, so
- * Samples and Level start folded — and a folded stage's controls are `hidden`,
+ * Source and Level start folded — and a folded stage's controls are `hidden`,
  * which puts them out of reach of a role query ON PURPOSE. `Level` is the stage
  * most of this file turns a knob on (it is the one no preset can be missing), so
  * most of them go through here first.
@@ -463,12 +463,75 @@ describe('the per-track voice draft seam', () => {
   it('refuses to remove a stage the schema does not mark removable', () => {
     const tracks = twoTracks();
 
-    // `source` is not a branch a voice can be without — changing the source kind
-    // is a later slice, and `Samples` declares no `removableBranch`.
-    expect(removeTrackVoiceSection(tracks[0].id, 'samples')).toEqual({
+    // `source` is not a branch a voice can be without: switching KIND is the
+    // operation, and `Source` declares no `removableBranch`.
+    expect(removeTrackVoiceSection(tracks[0].id, 'source')).toEqual({
       ok: false,
       reason: expect.stringContaining('cannot be removed'),
     });
+  });
+
+  it('switches the source kind by replacing the whole branch', () => {
+    // The seam is the agent-reachable route, so this is the case a caller with
+    // no pointer hits: `source.kind` is a path like any other from the outside,
+    // and the seam has to know it is not a `setAtPath`. Writing the discriminant
+    // alone would leave the sampler's `samples` beside an `fm-synth` tag.
+    const tracks = twoTracks();
+    expect(trackVoicePreset(tracks[0]).source.kind).toBe('sampler');
+
+    expect(setTrackVoiceParam(tracks[0].id, 'source.kind', 'fm-synth')).toEqual({
+      ok: true,
+      value: undefined,
+    });
+
+    const source = trackVoicePreset(getTracks()[0]).source;
+    expect(source.kind).toBe('fm-synth');
+    expect(Object.keys(source).sort()).toEqual(['kind', 'params']);
+    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.samples')).toBeUndefined();
+    // Tone's documented FMSynth default, so the voice plays before anything is
+    // turned. And the OTHER track is untouched, as with every write here.
+    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.params.harmonicity')).toBe(3);
+    expect(trackVoicePreset(getTracks()[1]).source.kind).toBe('sampler');
+  });
+
+  it('refuses a param the current source does not have', () => {
+    // `paramApplies` is a gate on the SEAM and not only on the pane: an FM row
+    // written onto a sampler would widen the preset with a field `Voice` never
+    // reads, and the caller would be told nothing.
+    const tracks = twoTracks();
+    expect(trackVoicePreset(tracks[0]).source.kind).toBe('sampler');
+
+    const wrongKind = setTrackVoiceParam(tracks[0].id, 'source.params.harmonicity', 2);
+    expect(wrongKind).toEqual({ ok: false, reason: expect.stringContaining('source') });
+    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.params')).toBeUndefined();
+
+    // Switch, and the same write is now accepted — an encoder takes any finite
+    // number, because Tone publishes no bound for harmonicity.
+    setTrackVoiceParam(tracks[0].id, 'source.kind', 'fm-synth');
+    expect(setTrackVoiceParam(tracks[0].id, 'source.params.harmonicity', 12.5)).toEqual({
+      ok: true,
+      value: undefined,
+    });
+    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.params.harmonicity')).toBe(12.5);
+    // …and still refuses a non-number, which is the only thing an encoder checks.
+    expect(setTrackVoiceParam(tracks[0].id, 'source.params.harmonicity', 'more')).toEqual({
+      ok: false,
+      reason: expect.stringContaining('number'),
+    });
+  });
+
+  it('refuses a source kind that is not one of the three', () => {
+    const tracks = twoTracks();
+    // `'toString'` rather than `'nonsense'`: an `in` check on the kind table
+    // would answer yes to it through the prototype chain, and the seam would
+    // then hand `defaultSourceFor` a kind its switch has no case for.
+    for (const bogus of ['wavetable', 'toString', 7]) {
+      expect(setTrackVoiceParam(tracks[0].id, 'source.kind', bogus)).toEqual({
+        ok: false,
+        reason: expect.stringContaining('options'),
+      });
+    }
+    expect(trackVoicePreset(getTracks()[0]).source.kind).toBe('sampler');
   });
 });
 
@@ -492,7 +555,7 @@ describe('the rack in a lane', () => {
         screen.getByRole('button', { name: `Voice rack for ${track.name}` }),
       ).toBeInTheDocument();
       // Every stage of every track is its own landmark, named for the track.
-      for (const section of ['Samples', 'Amp', 'Cabinet', 'Level']) {
+      for (const section of ['Source', 'Amp', 'Cabinet', 'Level']) {
         expect(
           screen.getByRole('region', { name: `${track.name} ${section}` }),
         ).toBeInTheDocument();
@@ -564,6 +627,59 @@ describe('the rack in a lane', () => {
     // way of calling `addTrackVoiceSection` rather than a second authority on
     // what an amp starts as.
     expect(getAtPath(trackVoicePreset(getTracks()[0]), 'effects.amp.preDrive')).toBe(0.3);
+  });
+
+  it('shows the same Source rows the pattern pane does, and switches from them', async () => {
+    // The two editors render one table, and they have drifted before — that is
+    // why `DEFAULT_OPEN_SECTIONS` lives in the schema. So the composition side
+    // gets the same three assertions the pane's own test makes: the section is
+    // there on every voice, only the current kind's rows are, and the picker
+    // replaces the whole branch rather than the discriminant.
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+    openStage(tracks[0], 'Source');
+
+    const source = stage(tracks[0], 'Source');
+    expect((source.getByLabelText('Source') as HTMLSelectElement).value).toBe('sampler');
+    expect(source.getByLabelText('Pack')).toBeInTheDocument();
+    expect(source.queryByRole('spinbutton', { name: 'Resonance' })).toBeNull();
+
+    await user.selectOptions(source.getByLabelText('Source'), 'pluck-synth');
+
+    const swapped = trackVoicePreset(getTracks()[0]).source;
+    expect(swapped.kind).toBe('pluck-synth');
+    expect(Object.keys(swapped).sort()).toEqual(['kind', 'params']);
+
+    const after = stage(getTracks()[0], 'Source');
+    // Bounded rows draw as knobs on a rack face; unbounded ones as encoders.
+    expect(after.getByRole('slider', { name: 'Attack noise' })).toBeInTheDocument();
+    expect(after.getByRole('spinbutton', { name: 'Resonance' })).toBeInTheDocument();
+    expect(after.queryByLabelText('Pack')).toBeNull();
+    // The other rack is still a sampler and still not dirty.
+    expect(trackVoicePreset(getTracks()[1]).source.kind).toBe('sampler');
+    expect(isTrackVoiceDirty(getTracks()[1])).toBe(false);
+  });
+
+  it('turns an encoder on one rack and the value reaches the draft', () => {
+    // Same silent-failure guard as the pane's: an encoder is a `role="spinbutton"`
+    // `<div>` with no form value, so only the draft can say the write landed.
+    const tracks = twoTracks();
+    setTrackVoiceParam(tracks[0].id, 'source.kind', 'pluck-synth');
+    render(<VoiceGrid />);
+    openStage(getTracks()[0], 'Source');
+
+    const dial = stage(getTracks()[0], 'Source').getByRole('spinbutton', { name: 'Resonance' });
+    const before = getAtPath(trackVoicePreset(getTracks()[0]), 'source.params.resonance') as number;
+    fireEvent.keyDown(dial, { key: 'ArrowUp' });
+
+    // One arrow key is one `step`, and the step is the SCHEMA's — the rack knows
+    // no increments of its own.
+    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.params.resonance')).toBeCloseTo(
+      before + 0.01,
+      6,
+    );
+    expect(isTrackVoiceDirty(getTracks()[1])).toBe(false);
   });
 
   it('turns a knob on one rack without moving the other', () => {
@@ -841,7 +957,7 @@ describe('the stages stack, and the row fits them', () => {
 
     // Unfolding the LAST folded stage reports an empty list, and empty is not
     // the same as absent: absent means "nobody has touched this rack" and opens
-    // on the default. Dropping the empty one would re-fold Samples and Level the
+    // on the default. Dropping the empty one would re-fold Source and Level the
     // moment the user finished opening them.
     for (const id of DEFAULT_FOLDED) {
       const label = PARAM_SECTIONS.find((section) => section.id === id)?.label;

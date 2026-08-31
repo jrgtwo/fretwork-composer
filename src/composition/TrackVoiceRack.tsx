@@ -94,6 +94,7 @@ import {
   PARAM_SECTIONS,
   enabledParamOf,
   sectionPresence,
+  visibleParams,
   type EnumParam,
   type Param,
   type ParamSection,
@@ -116,6 +117,7 @@ import { CabinetGraphic } from '../voice/rack/CabinetGraphic';
 import { Knob } from '../voice/controls/Knob';
 import { ParamEnum } from '../voice/controls/ParamEnum';
 import { ParamToggle } from '../voice/controls/ParamToggle';
+import { ParamEncoder } from '../voice/controls/ParamEncoder';
 import {
   setTrackInputGainDb,
   TRACK_INPUT_GAIN_RANGE_DB,
@@ -273,6 +275,52 @@ export function TrackVoiceRack({
           />
         );
 
+      case 'encoder':
+        // No `id` for the same reason `Knob` has none: `ParamEncoder` names
+        // itself through `aria-labelledby`, so there is no `<label htmlFor>`.
+        return (
+          <ParamEncoder
+            key={param.path}
+            label={param.label}
+            size={SMALL_KNOB_PX}
+            value={typeof raw === 'number' ? raw : param.fallback}
+            step={param.step}
+            precision={param.precision}
+            unit={param.unit}
+            fallback={param.fallback}
+            onChange={(value) => write(param.path, value)}
+          />
+        );
+
+      case 'source-kind':
+        return (
+          <ParamEnum
+            key={param.path}
+            id={id}
+            label={param.label}
+            value={param.resolve(raw)}
+            options={param.options}
+            // Not the default placeholder ("Not in the registry"): there is no
+            // registry of source kinds to be missing from — an unrecognised
+            // discriminant is a stored variant this build cannot play.
+            placeholder="Unrecognised source"
+            // The seam does the branch swap — writing the discriminant alone
+            // would leave a sampler's banks beside an FM tag. See
+            // `sourceDefaults.withSourceKind`.
+            //
+            // NO PREFETCH HERE, unlike `VoicePane`, and it is the rack's existing
+            // policy rather than an oversight: the pack picker two rows down does
+            // not warm either. The pattern page's `warmSampleBanks` is a rate
+            // adapter for a `<select>` that fires per arrow key
+            // (`docs/FOLLOW-UPS.md`, permanent-adapter table); the composition
+            // path's equivalent is `VOICE_COMMIT_MS` in `TrackControls`, and its
+            // voices are built by `scheduleTrackVoiceRebuild` (LIB-GAP(19)), which
+            // is where a warm would belong so both writes get one. Cost: the first
+            // Play after switching a track to samples waits on the banks.
+            onChange={(value) => write(param.path, value)}
+          />
+        );
+
       case 'sample-pack': {
         // A preset stores note→URL maps rather than a pack id, so the active
         // entry is found by deep shape; `null` is a hand-authored map matching
@@ -345,7 +393,7 @@ export function TrackVoiceRack({
         formatValue={(v) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`}
         onChange={(value) => report(setTrackInputGainDb(track.id, value))}
       />
-      {section.params
+      {visibleParams(preset, section)
         .filter((param) => param.path !== 'inputGainDb')
         .map((param) => renderParam(section, param))}
     </div>
@@ -374,6 +422,7 @@ export function TrackVoiceRack({
    *  model the chain would really build engraved on the face. Split by `kind`,
    *  so a slider the schema gains appears as a knob without touching this. */
   const renderAmp = (section: ParamSection) => {
+    const rows = visibleParams(preset, section);
     const power = enabledParamOf(section);
     const enabled = power ? getAtPath(preset, power.path) !== false : true;
     const rawModel = getAtPath(preset, 'effects.amp.modelId');
@@ -391,11 +440,11 @@ export function TrackVoiceRack({
               : undefined
           }
         >
-          {section.params
+          {rows
             .filter((param): param is SliderParam => param.kind === 'slider')
             .map((param) => renderKnob(param, AMP_KNOB_PX))}
         </AmpHead>
-        {section.params
+        {rows
           .filter((param) => param.kind !== 'slider' && param !== power)
           .map((param) => renderParam(section, param))}
       </>
@@ -413,7 +462,8 @@ export function TrackVoiceRack({
    *  is otherwise empty, and a stage that is as tall as its own graphic reads as
    *  one piece of gear rather than as a picture with a form under it. */
   const renderCabinet = (section: ParamSection) => {
-    const cab = section.params.find(
+    const rows = visibleParams(preset, section);
+    const cab = rows.find(
       (param): param is EnumParam => param.kind === 'enum' && param.path === CAB_URL_PATH,
     );
     return (
@@ -426,13 +476,13 @@ export function TrackVoiceRack({
           />
         ) : null}
         <div className="flex min-w-[190px] flex-1 flex-col gap-1">
-          {section.params
+          {rows
             .filter((param): param is SliderParam => param.kind === 'slider')
             .map((param) => renderKnob(param, SMALL_KNOB_PX))}
           {/* The cabinet `<select>` is deliberately still here alongside the
               dot: it is the text-level route to the same value and the only
               place the registry's description of a capture can be read. */}
-          {section.params
+          {rows
             .filter((param) => param.kind !== 'slider')
             .map((param) => renderParam(section, param))}
         </div>
@@ -475,12 +525,10 @@ export function TrackVoiceRack({
         )}
       >
         {presence === 'absent' ? (
+          /* Only a removable stage can be absent: Source and Level both have a
+             null probe, so they apply to every preset there is. */
           <p className="max-w-[26ch] font-mono text-[8.5px] leading-snug text-ink-mut">
-            {section.removableBranch
-              ? `No ${section.label.toLowerCase()} stage on this voice.`
-              : /* Samples has no removable branch: a non-sampler source is a
-                   pluck synth, and synth params are a later slice. */
-                'This voice is not sampler-based.'}
+            {`No ${section.label.toLowerCase()} stage on this voice.`}
           </p>
         ) : section.id === 'amp' ? (
           renderAmp(section)
@@ -490,7 +538,7 @@ export function TrackVoiceRack({
           renderLevel(section)
         ) : (
           <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
-            {section.params.map((param) => renderParam(section, param))}
+            {visibleParams(preset, section).map((param) => renderParam(section, param))}
           </div>
         )}
       </Section>

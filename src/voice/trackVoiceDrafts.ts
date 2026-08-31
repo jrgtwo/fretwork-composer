@@ -48,8 +48,15 @@ import {
   useTrackVoicePreset,
   voiceKey,
 } from './voiceService';
-import { PARAM_SECTIONS, sectionApplies, type Param, type SectionId } from './paramSchema';
+import {
+  PARAM_SECTIONS,
+  paramApplies,
+  sectionApplies,
+  type Param,
+  type SectionId,
+} from './paramSchema';
 import { removeAtPath, setAtPath } from './presetPaths';
+import { isSourceKind, withSourceKind } from './sourceDefaults';
 
 /** One track's unsaved edit, and the voice choice it is an edit OF. */
 interface TrackVoiceDraft {
@@ -226,6 +233,15 @@ const PARAM_BY_PATH: ReadonlyMap<string, Param> = new Map(
  * in the preset. The preset stores the maps (which is why reading the selection
  * back needs the lib's `detectSamplePack`), but a caller naming one by hand
  * would be authoring a sample map, and the registry is the addressable thing.
+ *
+ * A `source-kind` param takes a kind and replaces the WHOLE `source` branch, for
+ * the reason `sourceDefaults` documents: writing the discriminant alone produces
+ * an object matching no arm of `VoiceSource`. It is also the only param here
+ * whose write is not a `setAtPath` of the value it was handed.
+ *
+ * An `encoder` param is range-checked only for finiteness. That is the point of
+ * the control: Tone publishes no bound for those fields, so refusing a value
+ * would be enforcing a fence this app invented — see `paramSchema`'s header.
  */
 export function setTrackVoiceParam(
   trackId: string,
@@ -239,6 +255,16 @@ export function setTrackVoiceParam(
   if (!param) return { ok: false, reason: `“${path}” is not an editable voice parameter.` };
 
   const preset = trackVoicePreset(track);
+
+  // A row the current source does not have is refused rather than written: an FM
+  // param on a sampler would widen the preset with a field `Voice` never reads,
+  // and an agent with no pointer is exactly the caller that would try it.
+  if (!paramApplies(preset, param)) {
+    return {
+      ok: false,
+      reason: `${param.label} is not a setting of this voice's source.`,
+    };
+  }
 
   switch (param.kind) {
     case 'slider': {
@@ -263,10 +289,22 @@ export function setTrackVoiceParam(
       }
       return commit(track, setAtPath(preset, path, value));
     }
+    case 'encoder': {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return { ok: false, reason: `${param.label} takes a number.` };
+      }
+      return commit(track, setAtPath(preset, path, value));
+    }
     case 'sample-pack': {
       const pack = typeof value === 'string' ? getSamplePack(value) : undefined;
       if (!pack) return { ok: false, reason: 'That is not a registered sample pack.' };
       return commit(track, setAtPath(preset, path, pack.samples));
+    }
+    case 'source-kind': {
+      if (!isSourceKind(value)) {
+        return { ok: false, reason: `That is not one of the ${param.label.toLowerCase()} options.` };
+      }
+      return commit(track, withSourceKind(preset, value));
     }
   }
 }
@@ -293,8 +331,26 @@ export function addTrackVoiceSection(trackId: string, sectionId: SectionId): Res
   let next = trackVoicePreset(track);
   if (sectionApplies(next, section)) return { ok: true, value: undefined };
   for (const param of section.params) {
-    if (param.optional || param.kind === 'sample-pack') continue;
-    next = setAtPath(next, param.path, param.fallback);
+    if (param.optional) continue;
+    if (!paramApplies(next, param)) continue;
+    // Exhaustive, for the reason `VoicePane.addSection` spells out: `source-kind` and
+    // `sample-pack` are the two rows whose value is not what `setAtPath(path, fallback)`
+    // would write, and a bare `source.kind: 'sampler'` is precisely the malformed union
+    // `withSourceKind` exists to prevent. The `default` makes a future `Param` kind a
+    // `tsc` failure here rather than a silent write.
+    switch (param.kind) {
+      case 'slider':
+      case 'encoder':
+      case 'enum':
+      case 'toggle':
+        next = setAtPath(next, param.path, param.fallback);
+        break;
+      case 'sample-pack':
+      case 'source-kind':
+        break;
+      default:
+        param satisfies never;
+    }
   }
   return commit(track, next);
 }

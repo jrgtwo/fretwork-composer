@@ -18,10 +18,18 @@
  *
  * KNOWN, accepted: a value outside `[min, max]` renders the thumb pinned to the bound
  * while the readout shows the true number, and the first drag snaps it into range.
- * `paramSchema.test.ts` walks every shipped preset against every declared range, so
- * nothing built-in reaches it — only a variant authored by guitar-tutor's Sound Lab,
- * whose fader ranges differ from ours, could. Clamping the readout would hide the fact
- * that the preset holds a value this editor cannot represent, which is worse.
+ * Clamping the readout would hide the fact that the preset holds a value this editor
+ * cannot represent, which is worse.
+ *
+ * ⚠ THIS IS NOT AN EDGE CASE ANY MORE, and the header used to claim it was. Ten of the
+ * fourteen built-ins hold a `source.release` outside the 0–1 s that `classes/Sampler.html`
+ * documents — 1.5 to 2.8 s — so on every one of them the Release row draws pinned at 1
+ * and reads `2.50 s`. They are listed in `STALE_PRESET_VALUES` in
+ * `src/voice/paramSchema.test.ts`, and they are stale PRESET data (the lib is out of
+ * bounds for this app), not a wrong bound. Two consequences to expect until they are
+ * retuned: the first arrow key on that row jumps 2.5 s → 1 s in one press, and a click on
+ * the far right of the track emits nothing at all, because the DOM has already clamped
+ * the input's value to `max` and React's value tracker sees no change.
  */
 export function ParamSlider({
   id,

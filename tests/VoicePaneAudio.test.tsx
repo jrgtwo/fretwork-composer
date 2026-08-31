@@ -142,6 +142,36 @@ describe('VoicePane → playbackService', () => {
     expect(refreshed).toHaveBeenCalledTimes(1);
   });
 
+  it('hands the swapped source to the engine, not just to the working copy', async () => {
+    // The brief's own requirement, and the one `VoicePane.test.tsx` structurally cannot
+    // meet: it asserts the object given to `onWorkingChange`. Those are the same object
+    // in today's `commit`, but nothing pins that — delete `applyVoicePreset(next)` from
+    // `commit` and the whole Source panel goes silent while every assertion over there
+    // still passes. A control that writes a value nothing listens to is invisible from
+    // the store's side.
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve()));
+    render(<Host />);
+    await userEvent.click(screen.getByRole('button', { name: 'Source' }));
+
+    await userEvent.selectOptions(screen.getByLabelText('Source'), 'fm-synth');
+
+    expect(applied).toHaveBeenCalledTimes(1);
+    const pushed = applied.mock.calls[0][0];
+    // The WHOLE branch, not the discriminant: `source.kind = 'fm-synth'` beside a
+    // sampler's `samples` matches no arm of `VoiceSource`, and it is `Voice` — reached
+    // only through this seam — that would read `params` off it and get `undefined`.
+    expect(pushed?.source.kind).toBe('fm-synth');
+    expect(Object.keys(pushed?.source ?? {}).sort()).toEqual(['kind', 'params']);
+
+    // And an ordinary row inside the new source travels the same way.
+    fireEvent.keyDown(screen.getByRole('spinbutton', { name: 'Harmonicity' }), { key: 'ArrowUp' });
+    expect(applied).toHaveBeenCalledTimes(2);
+    const turned = applied.mock.calls[1][0];
+    expect(turned?.source.kind).toBe('fm-synth');
+    if (turned?.source.kind !== 'fm-synth') throw new Error('unreachable');
+    expect(turned.source.params.harmonicity).toBeCloseTo(3.05, 6);
+  });
+
   it('warms the voice on every hover, because the voice underneath changes', async () => {
     // LIB-GAP(3d): nothing can await the sampler, so hovering is the only pre-roll the
     // first audition gets. A once-per-mount guard makes every voice after the first
