@@ -47,11 +47,10 @@ import { getAtPath, hasPath, removeAtPath, setAtPath } from './presetPaths';
  *
  * 2. When a preset value falls outside a declared range, the RANGE used to be
  *    what was wrong. It is not any more. Every bound in `paramSchema` is cited to
- *    a page on Tone's documentation site; the fourteen shipped presets are
- *    preselected settings stored in the lib, which this app must not edit. So an
- *    out-of-range built-in is a STALE PRESET, it goes on `STALE_PRESET_VALUES`
- *    with its exact value, and the follow-up slice retunes it. Widening a range
- *    to admit one is the specific mistake that list exists to prevent.
+ *    a page on Tone's documentation site, so an out-of-range preset is the PRESET
+ *    being wrong and gets retuned in the lib. Widening a range to admit one is the
+ *    specific mistake to avoid. Ten sampler presets were retuned on 2026-08-31 for
+ *    exactly this reason; the allow-list that carried them in the meantime is gone.
  *
  * The built-ins alone are not enough either: no shipped preset sets `enabled`,
  * `inputGainDb` or most other optional fields, so a typo in one of those paths is
@@ -239,55 +238,6 @@ const ADSR_LEAVES: Record<
   true
 > = { attack: true, decay: true, sustain: true, release: true };
 
-/**
- * LIB-GAP(24) — ⚠ SHIPPED PRESETS THAT NO LONGER FIT THEIR OWN CONTROL, and the
- * follow-up slice's worklist.
- *
- * Tagged, and rowed in `docs/FOLLOW-UPS.md` under "Lib gaps we are masking",
- * because that is what this is: a workaround for stale data in `@fretwork/lib`
- * that must not calcify. DELETE WHEN the ten sampler presets carry a
- * `source.release` of 1 s or less — at which point every entry below stops
- * matching and the list empties itself.
- *
- * Each entry is a value stored in `@fretwork/lib`'s preset table that sits outside
- * the range Tone documents for the node it configures. The presets are out of
- * date; the ranges are not. They cannot be fixed from here — the lib is out of
- * bounds for this app — so the range check skips exactly these, by preset id AND
- * path AND exact value. Change the value in the lib and the allowance stops
- * matching, which is the point: an updated preset either comes into range (and the
- * entry is then reported as unnecessary by the test below) or fails loudly.
- *
- * ALL TEN are `source.release` on a sampler. `classes/Sampler.html` publishes
- * `Min: 0` / `Max: 1`; the shipped samplers carry 1.5 to 2.8, which the old
- * Sound-Lab-derived range of 0.1–4 admitted. Nothing else in the table is
- * out of range — the pluck preset's `attackNoise: 1.5` and `dampening: 6000` are
- * both comfortably inside Tone's documented bounds, and every FM envelope value
- * ships well inside its own.
- */
-interface StalePresetValue {
-  readonly presetId: string;
-  readonly path: string;
-  readonly value: number;
-}
-
-const STALE_PRESET_VALUES: readonly StalePresetValue[] = [
-  { presetId: 'acoustic-guitar', path: 'source.release', value: 2.5 },
-  { presetId: 'karoryfer-green-guitar', path: 'source.release', value: 2.5 },
-  { presetId: 'karoryfer-black-guitar', path: 'source.release', value: 2.5 },
-  { presetId: 'clean-amp', path: 'source.release', value: 2.5 },
-  { presetId: 'blues-amp', path: 'source.release', value: 2.2 },
-  { presetId: 'crunch-amp', path: 'source.release', value: 2.0 },
-  { presetId: 'lead-amp', path: 'source.release', value: 2.5 },
-  { presetId: 'metal-amp', path: 'source.release', value: 1.5 },
-  { presetId: 'surf-amp', path: 'source.release', value: 2.5 },
-  { presetId: 'ambient-amp', path: 'source.release', value: 2.8 },
-];
-
-const isStale = (preset: VoicePreset, path: string, value: number): boolean =>
-  STALE_PRESET_VALUES.some(
-    (stale) => stale.presetId === preset.id && stale.path === path && stale.value === value,
-  );
-
 /** Every violation is reported as a string so a failure lists all of them at once
  *  instead of stopping at the first. */
 function violationsFor(preset: VoicePreset, param: Param): readonly string[] {
@@ -307,7 +257,6 @@ function violationsFor(preset: VoicePreset, param: Param): readonly string[] {
   switch (param.kind) {
     case 'slider':
       if (typeof value !== 'number') return [`${at}: expected a number, got ${typeof value}`];
-      if (isStale(preset, param.path, value)) return [];
       if (value < param.min || value > param.max) {
         return [`${at}: ${value} is outside the declared range ${param.min}..${param.max}`];
       }
@@ -429,22 +378,6 @@ describe('violationsFor itself', () => {
     expect(harmonicity.optional).toBeUndefined();
   });
 
-  it('allows a stale value only on that preset, at that path, at that exact value', () => {
-    // The allowance is not a hole in the range check for everyone else.
-    const release = paramAt('source.release');
-    if (release.kind !== 'slider') throw new Error('source.release is no longer a slider');
-    const stale = STALE_PRESET_VALUES[0];
-    const real = VOICE_PRESETS.find((preset) => preset.id === stale.presetId);
-    if (!real) throw new Error(`${stale.presetId} is no longer a built-in`);
-    expect(violationsFor(real, release)).toEqual([]);
-
-    // Same value, a preset the list does not name.
-    const impostor = setAtPath(FULLY_POPULATED_SAMPLER, 'source.release', stale.value);
-    expect(only(impostor, 'source.release')).toContain('outside the declared range');
-    // The named preset, a value the list does not name.
-    const moved = setAtPath(real, 'source.release', stale.value + 0.1);
-    expect(only(moved, 'source.release')).toContain('outside the declared range');
-  });
 });
 
 /**
@@ -466,8 +399,8 @@ describe('documented bounds', () => {
 
   it('takes the sampler`s release from classes/Sampler.html', () => {
     // https://tonejs.github.io/docs/15.1.22/classes/Sampler.html — `release` Min: 0,
-    // Max: 1. Widening this to fit the ten stale built-ins is the specific mistake
-    // `STALE_PRESET_VALUES` exists to prevent.
+    // Max: 1. The ten sampler presets were retuned to 1.0 to fit this rather than
+    // the range being widened to fit them.
     expect(bounds('source.release')).toEqual({ min: 0, max: 1 });
   });
 
@@ -583,53 +516,6 @@ describe('schema vs. every built-in VoicePreset', () => {
     const withCab = VOICE_PRESETS.filter((p) => sectionApplies(p, sectionAt('cabinet')));
     expect(withCab.some((p) => hasPath(p, makeupDb))).toBe(true);
     expect(withCab.some((p) => !hasPath(p, makeupDb))).toBe(true);
-  });
-});
-
-describe('stale built-in values', () => {
-  it('names a real preset, at that exact value, still out of range', () => {
-    // The self-cleaning half. Retune one of these in the lib and its allowance
-    // stops matching, so the entry has to be removed rather than lingering as a
-    // permanent hole in the range check.
-    const problems: string[] = [];
-    for (const stale of STALE_PRESET_VALUES) {
-      const preset = VOICE_PRESETS.find((p) => p.id === stale.presetId);
-      if (!preset) {
-        problems.push(`${stale.presetId}: no such built-in — drop the allowance`);
-        continue;
-      }
-      const param = paramAt(stale.path);
-      if (param.kind !== 'slider') {
-        problems.push(`${stale.path}: allowances only apply to bounded rows`);
-        continue;
-      }
-      const value = getAtPath(preset, stale.path);
-      if (value !== stale.value) {
-        problems.push(
-          `${stale.presetId} @ ${stale.path}: now ${String(value)}, not ${stale.value} — re-check the allowance`,
-        );
-        continue;
-      }
-      if (value >= param.min && value <= param.max) {
-        problems.push(`${stale.presetId} @ ${stale.path}: back in range — drop the allowance`);
-      }
-    }
-    expect(problems).toEqual([]);
-  });
-
-  it('is the only thing standing between those presets and a failure', () => {
-    // Mutation-proofing for the allow-list itself: with it emptied, the loop over
-    // the built-ins must fail. Otherwise the list is decoration and a future
-    // widening of a range would go unnoticed.
-    const withoutAllowance = VOICE_PRESETS.flatMap((preset) =>
-      STALE_PRESET_VALUES.filter((stale) => stale.presetId === preset.id).map((stale) => {
-        const param = paramAt(stale.path);
-        if (param.kind !== 'slider') return `${stale.path} is not a slider`;
-        const value = getAtPath(preset, stale.path) as number;
-        return value < param.min || value > param.max ? `${preset.id} out of range` : '';
-      }),
-    ).filter(Boolean);
-    expect(withoutAllowance).toHaveLength(STALE_PRESET_VALUES.length);
   });
 });
 
