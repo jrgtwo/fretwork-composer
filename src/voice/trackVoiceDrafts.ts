@@ -52,11 +52,14 @@ import {
   PARAM_SECTIONS,
   paramApplies,
   sectionApplies,
+  subBranchApplies,
   type Param,
+  type ParamSection,
+  type ParamSubBranch,
   type SectionId,
 } from './paramSchema';
 import { removeAtPath, setAtPath } from './presetPaths';
-import { isSourceKind, withSourceKind } from './sourceDefaults';
+import { isSourceKind, withLayerSourceKind, withSourceKind } from './sourceDefaults';
 
 /** One track's unsaved edit, and the voice choice it is an edit OF. */
 interface TrackVoiceDraft {
@@ -239,9 +242,13 @@ const PARAM_BY_PATH: ReadonlyMap<string, Param> = new Map(
  * an object matching no arm of `VoiceSource`. It is also the only param here
  * whose write is not a `setAtPath` of the value it was handed.
  *
- * An `encoder` param is range-checked only for finiteness. That is the point of
- * the control: Tone publishes no bound for those fields, so refusing a value
- * would be enforcing a fence this app invented — see `paramSchema`'s header.
+ * An `encoder` param is range-checked only for finiteness, and for a `floor`
+ * where the row declares one. That is the point of the control: Tone publishes no
+ * bound for those fields, so refusing a value would be enforcing a fence this app
+ * invented — see `paramSchema`'s header. The exception is narrow and is named at
+ * each row: a frequency of zero is not a quiet setting, it is a track that plays
+ * silence with every control reading normally, and this caller has no ear on the
+ * result. See `EncoderParam.floor`.
  */
 export function setTrackVoiceParam(
   trackId: string,
@@ -277,6 +284,12 @@ export function setTrackVoiceParam(
           reason: `${param.label} is ${param.min} to ${param.max}${param.unit ? ` ${param.unit}` : ''}.`,
         };
       }
+      // Only where the FIELD is integral, never merely because the fader's step
+      // is: a step is a detent, and refusing 3.7 dB on a half-decibel fader would
+      // be inventing a grid the preset does not have. See `SliderParam.integral`.
+      if (param.integral && !Number.isInteger(value)) {
+        return { ok: false, reason: `${param.label} is a whole number.` };
+      }
       return commit(track, setAtPath(preset, path, value));
     }
     case 'toggle': {
@@ -292,6 +305,12 @@ export function setTrackVoiceParam(
     case 'encoder': {
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         return { ok: false, reason: `${param.label} takes a number.` };
+      }
+      if (param.floor !== undefined && value < param.floor) {
+        return {
+          ok: false,
+          reason: `${param.label} is ${param.floor}${param.unit ? ` ${param.unit}` : ''} or more.`,
+        };
       }
       return commit(track, setAtPath(preset, path, value));
     }
@@ -370,6 +389,113 @@ export function removeTrackVoiceSection(trackId: string, sectionId: SectionId): 
     return { ok: false, reason: `${section.label} cannot be removed from a voice.` };
   }
   return commit(track, removeAtPath(trackVoicePreset(track), section.removableBranch));
+}
+
+/**
+ * The section that declares `subBranchId`, and the sub-branch itself.
+ *
+ * Looked up rather than passed, for the reason `sectionById` is: a caller names
+ * a branch the schema knows, so an id the table no longer declares is refused in
+ * words instead of writing a path nothing renders.
+ */
+function subBranchById(
+  id: string,
+): { section: ParamSection; sub: ParamSubBranch } | undefined {
+  for (const section of PARAM_SECTIONS) {
+    if (section.subBranch?.id === id) return { section, sub: section.subBranch };
+  }
+  return undefined;
+}
+
+/**
+ * Add one nested optional branch — the second source, or the body filter's
+ * cutoff envelope.
+ *
+ * Path-addressed rather than `SectionId`-keyed, because a sub-branch is not a
+ * section: it lives INSIDE one, has no bypass of its own, and is created in a
+ * single write from `ParamSubBranch.seed` rather than row by row from fallbacks.
+ * A `VoiceLayer` contains a whole `VoiceSource`, and no amount of row fallbacks
+ * produces one — which is the entire reason `seed` exists (see `ParamSubBranch`).
+ *
+ * ⚠ WITHOUT THIS, the second source is unreachable to any caller without a
+ * pointer: `addTrackVoiceSection` cannot name it, and every `layer.*` write is
+ * refused while the branch is absent, so a track that lacks a layer could never
+ * gain one and one that has a layer could never lose it. Every feature needs a
+ * seam the agent can call; this is the layer's.
+ *
+ * Adding what is already there is a no-op rather than a refusal — the same
+ * contract `addTrackVoiceSection` has, and the one that makes the call
+ * idempotent for a caller that cannot see the rack.
+ */
+export function addTrackVoiceSubBranch(trackId: string, subBranchId: string): Result {
+  const track = findTrack(trackId);
+  if (!track) return { ok: false, reason: 'No such track.' };
+  const found = subBranchById(subBranchId);
+  if (!found) return { ok: false, reason: `“${subBranchId}” is not a voice sub-branch.` };
+
+  const preset = trackVoicePreset(track);
+  if (subBranchApplies(preset, found.sub)) return { ok: true, value: undefined };
+  return commit(track, setAtPath(preset, found.sub.branch, found.sub.seed(preset)));
+}
+
+/**
+ * Delete one nested optional branch, tuning and all.
+ *
+ * ABSENT, not bypassed, and a sub-branch has no third state to offer: it has no
+ * `enabled` flag, so this is the only way back and it throws the branch's
+ * settings away. `VoicePane`'s Remove says the same thing in words.
+ */
+export function removeTrackVoiceSubBranch(trackId: string, subBranchId: string): Result {
+  const track = findTrack(trackId);
+  if (!track) return { ok: false, reason: 'No such track.' };
+  const found = subBranchById(subBranchId);
+  if (!found) return { ok: false, reason: `“${subBranchId}” is not a voice sub-branch.` };
+  return commit(track, removeAtPath(trackVoicePreset(track), found.sub.branch));
+}
+
+/**
+ * Re-kind a sub-branch's source — today, the second source's.
+ *
+ * ⚠ NOT REACHABLE THROUGH {@link setTrackVoiceParam}, and deliberately so. That
+ * function resolves a `source-kind` row through `withSourceKind`, which takes no
+ * path and always replaces `preset.source`; a `layer.source.kind` row sitting in
+ * `PARAM_BY_PATH` would therefore let any caller ask to re-kind the SECOND source
+ * and silently re-kind the primary instead. Keeping the layer's picker on
+ * `ParamSubBranch.kindRow` keeps it out of that map, and this is the branch-aware
+ * write it needs — `VoicePane.renderSubBranchKind` is the same call.
+ *
+ * `withLayerSourceKind` by name rather than a generic branch write, for the same
+ * reason `VoicePane` uses it: the value's SHAPE is the point, and a typed spread
+ * is checked where a dotted path is not. The layer is the only sub-branch with a
+ * `kindRow` today and `paramSchema.test.ts` fails the day a second one appears
+ * without its own swap, so the guard here is an assertion of that, not a
+ * limitation this function invented.
+ */
+export function setTrackVoiceSubBranchKind(
+  trackId: string,
+  subBranchId: string,
+  kind: unknown,
+): Result {
+  const track = findTrack(trackId);
+  if (!track) return { ok: false, reason: 'No such track.' };
+  const found = subBranchById(subBranchId);
+  if (!found?.sub.kindRow) {
+    return { ok: false, reason: `“${subBranchId}” has no source of its own.` };
+  }
+  if (found.sub.id !== 'layer') {
+    return { ok: false, reason: `${found.sub.label} has no branch-aware source swap yet.` };
+  }
+  if (!isSourceKind(kind) || !found.sub.kindRow.options.some((o) => o.value === kind)) {
+    return { ok: false, reason: `That is not one of the ${found.sub.label.toLowerCase()} kinds.` };
+  }
+  const preset = trackVoicePreset(track);
+  // Refused rather than silently creating one: `withLayerSourceKind` returns the
+  // preset untouched when there is no layer, so without this the call would
+  // report success and change nothing.
+  if (!subBranchApplies(preset, found.sub)) {
+    return { ok: false, reason: `This voice has no ${found.sub.label.toLowerCase()}.` };
+  }
+  return commit(track, withLayerSourceKind(preset, kind));
 }
 
 /**

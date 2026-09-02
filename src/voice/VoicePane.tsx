@@ -53,17 +53,21 @@ import {
 } from './voiceService';
 import {
   PARAM_SECTIONS,
+  branchParams,
   enabledParamOf,
+  ownParams,
   paramApplies,
   sectionPresence,
-  visibleParams,
+  subBranchApplies,
   type EnumParam,
   type Param,
   type ParamSection,
+  type ParamSubBranch,
   type SectionId,
   type SliderParam,
+  type SourceKindParam,
 } from './paramSchema';
-import { isSourceKind, withSourceKind } from './sourceDefaults';
+import { isSourceKind, withLayerSourceKind, withSourceKind } from './sourceDefaults';
 import { getAtPath, removeAtPath, setAtPath } from './presetPaths';
 import { VoiceSection, type SectionStatus } from './VoiceSection';
 import { ParamSlider } from './controls/ParamSlider';
@@ -420,9 +424,43 @@ function VoiceEditor({
     commit(removeAtPath(preset, section.removableBranch));
   };
 
-  const renderParam = (section: ParamSection, param: Param) => {
+  /**
+   * A sub-branch is created in ONE write, from the seed on its descriptor —
+   * unlike `addSection`, which builds a section out of its rows' fallbacks.
+   *
+   * That difference is the whole reason `ParamSubBranch` exists: a `VoiceLayer`
+   * contains a `VoiceSource`, and no row fallback can produce one (the
+   * `source-kind` case above is precisely the row `addSection` has to skip). A
+   * layer seeded the row-by-row way would be `{ gainDb, octaveOffset }` with no
+   * source at all, which is what `Voice._buildLayer` would hand to `buildSynth`.
+   */
+  const addSubBranch = (sub: ParamSubBranch) =>
+    // `sub.seed(preset)`, not a constant: a layer's mix level is only meaningful
+    // relative to the primary it is about to sit under, and the primary's
+    // calibration trim differs by source kind. See `sourceDefaults.seedLayerFor`.
+    commit(setAtPath(preset, sub.branch, sub.seed(preset)));
+
+  /** Absent, not bypassed: a sub-branch has no `enabled` flag — you have one or
+   *  you don't — so this throws the tuning away, and the Add beside it says so. */
+  const removeSubBranch = (sub: ParamSubBranch) => commit(removeAtPath(preset, sub.branch));
+
+  /**
+   * One row of the table.
+   *
+   * `nameScope` prefixes the ACCESSIBLE name (never the engraving, which has a
+   * 74 px column to live in). Passed for a sub-branch's rows, because those are
+   * the primary's own descriptors generated under a second branch: an FM voice
+   * with an FM layer puts two "Harmonicity" spinbuttons, two "Env attack"
+   * sliders and two "Carrier" selects in one pane. The enclosing `role="group"`
+   * does NOT name them — a group's name is announced on entry, not folded into a
+   * descendant's accessible name — so the override is the only thing that tells
+   * them apart to a listener. `ParamToggle` already does exactly this for the
+   * stages' identically named bypasses.
+   */
+  const renderParam = (section: ParamSection, param: Param, nameScope?: string) => {
     const raw = getAtPath(preset, param.path);
     const id = domId(param.path);
+    const scoped = (label: string) => (nameScope ? `${nameScope} ${label}` : undefined);
 
     switch (param.kind) {
       case 'slider':
@@ -431,6 +469,7 @@ function VoiceEditor({
             key={param.path}
             id={id}
             label={param.label}
+            ariaLabel={scoped(param.label)}
             value={typeof raw === 'number' ? raw : param.fallback}
             min={param.min}
             max={param.max}
@@ -452,7 +491,7 @@ function VoiceEditor({
             // accessibility tree at once. Same problem, same answer as the Add/Remove
             // buttons below: the name carries the stage, the visible label stays short
             // because the label column is 74px wide.
-            ariaLabel={`${section.label} ${param.label}`}
+            ariaLabel={scoped(param.label) ?? `${section.label} ${param.label}`}
             value={typeof raw === 'boolean' ? raw : param.fallback}
             onChange={(value) => commit(setAtPath(preset, param.path, value))}
           />
@@ -464,6 +503,7 @@ function VoiceEditor({
             key={param.path}
             id={id}
             label={param.label}
+            ariaLabel={scoped(param.label)}
             value={param.resolve(raw)}
             options={param.options}
             badgeOf={param.badgeOf}
@@ -476,6 +516,7 @@ function VoiceEditor({
           <ParamEncoder
             key={param.path}
             label={param.label}
+            ariaLabel={scoped(param.label)}
             value={typeof raw === 'number' ? raw : param.fallback}
             step={param.step}
             precision={param.precision}
@@ -544,6 +585,111 @@ function VoiceEditor({
   };
 
   /**
+   * The sub-branch's source picker.
+   *
+   * NOT `renderParam`'s `source-kind` case, and the difference is the write:
+   * that one calls `withSourceKind`, which always replaces `preset.source`. The
+   * only sub-branch carrying a `kindRow` today is the layer, so the branch-aware
+   * swap it needs is `withLayerSourceKind` — named for its branch rather than
+   * parameterised by one, because the value's SHAPE is the point and a typed
+   * spread is checked where a dotted path is not. A second `kindRow` would need
+   * its own; `paramSchema.test.ts` fails the day one appears without it.
+   */
+  const renderSubBranchKind = (row: SourceKindParam, nameScope: string) => (
+    <ParamEnum
+      key={row.path}
+      id={domId(row.path)}
+      label={row.label}
+      // "Source" is also the primary's picker's label, and both are in the Source
+      // stage at once — see `renderParam`'s note on why the group does not name it.
+      ariaLabel={`${nameScope} ${row.label}`}
+      value={row.resolve(getAtPath(preset, row.path))}
+      options={row.options}
+      // A stored kind the picker does not offer resolves fine and simply has no
+      // option — `ParamEnum` shows this instead of silently selecting the first
+      // entry. See `LAYER_SUB_BRANCH` for which kinds a layer is offered and why.
+      placeholder="Not offered here"
+      onChange={(next) => {
+        if (!isSourceKind(next)) return;
+        commit(withLayerSourceKind(preset, next));
+      }}
+    />
+  );
+
+  /**
+   * An optional branch nested inside a stage — the second source, and the body
+   * filter's cutoff envelope.
+   *
+   * Drawn INSIDE its section rather than as a section of its own, which is the
+   * shape the user asked for and the shape the thing is: a layer is part of what
+   * makes the sound and has no bypass, and an envelope is part of the filter it
+   * sweeps. `role="group"` with the sub-branch's own name is what carries that
+   * containment to a screen reader.
+   *
+   * ⚠ THE GROUP'S NAME IS NOT WHAT TELLS THE LAYER'S "HARMONICITY" FROM THE
+   * PRIMARY'S — an earlier version of this comment claimed it was. A group's
+   * accessible name is announced on ENTERING it and does not contribute to any
+   * descendant's own name, so on an FM voice with an FM layer a listener reading
+   * the controls hears "Harmonicity" twice with nothing between them. The rows
+   * are therefore rendered with `sub.label` as their name scope; the group stays
+   * for the containment it does express.
+   */
+  const renderSubBranch = (section: ParamSection) => {
+    const sub = section.subBranch;
+    if (!sub) return null;
+    const present = subBranchApplies(preset, sub);
+    const kind = sub.kindRow ? sub.kindRow.resolve(getAtPath(preset, sub.kindRow.path)) : null;
+    const offered = sub.kindRow?.options.some((option) => option.value === kind) ?? true;
+
+    return (
+      <div role="group" aria-label={sub.label} className="tray flex flex-col gap-1 rounded-lg p-1.5">
+        <div className="flex items-center gap-1.5">
+          <span className={voiceLabelClass}>{sub.label}</span>
+          <span className="flex-1" />
+          <button
+            type="button"
+            // Two sub-branches can be on screen at once and both buttons say
+            // "Add" — the name carries which, exactly as the stage buttons do.
+            aria-label={`${present ? 'Remove' : 'Add'} ${sub.label}`}
+            onClick={() => (present ? removeSubBranch(sub) : addSubBranch(sub))}
+            className={voiceButtonClass}
+          >
+            {present ? 'Remove' : 'Add'}
+          </button>
+        </div>
+
+        {present ? (
+          <>
+            {sub.kindRow ? renderSubBranchKind(sub.kindRow, sub.label) : null}
+            {branchParams(preset, section).map((param) =>
+              renderParam(section, param, sub.label),
+            )}
+            {sub.id === 'body-filter-envelope' ? (
+              <p className="font-mono text-[9px] leading-snug text-ink-mut">
+                While this is here the envelope drives the cutoff, so the stage’s static
+                Cutoff is put away — its value is kept and comes back if you remove this.
+              </p>
+            ) : null}
+            {kind !== null && !offered ? (
+              <p className="font-mono text-[9px] leading-snug text-ink-mut">
+                This second source is a kind the editor does not offer for a layer, so its own
+                settings are not shown. Its mix and octave are still yours; picking a kind above
+                replaces it.
+              </p>
+            ) : null}
+          </>
+        ) : (
+          <p className="font-mono text-[9px] leading-snug text-ink-mut">
+            {sub.id === 'layer'
+              ? 'No second source. Adding one mixes a quiet synth under every note, which you can then tune, transpose or remove.'
+              : 'No cutoff envelope — the filter sits at a fixed cutoff, which is a sound of its own. Adding one sweeps the cutoff per note instead.'}
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  /**
    * The same `SliderParam`, drawn as a rotary instead of a row.
    *
    * Every number it needs still comes from the descriptor — min, max, step, the readout's
@@ -580,7 +726,11 @@ function VoiceEditor({
    * charge of what exists.
    */
   const renderAmpSection = (section: ParamSection) => {
-    const rows = visibleParams(preset, section);
+    // `ownParams`, not `visibleParams`: the generic path below already switched,
+    // and `renderSubBranch` now runs after EVERY stage body. A gear renderer that
+    // still asked for all the visible rows would draw a sub-branch's rows twice
+    // the day Amp or Cabinet gains one.
+    const rows = ownParams(preset, section);
     const power = enabledParamOf(section);
     const enabled = power ? getAtPath(preset, power.path) !== false : true;
     const rawModel = getAtPath(preset, AMP_MODEL_PATH);
@@ -620,7 +770,8 @@ function VoiceEditor({
    * registry's description of a capture is readable, which no dot can carry.
    */
   const renderCabinetSection = (section: ParamSection) => {
-    const rows = visibleParams(preset, section);
+    // `ownParams` for the reason `renderAmpSection` states.
+    const rows = ownParams(preset, section);
     const cab = rows.find(
       (param): param is EnumParam => param.kind === 'enum' && param.path === CAB_URL_PATH,
     );
@@ -835,18 +986,17 @@ function VoiceEditor({
               }
             >
               {status !== 'absent' ? (
-                // Amp and Cabinet are gear and are drawn as gear. Source and Level are
-                // not — a sample pack is a list and a fader is a fader — so they keep
-                // the descriptor-driven rows.
-                section.id === 'amp' ? (
-                  renderAmpSection(section)
-                ) : section.id === 'cabinet' ? (
-                  renderCabinetSection(section)
-                ) : (
-                  <>
-                    {visibleParams(preset, section).map((param) => renderParam(section, param))}
-                  </>
-                )
+                <>
+                  {/* Amp and Cabinet are gear and are drawn as gear. Source, Body
+                      filter and Level are not — a sample pack is a list and a fader
+                      is a fader — so they keep the descriptor-driven rows. */}
+                  {section.id === 'amp'
+                    ? renderAmpSection(section)
+                    : section.id === 'cabinet'
+                      ? renderCabinetSection(section)
+                      : ownParams(preset, section).map((param) => renderParam(section, param))}
+                  {renderSubBranch(section)}
+                </>
               ) : (
                 /* Only a removable section can be absent: Source and Level both have a
                    null probe, so `sectionApplies` is true for them on every preset. */

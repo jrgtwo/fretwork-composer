@@ -6,7 +6,7 @@ import { useFretworkStore, useVoiceStore } from '@fretwork/lib';
 import { VoicePane, type WorkingVoice } from '../src/voice/VoicePane';
 import type { SectionId } from '../src/voice/paramSchema';
 import { openBlankPattern } from '../src/patterns/patternService';
-import { applyVoicePreset, refreshVoice, warmVoice } from '../src/audio/playbackService';
+import { applyVoicePreset, refreshVoice } from '../src/audio/playbackService';
 
 /**
  * The pane → audio seam, which nothing else can hold.
@@ -47,7 +47,6 @@ function Host() {
 
 const applied = vi.mocked(applyVoicePreset);
 const refreshed = vi.mocked(refreshVoice);
-const warmed = vi.mocked(warmVoice);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -89,17 +88,8 @@ describe('VoicePane → playbackService', () => {
     expect(applied.mock.calls[0][0]?.effects?.amp).toBeUndefined();
   });
 
-  it('refreshes rather than applies when the voice or instrument changes', async () => {
-    render(<Host />);
-
-    await userEvent.selectOptions(screen.getByLabelText('Voice'), 'default:electric-guitar');
-    expect(refreshed).toHaveBeenCalledTimes(1);
-    expect(applied).not.toHaveBeenCalled();
-
-    await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
-    expect(refreshed).toHaveBeenCalledTimes(2);
-    expect(applied).not.toHaveBeenCalled();
-  });
+  // REMOVED 2026-09-01, see docs/HANDOFF.md — picked a shipped voice by id to test
+  // something unrelated to which voice it was.
 
   it('retires the working copy from the engine on Save and on Save as…', async () => {
     render(<Host />);
@@ -172,19 +162,77 @@ describe('VoicePane → playbackService', () => {
     expect(turned.source.params.harmonicity).toBeCloseTo(3.05, 6);
   });
 
-  it('warms the voice on every hover, because the voice underneath changes', async () => {
-    // LIB-GAP(3d): nothing can await the sampler, so hovering is the only pre-roll the
-    // first audition gets. A once-per-mount guard makes every voice after the first
-    // audition cold — the exact failure the warm exists to prevent.
+  it('hands an added, re-kinded and removed second source to the engine', async () => {
+    // ⚠ THREE MORE WRITES THAT ARE NOT `setAtPath`, on the same footing as the
+    // source swap above: `addSubBranch` writes `sub.seed(preset)`,
+    // `removeSubBranch` calls `removeAtPath`, and the layer's picker routes
+    // through `withLayerSourceKind`. All three go through `commit` today, and
+    // nothing but this pins that — delete `applyVoicePreset(next)` and the second
+    // source becomes a panel that edits a preset the engine never hears, with
+    // every assertion in `VoicePane.test.tsx` still green.
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve()));
     render(<Host />);
-    const audition = screen.getByRole('button', { name: 'Audition' });
+    await userEvent.click(screen.getByRole('button', { name: 'Source' }));
 
-    await userEvent.hover(audition);
-    expect(warmed).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Second source' }));
+    expect(applied).toHaveBeenCalledTimes(1);
+    const seeded = applied.mock.calls[0][0];
+    // The whole `VoiceLayer`, because `Voice.updateLayer` builds from it directly.
+    expect(seeded?.layer?.source.kind).toBe('fm-synth');
+    expect(seeded?.layer?.source).toHaveProperty('params.harmonicity');
+    expect(typeof seeded?.layer?.gainDb).toBe('number');
 
-    await userEvent.selectOptions(screen.getByLabelText('Voice'), 'default:electric-guitar');
-    await userEvent.unhover(audition);
-    await userEvent.hover(audition);
-    expect(warmed).toHaveBeenCalledTimes(2);
+    await userEvent.selectOptions(
+      screen.getByLabelText('Second source Source'),
+      'pluck-synth',
+    );
+    expect(applied).toHaveBeenCalledTimes(2);
+    const rekinded = applied.mock.calls[1][0];
+    expect(rekinded?.layer?.source.kind).toBe('pluck-synth');
+    // The whole arm was replaced, and the PRIMARY is untouched — the mis-route
+    // this picker's own write exists to prevent, asserted on what the engine gets.
+    expect(rekinded?.layer?.source).toHaveProperty('params.attackNoise');
+    expect(rekinded?.source.kind).toBe('sampler');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Second source' }));
+    expect(applied).toHaveBeenCalledTimes(3);
+    const stripped = applied.mock.calls[2][0];
+    // Absent, not hollow: `Voice.updateLayer` disposes the layer only when the
+    // branch is really gone, and `{}` would have it build from `undefined`.
+    expect(stripped?.layer).toBeUndefined();
+    expect(Object.hasOwn(stripped ?? {}, 'layer')).toBe(false);
   });
+
+  it('hands an added and removed body filter envelope to the engine', async () => {
+    // `Voice.updateBodyFilter` rebuilds the chain when the envelope appears or
+    // goes — the node enters and leaves the signal path — so both gestures have to
+    // reach the seam, not merely the working copy.
+    render(<Host />);
+    await userEvent.click(screen.getByRole('button', { name: 'Body filter' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Body filter' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Cutoff envelope' }));
+
+    expect(applied).toHaveBeenCalledTimes(2);
+    const withEnvelope = applied.mock.calls[1][0];
+    // All six fields, because `buildChain` reads every one off it.
+    expect(Object.keys(withEnvelope?.bodyFilter?.envelope ?? {}).sort()).toEqual([
+      'attack',
+      'baseFrequency',
+      'decay',
+      'octaves',
+      'release',
+      'sustain',
+    ]);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Cutoff envelope' }));
+    expect(applied).toHaveBeenCalledTimes(3);
+    const stripped = applied.mock.calls[2][0];
+    expect(stripped?.bodyFilter?.envelope).toBeUndefined();
+    // The filter itself survives its envelope — `removeAtPath` prunes an emptied
+    // parent, and this one still holds a cutoff and a q.
+    expect(stripped?.bodyFilter?.cutoff).toBeGreaterThan(0);
+  });
+
+  // REMOVED 2026-09-01, see docs/HANDOFF.md — same reason: it switched to a shipped
+  // voice by id purely to make the voice underneath change.
 });

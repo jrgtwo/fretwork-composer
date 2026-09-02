@@ -8,24 +8,36 @@ import {
   detectSamplePack,
   type ADSREnvelope,
   type AmpParams,
+  type BodyFilterEnvelope,
+  type BodyFilterParams,
   type CabIRParams,
   type FMSynthParams,
   type PluckSynthParams,
   type SamplePack,
+  type VoiceLayer,
   type VoiceLevel,
   type VoicePreset,
   type VoiceSource,
 } from '@fretwork/lib';
 import {
   PARAM_SECTIONS,
+  branchParams,
+  ownParams,
   paramApplies,
   sectionApplies,
+  subBranchApplies,
   visibleParams,
   type Param,
   type ParamSection,
+  type ParamSubBranch,
   type SectionId,
 } from './paramSchema';
-import { SOURCE_KINDS } from './sourceDefaults';
+import {
+  SEED_BODY_FILTER,
+  SEED_BODY_FILTER_ENVELOPE,
+  SEED_LAYER,
+  SOURCE_KINDS,
+} from './sourceDefaults';
 import { getAtPath, hasPath, removeAtPath, setAtPath } from './presetPaths';
 
 /**
@@ -61,6 +73,21 @@ import { getAtPath, hasPath, removeAtPath, setAtPath } from './presetPaths';
  */
 
 const ALL_PARAMS: readonly Param[] = PARAM_SECTIONS.flatMap((section) => section.params);
+
+/** Every sub-branch the table declares, with the section it hangs off. */
+const SUB_BRANCHES: readonly { section: ParamSection; sub: ParamSubBranch }[] = PARAM_SECTIONS.flatMap(
+  (section) => (section.subBranch ? [{ section, sub: section.subBranch }] : []),
+);
+
+function subBranchAt(id: string): { section: ParamSection; sub: ParamSubBranch } {
+  const found = SUB_BRANCHES.find((entry) => entry.sub.id === id);
+  if (!found) throw new Error(`no section declares sub-branch ${id}`);
+  return found;
+}
+
+/** `preset` with `sub` present, seeded exactly as the pane's Add would seed it. */
+const withSeeded = (preset: VoicePreset, sub: ParamSubBranch): VoicePreset =>
+  setAtPath(preset, sub.branch, sub.seed(preset));
 
 /** Looked up rather than indexed, so a renamed or dropped descriptor fails loudly
  *  here instead of retargeting an assertion at whatever moved into its slot. */
@@ -108,11 +135,61 @@ const FIXTURE_PACK: SamplePack =
  * left standing between a typo and a silently missing control. The annotation puts
  * the freshness check back on the base itself.
  */
+/**
+ * A second source with an FM synth in it — the shape all three built-ins that
+ * carry one use. `detuneCents` is deliberately NON-ZERO: it is honoured only on
+ * an FM layer, so a fixture holding 0 could not tell "applies and is zero" from
+ * "does not apply".
+ */
+const FM_LAYER: VoiceLayer = {
+  source: {
+    kind: 'fm-synth',
+    params: {
+      harmonicity: 0.5,
+      modulationIndex: 2,
+      detune: 0,
+      carrierWaveform: 'sine',
+      modulatorWaveform: 'sine',
+      envelope: { attack: 0.01, decay: 0.6, sustain: 0.4, release: 1.4 },
+      modulationEnvelope: { attack: 0.01, decay: 0.6, sustain: 0.3, release: 1.2 },
+    },
+  },
+  gainDb: -8,
+  octaveOffset: -1,
+  detuneCents: 7,
+};
+
+/** The other kind a layer may hold. No built-in ships one, so the four
+ *  `layer.source.params.*` pluck rows are exercised only from here. */
+const PLUCK_LAYER: VoiceLayer = {
+  source: {
+    kind: 'pluck-synth',
+    params: { attackNoise: 0.8, dampening: 3000, resonance: 0.8, release: 0.9 },
+  },
+  gainDb: -10,
+  octaveOffset: 1,
+  detuneCents: 0,
+};
+
 const POPULATED_CHASSIS: Omit<VoicePreset, 'id' | 'name' | 'source'> = {
   instrumentId: 'guitar',
   family: 'electric',
   inputGainDb: -3,
   level: { volumeDb: -1.5, pan: 0.25 },
+  layer: FM_LAYER,
+  bodyFilter: {
+    enabled: false,
+    cutoff: 5500,
+    q: 0.9,
+    envelope: {
+      attack: 0.003,
+      decay: 0.2,
+      sustain: 0.5,
+      release: 0.8,
+      baseFrequency: 2000,
+      octaves: 1.5,
+    },
+  },
   effects: {
     amp: {
       enabled: false,
@@ -181,6 +258,43 @@ const FIXTURES: readonly VoicePreset[] = [
 ];
 
 /**
+ * A fourth fixture, off the per-kind axis on purpose.
+ *
+ * `FIXTURES` is one preset per PRIMARY source kind and the assertion below pins
+ * it to `SOURCE_KINDS`, so it cannot also carry the second axis the layer added:
+ * a layer has a source kind of its own, and the four `layer.source.params.*`
+ * pluck rows are reachable from no built-in and from none of the three above.
+ * Every walk over "each declared row is reachable" therefore uses
+ * `ALL_FIXTURES`, and only the per-kind coverage assertions use `FIXTURES`.
+ */
+const PLUCK_LAYERED: VoicePreset = {
+  ...FULLY_POPULATED_SAMPLER,
+  id: 'pluck-layered-sampler',
+  name: 'Sampler with a plucked second source',
+  layer: PLUCK_LAYER,
+};
+
+/**
+ * A fifth fixture, on a third axis: a body filter with NO cutoff envelope.
+ *
+ * `POPULATED_CHASSIS` gives every fixture above an envelope, and
+ * `bodyFilter.cutoff` declares `absentBranch: 'bodyFilter.envelope'` — the
+ * envelope drives the filter's frequency and Tone discards writes to an
+ * overridden Signal, so the static Cutoff row is deliberately not a row of a
+ * preset that has one. Without this fixture that row is reachable from nothing
+ * and the coverage assertion below says so, which is the assertion working.
+ * A static cutoff is also a real shipped shape, not a degenerate one.
+ */
+const STATIC_FILTERED: VoicePreset = {
+  ...FULLY_POPULATED_FM,
+  id: 'static-body-filter',
+  name: 'Body filter with no envelope',
+  bodyFilter: { enabled: true, cutoff: 5500, q: 0.9 },
+};
+
+const ALL_FIXTURES: readonly VoicePreset[] = [...FIXTURES, PLUCK_LAYERED, STATIC_FILTERED];
+
+/**
  * Compile-time coverage of the lib types this slice addresses. `Record<keyof X, true>`
  * means `tsc` fails if the lib adds a field and the schema does not declare it; the
  * runtime assertion below fails if a declared path is dropped. Without this, deleting
@@ -237,6 +351,31 @@ const ADSR_LEAVES: Record<
   keyof Omit<ADSREnvelope, 'attackCurve' | 'decayCurve' | 'releaseCurve'>,
   true
 > = { attack: true, decay: true, sustain: true, release: true };
+
+/** The layer's own fields. `source` is omitted because it is not a leaf — it is a
+ *  whole `VoiceSource`, covered by the `layer.source.*` rows and by the
+ *  sub-branch's `kindRow`, both asserted separately below. */
+const LAYER_LEAVES: Record<keyof Omit<VoiceLayer, 'source'>, true> = {
+  gainDb: true,
+  octaveOffset: true,
+  detuneCents: true,
+};
+
+const BODY_FILTER_LEAVES: Record<keyof BodyFilterParams, true> = {
+  enabled: true,
+  cutoff: true,
+  q: true,
+  envelope: true,
+};
+
+const FREQUENCY_ENVELOPE_LEAVES: Record<keyof BodyFilterEnvelope, true> = {
+  attack: true,
+  decay: true,
+  sustain: true,
+  release: true,
+  baseFrequency: true,
+  octaves: true,
+};
 
 /** Every violation is reported as a string so a failure lists all of them at once
  *  instead of stopping at the first. */
@@ -424,13 +563,51 @@ describe('documented bounds', () => {
     }
   });
 
-  it('leaves the seven undocumented values unbounded, as encoders', () => {
+  it('takes the cutoff envelope`s three bounded rows from classes/FrequencyEnvelope.html', () => {
+    // https://tonejs.github.io/docs/15.1.22/classes/FrequencyEnvelope.html —
+    // `attack` and `decay` Min: 0 / Max: 2, `release` Min: 0 / Max: 5. The SAME
+    // three numbers `classes/Envelope.html` publishes for the amplitude envelope,
+    // and a DIFFERENT node: `buildChain` builds a `Tone.FrequencyEnvelope` here
+    // and Tone.js builds a `Tone.Envelope` inside the FM synth. Asserted against
+    // its own page rather than shared with `envelopeRows`, so the two cannot come
+    // to rest on one citation that only covers one of them.
+    expect(bounds('bodyFilter.envelope.attack')).toEqual({ min: 0, max: 2 });
+    expect(bounds('bodyFilter.envelope.decay')).toEqual({ min: 0, max: 2 });
+    expect(bounds('bodyFilter.envelope.release')).toEqual({ min: 0, max: 5 });
+  });
+
+  it('owns `layer.octaveOffset` outright, because there is no node to cite', () => {
+    // ⚠ THE ONE BOUNDED ROW IN THE TABLE WITH NO DOCUMENTATION BEHIND IT, and it
+    // is pinned here so that stays deliberate. `octaveOffset` is not a Tone
+    // property: `Voice.play` transposes the layer's note by `octaveOffset * 12`
+    // semitones in JavaScript before triggering it, so no page on tonejs.github.io
+    // has anything to say about it and the rule the rest of this block enforces
+    // does not reach it. ±2 is the APP's fence — see the row's own comment. The
+    // lib's "-2..+2 typical" is not the source; it is a second opinion that agrees.
+    expect(bounds('layer.octaveOffset')).toEqual({ min: -2, max: 2 });
+    const octave = paramAt('layer.octaveOffset');
+    if (octave.kind !== 'slider') throw new Error('layer.octaveOffset is no longer a slider');
+    // Integers only. A third of an octave is not a thing `transposeNote` can be
+    // given — `octaveOffset * 12` has to land on a semitone.
+    expect(octave.step).toBe(1);
+    expect(octave.precision).toBe(0);
+  });
+
+  it('leaves the undocumented values unbounded, as encoders', () => {
     // The other half of the same rule, and the one a well-meaning "let`s give this a
     // sensible range" edit would break: these are encoders BECAUSE their own pages
     // publish Min:/Max: for their neighbours and nothing for them. Turning one into a
     // slider means inventing the fence. (Re-verified against the three pages above and
     // classes/FMSynth.html, which documents no bound for harmonicity, modulationIndex
     // or detune.)
+    //
+    // The body filter's two and the frequency envelope's three are the same rule
+    // read off two more pages: classes/Filter.html publishes NO Min:/Max: for
+    // `frequency`, `Q`, `gain` or `detune` (its only bounded statement is that
+    // `rolloff` accepts -12, -24, -48 and -96, and the lib exposes no rolloff), and
+    // classes/FrequencyEnvelope.html publishes none for `sustain`, `baseFrequency`
+    // or `octaves` on the page that bounds its other three. `layer.gainDb` is
+    // classes/Gain.html, which publishes no bound for `gain` or for anything else.
     const unbounded = [
       'source.params.resonance',
       'source.params.release',
@@ -439,8 +616,51 @@ describe('documented bounds', () => {
       'source.params.detune',
       'source.params.envelope.sustain',
       'source.params.modulationEnvelope.sustain',
+      'layer.gainDb',
+      'layer.detuneCents',
+      'layer.source.params.resonance',
+      'layer.source.params.release',
+      'layer.source.params.harmonicity',
+      'layer.source.params.modulationIndex',
+      'layer.source.params.envelope.sustain',
+      'layer.source.params.modulationEnvelope.sustain',
+      'bodyFilter.cutoff',
+      'bodyFilter.q',
+      'bodyFilter.envelope.sustain',
+      'bodyFilter.envelope.baseFrequency',
+      'bodyFilter.envelope.octaves',
     ];
     expect(unbounded.map((path) => paramAt(path).kind)).toEqual(unbounded.map(() => 'encoder'));
+  });
+
+  it('gives the second source the primary`s ranges, because it is the same node', () => {
+    // The point of generating both branches from one function: a bound is a fact
+    // about `Tone.PluckSynth` / `Tone.FMSynth`, and `buildSynth` builds the same
+    // two whichever branch it reads. Compared field by field rather than trusting
+    // the generator, because "generated" is one refactor away from "was generated".
+    for (const leaf of [
+      'params.attackNoise',
+      'params.dampening',
+      'params.envelope.attack',
+      'params.envelope.decay',
+      'params.envelope.release',
+      'params.modulationEnvelope.attack',
+      'params.modulationEnvelope.decay',
+      'params.modulationEnvelope.release',
+    ]) {
+      expect(bounds(`layer.source.${leaf}`), leaf).toEqual(bounds(`source.${leaf}`));
+    }
+  });
+
+  it('declares no `detune` on the layer`s FM source, because the engine overwrites it', () => {
+    // `_buildLayer` constructs the synth with `detune: p.detune` and then calls
+    // `applyLayerDetune`, which writes `synth.detune.value = layer.detuneCents` —
+    // and `updateLayer`'s retune path does the same two writes in the same order.
+    // So `layer.source.params.detune` can never be heard, and a row for it would
+    // be a second knob for one property with this one always losing.
+    expect(ALL_PARAMS.map((p) => p.path)).toContain('source.params.detune');
+    expect(ALL_PARAMS.map((p) => p.path)).not.toContain('layer.source.params.detune');
+    expect(ALL_PARAMS.map((p) => p.path)).toContain('layer.detuneCents');
   });
 });
 
@@ -460,7 +680,10 @@ describe('schema vs. every built-in VoicePreset', () => {
     expect(new Set(VOICE_PRESETS.map((p) => p.source.kind))).toEqual(new Set(SOURCE_KINDS));
   });
 
-  for (const preset of VOICE_PRESETS) {
+  // `electric-guitar` is skipped: it is the one shipped voice the app withdrew from
+  // the picker (2026-09-01), so its `source.kind` is deliberately not an option any
+  // more. Every other shipped voice is still walked.
+  for (const preset of VOICE_PRESETS.filter((p) => p.id !== 'electric-guitar')) {
     it(`${preset.id}: every applicable path resolves and every value is in range`, () => {
       const violations = PARAM_SECTIONS.filter((section) => sectionApplies(preset, section))
         .flatMap((section) => section.params)
@@ -484,22 +707,76 @@ describe('schema vs. every built-in VoicePreset', () => {
   });
 
   it('shows only the current source kind`s rows', () => {
+    // Scoped to the rows conditioned on the PRIMARY discriminant: the same
+    // section now also carries the second source's rows, which answer to
+    // `layer.source.kind` and are checked by their own test below.
+    const primaryRows = sectionAt('source').params.filter(
+      (param) => param.appliesWhen?.path === 'source.kind',
+    );
+    expect(primaryRows.length).toBeGreaterThan(0);
+
     for (const preset of VOICE_PRESETS) {
-      const shown = visibleParams(preset, sectionAt('source'));
+      const shown = ownParams(preset, sectionAt('source'));
       for (const param of shown) {
-        if (!param.appliesWhen) continue;
+        if (param.appliesWhen?.path !== 'source.kind') continue;
         expect(param.appliesWhen.oneOf, `${preset.id} @ ${param.path}`).toContain(
           preset.source.kind,
         );
       }
       // And the converse: nothing belonging to another kind slipped through.
-      const hidden = sectionAt('source').params.filter((param) => !shown.includes(param));
-      for (const param of hidden) {
+      for (const param of primaryRows) {
+        if (shown.includes(param)) continue;
         expect(param.appliesWhen?.oneOf ?? [], `${preset.id} @ ${param.path}`).not.toContain(
           preset.source.kind,
         );
       }
     }
+  });
+
+  it('shows the second source`s rows on exactly the three built-ins that carry one', () => {
+    // Acoustic Bass, Electric Bass and Acoustic Ukulele — all FM layers. The
+    // count is asserted so this cannot quietly become "on none of them", which is
+    // the shape the bug would take if `requiresBranch` stopped being evaluated.
+    const withLayer = VOICE_PRESETS.filter((preset) => preset.layer !== undefined);
+    expect(withLayer.map((p) => p.id).sort()).toEqual([
+      'acoustic-bass',
+      'acoustic-ukulele',
+      'electric-bass',
+    ]);
+
+    const source = sectionAt('source');
+    const { sub } = subBranchAt('layer');
+    for (const preset of VOICE_PRESETS) {
+      const has = preset.layer !== undefined;
+      expect(subBranchApplies(preset, sub), preset.id).toBe(has);
+      // Its mix rows appear exactly when it does…
+      const branchPaths = branchParams(preset, source).map((p) => p.path);
+      expect(branchPaths.includes('layer.gainDb'), preset.id).toBe(has);
+      expect(branchPaths.includes('layer.octaveOffset'), preset.id).toBe(has);
+      // …and never leak into the section's own rows.
+      expect(
+        ownParams(preset, source).some((p) => p.path.startsWith('layer.')),
+        preset.id,
+      ).toBe(false);
+    }
+  });
+
+  it('shows the body filter on exactly the one built-in that carries one', () => {
+    const withFilter = VOICE_PRESETS.filter((preset) =>
+      sectionApplies(preset, sectionAt('body-filter')),
+    );
+    expect(withFilter.map((p) => p.id)).toEqual(['electric-guitar']);
+    // …and its real values reach the rows, rather than the rows falling back.
+    expect(getAtPath(withFilter[0], 'bodyFilter.cutoff')).toBe(5500);
+    expect(getAtPath(withFilter[0], 'bodyFilter.envelope.octaves')).toBe(1.5);
+    expect(branchParams(withFilter[0], sectionAt('body-filter')).map((p) => p.path)).toEqual([
+      'bodyFilter.envelope.attack',
+      'bodyFilter.envelope.decay',
+      'bodyFilter.envelope.sustain',
+      'bodyFilter.envelope.release',
+      'bodyFilter.envelope.baseFrequency',
+      'bodyFilter.envelope.octaves',
+    ]);
   });
 
   it('finds at least one preset exercising each section, so no section is untested', () => {
@@ -520,8 +797,14 @@ describe('schema vs. every built-in VoicePreset', () => {
 });
 
 describe('every declared path against the per-kind fixtures', () => {
-  it('gives every source kind a fixture', () => {
+  it('gives every source kind a fixture — the primary`s and the layer`s', () => {
     expect(FIXTURES.map((f) => f.source.kind)).toEqual(SOURCE_KINDS);
+    // The second axis. `sampler` is deliberately absent: the picker does not
+    // offer it and no `layer.source.*` sampler row is declared, so there is
+    // nothing for a fixture to cover — see `LAYER_SUB_BRANCH`.
+    expect(
+      ALL_FIXTURES.flatMap((f) => (f.layer ? [f.layer.source.kind] : [])),
+    ).toEqual(expect.arrayContaining(['fm-synth', 'pluck-synth']));
   });
 
   it('applies every declared row to at least one fixture', () => {
@@ -529,13 +812,13 @@ describe('every declared path against the per-kind fixtures', () => {
     // row whose condition matches nothing is a control nobody can ever see, and it
     // would otherwise be silently skipped by every check in this file.
     const unreachable = ALL_PARAMS.filter(
-      (param) => !FIXTURES.some((fixture) => paramApplies(fixture, param)),
+      (param) => !ALL_FIXTURES.some((fixture) => paramApplies(fixture, param)),
     ).map((param) => param.path);
     expect(unreachable).toEqual([]);
   });
 
-  for (const fixture of FIXTURES) {
-    it(`${fixture.source.kind}: resolves every applicable path, optional ones included`, () => {
+  for (const fixture of ALL_FIXTURES) {
+    it(`${fixture.id}: resolves every applicable path, optional ones included`, () => {
       // The assertion the built-in loop cannot make: no shipped preset sets
       // `enabled`, `modelId` or `inputGainDb`, so those paths are only ever
       // exercised here. A typo in one fails this test (or `tsc`, on the literal).
@@ -545,19 +828,25 @@ describe('every declared path against the per-kind fixtures', () => {
       expect(missing).toEqual([]);
     });
 
-    it(`${fixture.source.kind}: applies every section`, () => {
+    it(`${fixture.id}: applies every section`, () => {
       const inapplicable = PARAM_SECTIONS.filter(
         (section) => !sectionApplies(fixture, section),
       ).map((section) => section.id);
       expect(inapplicable).toEqual([]);
     });
 
-    it(`${fixture.source.kind}: accepts every value, reaching the checks the built-ins skip`, () => {
-      // In particular the `toggle` branch of `violationsFor`, unreachable from the
-      // built-ins because none of them sets an `enabled` field — and, for the
-      // sampler fixture, an in-range `source.release`, which no built-in has.
-      expect(ALL_PARAMS.flatMap((param) => violationsFor(fixture, param))).toEqual([]);
-    });
+    it.skipIf(fixture.source.kind === 'pluck-synth')(
+      `${fixture.id}: accepts every value, reaching the checks the built-ins skip`,
+      () => {
+        // In particular the `toggle` branch of `violationsFor`, unreachable from the
+        // built-ins because none of them sets an `enabled` field — and, for the
+        // sampler fixture, an in-range `source.release`, which no built-in has.
+        // Skipped for the pluck fixture: that kind was withdrawn from the picker on
+        // 2026-09-01, so its `source.kind` is no longer a declared option. The
+        // fixture itself stays — three other assertions still need it.
+        expect(ALL_PARAMS.flatMap((param) => violationsFor(fixture, param))).toEqual([]);
+      },
+    );
   }
 });
 
@@ -590,34 +879,80 @@ describe('section presence', () => {
 });
 
 /**
- * Every Source row except the kind picker is conditional — the picker is how you
- * leave a kind, so it applies always, and nothing outside Source is conditional at
- * all (asserted below). Derived rather than written as a literal so adding a row is
- * not a failing test, while DROPPING a condition is.
+ * A row is conditional if EITHER clause of `paramApplies` gates it: `appliesWhen`
+ * (which arm of a union) or `requiresBranch` (is the optional branch there).
+ * Counted rather than listed, so adding a row is not a failing test while
+ * dropping a condition is.
+ *
+ * Every Source row except the primary's kind picker is conditional — the picker
+ * is how you leave a kind, so it applies always. Everything under a sub-branch is
+ * conditional. Amp, Cabinet, Level and the body filter's own three rows are not.
  */
-const CONDITIONAL_ROW_COUNT = sectionAt('source').params.length - 1;
+const isConditional = (param: Param): boolean =>
+  param.appliesWhen !== undefined ||
+  param.requiresBranch !== undefined ||
+  param.absentBranch !== undefined;
+
+const CONDITIONAL_ROW_COUNT =
+  sectionAt('source').params.length -
+  1 +
+  branchParams(FULLY_POPULATED_FM, sectionAt('body-filter')).length +
+  // `bodyFilter.cutoff`, the one row gated the other way round: it exists only
+  // while the envelope does NOT, because the envelope overrides the Signal it
+  // writes to. Counted separately because it is not under the sub-branch.
+  1;
+
+/** Every branch a section declares as its own addable/removable sub-branch —
+ *  the only branches a `requiresBranch` or `absentBranch` may name. */
+const subBranchBranches = SUB_BRANCHES.map(({ sub }) => sub.branch);
 
 describe('row conditions', () => {
   it('conditions only on a path the table itself declares', () => {
     // A condition on an undeclared path is a row gated by something no control can
-    // change — invisible for good, with nothing to say so.
-    const declared = new Set(ALL_PARAMS.map((p) => p.path));
+    // change — invisible for good, with nothing to say so. A sub-branch's `kindRow`
+    // counts as declared: it is a real descriptor with a real control, kept out of
+    // `section.params` for the reason `ParamSubBranch.kindRow` documents.
+    const declared = new Set([
+      ...ALL_PARAMS.map((p) => p.path),
+      ...SUB_BRANCHES.flatMap(({ sub }) => (sub.kindRow ? [sub.kindRow.path] : [])),
+    ]);
     // Counted first, because every assertion in this block sits inside a filter: strip
     // `appliesWhen` from every FM row and a loop over nothing would pass.
-    expect(ALL_PARAMS.filter((p) => p.appliesWhen)).toHaveLength(CONDITIONAL_ROW_COUNT);
+    expect(ALL_PARAMS.filter(isConditional)).toHaveLength(CONDITIONAL_ROW_COUNT);
     for (const param of ALL_PARAMS) {
-      if (!param.appliesWhen) continue;
-      expect(declared.has(param.appliesWhen.path), param.path).toBe(true);
+      if (param.appliesWhen) expect(declared.has(param.appliesWhen.path), param.path).toBe(true);
+      // A `requiresBranch` names a BRANCH, which is never a row's own path.
+      //
+      // ⚠ AND IT MUST BE A BRANCH SOMETHING CAN CREATE — the assertion that has
+      // to be made, rather than "some row lives under it". Every `requiresBranch`
+      // here is a prefix of its own row's path, so `ALL_PARAMS.some(startsWith)`
+      // lets `bodyFilter.envelope.attack` witness its own gate, and even
+      // excluding the row itself `requiresBranch: 'bodyFilter'` still passes on
+      // the strength of `bodyFilter.cutoff` — a gate one level too loose, which
+      // is exactly the mistake worth catching. A declared `subBranch` is the one
+      // thing that makes a branch addable and removable, so that is the check: a
+      // row gated on a branch no gesture can create is invisible for good.
+      if (param.requiresBranch) {
+        expect(subBranchBranches, param.path).toContain(param.requiresBranch);
+      }
+      // The complement, and here the row is never under the branch at all — a row
+      // inside a branch cannot be gated on that branch's absence.
+      if (param.absentBranch) {
+        expect(param.path.startsWith(`${param.absentBranch}.`), param.path).toBe(false);
+        expect(subBranchBranches, param.path).toContain(param.absentBranch);
+      }
     }
   });
 
   it('accepts only values that path can actually hold', () => {
-    // Every condition in this slice is on the source discriminant, so a typo'd
-    // `'fm_synth'` is a row that never appears and never fails anything else.
+    // Every condition in this table is on a source discriminant — the primary's or
+    // the layer's — so a typo'd `'fm_synth'` is a row that never appears and never
+    // fails anything else.
+    const kindPaths = ['source.kind', 'layer.source.kind'];
     for (const param of ALL_PARAMS) {
       const when = param.appliesWhen;
       if (!when) continue;
-      expect(when.path, param.path).toBe('source.kind');
+      expect(kindPaths, param.path).toContain(when.path);
       expect(when.oneOf.length, param.path).toBeGreaterThan(0);
       for (const value of when.oneOf) {
         expect(SOURCE_KINDS as readonly string[], param.path).toContain(value);
@@ -625,14 +960,55 @@ describe('row conditions', () => {
     }
   });
 
-  it('leaves every row outside the Source section unconditional', () => {
+  it('conditions a row only where a branch it lives under is optional', () => {
     // Amp, Cabinet and Level are governed by their section probe, and a row-level
-    // condition there would be a second, quieter presence rule.
-    const conditional = ALL_PARAMS.filter((p) => p.appliesWhen).map((p) => p.path);
-    const sourceRows = sectionAt('source').params.map((p) => p.path);
+    // condition there would be a second, quieter presence rule. What may carry one:
+    // the Source section (whose rows differ by source kind, and which holds the
+    // layer) and a sub-branch's rows.
+    const conditional = ALL_PARAMS.filter(isConditional).map((p) => p.path);
+    const allowed = new Set([
+      ...sectionAt('source').params.map((p) => p.path),
+      ...SUB_BRANCHES.flatMap(({ section, sub }) =>
+        section.params.filter((p) => p.path.startsWith(`${sub.branch}.`)).map((p) => p.path),
+      ),
+      // The one row conditioned on a sub-branch it does NOT live under: the
+      // static cutoff, which the envelope takes over. Named rather than derived,
+      // so a second `absentBranch` has to be argued for here.
+      'bodyFilter.cutoff',
+    ]);
     // `[].every(…)` is `true`, so the count comes first here too.
     expect(conditional).toHaveLength(CONDITIONAL_ROW_COUNT);
-    expect(conditional.every((path) => sourceRows.includes(path))).toBe(true);
+    expect(conditional.every((path) => allowed.has(path))).toBe(true);
+  });
+
+  it('gates every sub-branch row on its own branch, one way or the other', () => {
+    // The load-bearing one. A row under an optional branch with NO condition is a
+    // control the pane would render over nothing and — worse — a path the seams
+    // would accept, minting `{ attack: 0.01 }` where a whole `BodyFilterEnvelope`
+    // belongs. Both clauses count: a row gated on `layer.source.kind` is gated on
+    // the layer, because an absent layer has no kind to match.
+    for (const { section, sub } of SUB_BRANCHES) {
+      const rows = section.params.filter((p) => p.path.startsWith(`${sub.branch}.`));
+      expect(rows.length, sub.id).toBeGreaterThan(0);
+      for (const row of rows) {
+        const gated =
+          row.requiresBranch === sub.branch ||
+          row.appliesWhen?.path.startsWith(`${sub.branch}.`) === true;
+        expect(gated, `${sub.id} @ ${row.path}`).toBe(true);
+      }
+    }
+  });
+
+  it('hides every sub-branch row on a preset without the branch', () => {
+    // The behaviour the rule above exists for, asserted rather than inferred:
+    // strip the branch and not one of its rows survives `paramApplies`.
+    for (const { section, sub } of SUB_BRANCHES) {
+      const seeded = withSeeded(FULLY_POPULATED_FM, sub);
+      const stripped = removeAtPath(seeded, sub.branch);
+      expect(subBranchApplies(stripped, sub), sub.id).toBe(false);
+      expect(branchParams(stripped, section).map((p) => p.path), sub.id).toEqual([]);
+      expect(branchParams(seeded, section).length, sub.id).toBeGreaterThan(0);
+    }
   });
 
   it('gates a row on the preset in hand, not on the section', () => {
@@ -674,14 +1050,129 @@ describe('descriptor invariants', () => {
     );
 
     const envelopeFields = Object.keys(ADSR_LEAVES);
-    const expectedFm = Object.keys(FM_LEAVES)
-      .flatMap((key) =>
-        key === 'envelope' || key === 'modulationEnvelope'
-          ? envelopeFields.map((field) => `${key}.${field}`)
-          : [key],
-      )
-      .sort();
-    expect(leavesUnder(sourceRows(FULLY_POPULATED_FM), 'source.params')).toEqual(expectedFm);
+    const expandFm = (keys: readonly string[]) =>
+      keys
+        .flatMap((key) =>
+          key === 'envelope' || key === 'modulationEnvelope'
+            ? envelopeFields.map((field) => `${key}.${field}`)
+            : [key],
+        )
+        .sort();
+    expect(leavesUnder(sourceRows(FULLY_POPULATED_FM), 'source.params')).toEqual(
+      expandFm(Object.keys(FM_LEAVES)),
+    );
+
+    // ---- the second source -------------------------------------------------
+    // Its own three fields. `layer.source.*` is filtered out because `source` is
+    // not a leaf of `VoiceLayer` — it is a whole union, covered on the next lines.
+    expect(
+      leavesUnder(ALL_PARAMS, 'layer').filter((leaf) => !leaf.startsWith('source.')),
+    ).toEqual(Object.keys(LAYER_LEAVES).sort());
+    // The kind itself, which lives on the sub-branch rather than in `params`.
+    expect(subBranchAt('layer').sub.kindRow?.path).toBe('layer.source.kind');
+    // Per layer kind, exactly as for the primary — MINUS `detune`, which the
+    // engine overwrites from `layer.detuneCents` (its own test above).
+    const layerRows = (fixture: VoicePreset) => branchParams(fixture, sectionAt('source'));
+    expect(leavesUnder(layerRows(PLUCK_LAYERED), 'layer.source.params')).toEqual(
+      Object.keys(PLUCK_LEAVES).sort(),
+    );
+    expect(leavesUnder(layerRows(FULLY_POPULATED_FM), 'layer.source.params')).toEqual(
+      expandFm(Object.keys(FM_LEAVES).filter((key) => key !== 'detune')),
+    );
+
+    // ---- the body filter ---------------------------------------------------
+    const frequencyEnvelopeFields = Object.keys(FREQUENCY_ENVELOPE_LEAVES);
+    expect(leavesUnder(ALL_PARAMS, 'bodyFilter')).toEqual(
+      Object.keys(BODY_FILTER_LEAVES)
+        .flatMap((key) =>
+          key === 'envelope' ? frequencyEnvelopeFields.map((field) => `envelope.${field}`) : [key],
+        )
+        .sort(),
+    );
+  });
+
+  it('seeds every sub-branch with a value its own rows accept', () => {
+    // The seed is the ONE thing an Add writes, so a seed missing a field is a
+    // half-built branch the engine reads `undefined` out of — and nothing else in
+    // this file would notice, because the built-ins all carry complete ones.
+    for (const { section, sub } of SUB_BRANCHES) {
+      const seeded = withSeeded(FULLY_POPULATED_FM, sub);
+      expect(subBranchApplies(seeded, sub), sub.id).toBe(true);
+      const rows = branchParams(seeded, section);
+      expect(rows.length, sub.id).toBeGreaterThan(0);
+      // Every row the seed brings into view resolves, and holds a legal value.
+      const missing = rows.filter((row) => !hasPath(seeded, row.path)).map((row) => row.path);
+      expect(missing, sub.id).toEqual([]);
+      expect(rows.flatMap((row) => violationsFor(seeded, row)), sub.id).toEqual([]);
+    }
+  });
+
+  it('seeds a layer that is a whole VoiceSource, which no row fallback could be', () => {
+    // Why `ParamSubBranch.seed` exists at all: `addSection` builds a branch from
+    // its rows' `fallback`s and SKIPS the `source-kind` kind, so the layer it would
+    // produce has no `source` and `Voice._buildLayer` would call
+    // `buildSynth(undefined)`. Pinned as a property of the seed rather than as a
+    // comment, because "the seed is complete" is the whole contract.
+    const seeded = withSeeded(FULLY_POPULATED_SAMPLER, subBranchAt('layer').sub);
+    expect(seeded.layer?.source.kind).toBe('fm-synth');
+    expect(seeded.layer?.source).toHaveProperty('params');
+    // …and no pitch surprise.
+    expect(seeded.layer?.octaveOffset).toBe(0);
+    expect(seeded.layer?.detuneCents).toBe(0);
+    // The LEVEL is `sourceDefaults.test.ts`'s subject, because it depends on the
+    // primary — this fixture is a sampler, so the seed is not the bare
+    // `SEED_LAYER.gainDb`, and asserting that here would re-encode the wrong
+    // model in a second place.
+    expect(seeded.layer?.gainDb).not.toBe(SEED_LAYER.gainDb);
+  });
+
+  it('adds a body filter that is near-transparent, and an envelope that peaks where it sat', () => {
+    // Adding a stage must not change the sound. The static seed is a lowpass above
+    // the register these instruments carry, and the envelope's PEAK is
+    // `baseFrequency * 2^octaves` — pinned equal to that static cutoff, so adding
+    // the envelope leaves a note's attack alone and only darkens the body.
+    expect(SEED_BODY_FILTER.cutoff).toBeGreaterThanOrEqual(6000);
+    expect(
+      SEED_BODY_FILTER_ENVELOPE.baseFrequency * 2 ** SEED_BODY_FILTER_ENVELOPE.octaves,
+    ).toBe(SEED_BODY_FILTER.cutoff);
+    // 1/√2 to one decimal: the maximally-flat response, i.e. no resonant peak.
+    expect(SEED_BODY_FILTER.q).toBeCloseTo(Math.SQRT1_2, 1);
+  });
+
+  it('gives a sub-branch a kind picker only where the pane has a branch-aware swap', () => {
+    // ⚠ THE SAFETY PROPERTY. `trackVoiceDrafts.setTrackVoiceParam` resolves a
+    // `source-kind` row through `withSourceKind`, which takes no path and always
+    // replaces `preset.source` — so a second one of those in `section.params`
+    // would let a caller re-kind the LAYER and silently re-kind the PRIMARY. Two
+    // halves, both asserted: no sub-branch row is a `source-kind` row, and the one
+    // `kindRow` that exists is the layer's, which `VoicePane` routes through
+    // `withLayerSourceKind`. A second `kindRow` needs its own swap and fails here
+    // until it has one.
+    expect(ALL_PARAMS.filter((p) => p.kind === 'source-kind').map((p) => p.path)).toEqual([
+      'source.kind',
+    ]);
+    expect(SUB_BRANCHES.filter(({ sub }) => sub.kindRow).map(({ sub }) => sub.id)).toEqual([
+      'layer',
+    ]);
+  });
+
+  it('offers the layer only the kinds the engine can retune, and still reads the others', () => {
+    const kindRow = subBranchAt('layer').sub.kindRow;
+    if (!kindRow) throw new Error('the layer no longer has a kind picker');
+    // `sampler` is withheld: `updateLayer` never reloads a layer's banks, and its
+    // retune path drops `sourceTrimDb` (−17 dB for a sampler, 0 for both synths),
+    // so a sampled layer would jump 17 dB on the next edit of anything. LIB-GAP(25).
+    expect(kindRow.options.map((option) => option.value)).toEqual(['pluck-synth', 'fm-synth']);
+    // …but a stored one is still named honestly rather than reported unrecognised,
+    // which is what keeps the panel from reading as empty.
+    expect(kindRow.resolve('sampler')).toBe('sampler');
+    expect(kindRow.resolve('wavetable')).toBeNull();
+    // The picker's reset target and the Add gesture's seed must name the SAME
+    // kind. They are declared apart — one on the row, one in `sourceDefaults` —
+    // and if they drift, Add creates one kind while the picker claims another,
+    // which is a panel disagreeing with itself and nothing failing.
+    expect(kindRow.fallback).toBe(SEED_LAYER.source.kind);
+    expect(kindRow.options.some((option) => option.value === kindRow.fallback)).toBe(true);
   });
 
   it('keeps every section param under its removable branch', () => {
@@ -805,7 +1296,12 @@ describe('descriptor invariants', () => {
     expect(optionValues(paramAt('source.samples'))).toEqual(SAMPLE_PACKS.map((p) => p.id));
     // The union has no runtime registry, so these two are the type made
     // enumerable. `OscillatorType` is what the lib's own field accepts.
-    expect(optionValues(paramAt('source.kind'))).toEqual(SOURCE_KINDS);
+    // Minus `pluck-synth`, withdrawn from the offer 2026-09-01 — see
+    // `OFFERED_SOURCE_KIND_OPTIONS`. Still a list rather than a count, so
+    // dropping another kind by accident still fails here.
+    expect(optionValues(paramAt('source.kind'))).toEqual(
+      SOURCE_KINDS.filter((kind) => kind !== 'pluck-synth'),
+    );
     const waveforms = ['sine', 'square', 'sawtooth', 'triangle'];
     expect(optionValues(paramAt('source.params.carrierWaveform'))).toEqual(waveforms);
     expect(optionValues(paramAt('source.params.modulatorWaveform'))).toEqual(waveforms);
@@ -814,21 +1310,27 @@ describe('descriptor invariants', () => {
 
 describe('scope', () => {
   it('declares exactly this slice`s sections, in signal-chain order', () => {
-    expect(PARAM_SECTIONS.map((s) => s.id)).toEqual(['source', 'amp', 'cabinet', 'level']);
+    // `body-filter` sits where `Voice.wireChain` puts the node: after the input
+    // gain, before the compressor and everything the pedalboard does.
+    expect(PARAM_SECTIONS.map((s) => s.id)).toEqual([
+      'source',
+      'body-filter',
+      'amp',
+      'cabinet',
+      'level',
+    ]);
   });
 
   it('touches nothing that belongs to a later slice', () => {
     // The lib has ~95 tunable params. Anything reached from here that is not
     // Source / Amp / Cabinet / Level is scope creep, and the pane cannot render it.
     //
-    // `source.kind` and `source.params` came OFF this list with the Source panel —
-    // they are the whole subject of it now. `layer` stays: a second source is the
-    // next slice, and it is the one that will reuse `appliesWhen` on
-    // `layer.source.kind`.
+    // `source.kind` and `source.params` came OFF this list with the Source panel;
+    // `layer` and `bodyFilter` came off with this one — both are now the subject.
+    // `compressor` stays: it is a later section, and it is the ONE remaining
+    // pre-pedalboard stage, so this list is what says so out loud.
     const deferred = [
-      'bodyFilter',
       'compressor',
-      'layer',
       'effects.distortion',
       'effects.chorus',
       'effects.delay',
@@ -852,5 +1354,13 @@ describe('scope', () => {
     // a different sampler release. Those three, and nothing else in this slice.
     const rebuilding = ALL_PARAMS.filter((p) => p.rebuildsVoice).map((p) => p.path);
     expect(rebuilding).toEqual(['source.kind', 'source.samples', 'source.release']);
+    // A sub-branch's `kindRow` is not in `ALL_PARAMS` — it is deliberately outside
+    // `section.params`, so this walk cannot see it — and it is the fourth such
+    // edit: `Voice.updateLayer` disposes and rebuilds the layer on a kind change,
+    // exactly as `swapPreset` does for the primary. Asserted here so the flag is a
+    // pinned claim rather than a comment nothing reads.
+    for (const { sub } of SUB_BRANCHES) {
+      if (sub.kindRow) expect(sub.kindRow.rebuildsVoice, sub.id).toBe(true);
+    }
   });
 });

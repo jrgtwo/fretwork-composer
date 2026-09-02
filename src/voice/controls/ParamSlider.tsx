@@ -21,19 +21,19 @@
  * Clamping the readout would hide the fact that the preset holds a value this editor
  * cannot represent, which is worse.
  *
- * ⚠ THIS IS NOT AN EDGE CASE ANY MORE, and the header used to claim it was. Ten of the
- * fourteen built-ins hold a `source.release` outside the 0–1 s that `classes/Sampler.html`
- * documents — 1.5 to 2.8 s — so on every one of them the Release row draws pinned at 1
- * and reads `2.50 s`. They are listed in `STALE_PRESET_VALUES` in
- * `src/voice/paramSchema.test.ts`, and they are stale PRESET data (the lib is out of
- * bounds for this app), not a wrong bound. Two consequences to expect until they are
- * retuned: the first arrow key on that row jumps 2.5 s → 1 s in one press, and a click on
- * the far right of the track emits nothing at all, because the DOM has already clamped
- * the input's value to `max` and React's value tracker sees no change.
+ * ⚠ IT WAS ONCE THE COMMON CASE, which is why the behaviour is spelled out rather than
+ * waved at. Ten of the fourteen built-ins held a `source.release` of 1.5–2.8 s against the
+ * 0–1 s `classes/Sampler.html` documents, so the Release row drew pinned at 1 and read
+ * `2.50 s` on most voices; the lib has since retuned those presets (FOLLOW-UPS row 24) and
+ * no built-in is out of range today. A hand-authored variant still can be, and then two
+ * things follow: the first arrow key on that row jumps 2.5 s → 1 s in one press, and a
+ * click on the far right of the track emits nothing at all, because the DOM has already
+ * clamped the input's value to `max` and React's value tracker sees no change.
  */
 export function ParamSlider({
   id,
   label,
+  ariaLabel,
   value,
   min,
   max,
@@ -44,6 +44,15 @@ export function ParamSlider({
 }: {
   id: string;
   label: string;
+  /**
+   * Overrides the visible label as the accessible name. Same job, same reason as
+   * `ParamToggle.ariaLabel`: a descriptor generated under two branches puts two
+   * controls called "Harmonicity" in one pane, and `role="group"` does NOT
+   * contribute its name to a descendant's — it is announced on entering the
+   * group, not on the control. The visible engraving stays inside its 74 px
+   * column; the name carries the branch.
+   */
+  ariaLabel?: string;
   value: number;
   min: number;
   max: number;
@@ -63,6 +72,10 @@ export function ParamSlider({
       <input
         id={id}
         type="range"
+        // Exclusive rather than additive: `aria-label` outranks the `<label
+        // for>` in the accessible-name computation, so setting it always wins
+        // and setting nothing leaves the visible label doing the naming.
+        {...(ariaLabel ? { 'aria-label': ariaLabel } : {})}
         min={min}
         max={max}
         step={step}

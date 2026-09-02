@@ -78,8 +78,17 @@ export interface ParamEncoderProps {
    * never read here — the pane owns the write. Optional because only the row supplies it.
    */
   path?: string;
-  /** Engraved under the cap, and the control's accessible name. */
+  /** Engraved under the cap, and the control's accessible name unless
+   *  {@link ParamEncoderProps.ariaLabel} overrides it. */
   label: string;
+  /**
+   * Overrides the engraving as the accessible name. Same job, same reason as
+   * `ParamToggle.ariaLabel`: a descriptor generated under two branches puts two
+   * spinbuttons called "Harmonicity" in one pane, and the enclosing
+   * `role="group"` does NOT contribute its name to a descendant's — it is
+   * announced on entering the group, not on the control.
+   */
+  ariaLabel?: string;
   value: number;
   /** The increment. One detent, one arrow press, one wheel notch. */
   step: number;
@@ -101,6 +110,7 @@ export interface ParamEncoderProps {
 
 export function ParamEncoder({
   label,
+  ariaLabel,
   value,
   step,
   precision,
@@ -302,7 +312,10 @@ export function ParamEncoder({
         ref={dialRef}
         role="spinbutton"
         tabIndex={disabled ? -1 : 0}
-        aria-labelledby={labelId}
+        // Exclusive, not additive: `aria-labelledby` outranks `aria-label` in the
+        // name computation, so the two cannot both be set — the same choice
+        // `ParamToggle` makes and for the same reason.
+        {...(ariaLabel ? { 'aria-label': ariaLabel } : { 'aria-labelledby': labelId })}
         aria-valuenow={value}
         // No aria-valuemin / aria-valuemax: see the header. Their ABSENCE is the
         // statement, and on `spinbutton` it is a legal one.

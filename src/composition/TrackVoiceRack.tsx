@@ -80,6 +80,25 @@
  * components is the better answer and is a change to those components, not to
  * this one.
  *
+ * ── A sub-branch is added, removed and re-kinded here too ────────────────────
+ *
+ * `paramSchema` carries two optional branches nested inside stages — the second
+ * source, in Source, and the body filter's cutoff envelope. Their ROWS work here
+ * like every other row, because they are declared in `section.params` and so are
+ * in `trackVoiceDrafts`' path map.
+ *
+ * The BRANCH itself needs three seams of its own, because `addTrackVoiceSection`
+ * / `removeTrackVoiceSection` are keyed by `SectionId` and a sub-branch is not a
+ * section, and because `setTrackVoiceParam` resolves a `source-kind` row through
+ * `withSourceKind`, which takes no path and always replaces the PRIMARY source —
+ * which is exactly why the layer's picker is declared on `ParamSubBranch.kindRow`
+ * and kept out of `section.params` in the first place. They are
+ * `addTrackVoiceSubBranch`, `removeTrackVoiceSubBranch` and
+ * `setTrackVoiceSubBranchKind` in `voice/trackVoiceDrafts.ts`, and this surface
+ * draws all three — so a track with no second source can gain one from here or
+ * from an agent's call, which is the same test every other capability on this
+ * page passes.
+ *
  * ── ⚠ There is no reverb here, and that is deliberate ────────────────────────
  *
  * A `VoicePreset` has its own reverb and `paramSchema` does not declare it, so it
@@ -92,21 +111,28 @@ import { getAmpModel, getSamplePack, detectSamplePack, type Track } from '@fretw
 import {
   DEFAULT_OPEN_SECTIONS,
   PARAM_SECTIONS,
+  branchParams,
   enabledParamOf,
+  ownParams,
   sectionPresence,
-  visibleParams,
+  subBranchApplies,
   type EnumParam,
   type Param,
   type ParamSection,
+  type ParamSubBranch,
   type SectionId,
   type SliderParam,
+  type SourceKindParam,
 } from '../voice/paramSchema';
 import { getAtPath } from '../voice/presetPaths';
 import {
   addTrackVoiceSection,
+  addTrackVoiceSubBranch,
   discardTrackVoiceDraft,
   removeTrackVoiceSection,
+  removeTrackVoiceSubBranch,
   setTrackVoiceParam,
+  setTrackVoiceSubBranchKind,
   useTrackVoiceDirty,
   useTrackVoiceWorkingPreset,
 } from '../voice/trackVoiceDrafts';
@@ -222,12 +248,15 @@ export function TrackVoiceRack({
    * descriptor, including `fallback` as the double-click reset, so nothing about
    * an amp's ranges is known to this file.
    */
-  const renderKnob = (param: SliderParam, size: number) => {
+  const renderKnob = (param: SliderParam, size: number, nameScope?: string) => {
     const raw = getAtPath(preset, param.path);
     return (
       <Knob
         key={param.path}
         label={param.label}
+        // See `renderParam`: a sub-branch's rows share their labels with the
+        // primary's, and the group around them does not name them.
+        ariaLabel={nameScope ? `${nameScope} ${param.label}` : undefined}
         size={size}
         value={typeof raw === 'number' ? raw : param.fallback}
         min={param.min}
@@ -242,9 +271,19 @@ export function TrackVoiceRack({
     );
   };
 
-  const renderParam = (section: ParamSection, param: Param) => {
+  /**
+   * One row of the table. `nameScope` prefixes the ACCESSIBLE name of a
+   * sub-branch's rows — the same override, for the same reason, that
+   * `VoicePane.renderParam` documents: the layer's rows are the primary's
+   * descriptors generated under a second branch, so "Harmonicity" appears twice
+   * inside one stage, and the enclosing `role="group"` does not contribute its
+   * name to a descendant's. The landmark name handles the OTHER axis (which of
+   * eight racks); this one handles which branch inside a stage.
+   */
+  const renderParam = (section: ParamSection, param: Param, nameScope?: string) => {
     const raw = getAtPath(preset, param.path);
     const id = domId(track.id, param.path);
+    const scoped = (label: string) => (nameScope ? `${nameScope} ${label}` : undefined);
 
     switch (param.kind) {
       case 'toggle':
@@ -256,7 +295,7 @@ export function TrackVoiceRack({
             // Every stage's bypass is labelled "Enabled" and there are up to
             // eight racks of them, so the name carries the track and the stage
             // while the visible label stays inside a 74 px column.
-            ariaLabel={`${track.name} ${section.label} ${param.label}`}
+            ariaLabel={scoped(param.label) ?? `${track.name} ${section.label} ${param.label}`}
             value={typeof raw === 'boolean' ? raw : param.fallback}
             onChange={(value) => write(param.path, value)}
           />
@@ -268,6 +307,7 @@ export function TrackVoiceRack({
             key={param.path}
             id={id}
             label={param.label}
+            ariaLabel={scoped(param.label)}
             value={param.resolve(raw)}
             options={param.options}
             badgeOf={param.badgeOf}
@@ -282,6 +322,7 @@ export function TrackVoiceRack({
           <ParamEncoder
             key={param.path}
             label={param.label}
+            ariaLabel={scoped(param.label)}
             size={SMALL_KNOB_PX}
             value={typeof raw === 'number' ? raw : param.fallback}
             step={param.step}
@@ -358,7 +399,7 @@ export function TrackVoiceRack({
         // Every slider in this table is drawn as a knob here — the lane is a
         // rack face, and a 74 px label plus a 52 px readout per row is the pane
         // layout, not the rack one.
-        return renderKnob(param, SMALL_KNOB_PX);
+        return renderKnob(param, SMALL_KNOB_PX, nameScope);
     }
   };
 
@@ -393,7 +434,8 @@ export function TrackVoiceRack({
         formatValue={(v) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`}
         onChange={(value) => report(setTrackInputGainDb(track.id, value))}
       />
-      {visibleParams(preset, section)
+      {/* `ownParams` for the reason `renderAmp` states. */}
+      {ownParams(preset, section)
         .filter((param) => param.path !== 'inputGainDb')
         .map((param) => renderParam(section, param))}
     </div>
@@ -422,7 +464,10 @@ export function TrackVoiceRack({
    *  model the chain would really build engraved on the face. Split by `kind`,
    *  so a slider the schema gains appears as a knob without touching this. */
   const renderAmp = (section: ParamSection) => {
-    const rows = visibleParams(preset, section);
+    // `ownParams`, not `visibleParams`: `renderSubBranch` runs after every stage
+    // body, so a renderer asking for all the visible rows would draw a sub-branch's
+    // rows twice the day this stage gains one.
+    const rows = ownParams(preset, section);
     const power = enabledParamOf(section);
     const enabled = power ? getAtPath(preset, power.path) !== false : true;
     const rawModel = getAtPath(preset, 'effects.amp.modelId');
@@ -462,7 +507,8 @@ export function TrackVoiceRack({
    *  is otherwise empty, and a stage that is as tall as its own graphic reads as
    *  one piece of gear rather than as a picture with a form under it. */
   const renderCabinet = (section: ParamSection) => {
-    const rows = visibleParams(preset, section);
+    // `ownParams` for the reason `renderAmp` states.
+    const rows = ownParams(preset, section);
     const cab = rows.find(
       (param): param is EnumParam => param.kind === 'enum' && param.path === CAB_URL_PATH,
     );
@@ -486,6 +532,89 @@ export function TrackVoiceRack({
             .filter((param) => param.kind !== 'slider')
             .map((param) => renderParam(section, param))}
         </div>
+      </div>
+    );
+  };
+
+  /**
+   * The sub-branch's source picker — the second source's kind.
+   *
+   * NOT `renderParam`'s `source-kind` case, and the difference is the write:
+   * that one routes through `setTrackVoiceParam`, which resolves a `source-kind`
+   * row with `withSourceKind` — a function that takes no path and always
+   * replaces the PRIMARY source. `setTrackVoiceSubBranchKind` is the
+   * branch-aware seam, and it is why the layer's picker is declared on
+   * `ParamSubBranch.kindRow` rather than in `section.params`.
+   */
+  const renderSubBranchKind = (row: SourceKindParam, sub: ParamSubBranch) => (
+    <ParamEnum
+      key={row.path}
+      id={domId(track.id, row.path)}
+      label={row.label}
+      // "Source" names the primary's picker too, and both live in this stage.
+      ariaLabel={`${track.name} ${sub.label} ${row.label}`}
+      value={row.resolve(getAtPath(preset, row.path))}
+      options={row.options}
+      // A stored kind the picker does not offer resolves fine and simply has no
+      // option — see `LAYER_SOURCE_KIND_OPTIONS` for which kinds and why.
+      placeholder="Not offered here"
+      onChange={(value) => report(setTrackVoiceSubBranchKind(track.id, sub.id, value))}
+    />
+  );
+
+  /**
+   * A stage's nested optional branch — the second source, the cutoff envelope.
+   *
+   * Rendered as a named group, which carries the CONTAINMENT; the rows' own
+   * names carry which branch they belong to (`renderParam`'s `nameScope`),
+   * because a group's accessible name is announced on entry and does not fold
+   * into a descendant's. Here the group also nests inside the `RackFace`
+   * landmark, so a listener gets the track, the stage, then the group.
+   *
+   * Add and Remove are drawn whether or not the branch is there, exactly as the
+   * stage buttons are: `addTrackVoiceSubBranch` / `removeTrackVoiceSubBranch`
+   * are the seams for it, so neither button is a refusal waiting to happen.
+   */
+  const renderSubBranch = (section: ParamSection) => {
+    const sub = section.subBranch;
+    if (!sub) return null;
+    const present = subBranchApplies(preset, sub);
+    return (
+      <div
+        role="group"
+        aria-label={`${track.name} ${sub.label}`}
+        className="flex flex-wrap items-start gap-x-2 gap-y-1 border-t border-ink-mut/20 pt-1"
+      >
+        <div className="flex w-full items-center gap-1.5">
+          <span className="font-mono text-[8px] tracking-[0.1em] text-ink-mut uppercase">
+            {sub.label}
+          </span>
+          <span className="flex-1" />
+          <button
+            type="button"
+            // Up to eight racks, two sub-branches, and every button says "Add" —
+            // the name carries the track and the branch, as the stage's does.
+            aria-label={`${present ? 'Remove' : 'Add'} ${sub.label} for ${track.name}`}
+            onClick={() =>
+              report(
+                present
+                  ? removeTrackVoiceSubBranch(track.id, sub.id)
+                  : addTrackVoiceSubBranch(track.id, sub.id),
+              )
+            }
+            className={buttonClass}
+          >
+            {present ? 'Remove' : 'Add'}
+          </button>
+        </div>
+        {present ? (
+          <>
+            {sub.kindRow ? renderSubBranchKind(sub.kindRow, sub) : null}
+            {branchParams(preset, section).map((param) =>
+              renderParam(section, param, `${track.name} ${sub.label}`),
+            )}
+          </>
+        ) : null}
       </div>
     );
   };
@@ -538,9 +667,10 @@ export function TrackVoiceRack({
           renderLevel(section)
         ) : (
           <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
-            {visibleParams(preset, section).map((param) => renderParam(section, param))}
+            {ownParams(preset, section).map((param) => renderParam(section, param))}
           </div>
         )}
+        {presence !== 'absent' ? renderSubBranch(section) : null}
       </Section>
     );
   };

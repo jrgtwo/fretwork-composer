@@ -6,6 +6,7 @@ import {
   ACOUSTIC_GUITAR_PRESET,
   CABINET_IRS,
   detectSamplePack,
+  sourceTrimDb,
   useFretworkStore,
   useVoiceStore,
   type CabIRParams,
@@ -103,7 +104,7 @@ describe('VoicePane', () => {
 
     // Section disclosures carry the label alone — no status text folded into the
     // accessible name, which is why the status note sits outside the button.
-    for (const name of ['Source', 'Amp', 'Cabinet', 'Level']) {
+    for (const name of ['Source', 'Body filter', 'Amp', 'Cabinet', 'Level']) {
       expect(section(name)).toBeInTheDocument();
     }
 
@@ -132,10 +133,12 @@ describe('VoicePane', () => {
 
   it('reads absent and bypassed as different states', async () => {
     // Not a hypothetical: the stock acoustic guitar ships with no `effects` object at
-    // all, so both amp and cabinet start absent.
+    // all, so both amp and cabinet start absent — and no `bodyFilter` either, which
+    // is the state thirteen of the fourteen built-ins are in.
     expect(ACOUSTIC_GUITAR_PRESET.effects).toBeUndefined();
+    expect(ACOUSTIC_GUITAR_PRESET.bodyFilter).toBeUndefined();
     render(<Host />);
-    expect(screen.getAllByText('Not on this preset')).toHaveLength(2);
+    expect(screen.getAllByText('Not on this preset')).toHaveLength(3);
 
     await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
     const toggle = screen.getByRole('switch', { name: 'Cabinet Enabled' });
@@ -386,7 +389,7 @@ describe('VoicePane', () => {
     const asked = stubConfirm(false);
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-    await pickVoice('default:electric-guitar');
+    await pickVoice('default:karoryfer-green-guitar');
 
     expect(asked).toHaveLength(1);
     // Refused, so the edit survives and the voice hasn't moved.
@@ -401,12 +404,12 @@ describe('VoicePane', () => {
     stubConfirm(true);
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-    await pickVoice('default:electric-guitar');
+    await pickVoice('default:karoryfer-green-guitar');
 
     expect(screen.getByText('Saved')).toBeInTheDocument();
     expect(screen.queryByLabelText('Drive')).not.toBeInTheDocument();
     expect((screen.getByLabelText('Voice') as HTMLSelectElement).value).toBe(
-      'default:electric-guitar',
+      'default:karoryfer-green-guitar',
     );
   });
 
@@ -518,24 +521,6 @@ describe('VoicePane', () => {
    * `applyVoicePreset`. A control that renders and writes nothing is invisible
    * from the row's side and obvious from the preset's.
    */
-  it('shows a synth voice`s own controls, not an empty panel', async () => {
-    render(<Host />);
-    // `electric-guitar` is the one guitar slot that isn't sampler-sourced.
-    await pickVoice('default:electric-guitar');
-    await userEvent.click(section('Source'));
-
-    // The kind picker is there on every voice, and it says what this one is.
-    expect((screen.getByLabelText('Source') as HTMLSelectElement).value).toBe('pluck-synth');
-    // Its two bounded params are sliders; its two unbounded ones are encoders.
-    expect(screen.getByLabelText('Attack noise')).toBeInTheDocument();
-    expect(screen.getByLabelText('Dampening')).toBeInTheDocument();
-    expect(screen.getByRole('spinbutton', { name: 'Resonance' })).toBeInTheDocument();
-    expect(screen.getByRole('spinbutton', { name: 'Release' })).toBeInTheDocument();
-    // Nothing belonging to the other two kinds.
-    expect(screen.queryByLabelText('Pack')).not.toBeInTheDocument();
-    expect(screen.queryByRole('spinbutton', { name: 'Harmonicity' })).not.toBeInTheDocument();
-  });
-
   it('switches the source and hands over a well-formed one', async () => {
     render(<Host />);
     await userEvent.click(section('Source'));
@@ -567,7 +552,7 @@ describe('VoicePane', () => {
     render(<Host />);
     await userEvent.click(section('Source'));
 
-    await userEvent.selectOptions(screen.getByLabelText('Source'), 'pluck-synth');
+    await userEvent.selectOptions(screen.getByLabelText('Source'), 'fm-synth');
     await userEvent.selectOptions(screen.getByLabelText('Source'), 'sampler');
 
     const source = workingPreset().source;
@@ -592,15 +577,15 @@ describe('VoicePane', () => {
     // form value, so "the control is on screen" says nothing about whether its
     // `onChange` reaches the preset. Only the working copy can.
     render(<Host />);
-    await pickVoice('default:electric-guitar');
     await userEvent.click(section('Source'));
+    await userEvent.selectOptions(screen.getByLabelText('Source'), 'fm-synth');
 
-    const resonance = screen.getByRole('spinbutton', { name: 'Resonance' });
-    const start = Number(resonance.getAttribute('aria-valuenow'));
-    fireEvent.keyDown(resonance, { key: 'ArrowUp' });
+    const harmonicity = screen.getByRole('spinbutton', { name: 'Harmonicity' });
+    const start = Number(harmonicity.getAttribute('aria-valuenow'));
+    fireEvent.keyDown(harmonicity, { key: 'ArrowUp' });
 
-    // The descriptor's step is 0.01, and an encoder is relative: start + one step.
-    expect(getAtPath(workingPreset(), 'source.params.resonance')).toBeCloseTo(start + 0.01, 6);
+    // The descriptor's step is 0.05, and an encoder is relative: start + one step.
+    expect(getAtPath(workingPreset(), 'source.params.harmonicity')).toBeCloseTo(start + 0.05, 6);
   });
 
   it('changing instrument re-offers that instrument’s voices', async () => {
@@ -614,4 +599,220 @@ describe('VoicePane', () => {
     // Bass has two slots and none of the guitar amps.
     expect(offered).toEqual(['Instrument default', 'Acoustic Bass', 'Electric Bass']);
   });
+
+  // ─── the second source (`preset.layer`) ────────────────────────────────────
+  //
+  // Every assertion here reads the preset the pane hands `applyVoicePreset`, not
+  // the DOM. That is the point: a layer is a branch nothing on screen renders
+  // whole, and "a control exists" is exactly the check that would still pass with
+  // the write deleted.
+
+  /** Open Source and hand back the second source's group. Folded sections stay
+   *  mounted but `hidden`, and a hidden subtree is out of the a11y tree. */
+  const openSecondSource = async () => {
+    await userEvent.click(section('Source'));
+    return within(screen.getByRole('group', { name: 'Second source' }));
+  };
+
+  it('adds a second source as a whole VoiceLayer, not a half of one', async () => {
+    // `Voice._buildLayer` calls `buildSynth(layer.source)` and reads `.kind` off
+    // it, so a layer seeded field-by-field from row fallbacks — which is what
+    // `addSection` would produce, since it skips `source-kind` rows — is a
+    // TypeError in the audio engine rather than a quiet mistuning.
+    expect(ACOUSTIC_GUITAR_PRESET.layer).toBeUndefined();
+    render(<Host />);
+    const layer = await openSecondSource();
+    await userEvent.click(layer.getByRole('button', { name: 'Add Second source' }));
+
+    const added = workingPreset().layer;
+    expect(added).toBeDefined();
+    expect(added!.source.kind).toBe('fm-synth');
+    // The whole arm, not just the discriminant.
+    expect(added!.source).toHaveProperty('params.harmonicity');
+    expect(added!.source).toHaveProperty('params.envelope.attack');
+    // Quiet and at unison — a stage that arrives must not be a level or pitch jump.
+    expect(added!.octaveOffset).toBe(0);
+    expect(added!.detuneCents).toBe(0);
+    // ⚠ AGAINST THE PRIMARY, NOT AGAINST FULL SCALE. `_buildLayer` bypasses the
+    // primary's `_sourceTrim` node and folds in only the layer's own, so the delta
+    // that is audible is `gainDb + trim(layer) − trim(primary)` — and the Acoustic
+    // Guitar this renders is a SAMPLER, trimmed 17 dB down. A bare
+    // `gainDb <= -6` passes for every value of the thing that can be wrong here.
+    const preset = workingPreset();
+    const deltaDb = added!.gainDb + sourceTrimDb(added!.source) - sourceTrimDb(preset.source);
+    expect(preset.source.kind).toBe('sampler');
+    expect(deltaDb).toBeLessThanOrEqual(-6);
+  });
+
+  it('removes a second source branch and all of it', async () => {
+    render(<Host />);
+    const layer = await openSecondSource();
+    await userEvent.click(layer.getByRole('button', { name: 'Add Second source' }));
+    expect(workingPreset().layer).toBeDefined();
+
+    await userEvent.click(
+      within(screen.getByRole('group', { name: 'Second source' })).getByRole('button', {
+        name: 'Remove Second source',
+      }),
+    );
+    // Absent, not `{}` — `removeAtPath` prunes, and a hollow branch reads as
+    // present to `hasBranchAtPath` and so would keep the rows on screen.
+    expect(workingPreset().layer).toBeUndefined();
+    expect(Object.hasOwn(workingPreset(), 'layer')).toBe(false);
+  });
+
+  it('shows a built-in`s real second source rather than the schema fallbacks', async () => {
+    render(<Host />);
+    await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
+    await pickVoice('default:acoustic-bass');
+    const layer = await openSecondSource();
+
+    // Acoustic Bass ships `gainDb: -8`, `octaveOffset: -1`, an FM sub-body at
+    // `harmonicity: 0.5`. The seed is -12 / 0 / 3, so a row rendering its fallback
+    // rather than the stored value fails every one of these.
+    expect(layer.getByRole('spinbutton', { name: 'Second source Mix' })).toHaveAttribute(
+      'aria-valuenow',
+      '-8',
+    );
+    expect(layer.getByLabelText('Second source Octave')).toHaveValue('-1');
+    expect(
+      layer.getByRole('spinbutton', { name: 'Second source Harmonicity' }),
+    ).toHaveAttribute('aria-valuenow', '0.5');
+
+    // ⚠ AND THE TWO ARE TELLABLE APART BY NAME. The layer's rows are the
+    // primary's descriptors generated under a second branch, so both stages of
+    // this one section engrave "Harmonicity". The enclosing `role="group"` does
+    // NOT name its descendants — a group is announced on entry — so without the
+    // rows' own name scope a listener hears "Harmonicity" twice with nothing
+    // between them. Exactly one of each name, and they are different elements.
+    const primary = screen.getByRole('spinbutton', { name: 'Harmonicity' });
+    const second = screen.getByRole('spinbutton', { name: 'Second source Harmonicity' });
+    expect(primary).not.toBe(second);
+    expect(primary).toHaveAttribute('aria-valuenow', '1');
+  });
+
+  it('writes a second source edit to `layer`, leaving the primary source alone', async () => {
+    render(<Host />);
+    await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
+    await pickVoice('default:acoustic-bass');
+    const layer = await openSecondSource();
+
+    const mix = layer.getByRole('spinbutton', { name: 'Second source Mix' });
+    fireEvent.keyDown(mix, { key: 'ArrowUp' });
+    // The descriptor's step is 0.5 dB, and an encoder is relative.
+    expect(getAtPath(workingPreset(), 'layer.gainDb')).toBeCloseTo(-7.5, 6);
+
+    // The primary's own harmonicity, read BEFORE the layer's is turned. The two
+    // rows are one descriptor generated under two branches; if the generator ever
+    // stopped substituting the prefix they would share a path, and nothing on
+    // screen would say so.
+    const primaryHarmonicity = getAtPath(workingPreset(), 'source.params.harmonicity');
+    const harmonicity = layer.getByRole('spinbutton', { name: 'Second source Harmonicity' });
+    fireEvent.keyDown(harmonicity, { key: 'ArrowUp' });
+    expect(getAtPath(workingPreset(), 'layer.source.params.harmonicity')).toBeCloseTo(0.55, 6);
+    expect(getAtPath(workingPreset(), 'source.params.harmonicity')).toBe(primaryHarmonicity);
+  });
+
+  it('changes the second source`s kind both ways, and never the primary`s', async () => {
+    // ⚠ THE MIS-ROUTE GUARD. `trackVoiceDrafts` resolves any `source-kind` row
+    // through `withSourceKind`, which always replaces `preset.source` — so a layer
+    // picker wired the obvious way re-kinds the PRIMARY and looks, on screen, like
+    // it worked. Asserted on both branches of the preset, in both directions.
+    render(<Host />);
+    await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
+    await pickVoice('default:acoustic-bass');
+    const layer = await openSecondSource();
+
+    await userEvent.selectOptions(layer.getByLabelText('Second source Source'), 'pluck-synth');
+    let preset = workingPreset();
+    expect(preset.layer?.source.kind).toBe('pluck-synth');
+    // The whole arm was replaced, so the FM params are gone rather than sitting
+    // beside a pluck tag — the malformed union `withLayerSourceKind` prevents.
+    expect(preset.layer?.source).toHaveProperty('params.attackNoise');
+    expect(preset.layer?.source).not.toHaveProperty('params.harmonicity');
+    expect(preset.source.kind).toBe('fm-synth');
+    expect(preset.source).toHaveProperty('params.harmonicity');
+
+    await userEvent.selectOptions(
+      within(screen.getByRole('group', { name: 'Second source' })).getByLabelText(
+        'Second source Source',
+      ),
+      'fm-synth',
+    );
+    preset = workingPreset();
+    expect(preset.layer?.source.kind).toBe('fm-synth');
+    expect(preset.layer?.source).toHaveProperty('params.harmonicity');
+    expect(preset.source.kind).toBe('fm-synth');
+  });
+
+  it('offers the layer no Detune of its own on a plucked source', async () => {
+    // `applyLayerDetune` writes `synth.detune.value` on an FMSynth and silently
+    // ignores a PluckSynth, so the control would do nothing there.
+    render(<Host />);
+    const layer = await openSecondSource();
+    await userEvent.click(layer.getByRole('button', { name: 'Add Second source' }));
+
+    const group = () => within(screen.getByRole('group', { name: 'Second source' }));
+    expect(
+      group().getByRole('spinbutton', { name: 'Second source Detune' }),
+    ).toBeInTheDocument();
+    await userEvent.selectOptions(group().getByLabelText('Second source Source'), 'pluck-synth');
+    expect(
+      group().queryByRole('spinbutton', { name: 'Second source Detune' }),
+    ).not.toBeInTheDocument();
+  });
+
+  // ─── the body filter ───────────────────────────────────────────────────────
+
+  const bodyFilter = () => within(screen.getByRole('region', { name: 'Body filter stage' }));
+
+  it('adds a body filter as a static one, and its envelope as a separate gesture', async () => {
+    // Two branches, two gestures, on purpose: a filter with no envelope is a fixed
+    // cutoff, which is a sound of its own and not a half-built one.
+    render(<Host />);
+    await userEvent.click(section('Body filter'));
+    await userEvent.click(bodyFilter().getByRole('button', { name: 'Add Body filter' }));
+
+    let filter = workingPreset().bodyFilter;
+    expect(filter).toBeDefined();
+    expect(filter!.envelope).toBeUndefined();
+    // Near-transparent rather than Tone's 350 Hz default — adding a stage must not
+    // darken the voice. And `enabled` stays unwritten: the lib documents an absent
+    // flag as implicit-on, so seeding `true` would state a choice nobody made.
+    expect(filter!.cutoff).toBeGreaterThanOrEqual(6000);
+    expect(Object.hasOwn(filter!, 'enabled')).toBe(false);
+
+    await userEvent.click(bodyFilter().getByRole('button', { name: 'Add Cutoff envelope' }));
+    filter = workingPreset().bodyFilter;
+    // The WHOLE envelope. `buildChain` reads all six off it; five `undefined`s is
+    // what a row-by-row seeding would have produced.
+    expect(Object.keys(filter!.envelope!).sort()).toEqual([
+      'attack',
+      'baseFrequency',
+      'decay',
+      'octaves',
+      'release',
+      'sustain',
+    ]);
+    // Its peak lands on the static cutoff it replaces, so the attack is unchanged.
+    expect(filter!.envelope!.baseFrequency * 2 ** filter!.envelope!.octaves).toBe(filter!.cutoff);
+  });
+
+  it('removes the envelope without removing the filter, and the filter with it', async () => {
+    render(<Host />);
+    await userEvent.click(section('Body filter'));
+    await userEvent.click(bodyFilter().getByRole('button', { name: 'Add Body filter' }));
+    await userEvent.click(bodyFilter().getByRole('button', { name: 'Add Cutoff envelope' }));
+    expect(workingPreset().bodyFilter?.envelope).toBeDefined();
+
+    await userEvent.click(bodyFilter().getByRole('button', { name: 'Remove Cutoff envelope' }));
+    // `removeAtPath` prunes an emptied parent — `bodyFilter` still holds cutoff and
+    // q, so it must survive rather than be pruned along with its envelope.
+    expect(workingPreset().bodyFilter).toBeDefined();
+    expect(workingPreset().bodyFilter?.envelope).toBeUndefined();
+
+    await userEvent.click(bodyFilter().getByRole('button', { name: 'Remove Body filter' }));
+    expect(workingPreset().bodyFilter).toBeUndefined();
+  });
+
 });

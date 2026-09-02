@@ -42,8 +42,17 @@ interface KnobProps {
   step: number;
   /** Reset target on double-click. Absent = double-click does nothing. */
   defaultValue?: number;
-  /** Engraved under the cap, and the control's accessible name. */
+  /** Engraved under the cap, and the control's accessible name unless
+   *  {@link KnobProps.ariaLabel} overrides it. */
   label: string;
+  /**
+   * Overrides the engraving as the accessible name. Same job, same reason as
+   * `ParamToggle.ariaLabel`: a descriptor generated under two branches puts two
+   * knobs called "Attack noise" in one stage, and the enclosing `role="group"`
+   * does NOT contribute its name to a descendant's — a group is announced on
+   * entry, not folded into the controls inside it.
+   */
+  ariaLabel?: string;
   /** Readout + `aria-valuetext`. e.g. `(v) => `${v.toFixed(1)} dB``. */
   formatValue?(v: number): string;
   /** Outer SVG dimension in px. */
@@ -59,6 +68,7 @@ export function Knob({
   step,
   defaultValue,
   label,
+  ariaLabel,
   formatValue,
   size = DEFAULT_SIZE,
   disabled = false,
@@ -88,10 +98,9 @@ export function Knob({
 
   // A value outside [min, max] pins the dial to the bound while the readout shows the
   // true number — the same trade `ParamSlider` documents, for the same reason: hiding
-  // it would hide that the preset holds something this editor cannot represent. Reached
-  // in the shipped app, not only by a hand-authored variant: ten built-ins carry a
-  // `source.release` above the documented 1 s (`STALE_PRESET_VALUES` in
-  // `voice/paramSchema.test.ts`), so this rack draws that dial pinned on most voices.
+  // it would hide that the preset holds something this editor cannot represent. No
+  // built-in reaches it today (the ten samplers' over-long `source.release` did until
+  // the lib retuned them — FOLLOW-UPS row 24); a hand-authored variant still can.
   const fraction = max === min ? 0 : Math.min(1, Math.max(0, (value - min) / (max - min)));
   const angle = -SWEEP_DEGREES / 2 + fraction * SWEEP_DEGREES;
   const formatted = formatValue ? formatValue(value) : value.toFixed(2);
@@ -232,7 +241,9 @@ export function Knob({
         ref={dialRef}
         role="slider"
         tabIndex={disabled ? -1 : 0}
-        aria-labelledby={labelId}
+        // Exclusive, not additive: `aria-labelledby` outranks `aria-label`, so
+        // the two cannot both be set — `ParamToggle`'s choice, for its reason.
+        {...(ariaLabel ? { 'aria-label': ariaLabel } : { 'aria-labelledby': labelId })}
         // Deliberately the clamped value: ARIA requires valuenow within
         // [valuemin, valuemax], and `aria-valuetext` below carries the true one.
         aria-valuenow={clamp(value)}

@@ -198,7 +198,13 @@ export function useEditingVoicePreset(): VoicePreset | null {
  * but the same reasoning that makes `parseVoiceKey` reject an unknown slot applies here:
  * a registry the lib has half-renamed must cost the picker one entry, not the render.
  */
+/** Withdrawn from the picker 2026-09-01: unusable by ear — every note doubles and
+ *  the string will not ring. Its source kind is withdrawn too, in `paramSchema`.
+ *  A track already pointing at it still plays it; nothing new can select it. */
+const WITHDRAWN_SLOT_IDS: readonly string[] = ['electric-guitar'];
+
 const optionForSlot = (slotId: SlotId): VoiceOption[] => {
+  if (WITHDRAWN_SLOT_IDS.includes(slotId)) return [];
   try {
     return [
       {

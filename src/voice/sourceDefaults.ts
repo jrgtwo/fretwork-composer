@@ -38,9 +38,13 @@
 import {
   SAMPLE_PACKS,
   getSamplePack,
+  sourceTrimDb,
   type FMSynthParams,
   type PluckSynthParams,
   type VoiceSource,
+  type BodyFilterEnvelope,
+  type BodyFilterParams,
+  type VoiceLayer,
   type VoicePreset,
 } from '@fretwork/lib';
 
@@ -188,11 +192,169 @@ export function defaultSourceFor(kind: VoiceSourceKind): VoiceSource {
  * so switching one of them to Samples yields a sampler PLUS that untouched FM
  * sub-body, which can read as "the switch didn't take". Kept on purpose: a layer is a
  * separate voice with its own kind, and throwing it away because the primary moved
- * would silently discard tuning the user never pointed at. The slice that gives
- * `layer` its own rows (`layer.source.kind`, the same `appliesWhen` mechanism one
- * level down) is where it becomes switchable rather than merely surviving.
+ * would silently discard tuning the user never pointed at. The second source now has
+ * its own rows and its own picker ({@link withLayerSourceKind}), so that sub-body is
+ * visible, mixable and removable rather than merely surviving — which is what made
+ * leaving it alone here defensible in the first place.
  */
 export function withSourceKind(preset: VoicePreset, kind: VoiceSourceKind): VoicePreset {
   if (preset.source.kind === kind) return preset;
   return { ...preset, source: defaultSourceFor(kind) };
 }
+
+/**
+ * `preset` with its SECOND source replaced by a well-formed one of `kind`.
+ *
+ * `withSourceKind` one level down, and separate from it rather than a `branch`
+ * argument on it for a reason that is not stylistic: `trackVoiceDrafts`
+ * `setTrackVoiceParam` handles a `source-kind` row by calling
+ * `withSourceKind(preset, value)` with no path at all, so ANY second row of that
+ * kind in `PARAM_SECTIONS` would swap the PRIMARY source while the caller
+ * pointed at the layer. That is why the layer's picker is declared on
+ * `ParamSubBranch.kindRow` and never in `section.params` — see the note there.
+ *
+ * Same identity contract as `withSourceKind`: unchanged in, same reference out,
+ * because the editors' dirty checks are reference-based. A preset with no layer
+ * is returned untouched — re-kinding something that is not there is not an
+ * operation, and creating one here would hide the add gesture inside a picker.
+ */
+export function withLayerSourceKind(preset: VoicePreset, kind: VoiceSourceKind): VoicePreset {
+  const layer = preset.layer;
+  if (!layer || layer.source.kind === kind) return preset;
+  return { ...preset, layer: { ...layer, source: defaultSourceFor(kind) } };
+}
+
+/**
+ * How far under the primary a freshly added second source sits, in dB.
+ *
+ * A second source at unity is a second VOICE, which is the level jump this seed
+ * exists to avoid: summed coherently, two equal sources are +6 dB. Twelve dB
+ * down sums to +1.9 dB — under a just-perceptible step — while still being
+ * plainly audible as body when soloed by ear.
+ *
+ * ⚠ RELATIVE TO THE PRIMARY, WHICH IS NOT THE SAME AS RELATIVE TO FULL SCALE —
+ * see {@link seedLayerFor}, which is the only thing that should ever write it.
+ */
+const SEED_LAYER_MIX_DB = -12;
+
+/**
+ * What a second source is when the user has just added one.
+ *
+ * ⚠ NOT A TONE CITATION, and it cannot be: a `VoiceLayer` is the lib's own
+ * construct — one extra synth mixed under the primary and triggered on the same
+ * note — and no Tone node has a "layer". So every number here is the APP's
+ * choice, stated with its reason, which is the same treatment `paramSchema`
+ * gives `layer.octaveOffset`.
+ *
+ *   `source`  — an FM synth on Tone's documented FM defaults. FM because it is
+ *               the one kind whose `detuneCents` the engine honours
+ *               (`applyLayerDetune` ignores a PluckSynth), and because it is the
+ *               only kind that needs no download before the next note.
+ *   `gainDb`  — {@link SEED_LAYER_MIX_DB}, the NOMINAL mix level: what a layer
+ *               sits at under a primary that needs no calibration trim. The
+ *               value actually written on Add comes from {@link seedLayerFor},
+ *               which corrects it for the primary in hand.
+ *   `octaveOffset` — 0. Adding a stage must not change the voice's PITCH
+ *               content: at −1 the first thing the user hears is a new bass note
+ *               they did not ask for. The octave control is the row directly
+ *               beneath, so a sub-octave is one click away.
+ *   `detuneCents` — 0. Unison; a detune the user did not dial is a chorus they
+ *               did not ask for.
+ */
+export const SEED_LAYER: VoiceLayer = {
+  source: defaultSourceFor('fm-synth'),
+  gainDb: SEED_LAYER_MIX_DB,
+  octaveOffset: 0,
+  detuneCents: 0,
+};
+
+/**
+ * {@link SEED_LAYER}, levelled against the primary it is about to sit under.
+ *
+ * ⚠ THE PRIMARY AND THE LAYER DO NOT MEET THE MIXER AT THE SAME REFERENCE, and
+ * a flat −12 dB is therefore wrong on ten of the fourteen built-ins.
+ * `Voice._ensureBuilt` puts the primary through a `_sourceTrim` node of
+ * `sourceTrimDb(preset.source)` — **−17 dB for a sampler**, because the packs
+ * are mastered to −1 dBFS and the lib calibrates every source to −18 — while
+ * `_buildLayer` connects the layer straight to the mixer, folding in only
+ * `sourceTrimDb(layer.source)`, which is 0 for both synths. That bypass is
+ * deliberate (a synth layer must not inherit the packs' mastering trim), so the
+ * correction belongs here.
+ *
+ * A layer seeded at a flat −12 under a SAMPLED primary therefore arrives about
+ * 5 dB LOUDER than the thing it is meant to sit beneath, not 12 dB under it —
+ * a level jump on Acoustic Guitar, both Karoryfer guitars and all seven amp
+ * presets, i.e. on the sound the user meets first.
+ *
+ * The correction is the difference of the two trims, so the layer lands
+ * {@link SEED_LAYER_MIX_DB} below the primary AT THE MIXER whichever family the
+ * primary belongs to: −29 dB under a sampler, −12 dB under a synth. It assumes
+ * the two sources' raw peaks are comparable, which is the only assumption
+ * available — `levels.ts` says outright that a synth "passes at unity because
+ * nothing has measured it" — and it is the assumption the flat number was
+ * making silently for the primary alone.
+ */
+export function seedLayerFor(preset: VoicePreset): VoiceLayer {
+  return {
+    ...SEED_LAYER,
+    gainDb: SEED_LAYER_MIX_DB + sourceTrimDb(preset.source) - sourceTrimDb(SEED_LAYER.source),
+  };
+}
+
+/**
+ * What a body filter is when the user has just added one.
+ *
+ * ⚠ A SECTION SEED IS "NEUTRAL", NOT "TONE'S DEFAULT" — the rule the Amp and
+ * Cabinet sections already follow (`preDrive: 0.3`, the first registered IR),
+ * and the one the pane's own copy states: adding a stage "seeds it with neutral
+ * values you can then tune". Tone's 15.1.22 `classes/Filter.html` publishes no
+ * defaults at all; the 13.8.25 `Filter` DEFAULTS block gives
+ * `frequency: 350, Q: 1`, and 350 Hz is a lowpass that would visibly darken every
+ * voice it was added to. A seed that changes the sound the moment you press Add
+ * is a seed that has to be undone before it can be used.
+ *
+ *   `cutoff` — 8000 Hz. Above the register a guitar's or bass's partials carry,
+ *              so the stage arrives near-transparent through the lib's fixed
+ *              `-12 dB/oct` lowpass and the user sweeps DOWN into the sound.
+ *   `q`      — 0.7 ≈ 1/√2, the maximally-flat (Butterworth) response: the one
+ *              value at which a lowpass has no resonant peak at all. A DSP fact
+ *              about the filter, not a range claim about the field.
+ *
+ * `enabled` is omitted on purpose — the lib documents `undefined` as
+ * implicit-on, and writing `true` would turn "unspecified" into a value nobody
+ * chose. `envelope` is omitted because a static cutoff is a real sound and not a
+ * degraded one; it is added by its own gesture.
+ */
+export const SEED_BODY_FILTER: BodyFilterParams = {
+  cutoff: 8000,
+  q: 0.7,
+};
+
+/**
+ * What the body filter's cutoff envelope is when the user has just added one.
+ *
+ * The lib: the envelope sweeps the cutoff from `baseFrequency` upward by
+ * `octaves`, then settles at `baseFrequency * 2^(sustain * octaves)` — and while
+ * an envelope is present the static `cutoff` is IGNORED. So the seed's job is to
+ * arrive without moving the sound the static filter was already making.
+ *
+ * ⚠ THE ONE NUMBER THAT IS NOT FREE: `baseFrequency * 2^octaves` is 2000 × 4 =
+ * 8000 Hz, which is exactly {@link SEED_BODY_FILTER}.cutoff. The envelope's PEAK
+ * therefore lands where the static filter sat, so the attack of a note is
+ * unchanged and only the sustained body darkens (to 2000 × 2^1 = 4000 Hz at
+ * `sustain: 0.5`) — audibly the thing a body filter is for, with no jump.
+ * `sourceDefaults.test.ts` pins that identity, because the two constants can
+ * otherwise drift apart silently.
+ *
+ * The four time/level fields are the app's, like everything else here: a 50 ms
+ * attack is fast enough not to smear a pluck and slow enough to be heard as a
+ * sweep rather than a click.
+ */
+export const SEED_BODY_FILTER_ENVELOPE: BodyFilterEnvelope = {
+  attack: 0.05,
+  decay: 0.2,
+  sustain: 0.5,
+  release: 0.5,
+  baseFrequency: 2000,
+  octaves: 2,
+};

@@ -36,6 +36,7 @@ import {
   voiceKey,
 } from '../src/voice/voiceService';
 import { playComposition, useCompositionPlayback } from '../src/audio/playbackService';
+import { setTrackVoiceParam } from '../src/voice/trackVoiceDrafts';
 import {
   getEditingPattern,
   openBlankPattern,
@@ -884,5 +885,42 @@ describe('per-track voices reach the engine', () => {
     });
 
     expect(running.voiceSwaps).toEqual([tracks[1].id]);
+  });
+
+  /**
+   * Reported by ear: picking the plucked synth on a track plays TWO notes for
+   * every note in the pattern, and the string never rings. The engine's own
+   * `notes/sec` counter showed each note triggering once, and the rack showed no
+   * second source, no filter and no effects — so if two things are sounding, two
+   * VOICES are sounding, and this counts them.
+   *
+   * `voiceSwaps` records every `setTrackVoice` the engine is asked to perform,
+   * and each one rebuilds through `buildVoice`. One pick must be one swap.
+   */
+  it('rebuilds a track’s voice exactly once when its source kind is picked', async () => {
+    const tracks = twoTracks();
+    const patternId = seedPattern('Riff');
+    place(patternId, tracks[0].id, 0);
+    place(patternId, tracks[1].id, BAR);
+    render(<CompositionProbe />);
+    await start();
+    const running = engine();
+
+    await act(async () => {
+      const result = setTrackVoiceParam(tracks[1].id, 'source.kind', 'pluck-synth');
+      if (!result.ok) throw new Error(result.reason);
+    });
+    // The rebuild is coalesced on a trailing timer, so let it land.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+
+    // ONE pick, ONE rebuild. `voiceSwaps` is the count that matters: every entry
+    // is a `setTrackVoice` the engine performed, and each rebuilds through the
+    // app's `buildTrackVoice`. Two entries here would be two live voices on one
+    // track, which is the reported symptom.
+    expect(running.voiceSwaps).toEqual([tracks[1].id]);
+    // Not touched: the other track keeps the voice it had.
+    expect(running.voiceSwaps).not.toContain(tracks[0].id);
   });
 });

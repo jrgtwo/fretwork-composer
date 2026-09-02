@@ -28,6 +28,7 @@ export interface EnumChoice {
 export function ParamEnum({
   id,
   label,
+  ariaLabel,
   value,
   options,
   onChange,
@@ -36,6 +37,15 @@ export function ParamEnum({
 }: {
   id: string;
   label: string;
+  /**
+   * Overrides the visible label as the accessible name. Same job, same reason as
+   * `ParamToggle.ariaLabel`: a descriptor generated under two branches puts two
+   * controls called "Harmonicity" in one pane, and `role="group"` does NOT
+   * contribute its name to a descendant's — it is announced on entering the
+   * group, not on the control. The visible engraving stays inside its 74 px
+   * column; the name carries the branch.
+   */
+  ariaLabel?: string;
   /** `null` when the preset's value matches no option. */
   value: string | null;
   options: readonly EnumChoice[];
@@ -61,6 +71,9 @@ export function ParamEnum({
         </label>
         <select
           id={id}
+          // Exclusive, for the reason `ParamSlider` gives: `aria-label` outranks
+          // a `<label for>`, so passing nothing leaves the engraving in charge.
+          {...(ariaLabel ? { 'aria-label': ariaLabel } : {})}
           value={selected ? selected.value : ''}
           onChange={(event) => onChange(event.currentTarget.value)}
           className="control pressable min-w-0 flex-1 rounded-lg px-1.5 py-1 font-mono text-[10px]"
