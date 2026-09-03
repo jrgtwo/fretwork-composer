@@ -53,16 +53,20 @@ import {
 } from './voiceService';
 import {
   PARAM_SECTIONS,
+  PEDALS,
   branchParams,
   enabledParamOf,
   ownParams,
   paramApplies,
   sectionPresence,
+  visibleParams,
   subBranchApplies,
   type EnumParam,
   type Param,
   type ParamSection,
+  type ParamStage,
   type ParamSubBranch,
+  type Pedal,
   type SectionId,
   type SliderParam,
   type SourceKindParam,
@@ -457,7 +461,7 @@ function VoiceEditor({
    * them apart to a listener. `ParamToggle` already does exactly this for the
    * stages' identically named bypasses.
    */
-  const renderParam = (section: ParamSection, param: Param, nameScope?: string) => {
+  const renderParam = (section: ParamStage, param: Param, nameScope?: string) => {
     const raw = getAtPath(preset, param.path);
     const id = domId(param.path);
     const scoped = (label: string) => (nameScope ? `${nameScope} ${label}` : undefined);
@@ -725,6 +729,100 @@ function VoiceEditor({
    * knob and an enum as a row without touching this file — the descriptor table stays in
    * charge of what exists.
    */
+  /**
+   * Put a pedal on the board, in ONE write from its seed — the sub-branch rule,
+   * not `addSection`'s row-by-row one, and for a sharper version of the same
+   * reason. `Voice.buildChain` reads every field of a pedal's params straight
+   * into a Tone constructor the moment the branch exists, so a stage assembled
+   * field by field is a node built with `undefined`s rather than one waiting to
+   * be finished.
+   */
+  const addPedal = (pedal: Pedal) => commit(setAtPath(preset, pedal.branch, pedal.seed));
+
+  /** Absent, not bypassed — this throws the pedal's tuning away, and the switch
+   *  beside it is the non-lossy way to take it out of the chain. */
+  const removePedal = (pedal: Pedal) => commit(removeAtPath(preset, pedal.branch));
+
+  /**
+   * The pedalboard: six stages inside one always-present section.
+   *
+   * ── WHY THIS IS NOT SIX SECTIONS ─────────────────────────────────────────────
+   *
+   * Each pedal is independently present, bypassable and removable, which is
+   * exactly what a `ParamSection` describes — so six sections is the obvious
+   * shape and it is the wrong one. It would put six more stage headers in a rack
+   * whose whole design argument is that TWO TRACKS' settings are comparable at
+   * once, and the pedalboard is one thing a guitarist points at, not six.
+   *
+   * So the section is the board and this renderer draws the pedals on it. Each is
+   * a `.tray` in the section's body — the same furniture a sub-branch uses, and
+   * the same depth language that separates two racks in the stack, because the
+   * question a reader has here is identical: where does one unit end and the next
+   * begin.
+   *
+   * ── THE ORDER IS THE SIGNAL'S, AND IT IS FIXED ───────────────────────────────
+   *
+   * Top to bottom is `Voice.wireChain`'s build order, which is the order the
+   * signal travels in. Nothing here can change it: the chain reads no order off
+   * the preset, so a drag gesture would move a card and not a sound. That is a
+   * lib change and it is deliberately not in this slice — a board that LOOKS
+   * rearrangeable and is not would be worse than one that plainly is not.
+   */
+  const renderPedalsSection = () => (
+    <div className="flex flex-col gap-1.5">
+      {PEDALS.map((pedal) => {
+        const present = sectionPresence(preset, pedal) !== 'absent';
+
+        return (
+          <div
+            key={pedal.id}
+            role="group"
+            aria-label={pedal.label}
+            className="tray flex flex-col gap-1 rounded-lg p-1.5"
+          >
+            <div className="flex items-center gap-1.5">
+              <span className={voiceLabelClass}>{pedal.label}</span>
+              {/* No bypassed note here, unlike a stage header. A stage's note exists
+                  because the body it describes may be folded away; a pedal card
+                  cannot fold, so its own `Enabled` switch is on screen saying
+                  "Bypassed" in as many words. A second copy in the header would be
+                  the same fact twice, and two things to keep in step. */}
+              <span className="flex-1" />
+              <button
+                type="button"
+                // Six of these are on screen at once and every one of them says
+                // "Add" or "Remove" — so the name carries the pedal, exactly as the
+                // stage and sub-branch buttons do.
+                aria-label={`${present ? 'Remove' : 'Add'} ${pedal.label}`}
+                onClick={() => (present ? removePedal(pedal) : addPedal(pedal))}
+                className={voiceButtonClass}
+              >
+                {present ? 'Remove' : 'Add'}
+              </button>
+            </div>
+
+            {present ? (
+              // The pedal is the stage here, not the section: `renderParam` names a
+              // toggle after the stage it belongs to, and six switches called
+              // "Enabled" under one section would otherwise all be announced
+              // "Pedals Enabled". `nameScope` does the same for the rest — four of
+              // these pedals have a row called "Mix" and two have one called
+              // "Feedback".
+              visibleParams(preset, pedal).map((param) =>
+                renderParam(pedal, param, pedal.label),
+              )
+            ) : (
+              <p className="font-mono text-[9px] leading-snug text-ink-mut">
+                Not on this voice. Adding it puts the pedal in the chain with its
+                maker&rsquo;s starting values, which you can then tune, bypass or remove.
+              </p>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+
   const renderAmpSection = (section: ParamSection) => {
     // `ownParams`, not `visibleParams`: the generic path below already switched,
     // and `renderSubBranch` now runs after EVERY stage body. A gear renderer that
@@ -987,14 +1085,17 @@ function VoiceEditor({
             >
               {status !== 'absent' ? (
                 <>
-                  {/* Amp and Cabinet are gear and are drawn as gear. Source, Body
-                      filter and Level are not — a sample pack is a list and a fader
-                      is a fader — so they keep the descriptor-driven rows. */}
+                  {/* Amp and Cabinet are gear and are drawn as gear; Pedals is a
+                      board of them and is drawn as one. Source, Body filter and Level
+                      are not — a sample pack is a list and a fader is a fader — so
+                      they keep the descriptor-driven rows. */}
                   {section.id === 'amp'
                     ? renderAmpSection(section)
                     : section.id === 'cabinet'
                       ? renderCabinetSection(section)
-                      : ownParams(preset, section).map((param) => renderParam(section, param))}
+                      : section.id === 'pedals'
+                        ? renderPedalsSection()
+                        : ownParams(preset, section).map((param) => renderParam(section, param))}
                   {renderSubBranch(section)}
                 </>
               ) : (

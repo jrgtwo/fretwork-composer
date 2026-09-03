@@ -235,4 +235,22 @@ describe('VoicePane → playbackService', () => {
 
   // REMOVED 2026-09-01, see docs/HANDOFF.md — same reason: it switched to a shipped
   // voice by id purely to make the voice underneath change.
+  it('pushes a pedal at the engine the moment it is added or removed', async () => {
+    // A pedal is a CHAIN-SHAPE change, not a value change — `Voice.updateEffects`
+    // compares `sameEffectsShape` and rebuilds the graph rather than retuning a
+    // node — so an add that never reaches the seam is a board with a pedal drawn
+    // on it and nothing in the signal path. jsdom cannot hear that, and no
+    // assertion in `VoicePane.test.tsx` would notice.
+    render(<Host />);
+    await userEvent.click(screen.getByRole('button', { name: 'Pedals' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add Distortion' }));
+    expect(applied).toHaveBeenCalledTimes(1);
+    expect(applied.mock.calls[0][0]?.effects?.distortion?.drive).toBe(0.4);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Distortion' }));
+    expect(applied).toHaveBeenCalledTimes(2);
+    expect(applied.mock.calls[1][0]?.effects?.distortion).toBeUndefined();
+  });
+
 });

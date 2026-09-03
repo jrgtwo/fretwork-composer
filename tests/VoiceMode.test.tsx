@@ -31,6 +31,7 @@ import {
 } from '../src/voice/paramSchema';
 import {
   addTrackVoiceSection,
+  addTrackVoicePedal,
   addTrackVoiceSubBranch,
   clearTrackVoiceDrafts,
   discardTrackVoiceDraft,
@@ -40,6 +41,7 @@ import {
   setTrackVoiceParam,
   setTrackVoiceSubBranchKind,
   trackVoicePreset,
+  removeTrackVoicePedal,
 } from '../src/voice/trackVoiceDrafts';
 import { playComposition, useCompositionPlayback } from '../src/audio/playbackService';
 import { getAtPath } from '../src/voice/presetPaths';
@@ -767,6 +769,126 @@ describe('the second source and the body filter, through the track seam', () => 
 
 // --------------------------------------------------------------- the racks ---
 
+describe('the pedalboard, through the track seam', () => {
+  it('adds and removes a pedal with no pointer at all', () => {
+    // ⚠ THE AGENT'S ROUTE IN, and there is no other. `addTrackVoiceSection` is
+    // `SectionId`-keyed and the pedalboard section is always present, so it can
+    // neither name a pedal nor create one; meanwhile every `effects.distortion.*`
+    // write is refused while the branch is absent, because each row declares
+    // `requiresBranch`. Without this pair a track with no distortion could never
+    // gain one from anything but a mouse.
+    const tracks = twoTracks();
+    expect(trackVoicePreset(tracks[0]).effects?.distortion).toBeUndefined();
+
+    expect(addTrackVoicePedal(tracks[0].id, 'distortion')).toEqual({
+      ok: true,
+      value: undefined,
+    });
+    const added = trackVoicePreset(getTracks()[0]).effects?.distortion;
+    // The COMPLETE params object, in one write. `Voice.buildChain` reads every
+    // field of this straight into a `Tone.Distortion`, so a half-seeded branch is
+    // a node constructed with `undefined`s rather than a stage awaiting tuning.
+    expect(added).toEqual({ drive: 0.4, wet: 1, oversample: 'none' });
+
+    // Idempotent, like both sibling adds: a caller that cannot see the rack must
+    // not have to look first.
+    expect(addTrackVoicePedal(tracks[0].id, 'distortion').ok).toBe(true);
+    expect(trackVoicePreset(getTracks()[0]).effects?.distortion).toEqual(added);
+
+    // …and now the rows it gates are accepted, where they were refused before.
+    expect(setTrackVoiceParam(tracks[0].id, 'effects.distortion.drive', 0.8).ok).toBe(true);
+    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'effects.distortion.drive')).toBe(0.8);
+
+    expect(removeTrackVoicePedal(tracks[0].id, 'distortion').ok).toBe(true);
+    expect(trackVoicePreset(getTracks()[0]).effects?.distortion).toBeUndefined();
+    // The other track was never touched by any of it.
+    expect(trackVoicePreset(getTracks()[1]).effects?.distortion).toBeUndefined();
+  });
+
+  it('refuses a pedal row while its pedal is absent', () => {
+    // The gate that makes the add seam necessary, stated on the pedal that is
+    // easiest to get wrong: without it this write mints
+    // `effects.autoWah: { q: 4 }`, an `AutoWahParams` missing five required
+    // fields, and `buildChain` hands the lot to `new Tone.AutoWah`.
+    const tracks = twoTracks();
+    expect(trackVoicePreset(tracks[0]).effects?.autoWah).toBeUndefined();
+    expect(setTrackVoiceParam(tracks[0].id, 'effects.autoWah.q', 4).ok).toBe(false);
+    expect(trackVoicePreset(getTracks()[0]).effects?.autoWah).toBeUndefined();
+  });
+
+  it('leaves a bypassed pedal’s tuning alone when asked to add it again', () => {
+    // Bypassed is PRESENT, so the add is a no-op — not a re-seed. Re-seeding would
+    // silently discard the tuning of a pedal the user switched off on purpose, and
+    // an agent calling the idempotent add is the caller most likely to do it.
+    const tracks = twoTracks();
+    expect(addTrackVoicePedal(tracks[0].id, 'delay').ok).toBe(true);
+    expect(setTrackVoiceParam(tracks[0].id, 'effects.delay.feedback', 0.6).ok).toBe(true);
+    expect(setTrackVoiceParam(tracks[0].id, 'effects.delay.enabled', false).ok).toBe(true);
+
+    expect(addTrackVoicePedal(tracks[0].id, 'delay').ok).toBe(true);
+    const delay = trackVoicePreset(getTracks()[0]).effects?.delay;
+    expect(delay?.feedback).toBe(0.6);
+    expect(delay?.enabled).toBe(false);
+  });
+
+  it('reaches the compressor, which lives at the root rather than under effects', () => {
+    // The one pedal whose branch is not `effects.<name>`. Worth its own assertion
+    // because everything else about a pedal is uniform, so a path assembled by
+    // pattern rather than read off the descriptor would work five times out of six.
+    const tracks = twoTracks();
+    expect(addTrackVoicePedal(tracks[0].id, 'compressor').ok).toBe(true);
+    const preset = trackVoicePreset(getTracks()[0]);
+    expect(preset.compressor).toEqual({
+      threshold: -24,
+      ratio: 12,
+      attack: 0.003,
+      release: 0.25,
+      knee: 30,
+    });
+    // And nowhere else: a path assembled as `effects.<id>` would land here.
+    expect(getAtPath(preset, 'effects.compressor')).toBeUndefined();
+    expect(setTrackVoiceParam(tracks[0].id, 'compressor.ratio', 8).ok).toBe(true);
+    expect(trackVoicePreset(getTracks()[0]).compressor?.ratio).toBe(8);
+  });
+
+  it('refuses the pedal seams in words rather than doing nothing', () => {
+    const tracks = twoTracks();
+    // A pedal the table does not declare — including one that IS a lib stage but
+    // is not a pedal, which is the plausible mistake rather than a typo.
+    expect(addTrackVoicePedal(tracks[0].id, 'reverb').ok).toBe(false);
+    expect(removeTrackVoicePedal(tracks[0].id, 'reverb').ok).toBe(false);
+    expect(addTrackVoicePedal(tracks[0].id, 'graphicEq').ok).toBe(false);
+    // A track that is gone.
+    expect(addTrackVoicePedal('no-such-track', 'chorus').ok).toBe(false);
+    // Removing one that was never there is a no-op, not a refusal — the same
+    // contract the add has, for a caller that cannot look first.
+    expect(removeTrackVoicePedal(tracks[0].id, 'chorus').ok).toBe(true);
+  });
+
+  it('range-checks a pedal row against the bound Tone actually publishes', () => {
+    // The compressor is the only fully bounded pedal — `Compressor.d.ts` carries
+    // real `@min`/`@max` on all five fields — so it is the one place a pedal write
+    // can be refused for being out of range at all. An agent hands over whatever
+    // it computed; a knob clamps itself.
+    const tracks = twoTracks();
+    expect(addTrackVoicePedal(tracks[0].id, 'compressor').ok).toBe(true);
+    expect(setTrackVoiceParam(tracks[0].id, 'compressor.ratio', 40).ok).toBe(false);
+    expect(setTrackVoiceParam(tracks[0].id, 'compressor.threshold', 12).ok).toBe(false);
+    expect(setTrackVoiceParam(tracks[0].id, 'compressor.ratio', 20).ok).toBe(true);
+
+    // …and the encoders are not range-checked, because Tone publishes no bound
+    // for them. A graphic-EQ band of +40 dB is a decision, not an error — the
+    // lib's "typical ±15" is a description of use, not a limit the node has.
+    expect(addTrackVoicePedal(tracks[0].id, 'graphic-eq').ok).toBe(true);
+    expect(setTrackVoiceParam(tracks[0].id, 'effects.graphicEq.band100Hz', 40).ok).toBe(true);
+    // Finiteness is still enforced: that check is about a number reaching Tone at
+    // all, not about a range this app invented.
+    expect(
+      setTrackVoiceParam(tracks[0].id, 'effects.graphicEq.band100Hz', Number.NaN).ok,
+    ).toBe(false);
+  });
+});
+
 describe('the rack in a lane', () => {
   it('draws one rack per track, each on its own voice', () => {
     const tracks = twoTracks();
@@ -1176,6 +1298,68 @@ const row = (track: Track) => {
   if (!el) throw new Error(`no row rendered for ${track.name}`);
   return el;
 };
+
+describe('the pedalboard in a rack', () => {
+  it('draws the pedals grouped, with the track in every name', () => {
+    // ⚠ THE DRIFT TEST. Both surfaces render `PARAM_SECTIONS`, and a section with
+    // no renderer on this side falls into the generic branch — thirty-eight rows
+    // flat, four of them called "Mix", none of them addable or removable. That is
+    // the same failure `DEFAULT_OPEN_SECTIONS` was hoisted out of the two panes to
+    // prevent, and it would pass every other test in this file.
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+    openStage(tracks[0], 'Pedals');
+
+    const board = screen.getByRole('region', { name: `${tracks[0].name} Pedals` });
+    expect(
+      within(board)
+        .getAllByRole('group')
+        .map((group) => group.getAttribute('aria-label')),
+    ).toEqual([
+      `${tracks[0].name} Compressor`,
+      `${tracks[0].name} Distortion`,
+      `${tracks[0].name} Chorus`,
+      `${tracks[0].name} Delay`,
+      `${tracks[0].name} Auto-wah`,
+      `${tracks[0].name} Graphic EQ`,
+    ]);
+  });
+
+  it('adds a pedal from the rack and leaves the other track alone', () => {
+    // Up to eight racks are on this page and every one of them has an "Add
+    // Chorus" — so the gesture has to reach the track whose button was pressed,
+    // which is the bug a per-rack surface invites and a pane never can.
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+    openStage(tracks[0], 'Pedals');
+
+    fireEvent.click(
+      screen.getByRole('button', { name: `Add Chorus for ${tracks[0].name}` }),
+    );
+    expect(trackVoicePreset(getTracks()[0]).effects?.chorus?.depth).toBe(0.7);
+    expect(trackVoicePreset(getTracks()[1]).effects?.chorus).toBeUndefined();
+
+    // The row it gates is now on screen, named by track AND pedal — the two axes
+    // a listener needs, in the order the rack's landmarks already use.
+    expect(
+      within(screen.getByRole('region', { name: `${tracks[0].name} Pedals` })).getByLabelText(
+        `${tracks[0].name} Chorus Depth`,
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: `Remove Chorus for ${tracks[0].name}` }),
+    );
+    expect(trackVoicePreset(getTracks()[0]).effects?.chorus).toBeUndefined();
+  });
+
+  it('starts folded, like every stage the schema does not open', () => {
+    // Six pedals unfolded in every rack would undo the reason racks beat a modal:
+    // two tracks' settings comparable at once. `DEFAULT_OPEN_SECTIONS` is the one
+    // list that decides it, and this asserts the board is not on it.
+    expect(DEFAULT_FOLDED).toContain('pedals');
+  });
+});
 
 describe('the stages stack, and the row fits them', () => {
   it('draws the four stages as siblings in one column, in schema order', () => {

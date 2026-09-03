@@ -50,12 +50,15 @@ import {
 } from './voiceService';
 import {
   PARAM_SECTIONS,
+  PEDALS,
   paramApplies,
   sectionApplies,
   subBranchApplies,
   type Param,
   type ParamSection,
   type ParamSubBranch,
+  type Pedal,
+  type PedalId,
   type SectionId,
 } from './paramSchema';
 import { removeAtPath, setAtPath } from './presetPaths';
@@ -451,6 +454,71 @@ export function removeTrackVoiceSubBranch(trackId: string, subBranchId: string):
   const found = subBranchById(subBranchId);
   if (!found) return { ok: false, reason: `“${subBranchId}” is not a voice sub-branch.` };
   return commit(track, removeAtPath(trackVoicePreset(track), found.sub.branch));
+}
+
+/**
+ * The pedal `pedalId` names. Looked up rather than passed, for the reason
+ * `sectionById` and `subBranchById` are: a caller names something the schema
+ * knows, so an id the table no longer declares is refused in words instead of
+ * writing a path nothing renders.
+ */
+function pedalById(id: string): Pedal | undefined {
+  return PEDALS.find((pedal) => pedal.id === id);
+}
+
+/**
+ * Put one pedal on a track's board.
+ *
+ * ⚠ WITHOUT THIS, every pedal is unreachable to a caller with no pointer, and in
+ * a way no other seam covers. `addTrackVoiceSection` names a SECTION, and the
+ * pedalboard section is `presenceProbe: null` — always present, nothing to add —
+ * so it can neither name a pedal nor create one. Meanwhile every `compressor.*`
+ * and `effects.<pedal>.*` write is refused by `setTrackVoiceParam` while the
+ * branch is absent, because each row declares `requiresBranch`. So a track
+ * without a distortion could never gain one and a track with one could never lose
+ * it. Adding a pedal is its own gesture because a pedal is its own stage.
+ *
+ * Seeded in ONE write from `Pedal.seed`, not row by row from fallbacks the way
+ * `addTrackVoiceSection` builds a section. A pedal's params interface is required
+ * in full the moment the branch exists — `Voice.buildChain` reads every field
+ * straight into a Tone constructor — so a half-built branch is a node built with
+ * `undefined`s rather than a stage waiting to be finished.
+ *
+ * Adding what is already there is a no-op rather than a refusal, the contract
+ * both sibling adds have, and the one that makes the call idempotent for a caller
+ * that cannot see the rack. Note it is a no-op even for a BYPASSED pedal: that
+ * pedal is on the board with the user's tuning intact, and re-seeding it would
+ * throw that away to answer a question nobody asked.
+ */
+export function addTrackVoicePedal(trackId: string, pedalId: PedalId | string): Result {
+  const track = findTrack(trackId);
+  if (!track) return { ok: false, reason: 'No such track.' };
+  const pedal = pedalById(pedalId);
+  if (!pedal) return { ok: false, reason: `“${pedalId}” is not a pedal.` };
+
+  const preset = trackVoicePreset(track);
+  if (sectionApplies(preset, pedal)) return { ok: true, value: undefined };
+  return commit(track, setAtPath(preset, pedal.branch, pedal.seed));
+}
+
+/**
+ * Take one pedal off a track's board.
+ *
+ * ABSENT, not bypassed, and the difference is the user's tuning: bypass keeps it
+ * for when they switch the pedal back on, this throws it away. Both states are
+ * reachable and they are not the same — `sectionPresence` is what tells them
+ * apart, and `TrackVoiceRack` offers both gestures for that reason.
+ *
+ * Removing what is not there is a no-op, matching the add and for the same
+ * reason: `removeAtPath` on an absent branch returns the same preset, `commit`
+ * sees an unchanged reference, and nothing is marked dirty.
+ */
+export function removeTrackVoicePedal(trackId: string, pedalId: PedalId | string): Result {
+  const track = findTrack(trackId);
+  if (!track) return { ok: false, reason: 'No such track.' };
+  const pedal = pedalById(pedalId);
+  if (!pedal) return { ok: false, reason: `“${pedalId}” is not a pedal.` };
+  return commit(track, removeAtPath(trackVoicePreset(track), pedal.branch));
 }
 
 /**

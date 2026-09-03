@@ -111,14 +111,17 @@ import { getAmpModel, getSamplePack, detectSamplePack, type Track } from '@fretw
 import {
   DEFAULT_OPEN_SECTIONS,
   PARAM_SECTIONS,
+  PEDALS,
   branchParams,
   enabledParamOf,
   ownParams,
   sectionPresence,
   subBranchApplies,
+  visibleParams,
   type EnumParam,
   type Param,
   type ParamSection,
+  type ParamStage,
   type ParamSubBranch,
   type SectionId,
   type SliderParam,
@@ -126,9 +129,11 @@ import {
 } from '../voice/paramSchema';
 import { getAtPath } from '../voice/presetPaths';
 import {
+  addTrackVoicePedal,
   addTrackVoiceSection,
   addTrackVoiceSubBranch,
   discardTrackVoiceDraft,
+  removeTrackVoicePedal,
   removeTrackVoiceSection,
   removeTrackVoiceSubBranch,
   setTrackVoiceParam,
@@ -280,7 +285,7 @@ export function TrackVoiceRack({
    * name to a descendant's. The landmark name handles the OTHER axis (which of
    * eight racks); this one handles which branch inside a stage.
    */
-  const renderParam = (section: ParamSection, param: Param, nameScope?: string) => {
+  const renderParam = (section: ParamStage, param: Param, nameScope?: string) => {
     const raw = getAtPath(preset, param.path);
     const id = domId(track.id, param.path);
     const scoped = (label: string) => (nameScope ? `${nameScope} ${label}` : undefined);
@@ -438,6 +443,71 @@ export function TrackVoiceRack({
       {ownParams(preset, section)
         .filter((param) => param.path !== 'inputGainDb')
         .map((param) => renderParam(section, param))}
+    </div>
+  );
+
+  /**
+   * The pedalboard, as one stage holding six.
+   *
+   * The composition page's counterpart of `VoicePane.renderPedalsSection`, and it
+   * exists for the reason every other renderer here has a twin: BOTH surfaces
+   * draw `PARAM_SECTIONS`, so a section without a renderer on this side falls
+   * into the generic branch and dumps all thirty-eight pedal rows flat, with no
+   * way to tell which pedal a "Mix" belongs to and no way to add or remove one.
+   * That is the exact drift `DEFAULT_OPEN_SECTIONS` was hoisted out of the two
+   * panes to prevent.
+   *
+   * Tighter than the pattern pane's — a hairline rule and a name rather than a
+   * tray, matching this file's sub-branch — because up to eight of these are on
+   * screen at once and the rack's chrome is already doing the separating.
+   */
+  const renderPedals = () => (
+    <div className="flex w-full flex-col gap-1">
+      {PEDALS.map((pedal) => {
+        const present = sectionPresence(preset, pedal) !== 'absent';
+
+        return (
+          <div
+            key={pedal.id}
+            role="group"
+            // Track first, for the reason the `RackFace` landmark states: that is
+            // the axis a listener navigating eight racks is moving along.
+            aria-label={`${track.name} ${pedal.label}`}
+            className="flex flex-wrap items-start gap-x-2 gap-y-1 border-t border-ink-mut/20 pt-1"
+          >
+            <div className="flex w-full items-center gap-1.5">
+              <span className="font-mono text-[8px] tracking-[0.1em] text-ink-mut uppercase">
+                {pedal.label}
+              </span>
+              {/* No bypassed note — the pedal's own `Enabled` switch says it, and a
+                  pedal card does not fold. See `VoicePane.renderPedalsSection`. */}
+              <span className="flex-1" />
+              <button
+                type="button"
+                // Eight racks × six pedals, every button saying "Add" — the name
+                // carries the track and the pedal, as the stage's and the
+                // sub-branch's do.
+                aria-label={`${present ? 'Remove' : 'Add'} ${pedal.label} for ${track.name}`}
+                onClick={() =>
+                  report(
+                    present
+                      ? removeTrackVoicePedal(track.id, pedal.id)
+                      : addTrackVoicePedal(track.id, pedal.id),
+                  )
+                }
+                className={buttonClass}
+              >
+                {present ? 'Remove' : 'Add'}
+              </button>
+            </div>
+            {present
+              ? visibleParams(preset, pedal).map((param) =>
+                  renderParam(pedal, param, `${track.name} ${pedal.label}`),
+                )
+              : null}
+          </div>
+        );
+      })}
     </div>
   );
 
@@ -665,6 +735,8 @@ export function TrackVoiceRack({
           renderCabinet(section)
         ) : section.id === 'level' ? (
           renderLevel(section)
+        ) : section.id === 'pedals' ? (
+          renderPedals()
         ) : (
           <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
             {ownParams(preset, section).map((param) => renderParam(section, param))}
