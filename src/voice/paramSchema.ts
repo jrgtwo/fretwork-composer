@@ -1987,6 +1987,12 @@ export const PARAM_SECTIONS: readonly ParamSection[] = [
  * `body-filter` is not in the list either, and for the plainer reason: it is
  * absent on thirteen of the fourteen built-ins, so opening it by default would
  * open a stage that says "not on this preset" almost every time.
+ *
+ * `pedals` is not in it for the strongest version of the same argument. It is one
+ * stage holding six, so unfolding it costs six cards rather than one stage's
+ * rows — and it is the section most likely to be entirely empty, since a pedal is
+ * added rather than tuned. Six "not on this voice" cards in every rack is the
+ * exact opposite of two tracks being comparable at once.
  */
 export const DEFAULT_OPEN_SECTIONS: readonly SectionId[] = ['amp', 'cabinet'];
 
