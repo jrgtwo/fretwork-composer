@@ -131,14 +131,45 @@ describe('VoicePane', () => {
     expect(pack).toBeVisible();
   });
 
+  it('adds a circuit amp and shows only the selected amp\'s knobs', async () => {
+    // The whole point of the circuit-amp section: the pane has no per-amp code.
+    // A Princeton declares Volume and Tone in the lib, and those are the two
+    // knobs that appear — a Deluxe with tremolo will get its own set from its
+    // own definition with nothing changed here.
+    render(<Host />);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
+
+    // Scoped to the section's own region: 'Volume' is also a Level row, and a
+    // bare query would pass on the wrong control.
+    const stageRegion = screen.getByRole('region', { name: 'Amp (circuit) stage' });
+    expect(within(stageRegion).getByLabelText('Amp')).toBeInTheDocument();
+    expect(within(stageRegion).getByLabelText('Volume')).toBeInTheDocument();
+    expect(within(stageRegion).getByLabelText('Tone')).toBeInTheDocument();
+    // Input gain is the universal row — before the circuit, not the amp's own
+    // Volume, which sits inside it. Both are present and they are not the same
+    // control.
+    expect(within(stageRegion).getByLabelText('Input gain')).toBeInTheDocument();
+    // And no knob from an amp this one does not declare.
+    expect(within(stageRegion).queryByLabelText('Presence')).not.toBeInTheDocument();
+
+    // And nothing from the classic amp leaks in: that stage has its own section
+    // and `wireChain` builds one or the other.
+    const stage = workingPreset().effects?.circuitAmp;
+    expect(stage?.ampId).toBe('princeton-5f2a');
+    expect(stage?.controls).toEqual({ volume: 0.5, tone: 0.5 });
+  });
+
   it('reads absent and bypassed as different states', async () => {
     // Not a hypothetical: the stock acoustic guitar ships with no `effects` object at
-    // all, so both amp and cabinet start absent — and no `bodyFilter` either, which
-    // is the state thirteen of the fourteen built-ins are in.
+    // all, so amp, circuit amp and cabinet all start absent — and no `bodyFilter`
+    // either, which is the state thirteen of the fourteen built-ins are in.
     expect(ACOUSTIC_GUITAR_PRESET.effects).toBeUndefined();
     expect(ACOUSTIC_GUITAR_PRESET.bodyFilter).toBeUndefined();
     render(<Host />);
-    expect(screen.getAllByText('Not on this preset')).toHaveLength(3);
+    // Four, not three: the experimental circuit amp is a section of its own and no
+    // shipped preset carries one, by design — `wireChain` builds one amp or the
+    // other, so a built-in voiced on the classic amp must not also carry a circuit.
+    expect(screen.getAllByText('Not on this preset')).toHaveLength(4);
 
     await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
     const toggle = screen.getByRole('switch', { name: 'Cabinet Enabled' });

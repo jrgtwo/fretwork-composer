@@ -72,6 +72,9 @@
 
 import {
   AMP_MODELS,
+  CIRCUIT_AMPS,
+  getCircuitAmp,
+  DEFAULT_CIRCUIT_AMP_ID,
   CABINET_IRS,
   DEFAULT_AMP_MODEL_ID,
   SAMPLE_PACKS,
@@ -81,6 +84,7 @@ import {
   type VoicePreset,
 } from '@fretwork/lib';
 import { getAtPath, hasBranchAtPath } from './presetPaths';
+import { circuitAmpControlPath } from './circuitAmpDefaults';
 import {
   SEED_AUTO_WAH,
   SEED_CHORUS,
@@ -340,6 +344,7 @@ export type SectionId =
   | 'body-filter'
   | 'pedals'
   | 'amp'
+  | 'circuit-amp'
   | 'cabinet'
   | 'level';
 
@@ -1942,11 +1947,111 @@ const PEDALS_SECTION: ParamSection = {
 };
 
 /** Signal-chain order: source → body filter → pedals → amp → cabinet → output. */
+const CIRCUIT_AMP_OPTIONS: readonly EnumOption[] = CIRCUIT_AMPS.map((amp) => ({
+  value: amp.id,
+  label: amp.name,
+  description: amp.description,
+}));
+
+/**
+ * The experimental circuit amp — a second amp implementation, beside the five
+ * models in `AMP_SECTION` rather than replacing them.
+ *
+ * `wireChain` builds one or the other: this stage takes the amp's slot while it
+ * is present and enabled, and the classic amp is skipped. Removing this stage
+ * puts the old one back exactly as it was, which is what you want while
+ * comparing them by ear.
+ *
+ * ── Why `params` is flattened ───────────────────────────────────────────────
+ *
+ * It is the union of EVERY amp's declared controls, each row gated with
+ * `appliesWhen` on the selected amp id. That flattening is load-bearing,
+ * exactly as it is for `PEDALS_SECTION`: `PARAM_BY_PATH` and the schema
+ * tripwire are both built from `PARAM_SECTIONS.flatMap(s => s.params)`, so a
+ * row declared only on one amp would be a control the composition page cannot
+ * write and no test checks the range of.
+ *
+ * ── Where the ranges come from ──────────────────────────────────────────────
+ *
+ * From the amp's own definition in the lib, never from this file. A control's
+ * range is a property of the circuit — a pot turns from 0 to 1 whatever this
+ * schema thinks — so a row here reads `control.min` / `control.max` /
+ * `control.default` and adds nothing of its own.
+ */
+const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
+  {
+    kind: 'toggle',
+    path: 'effects.circuitAmp.enabled',
+    label: 'Enabled',
+    optional: true,
+    fallback: true,
+  },
+  {
+    kind: 'enum',
+    path: 'effects.circuitAmp.ampId',
+    label: 'Amp',
+    options: CIRCUIT_AMP_OPTIONS,
+    // The lib falls back to the default for a missing or unknown id, so the
+    // picker shows what the chain will actually build. `getCircuitAmp` rather
+    // than a lookup table for exactly that reason — it IS the fallback.
+    fallback: DEFAULT_CIRCUIT_AMP_ID,
+    resolve: (raw) => getCircuitAmp(typeof raw === 'string' ? raw : undefined).id,
+  },
+  {
+    kind: 'slider',
+    path: 'effects.circuitAmp.inputGainDb',
+    label: 'Input gain',
+    // Ungated: every circuit amp has one whatever its topology.
+    //
+    // This is the level going INTO the amp — a boost pedal or a hot pickup in
+    // front of it. NOT the amp's Volume, which on a 5F2-A sits inside the
+    // circuit between the first triode and the tone network and sets how hard
+    // the second stage and the power tube are driven. Turn one up and the
+    // other down and you get different sounds at the same output level, which
+    // is the point of having both.
+    //
+    // Range matched to `VoicePreset.inputGainDb`'s documented hot-boost
+    // ceiling of +24 dB; the floor is -24 rather than -80 because grounding
+    // the signal belongs on that earlier control, not here.
+    min: -24,
+    max: 24,
+    step: 0.5,
+    unit: 'dB',
+    precision: 1,
+    fallback: 0,
+  },
+  ...CIRCUIT_AMPS.flatMap((amp) =>
+    amp.controls.map(
+      (control): Param => ({
+        kind: 'slider',
+        path: circuitAmpControlPath(amp.id, control.id),
+        label: control.label,
+        min: control.min,
+        max: control.max,
+        step: control.step,
+        unit: control.unit,
+        precision: 2,
+        fallback: control.default,
+        appliesWhen: { path: 'effects.circuitAmp.ampId', oneOf: [amp.id] },
+      }),
+    ),
+  ),
+];
+
+export const CIRCUIT_AMP_SECTION: ParamSection = {
+  id: 'circuit-amp',
+  label: 'Amp (circuit)',
+  presenceProbe: 'effects.circuitAmp',
+  removableBranch: 'effects.circuitAmp',
+  params: CIRCUIT_AMP_SECTION_PARAMS,
+};
+
 export const PARAM_SECTIONS: readonly ParamSection[] = [
   SOURCE_SECTION,
   BODY_FILTER_SECTION,
   PEDALS_SECTION,
   AMP_SECTION,
+  CIRCUIT_AMP_SECTION,
   CABINET_SECTION,
   LEVEL_SECTION,
 ];

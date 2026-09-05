@@ -3,6 +3,8 @@ import {
   AMP_MODELS,
   CABINET_IRS,
   DEFAULT_AMP_MODEL_ID,
+  DEFAULT_CIRCUIT_AMP_ID,
+  CIRCUIT_AMPS,
   SAMPLE_PACKS,
   VOICE_PRESETS,
   detectSamplePack,
@@ -266,6 +268,21 @@ const POPULATED_CHASSIS: Omit<VoicePreset, 'id' | 'name' | 'source'> = {
       outputDb: 0,
     },
     cabIR: { enabled: false, url: CABINET_IRS[0].url, makeupDb: 1.5 },
+    // The experimental circuit amp, on every fixture for the same reason the
+    // pedals are: no SHIPPED preset carries one and none is meant to, so a
+    // fixture is the only thing that walks its rows. `enabled: false` because
+    // `wireChain` builds one amp or the other and the classic `amp` above is
+    // the one these fixtures are about — presence, not engagement, is what the
+    // schema checks need.
+    //
+    // Values deliberately off the seed: a fixture equal to the seed cannot
+    // tell "the row reads the preset" from "the row fell back".
+    circuitAmp: {
+      enabled: false,
+      ampId: DEFAULT_CIRCUIT_AMP_ID,
+      inputGainDb: 2.5,
+      controls: { volume: 0.62, tone: 0.38 },
+    },
   },
 };
 
@@ -899,10 +916,39 @@ describe('schema vs. every built-in VoicePreset', () => {
     ]);
   });
 
+  /**
+   * Sections no shipped preset carries, and is not meant to.
+   *
+   * `circuit-amp` is the experimental amp engine. It was added BESIDE the five
+   * models in `amp-models.ts` precisely so that no existing preset changes
+   * behaviour, and putting one on a built-in would undo that — `wireChain`
+   * builds one amp or the other, so a shipped preset carrying a circuit amp
+   * would silently stop using the amp it was voiced with.
+   *
+   * Its rows are covered by the fixtures instead (`POPULATED_CHASSIS`), which
+   * is where every `enabled` / `modelId` / `inputGainDb` path is already
+   * exercised. Delete this exemption if the engine ever stops being
+   * experimental and a built-in is voiced on it.
+   */
+  const SECTIONS_NO_BUILTIN_CARRIES: readonly SectionId[] = ['circuit-amp'];
+
   it('finds at least one preset exercising each section, so no section is untested', () => {
     for (const section of PARAM_SECTIONS) {
+      if (SECTIONS_NO_BUILTIN_CARRIES.includes(section.id)) continue;
       const exercising = VOICE_PRESETS.filter((preset) => sectionApplies(preset, section));
       expect(exercising.length, `no built-in preset has section ${section.id}`).toBeGreaterThan(0);
+    }
+  });
+
+  it('covers every exempted section with a fixture instead', () => {
+    // The exemption above must not become a way to smuggle in an untested
+    // section: what a built-in does not cover, a fixture has to.
+    for (const id of SECTIONS_NO_BUILTIN_CARRIES) {
+      const section = sectionAt(id);
+      expect(
+        ALL_FIXTURES.some((fixture) => sectionApplies(fixture, section)),
+        `no fixture has exempted section ${id}`,
+      ).toBe(true);
     }
   });
 
@@ -1013,6 +1059,13 @@ const isConditional = (param: Param): boolean =>
   param.requiresBranch !== undefined ||
   param.absentBranch !== undefined;
 
+/** The per-amp knob rows: everything in the section except the three every amp
+ *  carries. Derived, so a new amp's controls are counted without editing this
+ *  file — and so a row that loses its gate still fails the count. */
+const CIRCUIT_AMP_CONTROL_PARAMS = sectionAt('circuit-amp').params.filter(
+  (p) => p.path.startsWith('effects.circuitAmp.controls.'),
+);
+
 const CONDITIONAL_ROW_COUNT =
   sectionAt('source').params.length -
   1 +
@@ -1025,7 +1078,15 @@ const CONDITIONAL_ROW_COUNT =
   // so a pedal's absence has nowhere to live but the row — see `pedalBypass`'s
   // note in `paramSchema`. A pedal row that lost its gate would drop this count
   // and fail here rather than becoming a control writing into a missing branch.
-  ALL_PEDAL_PARAMS.length;
+  ALL_PEDAL_PARAMS.length +
+  // Every circuit-amp CONTROL row. The section's probe answers "is there a
+  // circuit amp", never "which one", and different amps declare different
+  // knobs — a Princeton has Volume and Tone where a Deluxe will have tremolo —
+  // so the row is the only place "this control belongs to that amp" can live.
+  // The section's own three rows (enabled / ampId / inputGainDb) are ungated,
+  // because every circuit amp has them whatever its topology.
+  CIRCUIT_AMP_CONTROL_PARAMS.length;
+
 
 /**
  * Every branch some gesture in this app can actually create — a section's
@@ -1084,14 +1145,23 @@ describe('row conditions', () => {
     // Every condition in this table is on a source discriminant — the primary's or
     // the layer's — so a typo'd `'fm_synth'` is a row that never appears and never
     // fails anything else.
-    const kindPaths = ['source.kind', 'layer.source.kind'];
+    // Two discriminants carry conditions, and each has its own legal vocabulary.
+    // Checking the path without checking the values against THAT path's registry
+    // is what lets a typo'd `'fm_synth'` or `'princeton-5f2'` become a row that
+    // never appears and never fails anything else.
+    const CONDITION_VOCABULARY: Readonly<Record<string, readonly string[]>> = {
+      'source.kind': SOURCE_KINDS,
+      'layer.source.kind': SOURCE_KINDS,
+      'effects.circuitAmp.ampId': CIRCUIT_AMPS.map((amp) => amp.id),
+    };
     for (const param of ALL_PARAMS) {
       const when = param.appliesWhen;
       if (!when) continue;
-      expect(kindPaths, param.path).toContain(when.path);
+      const vocabulary = CONDITION_VOCABULARY[when.path];
+      expect(Object.keys(CONDITION_VOCABULARY), param.path).toContain(when.path);
       expect(when.oneOf.length, param.path).toBeGreaterThan(0);
       for (const value of when.oneOf) {
-        expect(SOURCE_KINDS as readonly string[], param.path).toContain(value);
+        expect(vocabulary, `${param.path} -> ${when.path}`).toContain(value);
       }
     }
   });
@@ -1117,6 +1187,11 @@ describe('row conditions', () => {
       // must not ALSO gate rows, and the pedalboard's probe deliberately answers
       // nothing, because six stages come and go inside one always-present board.
       ...ALL_PEDAL_PARAMS.map((p) => p.path),
+      // Every circuit-amp control row — the fourth case, and the same shape as
+      // the pedals': the section's probe answers presence and stops there,
+      // because WHICH amp decides which knobs exist. A Princeton declares
+      // Volume and Tone; the section cannot know that, and the row can.
+      ...CIRCUIT_AMP_CONTROL_PARAMS.map((p) => p.path),
     ]);
     // `[].every(…)` is `true`, so the count comes first here too.
     expect(conditional).toHaveLength(CONDITIONAL_ROW_COUNT);
@@ -1479,6 +1554,7 @@ describe('scope', () => {
       'body-filter',
       'pedals',
       'amp',
+      'circuit-amp',
       'cabinet',
       'level',
     ]);
