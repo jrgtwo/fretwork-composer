@@ -1008,7 +1008,22 @@ function scheduleTrackVoiceRebuild(trackId: string): void {
       // Attempted, not trusted: a preset the audio graph refuses must not take
       // the edit down with it — the draft is already recorded and the next play
       // builds from it.
-      attempt(() => active.playback.setTrackVoice(trackId));
+      //
+      // ⚠ REPORTED, not swallowed, and the distinction is the reason this is not
+      // `attempt`. That helper's `catch {}` is written for the dispose paths,
+      // where "the caller is already on its way out" is true. Here it is false:
+      // this is the LIVE EDIT path, `setTrackVoice` disposes the outgoing voice
+      // before building the replacement, and a throw in between leaves the track
+      // permanently silent. Swallowing it makes "the audio just stopped" a bug
+      // with no evidence anywhere — which is what it was.
+      try {
+        active.playback.setTrackVoice(trackId);
+      } catch (error) {
+        console.error(
+          `[fretwork] track ${trackId}: voice rebuild failed — this track is now silent until the next successful rebuild.`,
+          error,
+        );
+      }
     }, REBUILD_COALESCE_MS),
   );
 }
