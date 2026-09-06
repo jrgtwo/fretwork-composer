@@ -127,8 +127,14 @@ const lib = vi.hoisted(() => {
     readonly opts: Opts;
     held: FakeComposition;
     readonly schedulers: FakeTrackScheduler[] = [];
-    /** Track ids whose voice was rebuilt, in order. */
+    /** Track ids whose voice was REBUILT, in order. A knob turn must not appear
+     *  here — it retunes the voice this playback is already holding. */
     readonly voiceSwaps: string[] = [];
+    /** The voice each track is currently sounding through. The app keeps its own
+     *  handle on exactly these objects (`liveTrackVoices`), which is what lets a
+     *  knob turn call `swapPreset` on one instead of building a replacement, so
+     *  a per-track spy is how a retune is told apart from a rebuild. */
+    readonly voicesByTrack = new Map<string, { swapPreset: ReturnType<typeof vi.fn> }>();
 
     applyTrackState = vi.fn();
     setLoop = vi.fn();
@@ -140,10 +146,13 @@ const lib = vi.hoisted(() => {
       const track = this.held.tracks.find((candidate) => candidate.id === trackId);
       if (!track) return;
       this.voiceSwaps.push(trackId);
-      // The real one rebuilds through the factory, which is the only way a
-      // draft reaches a LIVE voice — there is no in-place retune on this path
-      // (LIB-GAP(19)).
-      this.opts.buildVoice(track);
+      // The real one rebuilds through the factory and hands the result to its
+      // scheduler. Reached now only when the track's voice CANNOT be retuned —
+      // a voice pick, or an engine rebuilt inside the coalescing window.
+      this.voicesByTrack.set(
+        trackId,
+        this.opts.buildVoice(track) as { swapPreset: ReturnType<typeof vi.fn> },
+      );
     });
 
     updateComposition = vi.fn((next: FakeComposition) => {
@@ -167,7 +176,10 @@ const lib = vi.hoisted(() => {
       this.opts = opts;
       this.held = opts.composition;
       for (const track of opts.composition.tracks) {
-        opts.buildVoice(track);
+        this.voicesByTrack.set(
+          track.id,
+          opts.buildVoice(track) as { swapPreset: ReturnType<typeof vi.fn> },
+        );
         this.schedulers.push(new FakeTrackScheduler());
       }
       FakeMultiTrackPlayback.instances.push(this);
@@ -1735,27 +1747,44 @@ describe('a rack edit reaches the engine', () => {
     expect(lib.builtFromRef).toEqual([{ instrumentId: 'guitar', voiceRef: null }]);
   });
 
+  /** Every preset one track's live voice was retuned with, in order. */
+  function retunesFor(
+    running: { voicesByTrack: Map<string, { swapPreset: { mock: { calls: unknown[][] } } }> },
+    trackId: string,
+  ): unknown[] {
+    return (running.voicesByTrack.get(trackId)?.swapPreset.mock.calls ?? []).map(
+      (call) => call[0],
+    );
+  }
+
   it('retunes exactly one track when a knob moves, and coalesces the drag', async () => {
     const tracks = twoPlayableTracks();
     render(<CompositionProbe />);
     await start();
     const running = engine();
+    const buildsBefore = lib.builtFromPreset.length;
 
-    // Two writes microseconds apart, which is what one knob drag is. A rebuild
-    // is a `Tone.Sampler` and an HTTP load per bank (LIB-GAP(19)), so the window
-    // has to collapse them into the last value rather than build twice.
+    // Two writes microseconds apart, which is what one knob drag is. The window
+    // has to collapse them into the last value rather than act twice.
     await act(async () => {
       setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -3);
       setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6);
     });
 
-    await waitFor(() => expect(running.voiceSwaps).toEqual([tracks[0].id]));
-    expect(getAtPath(lib.builtFromPreset.at(-1), VOLUME_PATH)).toBe(-6);
+    await waitFor(() => expect(retunesFor(running, tracks[0].id)).toHaveLength(1));
+    expect(getAtPath(retunesFor(running, tracks[0].id)[0], VOLUME_PATH)).toBe(-6);
+
+    // RETUNED, not rebuilt — the whole point. A rebuild is a `Tone.Sampler` and
+    // an HTTP load per bank, so a knob turn that builds one re-downloads the
+    // entire sample pack.
+    expect(running.voiceSwaps).toEqual([]);
+    expect(lib.builtFromPreset).toHaveLength(buildsBefore);
     // Not the whole path, and not the other track: the point of the design.
+    expect(retunesFor(running, tracks[1].id)).toEqual([]);
     expect(lib.FakeMultiTrackPlayback.instances).toHaveLength(1);
   });
 
-  it('keeps two tracks’ rebuilds apart inside one coalescing window', async () => {
+  it('keeps two tracks’ retunes apart inside one coalescing window', async () => {
     const tracks = twoPlayableTracks();
     render(<CompositionProbe />);
     await start();
@@ -1763,21 +1792,20 @@ describe('a rack edit reaches the engine', () => {
 
     // Both racks edited inside one window — two knobs under two hands, or an
     // agent setting a pair. A single module-level timer would let the second
-    // write cancel the first's rebuild and the first track would keep sounding
-    // its old voice, silently and until something else forced a build. The
+    // write cancel the first's, and the first track would keep sounding its old
+    // settings, silently and until something else forced an update. The
     // per-track keying is the whole reason `pendingTrackRebuilds` is a Map.
     await act(async () => {
       setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -3);
       setTrackVoiceParam(tracks[1].id, VOLUME_PATH, -9);
     });
 
-    await waitFor(() =>
-      expect([...running.voiceSwaps].sort()).toEqual([tracks[0].id, tracks[1].id].sort()),
-    );
-    const presets = lib.builtFromPreset
-      .slice(-2)
-      .map((p) => getAtPath(p, VOLUME_PATH) as number);
-    expect(presets.slice().sort((a, b) => a - b)).toEqual([-9, -3]);
+    await waitFor(() => {
+      expect(retunesFor(running, tracks[0].id)).toHaveLength(1);
+      expect(retunesFor(running, tracks[1].id)).toHaveLength(1);
+    });
+    expect(getAtPath(retunesFor(running, tracks[0].id)[0], VOLUME_PATH)).toBe(-3);
+    expect(getAtPath(retunesFor(running, tracks[1].id)[0], VOLUME_PATH)).toBe(-9);
   });
 
   it('honours an edit made with no engine standing, on the next build', async () => {
@@ -1825,25 +1853,27 @@ describe('a rack edit reaches the engine', () => {
 
   it('puts the track back on its stored voice when the edit is discarded', async () => {
     const tracks = twoPlayableTracks();
+    const stored = getAtPath(trackVoicePreset(tracks[0]), VOLUME_PATH) as number;
+    expect(stored).not.toBe(-6);
+
     render(<CompositionProbe />);
     await start();
     const running = engine();
     await act(async () => {
       setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6);
     });
-    await waitFor(() => expect(running.voiceSwaps).toEqual([tracks[0].id]));
-    lib.builtFromRef.length = 0;
+    await waitFor(() => expect(retunesFor(running, tracks[0].id)).toHaveLength(1));
 
     await act(async () => {
       discardTrackVoiceDraft(tracks[0].id);
     });
 
-    // The engine is holding a `Voice` built FROM the draft; nothing else would
+    // The engine's voice is carrying the draft's settings; nothing else would
     // ever tell it to go back, which is why a discard notifies rather than
-    // merely deleting.
-    await waitFor(() =>
-      expect(lib.builtFromRef).toEqual([{ instrumentId: 'guitar', voiceRef: null }]),
-    );
+    // merely deleting. It goes back by being retuned with the STORED preset —
+    // the same path the edit took, in reverse.
+    await waitFor(() => expect(retunesFor(running, tracks[0].id)).toHaveLength(2));
+    expect(getAtPath(retunesFor(running, tracks[0].id)[1], VOLUME_PATH)).toBe(stored);
   });
 
   it('does not rebuild anything for an edit that changed no value', async () => {

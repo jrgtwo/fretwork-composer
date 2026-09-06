@@ -721,9 +721,16 @@ export async function auditionVoice(note: string = AUDITION_NOTE): Promise<void>
  *
  * `MultiTrackPlayback` keeps its per-track `Voice` objects private and exposes
  * only `setTrackVoice(trackId)` (the same enclosure LIB-GAP(19) is about), so
- * there is nothing to reach for. The pattern path can borrow `engine.voice`;
- * this one cannot, and building a rig of its own is the alternative rather than
- * a preference.
+ * the pattern path can borrow `engine.voice` and this one has nothing to borrow
+ * from the lib.
+ *
+ * ⚠ {@link liveTrackVoices} now holds those same objects, so the rig COULD be
+ * retired in favour of the track's own voice. It has not been, and the reason is
+ * routing rather than reach: an audition has to be heard with the transport
+ * stopped and independently of the track's fader, mute and solo, which the
+ * engine's voice is wired through. Reusing it would mean re-routing a live voice
+ * for the duration of a preview. Left as it is deliberately, and noted here
+ * because the sentence above used to say there was nothing to reach for.
  *
  * ONE rig, not one per track: it is a preview, only ever sounding one note at a
  * time, and eight idle `Tone.Sampler` sets would be eight bank loads for a
@@ -947,6 +954,7 @@ function buildTrackVoice(track: Track): Voice {
   // swapped live — so registering here is what lets the mixer meter every track
   // without `MultiTrackPlayback` having to expose its voices.
   registerTrackVoice(track.id, voice);
+  liveTrackVoices.set(track.id, voice);
   return voice;
 }
 
@@ -969,18 +977,38 @@ function cancelPendingTrackRebuilds(): void {
 }
 
 /**
+ * The `Voice` each track is currently sounding through, by track id.
+ *
+ * {@link buildTrackVoice} is the ONLY place a track's voice is constructed, and
+ * the lib calls it both when it builds the engine and when it swaps a track's
+ * voice live — so this holds the same object `MultiTrackPlayback` keeps in its
+ * entry and hands to the scheduler. That matters because the scheduler reads
+ * its instrument fresh inside every note callback rather than capturing one at
+ * schedule time, so retuning this object in place is heard by notes that are
+ * already queued on the transport.
+ *
+ * Deliberately NOT `levelMeters`' registry, which holds the same objects. That
+ * map belongs to the meter path; a control path reading it would break the next
+ * time metering changed how it tracks a voice, and the two have no reason to
+ * move together.
+ */
+const liveTrackVoices = new Map<string, Voice>();
+
+/**
  * Make one track's unsaved voice edit audible.
  *
- * LIB-GAP(19): this is a full voice REBUILD for what is a knob turn. The pattern
- * page retunes in place — `Voice.swapPreset` mutates the live chain, which is
- * what makes dragging a slider on a live voice viable at all — but
- * `MultiTrackPlayback` keeps its per-track `Voice` objects private and exposes
- * only `setTrackVoice(trackId)`, which rebuilds through the `buildVoice` factory
- * and disposes the outgoing voice after a release tail. So an amp knob costs one
- * `Tone.Sampler` per bank and an HTTP load each, where the same knob on the
- * pattern page costs a parameter write. Delete when `MultiTrackPlayback` exposes
- * the track's voice (or a `setTrackPreset(trackId, preset)`); see
- * docs/FOLLOW-UPS.md.
+ * RETUNES the live voice, and only rebuilds when there is no voice to retune.
+ * `Voice.swapPreset` mutates the chain in place, and the scheduler reads its
+ * instrument fresh inside every note callback rather than capturing one when it
+ * queues the note — so an edit is heard by notes already sitting on the
+ * transport, and a knob turn costs a parameter write instead of one
+ * `Tone.Sampler` per bank and an HTTP load each. `MultiTrackPlayback` keeps its
+ * voices private, but it builds them through {@link buildTrackVoice}, so
+ * {@link liveTrackVoices} already holds the object it is playing through.
+ *
+ * A SOURCE change still rebuilds, inside `swapPreset` — different banks mean
+ * different `Tone.Sampler`s and there is nothing to retune. That is the one case
+ * where the samples should be fetched again.
  *
  * Coalesced on {@link REBUILD_COALESCE_MS} — the SAME window the pattern path's
  * rebuild uses, and for the same reason rather than a second policy: a knob is a
@@ -1005,6 +1033,28 @@ function scheduleTrackVoiceRebuild(trackId: string): void {
       // live NOW is what should be rebuilt.
       const active = compositionEngine;
       if (!active) return;
+
+      // The fast path. Both halves have to be present: the voice is missing if
+      // the engine was rebuilt inside the debounce window, and the track is gone
+      // if it was deleted or an undo retracted it between the drag and here.
+      const voice = liveTrackVoices.get(trackId);
+      const track = findTrack(trackId);
+      if (voice && track) {
+        try {
+          voice.swapPreset(trackVoicePreset(track));
+          return;
+        } catch (error) {
+          // Fall through to the rebuild rather than leave the edit unheard: a
+          // stage toggle inside `swapPreset` disposes the chain before wiring
+          // its replacement, so a throw there can leave a half-built graph that
+          // only a fresh voice fixes.
+          console.error(
+            `[fretwork] track ${trackId}: retune failed — rebuilding the voice instead.`,
+            error,
+          );
+        }
+      }
+
       // Attempted, not trusted: a preset the audio graph refuses must not take
       // the edit down with it — the draft is already recorded and the next play
       // builds from it.
@@ -1201,6 +1251,7 @@ function disposeCompositionEngine(): void {
   // torn them down, and a meter reading a live voice one frame longer is
   // harmless where reading a disposed one takes the catch on every frame.
   clearTrackVoices();
+  liveTrackVoices.clear();
   emit(IDLE);
 }
 

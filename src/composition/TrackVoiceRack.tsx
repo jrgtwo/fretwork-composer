@@ -359,9 +359,9 @@ export function TrackVoiceRack({
             // not warm either. The pattern page's `warmSampleBanks` is a rate
             // adapter for a `<select>` that fires per arrow key
             // (`docs/FOLLOW-UPS.md`, permanent-adapter table); the composition
-            // path's equivalent is `VOICE_COMMIT_MS` in `TrackControls`, and its
-            // voices are built by `scheduleTrackVoiceRebuild` (LIB-GAP(19)), which
-            // is where a warm would belong so both writes get one. Cost: the first
+            // path's equivalent is `VOICE_COMMIT_MS` in `TrackControls`, and a
+            // source change goes through `scheduleTrackVoiceRebuild`, which is
+            // where a warm would belong so both writes get one. Cost: the first
             // Play after switching a track to samples waits on the banks.
             onChange={(value) => write(param.path, value)}
           />
