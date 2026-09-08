@@ -22,6 +22,26 @@
  * Expiring locally inverts the trade. A 30-day TTL costs 144 requests a month
  * instead of ~4,300, at the price of re-downloading ~11 MB that probably did
  * not change. Bytes are the cheap axis, so that is the right thing to waste.
+ * Serve stale while refreshing, so nobody waits on it.
+ *
+ * ── What was measured, and what cannot be changed ───────────────────────────
+ *
+ * MEASURED, not inferred. Supabase answers a CDN MISS with `cache-control:
+ * no-cache` and a Smart CDN HIT with `public, max-age=3600` — so a `curl` from
+ * outside the CDN only ever sees the former, and the browser's own HTTP cache
+ * cannot be relied on either way. `cacheControl` can only be set at UPLOAD
+ * time: there is no API for it and no dashboard field, so changing what the
+ * origin says means re-uploading all 670 objects (~78 KB each, ~45 MB).
+ *
+ * And there is no fallback inside Tone. `ToneAudioBuffer.downloads` is a list
+ * of in-flight promises for `Tone.loaded()` to await, NOT a URL to buffer map,
+ * so every new `Tone.Sampler` re-fetches and re-decodes every file it is given.
+ *
+ * ── Rejected by the user ────────────────────────────────────────────────────
+ *
+ * Content-addressed URLs — never reusing a path — because overwriting a sample
+ * in place has to keep working. And any extra Supabase API call to check
+ * freshness, because REQUESTS are the axis being conserved.
  */
 
 /** How long a downloaded sample is trusted. Long, because these files change

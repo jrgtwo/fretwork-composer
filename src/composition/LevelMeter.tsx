@@ -6,8 +6,9 @@
  * A meter that updated through React state would re-render its whole strip 30
  * times a second to move a bar a few pixels, and there is one of these per track
  * per tap. So the component renders ONCE and then writes to its own DOM nodes
- * from the subscription callback — `transform` on the fill, `left` on the peak
- * marker, a class on the clip dot. Nothing above it ever hears about a level.
+ * from the subscription callback — `clip-path` on the fill (never `transform`;
+ * see the note on the write itself), `left` on the peak marker, a class on the
+ * clip dot. Nothing above it ever hears about a level.
  *
  * That is also why the readout is written as `textContent` rather than rendered:
  * it is the same number the bar is already showing, and putting it in state

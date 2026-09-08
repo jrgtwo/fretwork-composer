@@ -933,9 +933,11 @@ const loopBoundaryOf = (composition: Composition): number =>
  * `sourceFingerprint` is deliberately NOT consulted here, and this is the one
  * place that could look like an omission: `Voice.swapPreset` is never called on
  * this path at all. `MultiTrackPlayback.setTrackVoice` constructs a whole new
- * `Voice` through this factory and disposes the old one after a release tail, so
- * the rebuild-versus-retune classification the pattern path needs simply does not
- * arise for a track — there is nothing live to retune.
+ * `Voice` through this factory and disposes the old one AT ONCE — the release
+ * tail its own comment promises does not happen, see
+ * {@link voiceSwapsMissedByDiff} — so the rebuild-versus-retune classification
+ * the pattern path needs simply does not arise for a track: there is nothing
+ * live to retune.
  *
  * CP-14: a track's rack edits go through `trackVoiceDrafts`, which holds a
  * preset no variant has yet — so nothing the lib resolves can see it and the
@@ -1101,9 +1103,16 @@ subscribeTrackVoiceDrafts(scheduleTrackVoiceRebuild);
  *
  * The ordinary case needs nothing from us: `diffTracks` classifies a `voiceRef`
  * change as `'voice'` and `updateComposition` calls `setTrackVoice(trackId)`
- * itself, which builds the new voice, hands it to that track's scheduler and
- * disposes the old one after a 4 s tail — a click-free swap mid-playback, for one
- * track and no other.
+ * itself, which builds the new voice and hands it to that track's scheduler, for
+ * one track and no other.
+ *
+ * ⚠ THE 4-SECOND RELEASE TAIL DOES NOT EXIST, whatever the comments in either
+ * repo say — so this swap is NOT click-free. `setTrackVoice` does schedule
+ * `old.dispose()` on a 4 s `setTimeout`, but `entry.scheduler.setInstrument(next)`
+ * one line earlier has ALREADY disposed the outgoing voice synchronously, so the
+ * timer fires against a dead object and its second dispose is swallowed by a
+ * `catch {}`. Notes ringing at a voice swap are CUT, not rung out. That is half
+ * of why the live rack-edit path retunes rather than rebuilds.
  *
  * LIB-GAP(18): that diff picks ONE action per track by priority, and `restream`
  * outranks `voice`. So an update in which a track's placements AND its voiceRef

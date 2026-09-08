@@ -22,7 +22,9 @@
  * hard the bus is driven. A signal arriving at +10 dBFS is squashed, chopped,
  * and reported as a tidy -0.5 — audible distortion, clean meter. It is the same
  * failure as the RMS-vs-peak bug one stage on: a meter placed where the answer
- * is already known.
+ * is already known. `levelMeters.test.ts` HOLDS this — a mutation-checked test
+ * that fails if the master source goes back to `getOutputPeakDb()`, because
+ * nothing about the reading itself would look wrong if it did.
  *
  * It is still not a headroom figure, and the difference matters when reading it.
  * The tap sits downstream of the bus compressor and of `MasterBus`'s own gain,

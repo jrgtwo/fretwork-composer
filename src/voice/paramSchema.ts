@@ -8,6 +8,14 @@
  * assert every path and range against every built-in preset, which hand-written
  * JSX can never do.
  *
+ * ⚠ TWO SURFACES RENDER THIS ONE TABLE — the pattern page's `VoicePane` and the
+ * composition page's `TrackVoiceRack` — so a section with a CUSTOM RENDERER
+ * needs one on BOTH sides. Without the twin, the second surface falls into its
+ * generic branch and dumps the section's rows out flat: for the pedalboard that
+ * is thirty-eight rows with no way to tell which pedal a "Mix" belongs to and no
+ * way to add or remove one. Amp, Cabinet, Level and Pedals each have a pair
+ * today; the reasoning is written out on `TrackVoiceRack`'s `renderPedals`.
+ *
  * ⚠ THE NUMBERS ARE NOT SOUND LAB'S. Every bound below is either the range Tone
  * publishes on `https://tonejs.github.io/` for the node the lib builds, cited by
  * page beside it, or — where that page gives a `Min:`/`Max:` for a property's

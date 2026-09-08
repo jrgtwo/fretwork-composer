@@ -16,6 +16,12 @@
  * together outgrow it. This is deliberately a stopgap — a better layout is planned —
  * but it is a stopgap with no arithmetic in it, which is why it can't go subtly wrong
  * the way the resize rules did.
+ *
+ * THE COMPOSITION PAGE IS THE WORKED EXAMPLE OF THE ALTERNATIVE, and it is where
+ * to look before designing the replacement: fixed regions, one scroll container,
+ * and a document that never scrolls. It does not use `PaneStack` at all. Do not
+ * reach for drag-resize as the fix — it was removed deliberately; decide what
+ * the layout should be first.
  */
 
 export interface PaneSpec {

@@ -17,10 +17,15 @@
  *     nothing a model can author from a schema without inventing values that do
  *     not exist. `voice_save_as` is here because it needs no authored preset: it
  *     saves what the track ALREADY sounds like, read back through the seam.
- *     There is no "make this dirtier" tool because there is no seam write to
- *     make one out of — the parameter drafts live in the voice rack's own UI
- *     state, which is a gap recorded in the ticket rather than papered over
- *     here.
+ *     ⚠ There is no "make this dirtier" tool, and that is a DECISION rather
+ *     than a missing seam. This header used to say no seam write existed to
+ *     make one out of; that is stale. `voice/trackVoiceDrafts.ts` exposes
+ *     `setTrackVoiceParam`, `addTrackVoiceSection`, `addTrackVoiceSubBranch`
+ *     and `addTrackVoicePedal`, all reachable by id and value with no pointer,
+ *     and they are deliberately left UNWRAPPED. Restated 2026-09-04: the agent
+ *     builds patterns and compositions and CHOOSES a voice; designing one is a
+ *     different kind of act. Wrapping them is a product decision to reopen, not
+ *     a gap to close.
  *   - **The global active variant** (`selectVoice` and the `activeVariants`
  *     map). It is the instrument-wide default shared by every pattern with no
  *     explicit ref, so writing it retunes documents the user never mentioned.
