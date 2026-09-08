@@ -886,7 +886,8 @@ describe('VoicePane', () => {
       wet: 0.5,
       type: 'sine',
       feedback: 0,
-      delayTime: 3.5,
+      // Tone's 3.5 ms default, in the seconds the lib's field stores.
+      delayTime: 0.0035,
       spread: 180,
     });
     // …and its controls are now on screen, named by the pedal so the four "Mix"

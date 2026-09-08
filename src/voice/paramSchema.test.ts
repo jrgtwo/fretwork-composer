@@ -231,7 +231,8 @@ const POPULATED_CHASSIS: Omit<VoicePreset, 'id' | 'name' | 'source'> = {
       wet: 0.3,
       type: 'triangle',
       feedback: 0.1,
-      delayTime: 4,
+      // SECONDS, like the field it stands in for — 4 ms.
+      delayTime: 0.004,
       spread: 120,
     },
     delay: { enabled: false, delayTime: 0.3, feedback: 0.2, wet: 0.15 },

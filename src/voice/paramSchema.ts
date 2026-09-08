@@ -1743,14 +1743,17 @@ const CHORUS_PEDAL: Pedal = definePedal({
       path: 'effects.chorus.delayTime',
       label: 'Delay',
       requiresBranch: 'effects.chorus',
-      // ⚠ MILLISECONDS. Tone types it `Milliseconds` and defaults it to 3.5; the
-      // lib's `ChorusParams.delayTime` comment says "Seconds" and is wrong about
-      // its own field — the value reaches `Tone.Chorus.delayTime` unconverted.
-      // The unit here is the node's. "Nominal range 2 to 20ms" is prose, so this
-      // is an encoder like every other prose range.
-      step: 0.1,
-      precision: 1,
-      unit: 'ms',
+      // ⚠ SECONDS, not the node's milliseconds. `Voice.ts` multiplies this field
+      // by 1000 into `Tone.Chorus.delayTime`, so what the preset stores is
+      // seconds and so is what this row edits. Rendering it as ms would be a
+      // second scale the preset does not store — the rule the envelope's
+      // `sustain` row already keeps. Tone's nominal 2–20 ms is 0.002–0.020 here,
+      // which is why the step is half a millisecond and the readout runs to four
+      // places; "nominal range" is prose, so this is an encoder like every other
+      // prose range.
+      step: 0.0005,
+      precision: 4,
+      unit: 's',
       floor: 0,
       fallback: SEED_CHORUS.delayTime,
     },

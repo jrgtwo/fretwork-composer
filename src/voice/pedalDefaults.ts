@@ -79,10 +79,16 @@ export const SEED_DISTORTION: DistortionParams = {
  * `tone/build/esm/effect/Chorus.js` `getDefaults()` (15.1.22). Chorus overrides
  * the inherited `wet` to 0.5 itself, so that number is Chorus's own.
  *
- * ⚠ `delayTime` IS MILLISECONDS. Tone types it `Milliseconds` and defaults it to
- * 3.5; the lib's `ChorusParams.delayTime` comment says "Seconds", which is
- * wrong about the field it stores — the value goes to `Tone.Chorus.delayTime`
- * unconverted. The row in `paramSchema` carries Tone's unit, not the comment's.
+ * ⚠ `delayTime` IS SECONDS HERE, and Tone's default is 3.5 MILLISECONDS. The
+ * field this seeds is the lib's, not the node's: `ChorusParams.delayTime` is
+ * seconds, the lib's own shipped preset stores `0.004` (`presets.ts`), and
+ * `Voice.ts` multiplies by 1000 on the way into `Tone.Chorus.delayTime` — which
+ * is the millisecond field, and which divides by 1000 again inside Tone. So
+ * Tone's 3.5 ms is written here as 0.0035.
+ *
+ * Written as `3.5` it asked for a 3.5-SECOND swept delay against delay lines
+ * whose default `maxDelay` is 1 s. Both LFOs clamp flat at the ceiling and the
+ * chorus is a static one-second slapback, which is what it sounded like.
  */
 export const SEED_CHORUS: ChorusParams = {
   frequency: 1.5,
@@ -90,7 +96,7 @@ export const SEED_CHORUS: ChorusParams = {
   wet: 0.5,
   type: 'sine',
   feedback: 0,
-  delayTime: 3.5,
+  delayTime: 0.0035,
   spread: 180,
 };
 
