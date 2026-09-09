@@ -81,6 +81,7 @@
 import {
   AMP_MODELS,
   CIRCUIT_AMPS,
+  type CircuitAmpControl,
   getCircuitAmp,
   DEFAULT_CIRCUIT_AMP_ID,
   CABINET_IRS,
@@ -1998,8 +1999,8 @@ const CIRCUIT_AMP_OPTIONS: readonly EnumOption[] = CIRCUIT_AMPS.map((amp) => ({
  *
  * ── Why `params` is flattened ───────────────────────────────────────────────
  *
- * It is the union of EVERY amp's declared controls, each row gated with
- * `appliesWhen` on the selected amp id. That flattening is load-bearing,
+ * It is the union of EVERY amp's declared controls, grouped by control id and
+ * each row gated with `appliesWhen` on the amps that declare it. That flattening is load-bearing,
  * exactly as it is for `PEDALS_SECTION`: `PARAM_BY_PATH` and the schema
  * tripwire are both built from `PARAM_SECTIONS.flatMap(s => s.params)`, so a
  * row declared only on one amp would be a control the composition page cannot
@@ -2010,7 +2011,18 @@ const CIRCUIT_AMP_OPTIONS: readonly EnumOption[] = CIRCUIT_AMPS.map((amp) => ({
  * From the amp's own definition in the lib, never from this file. A control's
  * range is a property of the circuit — a pot turns from 0 to 1 whatever this
  * schema thinks — so a row here reads `control.min` / `control.max` /
- * `control.default` and adds nothing of its own.
+ * `control.default` and adds nothing of its own. A SWITCH takes its options
+ * from the definition on the same rule.
+ *
+ * ── One row per control id, not per amp ─────────────────────────────────────
+ *
+ * `circuitAmpControlPath` does not namespace by amp id, so rows are grouped by
+ * control id and gated on every amp that declares it. Two amps declaring
+ * `tone` would otherwise emit the same path twice, and `PARAM_BY_PATH` — a Map
+ * — would keep only the last, leaving the other amp's Tone unwritable. The
+ * price is that a shared id shares its label, range and default; an amp
+ * needing a different default needs a different id, which the lib's
+ * `tests/circuit-amp-registry.test.ts` enforces.
  */
 const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
   {
@@ -2054,22 +2066,58 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
     precision: 1,
     fallback: 0,
   },
-  ...CIRCUIT_AMPS.flatMap((amp) =>
-    amp.controls.map(
-      (control): Param => ({
-        kind: 'slider',
-        path: circuitAmpControlPath(amp.id, control.id),
+  // Grouped by control id ACROSS amps, never one row per amp.
+  // `circuitAmpControlPath` does not namespace by amp, so two amps declaring
+  // `tone` would emit one path twice and `PARAM_BY_PATH` — a Map — would let
+  // the second silently win, after which `setTrackVoiceParam` would refuse
+  // every write to the first amp's Tone. Grouping is also the behaviour worth
+  // having: the tone pot keeps its position across an amp switch.
+  ...[
+    ...CIRCUIT_AMPS.reduce((byId, amp) => {
+      for (const control of amp.controls) {
+        const entry = byId.get(control.id);
+        if (entry) entry.ampIds.push(amp.id);
+        else byId.set(control.id, { control, ampIds: [amp.id] });
+      }
+      return byId;
+    }, new Map<string, { control: CircuitAmpControl; ampIds: string[] }>()).values(),
+  ].map(({ control, ampIds }): Param => {
+    const appliesWhen = { path: 'effects.circuitAmp.ampId', oneOf: ampIds } as const;
+    // The range and the options both come from the amp's own definition, never
+    // from this file — a control's shape is a property of the circuit.
+    if (control.kind === 'switch') {
+      return {
+        kind: 'enum',
+        path: circuitAmpControlPath(ampIds[0], control.id),
         label: control.label,
-        min: control.min,
-        max: control.max,
-        step: control.step,
-        unit: control.unit,
-        precision: 2,
+        options: control.options.map((o) => ({
+          value: o.value,
+          label: o.label,
+          description: o.description,
+        })),
         fallback: control.default,
-        appliesWhen: { path: 'effects.circuitAmp.ampId', oneOf: [amp.id] },
-      }),
-    ),
-  ),
+        // `null` for a value no amp offers, per `EnumParam.resolve`'s contract
+        // above — the picker ADMITS an unrecognised stored value rather than
+        // papering over it by silently showing the default. The lib's
+        // `switchValue` still BUILDS the default; the picker's job is to say so.
+        resolve: (raw) =>
+          typeof raw === 'string' && control.options.some((o) => o.value === raw) ? raw : null,
+        appliesWhen,
+      };
+    }
+    return {
+      kind: 'slider',
+      path: circuitAmpControlPath(ampIds[0], control.id),
+      label: control.label,
+      min: control.min,
+      max: control.max,
+      step: control.step,
+      unit: control.unit,
+      precision: 2,
+      fallback: control.default,
+      appliesWhen,
+    };
+  }),
 ];
 
 export const CIRCUIT_AMP_SECTION: ParamSection = {

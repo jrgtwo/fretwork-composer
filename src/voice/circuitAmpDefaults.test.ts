@@ -49,6 +49,9 @@ describe('CIRCUIT_AMP_SECTION', () => {
   it("takes each row's range from the control that declares it, never from this file", () => {
     const amp = getCircuitAmp('princeton-5f2a');
     const volume = amp.controls.find((c) => c.id === 'volume')!;
+    // Narrowed because `CircuitAmpControl` is a union — a switch has no range
+    // to take, and this test is about where a POT's range comes from.
+    if (volume.kind !== 'pot') throw new Error("the Princeton's Volume is a pot");
     const row = CIRCUIT_AMP_SECTION.params.find(
       (p) => p.path === circuitAmpControlPath(amp.id, 'volume'),
     );

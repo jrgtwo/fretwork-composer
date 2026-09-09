@@ -48,6 +48,7 @@ import {
   SEED_LAYER,
   SOURCE_KINDS,
 } from './sourceDefaults';
+import { circuitAmpControlPath } from './circuitAmpDefaults';
 import { getAtPath, hasPath, removeAtPath, setAtPath } from './presetPaths';
 
 /**
@@ -1236,6 +1237,46 @@ describe('row conditions', () => {
     expect(paramApplies(FULLY_POPULATED_SAMPLER, harmonicity)).toBe(false);
     // The kind picker itself is unconditional — it is how you leave.
     expect(paramAt('source.kind').appliesWhen).toBeUndefined();
+  });
+});
+
+describe('circuit-amp control rows', () => {
+  // The lib's control union reaches the schema as two different row kinds. A
+  // switch emitted as a slider would write a number into a field the renderer
+  // reads as a string, and `ParamSlider` would render a fader for a three-way
+  // switch.
+  it('emits an enum row for every declared switch and a slider for every pot', () => {
+    for (const amp of CIRCUIT_AMPS) {
+      for (const control of amp.controls) {
+        const row = paramAt(circuitAmpControlPath(amp.id, control.id));
+        expect(row.kind).toBe(control.kind === 'switch' ? 'enum' : 'slider');
+      }
+    }
+  });
+
+  // ⚠ THE COLLISION GUARD. `circuitAmpControlPath` ignores its `ampId`, so two
+  // amps declaring `tone` would emit ONE path twice — and `PARAM_BY_PATH` is a
+  // Map, so the second would silently win and `setTrackVoiceParam` would then
+  // refuse every write to the first amp's Tone. A live regression, not just a
+  // red test. The fix is one row per control id gated on every amp declaring
+  // it, which is what this asserts. It holds with one amp and keeps holding
+  // when the second lands.
+  it('gives each control id exactly one row, gated on every amp that declares it', () => {
+    const declaringAmps = new Map<string, string[]>();
+    for (const amp of CIRCUIT_AMPS) {
+      for (const control of amp.controls) {
+        declaringAmps.set(control.id, [...(declaringAmps.get(control.id) ?? []), amp.id]);
+      }
+    }
+    for (const [controlId, ampIds] of declaringAmps) {
+      const path = `effects.circuitAmp.controls.${controlId}`;
+      expect(ALL_PARAMS.filter((p) => p.path === path)).toHaveLength(1);
+      const row = paramAt(path);
+      expect(row.appliesWhen?.path).toBe('effects.circuitAmp.ampId');
+      expect([...(row.appliesWhen!.oneOf as readonly string[])].sort()).toEqual(
+        [...ampIds].sort(),
+      );
+    }
   });
 });
 

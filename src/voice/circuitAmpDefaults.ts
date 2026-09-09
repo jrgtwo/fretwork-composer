@@ -4,8 +4,9 @@
  * A control's value is keyed by the id the amp's OWN definition declares, so
  * the preset shape does not change when an amp is added. That is what lets the
  * pane render a Princeton's two knobs today and a Deluxe's tremolo later with
- * no per-amp UI code — adding an amp is a definition in the lib plus a build
- * function, and nothing here moves.
+ * no per-amp UI code — the schema branches on the control's declared KIND, not
+ * on which amp declared it, so adding an amp is a definition in the lib plus a
+ * build function and nothing here moves.
  */
 import { getCircuitAmp, DEFAULT_CIRCUIT_AMP_ID } from '@fretwork/lib';
 import type { CircuitAmpParams } from '@fretwork/lib';
@@ -22,8 +23,10 @@ export function circuitAmpControlPath(_ampId: string, controlId: string): string
   return `effects.circuitAmp.controls.${controlId}`;
 }
 
-function seedControls(ampId: string): Record<string, number> {
-  const seeded: Record<string, number> = {};
+/** A pot seeds its numeric default, a switch its declared option value. Both
+ *  come from the definition; this file chooses nothing. */
+function seedControls(ampId: string): Record<string, number | string> {
+  const seeded: Record<string, number | string> = {};
   for (const control of getCircuitAmp(ampId).controls) {
     seeded[control.id] = control.default;
   }
