@@ -1470,14 +1470,26 @@ const LEVEL_SECTION: ParamSection = {
  *     `feedback` row is a slider on that citation, which is the same kind of
  *     evidence `bodyFilter.q`'s floor already rests on (`Positive`, "greater than
  *     or equal to 0"), used at both ends because this unit bounds both ends.
- *   - Everything else is an encoder. `Distortion.distortion` says "nominal range
- *     is between 0 and 1" in PROSE and carries no `@min`/`@max`; so does
- *     `Chorus.delayTime` ("between 2 and 20ms") and `AutoWah`'s sensitivity
+ *   - Everything else is an encoder. `Chorus.delayTime` says "between 2 and 20ms"
+ *     in PROSE and carries no `@min`/`@max`; so does `AutoWah`'s sensitivity
  *     ("normal range of -40 to 0"). Prose is not a bound — a fader drawn to a
  *     nominal range is indistinguishable from one drawn to a real one, and the
  *     user would tune against a fence that is not there. `Tone.Filter` publishes
  *     no bound for `gain` at all, which is what makes the whole graphic EQ eight
  *     endless encoders despite the lib's comment suggesting ±15 dB.
+ *
+ * ── THE ONE CARVE-OUT: `effects.distortion.drive` ────────────────────────────
+ *
+ * That row is prose-only too — "nominal range is between 0 and 1" — and it is a
+ * SLIDER anyway. The rule's premise is that a prose range might be someone's
+ * guess, so drawing it is inventing a fence; here Tone's own curve is checkable
+ * and it agrees with the prose, which makes the fence a finding rather than an
+ * invention. It also failed the encoder's own promise in the other direction:
+ * "the real limits get found by ear during QA and only then become a
+ * `SliderParam`" (`ParamEncoder`'s header) is exactly what happened — the pedal
+ * was reported as maxed out at every setting, and an endless knob with no scale
+ * gave nowhere to aim. The row states the maths; do not generalise it. A second
+ * carve-out needs the same evidence, not the same shape of argument.
  */
 export type PedalId =
   | 'compressor'
@@ -1680,17 +1692,28 @@ const DISTORTION_PEDAL: Pedal = definePedal({
   params: [
     pedalBypass('effects.distortion'),
     {
-      kind: 'encoder',
+      kind: 'slider',
       path: 'effects.distortion.drive',
       label: 'Drive',
       requiresBranch: 'effects.distortion',
+      // THE ONE ROW BOUNDED ON PROSE, and the table header names the carve-out.
       // `tone/build/esm/effect/Distortion.d.ts` (15.1.22) says "Nominal range is
-      // between 0 and 1" in prose and publishes no `@min`/`@max`. Prose is not a
-      // bound — see the table header.
+      // between 0 and 1" and publishes no `@min`/`@max`, so the header's rule
+      // made this an encoder. The rule guards against a fence nobody can cite;
+      // this one Tone states in words, and its own curve backs the number up.
+      //
+      // `Distortion.js`'s setter takes `k = amount * 100` and shapes
+      // `f(x) = ((3 + k)·x·π/9) / (π + k·|x|)`. That is a gain of `(3 + k)/9` on
+      // small signals against a fixed ~0.35 at full scale, so the curve's whole
+      // character is set by how early it folds: 0.4 is already 4.8× before the
+      // fold, and past 1 the shape only creeps toward a square that 1 has
+      // effectively reached. A knob that spins forever offers a decade of
+      // asymptote and hides the part that matters, which is the bottom of the
+      // range. Every other encoder in this table stands.
+      min: 0,
+      max: 1,
       step: 0.01,
       precision: 2,
-      // Tone builds the curve from this value; a negative one is not a setting.
-      floor: 0,
       fallback: SEED_DISTORTION.drive,
     },
     normalRangeSlider('effects.distortion', 'effects.distortion.wet', 'Mix', SEED_DISTORTION.wet),
