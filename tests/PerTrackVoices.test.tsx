@@ -36,7 +36,7 @@ import {
   voiceKey,
 } from '../src/voice/voiceService';
 import { playComposition, useCompositionPlayback } from '../src/audio/playbackService';
-import { setTrackVoiceParam } from '../src/voice/trackVoiceDrafts';
+import { addTrackVoiceSection, setTrackVoiceParam } from '../src/voice/trackVoiceDrafts';
 import {
   getEditingPattern,
   openBlankPattern,
@@ -738,6 +738,65 @@ async function start(): Promise<void> {
     if (!result.ok) throw new Error(result.reason);
   });
 }
+
+describe('the circuit amp\u2019s switches through the seam', () => {
+  /** A track with the circuit-amp stage added and the 5E3 selected. */
+  function trackOnThe5E3(): string {
+    const track = twoTracks()[0];
+    const added = addTrackVoiceSection(track.id, 'circuit-amp');
+    if (!added.ok) throw new Error(added.reason);
+    const picked = setTrackVoiceParam(track.id, 'effects.circuitAmp.ampId', 'deluxe-5e3');
+    if (!picked.ok) throw new Error(picked.reason);
+    return track.id;
+  }
+
+  // The enum arm in `trackVoiceDrafts` validates against the row's own
+  // `options`, so this confirms the new switch rows REACH it — not new
+  // machinery. An agent with no pointer is exactly the caller that would try
+  // 'jumper' for 'jumpered', or 'normal' now that the three-way is gone.
+  it('refuses an input value the 5E3 does not offer', () => {
+    const trackId = trackOnThe5E3();
+    for (const bad of ['jumper', 'normal', 'HI', '']) {
+      const result = setTrackVoiceParam(trackId, 'effects.circuitAmp.controls.input', bad);
+      expect(result.ok, `accepted ${JSON.stringify(bad)}`).toBe(false);
+    }
+  });
+
+  it('refuses a number where a switch is declared, and a string where a pot is', () => {
+    const trackId = trackOnThe5E3();
+    expect(setTrackVoiceParam(trackId, 'effects.circuitAmp.controls.jumpered', 1).ok).toBe(false);
+    expect(setTrackVoiceParam(trackId, 'effects.circuitAmp.controls.volumeNormal', 'loud').ok)
+      .toBe(false);
+  });
+
+  it('accepts every position each switch declares', () => {
+    const trackId = trackOnThe5E3();
+    for (const [path, values] of [
+      ['input', ['hi', 'lo']],
+      ['bright', ['off', 'on']],
+      ['jumpered', ['off', 'on']],
+      ['inverter', ['split', 'composed']],
+    ] as const) {
+      for (const value of values) {
+        const result = setTrackVoiceParam(
+          trackId, `effects.circuitAmp.controls.${path}`, value,
+        );
+        expect(result.ok, `${path} = ${value}: ${result.ok ? '' : result.reason}`).toBe(true);
+      }
+    }
+  });
+
+  // ⚠ The Princeton must not gain the 5E3's controls. The rows are grouped by
+  // control id, so `tone` is shared deliberately — `input` is not.
+  it('refuses a 5E3 switch while the Princeton is selected', () => {
+    const track = twoTracks()[0];
+    const added = addTrackVoiceSection(track.id, 'circuit-amp');
+    if (!added.ok) throw new Error(added.reason);
+    expect(setTrackVoiceParam(track.id, 'effects.circuitAmp.controls.input', 'lo').ok).toBe(false);
+    // ...while the id they SHARE still writes.
+    expect(setTrackVoiceParam(track.id, 'effects.circuitAmp.controls.tone', 0.7).ok).toBe(true);
+  });
+});
 
 describe('per-track voices reach the engine', () => {
   it('builds each track from its OWN ref, and the fallback from null', async () => {
