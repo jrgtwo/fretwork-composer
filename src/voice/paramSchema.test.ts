@@ -373,7 +373,46 @@ const STATIC_FILTERED: VoicePreset = {
   bodyFilter: { enabled: true, cutoff: 5500, q: 0.9 },
 };
 
-const ALL_FIXTURES: readonly VoicePreset[] = [...FIXTURES, PLUCK_LAYERED, STATIC_FILTERED];
+/**
+ * A fixture with the SECOND circuit amp selected.
+ *
+ * `POPULATED_CHASSIS` selects the Princeton, so without this every 5E3-only
+ * row — its two channel volumes and its four switches — is a control no fixture
+ * can reach, and `applies every declared row to at least one fixture` is the
+ * assertion that says so. `tone` is deliberately present on both: it is the one
+ * control id the two amps share, and it must resolve under either.
+ *
+ * Values off the seed, for the same reason the chassis' are.
+ */
+const DELUXE_CIRCUIT_AMP: VoicePreset = {
+  ...FULLY_POPULATED_FM,
+  id: 'deluxe-circuit-amp',
+  name: 'Circuit amp on the 5E3',
+  effects: {
+    ...FULLY_POPULATED_FM.effects!,
+    circuitAmp: {
+      enabled: false,
+      ampId: 'deluxe-5e3',
+      inputGainDb: 2.5,
+      controls: {
+        input: 'lo',
+        bright: 'on',
+        jumpered: 'on',
+        volumeNormal: 0.62,
+        volumeBright: 0.38,
+        tone: 0.44,
+        inverter: 'composed',
+      },
+    },
+  },
+};
+
+const ALL_FIXTURES: readonly VoicePreset[] = [
+  ...FIXTURES,
+  PLUCK_LAYERED,
+  STATIC_FILTERED,
+  DELUXE_CIRCUIT_AMP,
+];
 
 /**
  * Compile-time coverage of the lib types this slice addresses. `Record<keyof X, true>`

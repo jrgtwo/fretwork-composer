@@ -32,16 +32,22 @@ describe('CIRCUIT_AMP_SECTION', () => {
     }
   });
 
-  it('gates every control row on the amp that declares it', () => {
+  it('gates every control row on every amp that declares it', () => {
+    // ⚠ ONE ROW PER CONTROL ID, NOT PER AMP. `circuitAmpControlPath` does not
+    // namespace by amp, so a shared id — `tone`, on both amps today — is ONE
+    // row gated on both. Asserting `oneOf: [amp.id]` here would demand the
+    // duplicate-path shape that `PARAM_BY_PATH` silently collapses.
     for (const amp of CIRCUIT_AMPS) {
       for (const control of amp.controls) {
         const row = CIRCUIT_AMP_SECTION.params.find(
           (p) => p.path === circuitAmpControlPath(amp.id, control.id),
         );
-        expect(row?.appliesWhen).toEqual({
-          path: 'effects.circuitAmp.ampId',
-          oneOf: [amp.id],
-        });
+        const declaring = CIRCUIT_AMPS.filter((a) =>
+          a.controls.some((c) => c.id === control.id),
+        ).map((a) => a.id);
+        expect(row?.appliesWhen?.path).toBe('effects.circuitAmp.ampId');
+        expect([...(row?.appliesWhen?.oneOf ?? [])].sort()).toEqual([...declaring].sort());
+        expect(row?.appliesWhen?.oneOf).toContain(amp.id);
       }
     }
   });
@@ -169,16 +175,20 @@ describe('only the selected amp\'s knobs are visible', () => {
     );
   });
 
-  it('shows a control row only while its own amp is selected', () => {
+  it('shows a control row only while an amp that declares it is selected', () => {
+    // A SHARED id stays visible across an amp switch, which is the point of
+    // grouping the rows — the tone pot keeps its position. What must not happen
+    // is one amp showing another's exclusive controls.
     for (const amp of CIRCUIT_AMPS) {
       const visible = new Set(
         visibleParams(presetWithAmpId(amp.id), CIRCUIT_AMP_SECTION).map((p) => p.path),
       );
+      const declaresHere = new Set(amp.controls.map((c) => c.id));
       for (const other of CIRCUIT_AMPS) {
         for (const control of other.controls) {
           const path = circuitAmpControlPath(other.id, control.id);
           expect(visible.has(path), `${amp.id} showing ${other.id}.${control.id}`).toBe(
-            other.id === amp.id,
+            declaresHere.has(control.id),
           );
         }
       }
