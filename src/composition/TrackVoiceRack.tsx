@@ -316,6 +316,7 @@ export function TrackVoiceRack({
             value={param.resolve(raw)}
             options={param.options}
             badgeOf={param.badgeOf}
+            mod={param.mod}
             onChange={(value) => write(param.path, value)}
           />
         );

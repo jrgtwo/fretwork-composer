@@ -17,6 +17,10 @@
  *   - **Description.** The registries carry a sentence per entry that is the whole
  *     reason a picker is more useful than an id, but `<option>` renders no children.
  *     So the selected entry's description goes underneath, the way Sound Lab does it.
+ *   - **Mod marking.** A control the amp did not ship with carries a MOD chip beside
+ *     its engraving. Rendered here rather than in either pane, because BOTH render
+ *     this component and a marker that existed on one surface only would be a
+ *     modded control reading as stock on the other.
  */
 
 export interface EnumChoice {
@@ -33,6 +37,7 @@ export function ParamEnum({
   options,
   onChange,
   badgeOf,
+  mod,
   placeholder = 'Not in the registry',
 }: {
   id: string;
@@ -52,6 +57,10 @@ export function ParamEnum({
   onChange: (value: string) => void;
   /** Extra word after an option's label — the amp model's category. */
   badgeOf?: (value: string) => string | undefined;
+  /** Set when this control is not stock — see `ParamCommon.mod`. Deliberately
+   *  NOT brass: brass is what every ordinary control already wears, so an
+   *  accent here would mark nothing. An engraved chip instead. */
+  mod?: true;
   placeholder?: string;
 }) {
   // The `?? null` is defensive rather than reachable: both descriptors' `resolve` return
@@ -63,12 +72,29 @@ export function ParamEnum({
   return (
     <div className="flex flex-col gap-0.5">
       <div className="flex items-center gap-2">
-        <label
-          htmlFor={id}
-          className="w-[74px] flex-none font-mono text-[9px] tracking-[0.1em] text-ink-mut uppercase"
-        >
-          {label}
-        </label>
+        {/* The chip is a SIBLING of the label, never a child of it. Inside, its
+            text joins the label's and the control announces as "Inverter MOD" —
+            the accessible name is the engraving here, so anything rendered in
+            the label is rendered into the name. */}
+        <div className="flex w-[74px] flex-none items-center gap-1">
+          <label
+            htmlFor={id}
+            className="font-mono text-[9px] tracking-[0.1em] text-ink-mut uppercase"
+          >
+            {label}
+          </label>
+          {mod ? (
+            // `title` as well as the chip: two letters say THAT it is a mod and
+            // nothing about what that means.
+            <span
+              data-mod-chip
+              title="Not a stock control — a modification to this amp."
+              className="rounded-sm border border-ink-mut/40 px-[3px] font-mono text-[7px] leading-[1.4] tracking-[0.08em] text-ink-mut uppercase"
+            >
+              MOD
+            </span>
+          ) : null}
+        </div>
         <select
           id={id}
           // Exclusive, for the reason `ParamSlider` gives: `aria-label` outranks

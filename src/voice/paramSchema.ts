@@ -215,6 +215,16 @@ interface ParamCommon {
    * `playbackService`'s coalescing, not the thing that makes the edit work.
    */
   readonly rebuildsVoice?: true;
+  /**
+   * Set when this control is not a stock part of whatever it belongs to.
+   *
+   * Carried from the lib's `CircuitAmpControl.mod` today, and the pane marks it
+   * so a modded control cannot be read as something the manufacturer shipped.
+   * A property of the CONTROL rather than of this table: which controls an amp
+   * really has is the amp's business, and a schema that decided it here would
+   * be a second opinion that can drift from the definition.
+   */
+  readonly mod?: true;
 }
 
 export interface SliderParam extends ParamCommon {
@@ -2085,8 +2095,12 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
     const appliesWhen = { path: 'effects.circuitAmp.ampId', oneOf: ampIds } as const;
     // The range and the options both come from the amp's own definition, never
     // from this file — a control's shape is a property of the circuit.
+    // `mod` rides along on both kinds: a mod can be a knob (a bright-cap lift)
+    // as easily as a switch.
+    const mod = control.mod ? ({ mod: true } as const) : undefined;
     if (control.kind === 'switch') {
       return {
+        ...mod,
         kind: 'enum',
         path: circuitAmpControlPath(ampIds[0], control.id),
         label: control.label,
@@ -2106,6 +2120,7 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
       };
     }
     return {
+      ...mod,
       kind: 'slider',
       path: circuitAmpControlPath(ampIds[0], control.id),
       label: control.label,

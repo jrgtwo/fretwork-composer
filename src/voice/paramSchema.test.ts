@@ -1293,6 +1293,20 @@ describe('circuit-amp control rows', () => {
     }
   });
 
+  // A mod is a control that is real but not original. The declaration lives on
+  // the amp — which controls it really has is the amp's business — and this
+  // asserts the schema CARRIES it rather than deciding it.
+  it('carries a control\u2019s mod flag onto its row, and marks nothing else', () => {
+    const modRows = ALL_PARAMS.filter((p) => p.mod).map((p) => p.path);
+    expect(modRows).toEqual(['effects.circuitAmp.controls.inverter']);
+    for (const amp of CIRCUIT_AMPS) {
+      for (const control of amp.controls) {
+        const row = paramAt(circuitAmpControlPath(amp.id, control.id));
+        expect(row.mod ?? false).toBe(control.mod ?? false);
+      }
+    }
+  });
+
   // ⚠ THE COLLISION GUARD. `circuitAmpControlPath` ignores its `ampId`, so two
   // amps declaring `tone` would emit ONE path twice — and `PARAM_BY_PATH` is a
   // Map, so the second would silently win and `setTrackVoiceParam` would then

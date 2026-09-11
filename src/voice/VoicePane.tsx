@@ -511,6 +511,7 @@ function VoiceEditor({
             value={param.resolve(raw)}
             options={param.options}
             badgeOf={param.badgeOf}
+            mod={param.mod}
             onChange={(next) => commit(setAtPath(preset, param.path, next))}
           />
         );
