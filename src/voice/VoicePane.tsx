@@ -122,15 +122,25 @@ const selectClass = 'control pressable min-w-0 rounded-lg px-1.5 py-1 font-mono 
  * `reconcile` won't build an audio graph on a page that has never made a sound, so
  * without a warm the first Play after a pack change stalls on the whole bank.
  *
- * What stays ours is the *rate*, and it is ours permanently rather than a masked gap: a
- * native `<select>` fires `change` once per arrow key while closed, so a keyboard user
- * stepping through the eight packs passes through every one of them, and the
- * Philharmonia pack alone is ~45 MP3s. The lib has no idea it is behind a `<select>`.
- * The window borrows `playbackService`'s rebuild window, so walking the list warms only
- * where it stops.
+ * The *rate* was ours because the lib's prefetch was unthrottled: a native `<select>`
+ * fires `change` once per arrow key while closed, so a keyboard user stepping through
+ * the eight packs passes through every one of them, and the Philharmonia pack alone is
+ * ~45 MP3s. The window borrows `playbackService`'s rebuild window, so walking the list
+ * warms only where it stops.
  *
- * No dedupe set here: `prefetchSampleBanks` is documented idempotent and the browser's
- * HTTP cache absorbs a repeat, so re-selecting a pack costs a cache hit, not a download.
+ * ⚠ VESTIGIAL as of 2026-09-11 — kept for one task, not permanently. The lib's
+ * `prefetchSampleBanks` now routes through the sample store's `warmUrls`, which has a
+ * six-deep concurrency pool, 429 backoff, and dedupe against any in-flight load of the
+ * same URL; a warm of an already-cached pack stops at PRESENCE and never reads a body.
+ * So an unthrottled walk of the list is an unpooled but request-free fan-out of
+ * `cache.match` calls rather than 45 requests per keypress — the pool wraps only the
+ * network stage, so the presence checks themselves are still one per URL — and this
+ * debounce is deletable. Its row in
+ * `docs/FOLLOW-UPS.md` names the condition — it is not deleted here because the store's
+ * behaviour has not been heard in a browser yet.
+ *
+ * No dedupe set here: `prefetchSampleBanks` is documented idempotent, and the store now
+ * makes a repeat a Cache Storage presence check rather than a request.
  */
 const WARM_COALESCE_MS = 120;
 let pendingWarm: ReturnType<typeof setTimeout> | null = null;

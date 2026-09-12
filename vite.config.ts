@@ -54,6 +54,21 @@ function harnessBuildStamp(): string {
 }
 
 export default defineConfig({
+  /**
+   * Pinned, and not a preference — the origin is the cache key.
+   *
+   * The lib's sample store keeps every sample file in Cache Storage, which is
+   * scoped to the ORIGIN. Vite's default is to walk up to 5174 when 5173 is
+   * taken, so a second `pnpm dev` (or a stale one) silently becomes a different
+   * origin with an empty cache and its own service-worker registrations, and
+   * every file is fetched again into an origin that answers 429. `strictPort`
+   * turns that into a startup error, which is the only version of it anyone
+   * notices — the other symptom is nothing but slowness.
+   */
+  server: { port: 5173, strictPort: true },
+  // Same reasoning, same hazard: `vite preview` walks off 4173 on its own port
+  // setting, and a preview served from a different origin is a different cache.
+  preview: { port: 4173, strictPort: true },
   plugins: [{ name: `harness-build-stamp:${harnessBuildStamp()}` }, react(), tailwindcss()],
   resolve: {
     // `alias` is the array form on purpose: string keys are PREFIX matches, so a plain
