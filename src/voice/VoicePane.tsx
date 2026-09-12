@@ -84,7 +84,6 @@ import { DirtyPill } from './DirtyPill';
 import { NameForm } from './NameForm';
 import { AmpHead } from './rack/AmpHead';
 import { CabinetGraphic } from './rack/CabinetGraphic';
-import { AuditionButton } from './AuditionButton';
 
 /** An unsaved edit, tagged with the voice it belongs to. Lives in `App`. */
 export interface WorkingVoice {
@@ -1003,8 +1002,6 @@ function VoiceEditor({
             </optgroup>
           )}
         </select>
-
-        <AuditionButton />
       </div>
 
       <div className="flex flex-none flex-wrap items-center gap-x-1.5 gap-y-1">

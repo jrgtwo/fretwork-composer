@@ -1,12 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   DEFAULT_PATTERNS_STATE,
   usePatternsStore,
   useVoiceStore,
   type Track,
-  type VoicePreset,
 } from '@fretwork/lib';
 import { CompositionPage } from '../src/composition/CompositionPage';
 import { VoiceRail } from '../src/composition/VoiceRail';
@@ -48,80 +47,36 @@ import { getEditingPattern, openBlankPattern } from '../src/patterns/patternServ
  * not move, and — because that is the specific trap — that the open PATTERN did
  * not move either.
  *
- * jsdom has no Web Audio, so the audio surface is mocked at the module boundary
- * exactly as `VoiceMode.test.tsx` and `PerTrackVoices.test.tsx` do — never Tone
- * itself. `Voice` is faked here because the audition path builds one directly
- * from a preset: that fake is the only thing that can tell "auditioned the
- * selected track's unsaved edit" apart from "auditioned whatever pattern was
- * open", which is the correction this ticket was re-planned for.
+ * jsdom has no Web Audio, so `startAudio` is replaced at the module boundary —
+ * never Tone itself. That is ALL that is replaced, and it is enough only because
+ * nothing here builds a `Voice` or an `EventScheduler`: the rail writes presets
+ * and drafts, and the page is never played. A test that ever reaches the engine
+ * from this file would construct the REAL lib `Voice`; fake it the way
+ * `VoiceMode.test.tsx` fakes `Voice` (or `PerTrackVoices.test.tsx` fakes the
+ * schedulers) rather than assuming this file's mock already covers it.
  *
  * jsdom also has no LAYOUT, so nothing here asserts that the rail is 300 px wide
  * or that a list scrolls. Every assertion is about what the rail offers, what it
  * writes and what it says.
  */
-const lib = vi.hoisted(() => {
-  /** Every note the audition rig played, with the preset it was holding at the
-   *  time — which is the whole question the track audition path exists to get
-   *  right. */
-  const played: Array<{ note: string; preset: unknown }> = [];
+const lib = vi.hoisted(() => ({
+  startAudio: vi.fn(async () => {}),
+  reset() {
+    vi.clearAllMocks();
+  },
+}));
 
-  class FakeVoice {
-    preset: unknown;
-    ensureBuilt = vi.fn();
-    ready = vi.fn(async () => {});
-    dispose = vi.fn();
-    setRoutingTarget = vi.fn();
-    swapPreset = vi.fn((next: unknown) => {
-      this.preset = next;
-    });
-    play = vi.fn((note: string) => {
-      played.push({ note, preset: this.preset });
-    });
-
-    constructor(preset: unknown) {
-      this.preset = preset;
-      built.push(this);
-    }
-  }
-
-  /** Every `Voice` CONSTRUCTED, which is a different question from every note
-   *  played: the rig is meant to be ONE voice re-pointed by `swapPreset`, so a
-   *  second entry here is a rebuild that should not have happened — and an entry
-   *  that never gets `dispose`d is a voice stranded on the shared master bus.
-   *
-   *  ⚠ The rig is a MODULE-level singleton in `playbackService`, so it outlives a
-   *  test the way it outlives an unmount. Every audition test below therefore
-   *  mounts the whole `CompositionPage`, whose `usePlaybackEngine` teardown is what
-   *  disposes it — which is both how these tests stay isolated from each other and
-   *  the reason `disposeAuditionRig` has to run even when Play was never pressed. */
-  const built: FakeVoice[] = [];
-
-  return {
-    played,
-    built,
-    FakeVoice,
-    startAudio: vi.fn(async () => {}),
-    MasterBus: { warmup: vi.fn(async () => {}) },
-    audioNow: vi.fn(() => 0),
-    reset() {
-      played.length = 0;
-      built.length = 0;
-      vi.clearAllMocks();
-    },
-  };
-});
-
-// Only the audio surface is replaced. The voice store, `resolveActiveVoice`, the
-// param schema and the composition store all stay real, so the list, the refusals
-// and the drafts are resolved here exactly as the app resolves them.
+// Only `startAudio` is replaced — `MasterBus` deliberately is NOT: `levelMeters`
+// calls `MasterBus.getPreLimiterPeakDb()` for the master meter `CompositionPage`
+// renders, and a partial stub would swallow that call in `readSource`'s catch and
+// report silence. The voice store, `resolveActiveVoice`, the param schema and the
+// composition store all stay real too, so the list, the refusals and the drafts
+// are resolved here exactly as the app resolves them.
 vi.mock('@fretwork/lib', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@fretwork/lib')>();
   return {
     ...actual,
-    Voice: lib.FakeVoice,
     startAudio: lib.startAudio,
-    MasterBus: lib.MasterBus,
-    audioNow: lib.audioNow,
   };
 });
 
@@ -554,100 +509,5 @@ describe('the unsaved mark', () => {
     // One draft, one discard button, and it is beside the knobs that made the
     // edit. Two would be two places to explain what "revert" means.
     expect(screen.queryByRole('button', { name: /Revert/ })).not.toBeInTheDocument();
-  });
-});
-
-// ----------------------------------------------------------------- audition ---
-
-describe('the audition', () => {
-  it('plays the selected track’s voice, including its unsaved edit', async () => {
-    twoTracks();
-    openBlankPattern('Riff');
-    selectTrack(rhythm().id);
-    setTrackVoiceParam(rhythm().id, VOLUME_PATH, -11);
-    setTrackVoiceParam(lead().id, VOLUME_PATH, 4);
-    render(<CompositionPage mode="voice" onModeChange={() => {}} />);
-
-    await userEvent.click(actionButton('Audition'));
-
-    await waitFor(() => expect(lib.played).toHaveLength(1));
-    const heard = lib.played[0].preset as VoicePreset;
-    // The correction this ticket was re-planned for: `auditionVoice` resolves
-    // through `getEditingPattern()`, so from here it would have played the open
-    // pattern's voice — silently wrong, and indistinguishable from the picker
-    // not working. The draft is what proves which one was reached: no variant
-    // holds this value, so nothing but the track path could produce it.
-    expect(getAtPath(heard, VOLUME_PATH)).toBe(-11);
-    // …and specifically NOT the other track's, which is dirty too.
-    expect(getAtPath(heard, VOLUME_PATH)).not.toBe(4);
-  });
-
-  it('re-points the one rig instead of rebuilding it, so a second audition is the NEW tone', async () => {
-    twoTracks();
-    selectTrack(lead().id);
-    setTrackVoiceParam(lead().id, VOLUME_PATH, -2);
-    render(<CompositionPage mode="voice" onModeChange={() => {}} />);
-
-    await userEvent.click(actionButton('Audition'));
-    await waitFor(() => expect(lib.played).toHaveLength(1));
-    expect(getAtPath(lib.played[0].preset as VoicePreset, VOLUME_PATH)).toBe(-2);
-
-    act(() => {
-      setTrackVoiceParam(lead().id, VOLUME_PATH, -8);
-    });
-    await userEvent.click(actionButton('Audition'));
-    await waitFor(() => expect(lib.played).toHaveLength(2));
-
-    // The guarantee this ticket was re-planned for: an audition matches what
-    // playback will do INCLUDING the unsaved edit. Without the `swapPreset` the rig
-    // would keep playing the preset it was constructed with.
-    expect(getAtPath(lib.played[1].preset as VoicePreset, VOLUME_PATH)).toBe(-8);
-    // …and it is one rig re-pointed, not a second `Tone.Sampler` set per knob turn:
-    // the source is unchanged, which is exactly what `swapPreset` exists for.
-    expect(lib.built).toHaveLength(1);
-  });
-
-  it('warms on hover and on focus, from the SELECTED track’s preset', async () => {
-    twoTracks();
-    // An open pattern, so this cannot pass by accident: `warmVoice` — the pattern
-    // path — returns before `startAudio` when nothing is open, which would make
-    // "startAudio was called" prove the track path all on its own.
-    openBlankPattern('Riff');
-    selectTrack(rhythm().id);
-    setTrackVoiceParam(rhythm().id, VOLUME_PATH, -13);
-    render(<CompositionPage mode="voice" onModeChange={() => {}} />);
-
-    await userEvent.hover(actionButton('Audition'));
-
-    // Nothing can await the sampler on the click path, so hovering is the only
-    // pre-roll the first audition gets — and it must fire on EVERY hover, since
-    // the voice under the button changes with every pick. Asserted on the PRESET
-    // the rig was built from: no variant holds this value, so nothing but the
-    // track path could have produced it.
-    await waitFor(() => expect(lib.built).toHaveLength(1));
-    expect(getAtPath(lib.built[0].preset as VoicePreset, VOLUME_PATH)).toBe(-13);
-    // The load is awaited HERE, off the click path, which is the whole point.
-    await waitFor(() => expect(lib.built[0].ready).toHaveBeenCalled());
-
-    // Keyboard users reach the button by focus and never hover at all.
-    lib.reset();
-    act(() => actionButton('Audition').focus());
-    await waitFor(() => expect(lib.startAudio).toHaveBeenCalled());
-  });
-
-  it('disposes the rig when the page goes, even if Play was never pressed', async () => {
-    twoTracks();
-    selectTrack(lead().id);
-    const page = render(<CompositionPage mode="voice" onModeChange={() => {}} />);
-
-    await userEvent.hover(actionButton('Audition'));
-    await waitFor(() => expect(lib.built).toHaveLength(1));
-
-    // ⚠ NO PLAY. The rig is built by the audition path alone, so on this page the
-    // composition ENGINE is still null — and the rig is connected to the shared
-    // `MasterBus` on its own. A teardown that ran only when an engine existed would
-    // strand it there for the rest of the session with no handle left to reach it.
-    page.unmount();
-    expect(lib.built[0].dispose).toHaveBeenCalled();
   });
 });

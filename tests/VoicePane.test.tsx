@@ -20,7 +20,7 @@ import { openBlankPattern } from '../src/patterns/patternService';
 /**
  * What jsdom cannot tell us here, so nobody wastes time writing it:
  *
- *   - **No Web Audio.** Every `applyVoicePreset` / `auditionVoice` call runs, finds no
+ *   - **No Web Audio.** Every `applyVoicePreset` / `refreshVoice` call runs, finds no
  *     engine and returns; that the amp knob is *audible* is a by-ear check
  *     (`docs/FOLLOW-UPS.md` §3), not an assertion. That the pane *calls* the seam at all
  *     is assertable, and lives in `VoicePaneAudio.test.tsx` — it needs the module mocked,

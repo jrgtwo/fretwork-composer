@@ -28,8 +28,6 @@ import { applyVoicePreset, refreshVoice } from '../src/audio/playbackService';
 vi.mock('../src/audio/playbackService', () => ({
   applyVoicePreset: vi.fn(),
   refreshVoice: vi.fn(),
-  auditionVoice: vi.fn(() => Promise.resolve()),
-  warmVoice: vi.fn(() => Promise.resolve()),
 }));
 
 function Host() {

@@ -4,7 +4,6 @@ import { act, render, renderHook } from '@testing-library/react';
 import {
   CABINET_IRS,
   SAMPLE_PACKS,
-  audioNow,
   detectSamplePack,
   getDefaultPresetForSlot,
   usePatternsStore,
@@ -30,11 +29,9 @@ import {
 } from './voiceService';
 import {
   applyVoicePreset,
-  auditionVoice,
   previewNote,
   refreshVoice,
   usePlaybackEngine,
-  warmVoice,
 } from '../audio/playbackService';
 
 /**
@@ -98,7 +95,6 @@ const audio = vi.hoisted(() => {
     FakeScheduler,
     metronome: { start: vi.fn(async () => {}), stop: vi.fn() },
     startAudio: vi.fn(async () => {}),
-    warmup: vi.fn(async () => {}),
     reset() {
       FakeVoice.instances.length = 0;
       FakeScheduler.instances.length = 0;
@@ -128,8 +124,6 @@ vi.mock('@fretwork/lib', async (importOriginal) => {
     PatternSource: class {
       constructor(readonly pattern: unknown) {}
     },
-    // Only `warmup` is reached, and only from the audition path.
-    MasterBus: { warmup: audio.warmup },
   };
 });
 
@@ -192,7 +186,7 @@ const flushRebuild = () =>
 
 beforeEach(() => {
   // Fake for the whole file so nothing accidentally depends on real-time coalescing.
-  // Safe alongside the async audition tests: those await promises, not timers.
+  // Safe alongside the async tests here: those await promises, not timers.
   vi.useFakeTimers();
   audio.reset();
   useVoiceStore.getState().reset();
@@ -893,67 +887,6 @@ describe('refreshVoice', () => {
   });
 });
 
-describe('auditionVoice', () => {
-  it('plays a note through the working voice without starting the transport', async () => {
-    const edited: VoicePreset = { ...editingPreset(), level: { volumeDb: -3, pan: 0 } };
-    applyVoicePreset(edited);
-    render(createElement(EngineProbe));
-
-    const before = audioNow();
-    await act(async () => {
-      await auditionVoice('C4');
-    });
-
-    // The metronome owns transport start/stop, so auditioning through it would *be*
-    // starting playback — the whole point is to hear a tweak while nothing is playing.
-    expect(audio.metronome.start).not.toHaveBeenCalled();
-    expect(lastVoice().preset).toBe(edited);
-    expect(lastVoice().ensureBuilt).toHaveBeenCalled();
-    const [note, duration, at] = lastVoice().play.mock.calls[0];
-    expect(note).toBe('C4');
-    expect(duration).toBe('4n');
-    // Scheduled ahead of the audio clock: exactly at it, right after the context
-    // resumes, lands in the past and the note is dropped without a word. Measured
-    // against `audioNow()` rather than zero — `Tone.now()` already includes a default
-    // 0.1 s lookAhead, so `> 0` holds with no pre-roll at all.
-    expect(at).toBeGreaterThan(before);
-  });
-
-  it('is inert with no pattern open rather than throwing', async () => {
-    usePatternsStore.getState().openPatternForEditing(null);
-    render(createElement(EngineProbe));
-
-    await expect(auditionVoice()).resolves.toBeUndefined();
-    expect(builtVoices()).toHaveLength(0);
-  });
-});
-
-describe('warmVoice', () => {
-  it('gets the samples in flight before anything asks to hear them', async () => {
-    render(createElement(EngineProbe));
-
-    await act(async () => {
-      await warmVoice();
-    });
-
-    // `auditionVoice` is synchronous, so the first audition on a cold page is silent
-    // unless the build already happened — which is what `warmVoice` is for. Nothing is
-    // played here; this only builds and awaits the load.
-    expect(builtVoices()).toHaveLength(1);
-    expect(lastVoice().ready).toHaveBeenCalled();
-    expect(lastVoice().play).not.toHaveBeenCalled();
-    expect(audio.metronome.start).not.toHaveBeenCalled();
-  });
-
-  it('is inert with no pattern open rather than throwing', async () => {
-    usePatternsStore.getState().openPatternForEditing(null);
-    render(createElement(EngineProbe));
-
-    await expect(warmVoice()).resolves.toBeUndefined();
-    expect(builtVoices()).toHaveLength(0);
-  });
-});
-
 describe('the voice key', () => {
   it('reuses the voice while the pattern and its preset are unchanged', () => {
     const { voice } = startEngine();
@@ -1010,8 +943,8 @@ describe('the voice key', () => {
 
 /**
  * NOT asserted here, and not assertable: that a rebuilt sampler really re-downloads its
- * banks, that `swapPreset` retunes without an audible click, and that the audition note
- * sounds with the transport stopped. jsdom has no Web Audio at all, so each of those is
+ * banks, that `swapPreset` retunes without an audible click, and that a previewed cell
+ * sounds at all. jsdom has no Web Audio at all, so each of those is
  * a listening test. What is pinned above is the decision that routes to them, which is
  * the part that fails in silence.
  */

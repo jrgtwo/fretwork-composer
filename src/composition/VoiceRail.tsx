@@ -20,7 +20,6 @@ import {
   useTrackVoiceDirty,
   useTrackVoiceWorkingPreset,
 } from '../voice/trackVoiceDrafts';
-import { AuditionButton } from '../voice/AuditionButton';
 import { SHARED_VOICE_REFUSAL_TEXT, useNameForm, voiceButtonClass } from '../voice/voiceChrome';
 import { DirtyPill } from '../voice/DirtyPill';
 import { NameForm } from '../voice/NameForm';
@@ -139,8 +138,8 @@ function TrackVoicePicker({ track }: { track: Track }) {
   const voices = useSelectableVoices(instrumentId);
   const status = useTrackVoiceStatus(track);
   // What the rack is showing and the engine is building: the unsaved edit when
-  // there is one, the resolved variant otherwise. The SAME call the audition
-  // resolves through, so Save writes exactly what Audition just played.
+  // there is one, the resolved variant otherwise. The SAME call the rack edits
+  // through, so Save writes exactly the draft the rack is showing.
   const preset = useTrackVoiceWorkingPreset(track);
   const dirty = useTrackVoiceDirty(track);
 
@@ -318,7 +317,7 @@ function TrackVoicePicker({ track }: { track: Track }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* ---- what is being voiced, and one note of it ------------------------ */}
+      {/* ---- what is being voiced ------------------------------------------ */}
       <div className="flex flex-none items-center gap-2 border-b border-rim-dark px-3 py-2">
         <span className="min-w-0 flex-1">
           <span className="block truncate font-display text-[14px] text-ink-hi">{track.name}</span>
@@ -326,7 +325,6 @@ function TrackVoicePicker({ track }: { track: Track }) {
             {instrumentId} · {preset.name}
           </span>
         </span>
-        <AuditionButton track={track} />
       </div>
 
       {/* ---- what can be done to the voice it is on ------------------------- */}
