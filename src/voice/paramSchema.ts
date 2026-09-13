@@ -65,7 +65,7 @@
  * of its own), and a cutoff envelope is part of the body filter, so neither is a
  * section. `ParamSection.subBranch` is that: a label, the branch, and the
  * well-formed value the Add gesture writes. Its ROWS stay in `section.params`,
- * gated by `requiresBranch`, because `trackVoiceDrafts.PARAM_BY_PATH` is built
+ * gated by `requiresBranch`, because `voiceDrafts.PARAM_BY_PATH` is built
  * from `section.params` and a row outside it is a control the composition page
  * cannot write at all.
  *
@@ -240,7 +240,7 @@ export interface SliderParam extends ParamCommon {
    * range-check against `step`. `layer.octaveOffset` is the first row where the
    * in-between value is genuinely meaningless: `Voice.play` hands
    * `octaveOffset * 12` to `transposeNote`, and a third of an octave is 4
-   * semitones of rounding nobody asked for. Enforced by `setTrackVoiceParam`,
+   * semitones of rounding nobody asked for. Enforced by `setVoiceParam`,
    * because a pointer lands on a detent and a headless write does not.
    */
   readonly integral?: true;
@@ -314,7 +314,7 @@ export interface EncoderParam extends ParamCommon {
    * ⚠ IT IS NOT A RANGE, and it is not rendered as one. An encoder exists
    * precisely because Tone publishes no `Min:`/`Max:` for the field, and the
    * control still has no end stop — a value the user turns to is on screen, in
-   * the readout, and one turn back. A headless `setTrackVoiceParam` write is
+   * the readout, and one turn back. A headless `setVoiceParam` write is
    * neither: `bodyFilter.cutoff = 0` is a lowpass that passes nothing, and
    * `bodyFilter.envelope.baseFrequency = 0` pins the whole sweep at DC
    * (`0 · 2^octaves` is still 0), so one call yields a track that plays silence
@@ -412,9 +412,9 @@ export interface ParamSection extends ParamStage {
  * An optional branch inside a section — the second source, and the body filter's
  * cutoff envelope.
  *
- * Deliberately NOT a `ParamSection`, and not for layout reasons. `addSection`
- * (both copies of it — `VoicePane` and `trackVoiceDrafts`) creates a section by
- * writing each required row's `fallback`, and it SKIPS the `source-kind` and
+ * Deliberately NOT a `ParamSection`, and not for layout reasons.
+ * `voiceDrafts.addVoiceSection` — the one copy, for both editors — creates a
+ * section by writing each required row's `fallback`, and it SKIPS the `source-kind` and
  * `sample-pack` kinds because their value is not what `setAtPath(path, fallback)`
  * would write. A `VoiceLayer` contains a whole `VoiceSource`, so no amount of
  * row fallbacks can produce one: seeding it that way yields `{gainDb, octaveOffset}`
@@ -444,7 +444,7 @@ export interface ParamSubBranch {
    * The source-kind picker, when this branch contains a `VoiceSource`.
    *
    * ⚠ ON THE SUB-BRANCH RATHER THAN IN `section.params`, and this is a safety
-   * property rather than tidiness. `trackVoiceDrafts.setTrackVoiceParam` handles
+   * property rather than tidiness. `voiceDrafts.setVoiceParam` handles
    * `kind: 'source-kind'` by calling `withSourceKind(preset, value)` — a function
    * that takes no path and always replaces `preset.source`. A `layer.source.kind`
    * row sitting in `PARAM_BY_PATH` would therefore let any caller (the agent
@@ -1977,7 +1977,7 @@ export const PEDALS: readonly Pedal[] = [
  * of its own.
  *
  * ⚠ `params` IS THE FLATTENED PEDAL ROWS, and that is load-bearing rather than
- * convenient. `trackVoiceDrafts.PARAM_BY_PATH` is built from
+ * convenient. `voiceDrafts.PARAM_BY_PATH` is built from
  * `PARAM_SECTIONS.flatMap(s => s.params)`, and `paramSchema.test.ts` walks the
  * same list. A pedal row outside it is a control the composition page cannot
  * write, the agent cannot reach, and no test checks the range of. The pane
@@ -2079,7 +2079,7 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
   // Grouped by control id ACROSS amps, never one row per amp.
   // `circuitAmpControlPath` does not namespace by amp, so two amps declaring
   // `tone` would emit one path twice and `PARAM_BY_PATH` — a Map — would let
-  // the second silently win, after which `setTrackVoiceParam` would refuse
+  // the second silently win, after which `setVoiceParam` would refuse
   // every write to the first amp's Tone. Grouping is also the behaviour worth
   // having: the tone pot keeps its position across an amp switch.
   ...[
@@ -2233,7 +2233,7 @@ export function subBranchApplies(preset: VoicePreset, sub: ParamSubBranch): bool
  *
  * Split by path prefix rather than by a second list, so a row cannot be declared
  * in one place and rendered from another: `section.params` stays the single
- * declaration, which is what keeps `trackVoiceDrafts`' path map complete.
+ * declaration, which is what keeps `voiceDrafts`' path map complete.
  */
 export function ownParams(preset: VoicePreset, section: ParamSection): readonly Param[] {
   const sub = section.subBranch;

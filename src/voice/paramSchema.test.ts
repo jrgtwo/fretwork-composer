@@ -91,7 +91,7 @@ const ALL_PARAMS: readonly Param[] = PARAM_SECTIONS.flatMap((section) => section
  *
  * Both routes must reach the same rows and the assertion below pins that: the
  * section's `params` is the flattened pedal rows precisely so
- * `trackVoiceDrafts.PARAM_BY_PATH` and this file's walks pick them up with no
+ * `voiceDrafts.PARAM_BY_PATH` and this file's walks pick them up with no
  * special case, and a pedal whose rows were declared only on the pedal would be
  * a control the composition page cannot write.
  */
@@ -1309,7 +1309,7 @@ describe('circuit-amp control rows', () => {
 
   // ⚠ THE COLLISION GUARD. `circuitAmpControlPath` ignores its `ampId`, so two
   // amps declaring `tone` would emit ONE path twice — and `PARAM_BY_PATH` is a
-  // Map, so the second would silently win and `setTrackVoiceParam` would then
+  // Map, so the second would silently win and `setVoiceParam` would then
   // refuse every write to the first amp's Tone. A live regression, not just a
   // red test. The fix is one row per control id gated on every amp declaring
   // it, which is what this asserts. It holds with one amp and keeps holding
@@ -1472,7 +1472,7 @@ describe('descriptor invariants', () => {
   });
 
   it('gives a sub-branch a kind picker only where the pane has a branch-aware swap', () => {
-    // ⚠ THE SAFETY PROPERTY. `trackVoiceDrafts.setTrackVoiceParam` resolves a
+    // ⚠ THE SAFETY PROPERTY. `voiceDrafts.setVoiceParam` resolves a
     // `source-kind` row through `withSourceKind`, which takes no path and always
     // replaces `preset.source` — so a second one of those in `section.params`
     // would let a caller re-kind the LAYER and silently re-kind the PRIMARY. Two
@@ -1723,7 +1723,7 @@ describe('the pedalboard', () => {
   });
 
   it('declares the same rows on the section as on the pedals, in chain order', () => {
-    // ⚠ THE LOAD-BEARING ONE. `trackVoiceDrafts.PARAM_BY_PATH` is built from
+    // ⚠ THE LOAD-BEARING ONE. `voiceDrafts.PARAM_BY_PATH` is built from
     // `PARAM_SECTIONS.flatMap(s => s.params)`, so a row declared on a pedal and
     // not reachable there is a control the composition page cannot write and the
     // agent cannot call — the failure `agent-reachable` exists to catch, and one

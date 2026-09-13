@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_PATTERNS_STATE, PPQ, useVoiceStore, usePatternsStore } from '@fretwork/lib';
 import { App } from '../src/App';
 import { stop } from '../src/audio/playbackService';
-import { PatternLibraryPanel, type SwitchGuard } from '../src/patterns/PatternLibraryPanel';
+import { PatternLibraryPanel } from '../src/patterns/PatternLibraryPanel';
 import {
   clearHistory,
   deletePattern,
@@ -20,6 +20,15 @@ import {
   stampNote,
   undo,
 } from '../src/patterns/patternService';
+import {
+  clearVoiceDrafts,
+  isVoiceDirty,
+  setVoiceParam,
+  voiceDraftKeys,
+} from '../src/voice/voiceDrafts';
+
+/** The Level stage's volume — any schema path would do; this one is on every preset. */
+const VOLUME_PATH = 'level.volumeDb';
 
 // Only `stop` is stood in for, exactly as `AppNavigation.test.tsx` does it:
 // jsdom has no Web Audio, so the transport's having been released is not
@@ -57,11 +66,13 @@ beforeEach(() => {
     library: { patterns: [], compositions: [], collections: [] },
   });
   clearHistory();
-  // Variants persist to sessionStorage, and the App-level test below reaches the
-  // voice pane through the same module singleton every other file does.
+  // Variants persist to sessionStorage, and the App-level tests below reach the
+  // voice pane through the same module singletons every other file does — the
+  // voice store and the draft store, both of which outlive every unmount.
   useVoiceStore.getState().reset();
-  // Both confirmations this file exercises — the destructive delete and the
-  // caller's switch guard — are stubbed per-test where the answer matters. The
+  clearVoiceDrafts();
+  // The one confirmation this file exercises — the destructive delete — is stubbed
+  // per-test where the answer matters. The
   // default is yes so that every OTHER test is testing the thing it names;
   // jsdom's own `confirm` is a "not implemented" stub returning undefined, which
   // would silently cancel every delete.
@@ -518,95 +529,110 @@ describe('the library panel', () => {
     expect(stopped).toHaveBeenCalledTimes(3);
   });
 
-  it('asks the caller before changing which pattern is open, and cancels on a no', async () => {
+  it('changes which pattern is open without asking anything', async () => {
+    // WAS a `confirmSwitch` guard threaded up to `App`, because the voice pane's
+    // unsaved edit was one React value for whatever pattern happened to be open, so
+    // a switch stranded it. The draft is keyed `pattern:<id>` now — a switch strands
+    // nothing — and the question went with the guard. The three gestures that change
+    // which pattern is open are pinned here as questionless.
     const a = seed('Riff A');
     const b = seed('Riff B');
-    // `App` puts the voice pane's unsaved working copy behind this. The panel
-    // cannot see it, which is exactly why the question is asked outward.
-    const confirmSwitch = vi.fn<SwitchGuard>(() => null);
-    render(<PatternLibraryPanel confirmSwitch={confirmSwitch} />);
+    const asked: string[] = [];
+    vi.stubGlobal('confirm', (message?: string) => {
+      asked.push(String(message));
+      return true;
+    });
+    render(<PatternLibraryPanel />);
 
-    await userEvent.click(rowFor('Riff A'));
-    expect(getEditingPattern()?.id).toBe(b);
-
-    await userEvent.click(screen.getByRole('button', { name: 'New pattern' }));
-    expect(getLibraryPatterns()).toHaveLength(2);
-
-    await userEvent.click(screen.getByRole('button', { name: 'Delete Riff B' }));
-    expect(names()).toEqual(['Riff A', 'Riff B']);
-
-    // Deleting a row that is NOT open changes nothing about what is open, so it
-    // must not be gated on a question about the open pattern's unsaved work.
-    const commit = vi.fn();
-    confirmSwitch.mockReturnValue(commit);
     await userEvent.click(rowFor('Riff A'));
     expect(getEditingPattern()?.id).toBe(a);
-    // Run only once the switch has actually happened — see `SwitchGuard`.
-    expect(commit).toHaveBeenCalledTimes(1);
+    expect(asked).toEqual([]);
+
+    await userEvent.click(screen.getByRole('button', { name: 'New pattern' }));
+    expect(getLibraryPatterns()).toHaveLength(3);
+    expect(asked).toEqual([]);
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    // The delete's OWN confirmation is still asked — it is about the notes, not
+    // about a voice — and it is the only one left on this panel.
+    await userEvent.click(screen.getByRole('button', { name: 'Delete Riff B' }));
+    expect(asked).toEqual([expect.stringContaining('Delete "Riff B"')]);
+    expect(names()).not.toContain('Riff B');
+    expect(b).not.toBe(a);
   });
 
-  it('does not run the caller’s discard when the create it agreed to is refused', async () => {
-    seed('Riff A');
-    const commit = vi.fn();
-    const confirmSwitch = vi.fn<SwitchGuard>(() => commit);
+  it('says so, and leaves the open pattern alone, when a create is refused', async () => {
+    const a = seed('Riff A');
     // The lib's `createPattern` returns '' at the tier cap and creates nothing.
     // Store actions live in store state, so this stands in for that refusal.
     const real = usePatternsStore.getState().createPattern;
     usePatternsStore.setState({ createPattern: () => '' });
     try {
-      render(<PatternLibraryPanel confirmSwitch={confirmSwitch} />);
+      render(<PatternLibraryPanel />);
 
       await userEvent.click(screen.getByRole('button', { name: 'New pattern' }));
 
-      expect(confirmSwitch).toHaveBeenCalled();
-      // Unsaved voice work destroyed for a pattern that was never made is the
-      // one outcome nothing can put back.
-      expect(commit).not.toHaveBeenCalled();
       expect(screen.getByRole('alert')).toHaveTextContent(/library refused/i);
       expect(names()).toEqual(['Riff A']);
+      // The switch never happened, so the pattern that IS open is untouched —
+      // including its unsaved voice edit, which used to be what a refused create
+      // could destroy on the way past.
+      expect(getEditingPattern()?.id).toBe(a);
     } finally {
       usePatternsStore.setState({ createPattern: real });
     }
   });
 
-  it('warns before a switch strands the voice pane, and honours both answers', async () => {
-    // The whole point of `confirmSwitch` wired up: the working preset lives in
-    // `App`, is keyed by pattern id, and stops applying to anything the moment
-    // another pattern opens. Rendered through `App` rather than stubbed, because
-    // what is being checked is that the two halves are actually connected.
-    seed('Riff A');
+  it('keeps a separate unsaved voice per pattern across a switch, and asks nothing', async () => {
+    // THE BEHAVIOUR CHANGE, through the whole app. The unsaved edit is keyed
+    // `pattern:<id>` in `voice/voiceDrafts`, so switching pattern strands nothing and
+    // asks nothing — and each pattern's own tone is still there when you come back.
+    // Rendered through `App` rather than stubbed, because what is being checked is
+    // that the pane, the rail and the store are actually connected.
+    const a = seed('Riff A');
     const b = seed('Riff B');
     const asked: string[] = [];
     vi.stubGlobal('confirm', (message?: string) => {
       asked.push(String(message));
-      return false;
+      return true;
     });
     render(<App />);
     const rail = () => within(screen.getByRole('complementary'));
 
-    // One click on a voice control is an unsaved edit.
+    // One click on a voice control is an unsaved edit — on B, which is open.
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    expect(screen.getByText('Unsaved')).toBeInTheDocument();
+
     await userEvent.click(rail().getByRole('button', { name: 'Open pattern Riff A' }));
 
-    expect(asked).toContain('Discard unsaved changes to this voice?');
+    expect(asked).toEqual([]);
+    expect(getEditingPattern()?.id).toBe(a);
+    // A is clean — B's edit did not follow the user onto it …
+    expect(screen.getByText('Saved')).toBeInTheDocument();
+    expect(isVoiceDirty('pattern', a)).toBe(false);
+    // … and B's edit is still B's.
+    expect(isVoiceDirty('pattern', b)).toBe(true);
+
+    // Edit A too, so the two drafts are live at once and cannot be one value.
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    expect(isVoiceDirty('pattern', a)).toBe(true);
+    expect(isVoiceDirty('pattern', b)).toBe(true);
+
+    await userEvent.click(rail().getByRole('button', { name: 'Open pattern Riff B' }));
     expect(getEditingPattern()?.id).toBe(b);
-
-    vi.stubGlobal('confirm', () => true);
-    await userEvent.click(rail().getByRole('button', { name: 'Open pattern Riff A' }));
-
-    expect(getEditingPattern()?.name).toBe('Riff A');
+    expect(screen.getByText('Unsaved')).toBeInTheDocument();
   });
 
-  it('discards the stranded voice copy even with the amp pane folded away', async () => {
-    // The reason the discard lives in `App` and not in `VoicePane`'s own
-    // retire-a-stranded-copy effect: `PaneStack` unmounts a collapsed pane's
-    // body, so with Instrument & Amp folded that effect never runs.
+  it('keeps the unsaved voice across a round trip made with the amp pane folded away', async () => {
+    // WAS the case for putting the discard in `App` rather than in `VoicePane`'s
+    // retire-a-stranded-copy effect: `PaneStack` unmounts a collapsed pane's body, so
+    // with Instrument & Amp folded that effect never ran and the copy was stranded
+    // silently. The draft is above every component now, so the fold changes nothing
+    // and the edit SURVIVES the round trip instead of being thrown away by it.
     //
-    // The round trip is what makes the assertion able to fail. Switching A → B
-    // alone proves nothing — the working copy is keyed by pattern id, so it
-    // reads as clean against B whether or not anything cleared it. Coming BACK
-    // to A makes the key match again, and an uncleared copy is live and unsaved
-    // the moment the pane is unfolded.
+    // The round trip is what makes the assertion able to fail: switching A → B alone
+    // proves nothing, because a draft keyed by pattern reads as clean against B either
+    // way. Coming BACK to A is what shows whether A's edit is still there.
     seed('Riff A');
     render(<App />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
@@ -615,25 +641,39 @@ describe('the library panel', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Collapse Instrument & Amp' }));
     const rail = () => within(screen.getByRole('complementary'));
     await userEvent.click(rail().getByRole('button', { name: 'New pattern' }));
+    await userEvent.click(rail().getByRole('button', { name: 'Cancel' }));
     await userEvent.click(rail().getByRole('button', { name: 'Open pattern Riff A' }));
     await userEvent.click(screen.getByRole('button', { name: 'Expand Instrument & Amp' }));
 
-    expect(screen.getByText('Saved')).toBeInTheDocument();
-    expect(screen.queryByText('Unsaved')).toBeNull();
-    // `applyVoicePreset(null)`, the other half of the discard, is NOT asserted:
-    // the engine's tagged copy is module-private to `playbackService` and jsdom
-    // has no Web Audio, so nothing outside the seam can observe it.
+    expect(screen.getByText('Unsaved')).toBeInTheDocument();
+    expect(screen.queryByText('Saved')).toBeNull();
   });
 
-  it('does not ask when deleting a row that is not open', async () => {
-    seed('Riff A');
-    seed('Riff B');
-    const confirmSwitch = vi.fn<SwitchGuard>(() => () => {});
-    render(<PatternLibraryPanel confirmSwitch={confirmSwitch} />);
+  it('drops a deleted pattern’s unsaved voice and leaves the open one’s alone', async () => {
+    // A pattern library is unbounded and `openBlankPattern` mints ids freely, so a
+    // draft per pattern has to be collected — see the collection note in `voiceDrafts`,
+    // and its argument for why the TRACK side deliberately is not. Deleting a row that
+    // is not open must take only that row's.
+    //
+    // ⚠ ASSERTED ON THE MAP ITSELF, through `voiceDraftKeys`. The requirement here is
+    // about MEMORY — a sampler draft carries a ~45-entry note→URL map per bank — and
+    // every other read self-clears an entry whose tag has stopped resolving, so a
+    // deleted pattern reads as clean through `isVoiceDirty` whether the prune ran or
+    // not. That assertion would pass with the pruning deleted.
+    const a = seed('Riff A');
+    const b = seed('Riff B');
+    render(<PatternLibraryPanel />);
+    expect(setVoiceParam('pattern', a, VOLUME_PATH, -6).ok).toBe(true);
+    expect(setVoiceParam('pattern', b, VOLUME_PATH, -9).ok).toBe(true);
+    expect(voiceDraftKeys()).toEqual(
+      expect.arrayContaining([`pattern:${a}`, `pattern:${b}`]),
+    );
 
     await userEvent.click(screen.getByRole('button', { name: 'Delete Riff A' }));
 
-    expect(confirmSwitch).not.toHaveBeenCalled();
     expect(names()).toEqual(['Riff B']);
+    expect(voiceDraftKeys()).not.toContain(`pattern:${a}`);
+    expect(voiceDraftKeys()).toContain(`pattern:${b}`);
+    expect(isVoiceDirty('pattern', b)).toBe(true);
   });
 });

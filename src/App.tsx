@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AppShell, type PageId } from './shell/AppShell';
 import type { Pane } from './shell/PaneStack';
-import { applyVoicePreset, stop } from './audio/playbackService';
+import { stop } from './audio/playbackService';
 import { CompositionPage, type CompositionRailSectionId } from './composition/CompositionPage';
 import type { ArrangementMode } from './composition/arrangementMath';
 import { useEditingComposition } from './composition/compositionService';
@@ -10,14 +10,10 @@ import { ThemeReference } from './theme/ThemeReference';
 import { Timeline } from './timeline/Timeline';
 import { seedDemoPattern } from './timeline/demoPattern';
 import { ensurePattern, getLibraryPatterns, useEditingPattern } from './patterns/patternService';
-import {
-  PatternLibraryCount,
-  PatternLibraryPanel,
-  type SwitchGuard,
-} from './patterns/PatternLibraryPanel';
+import { PatternLibraryCount, PatternLibraryPanel } from './patterns/PatternLibraryPanel';
 import { Section } from './shell/Section';
 import { CommandPanel } from './ai/CommandPanel';
-import { VoicePane, type WorkingVoice } from './voice/VoicePane';
+import { VoicePane } from './voice/VoicePane';
 // The default lives with the schema it indexes, so the pattern page's pane and the
 // composition page's racks cannot open on different stages (see `paramSchema`).
 import { DEFAULT_OPEN_SECTIONS, type SectionId } from './voice/paramSchema';
@@ -67,9 +63,6 @@ const DEFAULT_OPEN_COMPOSITION_RAIL_SECTIONS: readonly CompositionRailSectionId[
   'patterns',
 ];
 
-/** A switch that costs nothing: go ahead, and there is nothing to run after. */
-const NOTHING_STRANDED = () => {};
-
 export function App() {
   const pattern = useEditingPattern();
 
@@ -86,10 +79,10 @@ export function App() {
   // Which voice racks are folded — the same rule again, one level deeper: the
   // racks are drawn by lanes that are replaced on every mode switch, inside a
   // page that unmounts on every visit to the pattern page. The UNSAVED EDITS
-  // those racks hold are deliberately NOT here, and that is not an
-  // inconsistency: `playbackService` builds each track's voice from them, so
-  // they have to be readable without a render — see `voice/trackVoiceDrafts`,
-  // which is above every component for both reasons at once.
+  // those racks hold are deliberately NOT here, and neither is the pattern
+  // pane's: `playbackService` builds every voice from them, so they have to be
+  // readable without a render — see `voice/voiceDrafts`, which is above every
+  // component for both reasons at once, for both pages.
   const [collapsedRacks, setCollapsedRacks] = useState<readonly string[]>([]);
 
   // And which STAGES are folded inside those racks — CP-16's second level of
@@ -110,11 +103,9 @@ export function App() {
   // a collapse belongs above the stack, which is here.
   const [referenceView, setReferenceView] = useState<ReferenceViewId>('fretboard');
 
-  // Same reason, and it matters more here: this is the voice editor's UNSAVED work. Held
-  // inside the pane it would be destroyed by a collapse — silently, and with the engine
-  // still playing the edit, since `playbackService` keeps its own tagged copy. Which
-  // sections are unfolded is the same kind of state, one degree less costly to lose.
-  const [workingVoice, setWorkingVoice] = useState<WorkingVoice | null>(null);
+  // Which voice sections are unfolded. The pane's UNSAVED EDIT is deliberately not
+  // beside it — see `voice/voiceDrafts`, which holds one per pattern and one per
+  // track, above every component and readable by the engine without a render.
   const [openSections, setOpenSections] = useState<readonly SectionId[]>(DEFAULT_OPEN_SECTIONS);
 
   // And the same again for the stack itself: `PaneStack` is unmounted outright
@@ -178,44 +169,6 @@ export function App() {
     if (page !== 'pattern') stop();
   }, [page]);
 
-  /**
-   * Asked before the library panel changes which pattern is open.
-   *
-   * SWITCHING COSTS NOTHING IN THE TIMELINE — every edit there is written to the
-   * store as it is made. The app's one piece of unsaved work is the voice pane's
-   * working preset, and it is keyed by pattern id (`workingKey` in `VoicePane`),
-   * so the instant another pattern opens the edit stops applying to anything.
-   *
-   * The clear has to happen HERE rather than being left to `VoicePane`'s own
-   * retire-a-stranded-copy effect, for the reason the state is here at all:
-   * `PaneStack` unmounts a collapsed pane's body, so with Instrument & Amp folded
-   * away that effect does not run — and `playbackService` keeps its own tagged
-   * copy, which goes on sounding until something consults it. Hence
-   * `applyVoicePreset(null)` too, exactly as the pane does it.
-   *
-   * The key is split rather than matched whole because only its first field —
-   * the pattern id — decides whether THIS switch is what strands the copy; a copy
-   * already stranded by something else has nothing left to lose.
-   *
-   * ASKING AND DISCARDING ARE TWO STEPS ({@link SwitchGuard}): this returns what
-   * to run once the switch has actually happened. A create can still be refused
-   * after the question has been answered — the lib's `createPattern` declines at
-   * the tier cap — and discarding the user's tone for a pattern that was never
-   * made is the one outcome nothing can put back.
-   *
-   * `window.confirm` and this wording are `VoicePane`'s, kept verbatim: the same
-   * loss should not be described two ways depending on which control caused it.
-   */
-  const confirmPatternSwitch: SwitchGuard = () => {
-    if (!workingVoice || !pattern) return NOTHING_STRANDED;
-    if (workingVoice.key.split('|')[0] !== pattern.id) return NOTHING_STRANDED;
-    if (!window.confirm('Discard unsaved changes to this voice?')) return null;
-    return () => {
-      setWorkingVoice(null);
-      applyVoicePreset(null);
-    };
-  };
-
   // The theme reference stays reachable while we build — it's the living record
   // of the design system.
   if (new URLSearchParams(window.location.search).has('theme')) {
@@ -252,12 +205,7 @@ export function App() {
       id: 'amp',
       title: 'Instrument & Amp',
       children: (
-        <VoicePane
-          working={workingVoice}
-          onWorkingChange={setWorkingVoice}
-          openSections={openSections}
-          onOpenSectionsChange={setOpenSections}
-        />
+        <VoicePane openSections={openSections} onOpenSectionsChange={setOpenSections} />
       ),
     },
     {
@@ -285,11 +233,7 @@ export function App() {
         onCollapsedChange: setCollapsedPanes,
       }}
       rail={
-        <PatternRail
-          confirmSwitch={confirmPatternSwitch}
-          open={openRailSections}
-          onOpenChange={setOpenRailSections}
-        />
+        <PatternRail open={openRailSections} onOpenChange={setOpenRailSections} />
       }
     />
   );
@@ -321,11 +265,9 @@ export function App() {
  * state the app ships in.
  */
 function PatternRail({
-  confirmSwitch,
   open,
   onOpenChange,
 }: {
-  confirmSwitch: SwitchGuard;
   open: readonly RailSectionId[];
   /** An updater rather than a value, for the reason the panes' is one: two
    *  toggles batched into a single render must not lose the first. */
@@ -349,7 +291,7 @@ function PatternRail({
         // absorb what it is given. See the free-form note above.
         grow
       >
-        <PatternLibraryPanel confirmSwitch={confirmSwitch} />
+        <PatternLibraryPanel />
       </Section>
 
       {/* No `grow` — see the free-form note above. This section is as tall as

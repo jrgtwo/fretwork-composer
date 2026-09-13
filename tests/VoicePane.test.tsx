@@ -12,15 +12,16 @@ import {
   type CabIRParams,
   type VoicePreset,
 } from '@fretwork/lib';
-import { VoicePane, type WorkingVoice } from '../src/voice/VoicePane';
+import { VoicePane } from '../src/voice/VoicePane';
 import type { SectionId } from '../src/voice/paramSchema';
 import { getAtPath } from '../src/voice/presetPaths';
-import { openBlankPattern } from '../src/patterns/patternService';
+import { clearVoiceDrafts, readVoiceDraft } from '../src/voice/voiceDrafts';
+import { getEditingPattern, openBlankPattern } from '../src/patterns/patternService';
 
 /**
  * What jsdom cannot tell us here, so nobody wastes time writing it:
  *
- *   - **No Web Audio.** Every `applyVoicePreset` / `refreshVoice` call runs, finds no
+ *   - **No Web Audio.** Every draft notification and `refreshVoice` call runs, finds no
  *     engine and returns; that the amp knob is *audible* is a by-ear check
  *     (`docs/FOLLOW-UPS.md` §3), not an assertion. That the pane *calls* the seam at all
  *     is assertable, and lives in `VoicePaneAudio.test.tsx` — it needs the module mocked,
@@ -32,41 +33,55 @@ import { openBlankPattern } from '../src/patterns/patternService';
  *     reads it); the `hidden` utility *class* — which is the half that actually wins
  *     against `flex` in a browser — is not. So the disclosure test below protects the
  *     semantics and not the hiding: drop the class and it still passes.
- *   - **`commit`'s identity guard** (`next === preset`) cannot be reached from the DOM.
- *     React's own value tracker discards a `change` event whose value did not move, so
- *     the guard never sees one. It still covers the programmatic callers — `addSection`,
- *     `removeSection`, "Use suggested cab" — which is why it is not dead code.
+ *   - **The write seam's identity guard** (`next === the preset the holder is showing`)
+ *     cannot be reached from the DOM. React's own value tracker discards a `change`
+ *     event whose value did not move, so the guard never sees one. It still covers the
+ *     programmatic callers — Add/Remove stage, "Use suggested cab" — which is why it is
+ *     not dead code.
  *
- * `working` and `openSections` are hoisted into a host component because that is where
- * they live in the real app — `App`, above `PaneStack`, which unmounts a collapsed
- * pane's body. A pane that owned them would pass these tests and still lose the user's
- * unsaved tone on a collapse.
+ * `openSections` is hoisted into a host component because that is where it lives in the
+ * real app — `App`, above `PaneStack`, which unmounts a collapsed pane's body. THE
+ * UNSAVED EDIT IS NOT hoisted, and that is the change this file records: it lives in
+ * `voice/voiceDrafts`, keyed `pattern:<id>`, above every component and readable without
+ * a render. `draftPreset()` below reads it from there.
  */
-let lastWorking: WorkingVoice | null = null;
 
 function Host() {
-  const [working, setWorking] = useState<WorkingVoice | null>(null);
   const [openSections, setOpenSections] = useState<readonly SectionId[]>(['amp', 'cabinet']);
-  return (
-    <VoicePane
-      working={working}
-      onWorkingChange={(next) => {
-        lastWorking = next;
-        setWorking(next);
-      }}
-      openSections={openSections}
-      onOpenSectionsChange={setOpenSections}
-    />
-  );
+  return <VoicePane openSections={openSections} onOpenSectionsChange={setOpenSections} />;
 }
 
-/** The unsaved preset the pane is holding — the only way to see fields the controls
- *  render identically whether they are set or absent (an omitted `enabled` and an
- *  `enabled: true` both draw "In chain"). */
-const workingPreset = (): VoicePreset => {
-  if (!lastWorking) throw new Error('no working copy — the pane reported no edit');
-  return lastWorking.preset;
+/** The unsaved DRAFT the open pattern is holding — the only way to see fields the
+ *  controls render identically whether they are set or absent (an omitted `enabled` and
+ *  an `enabled: true` both draw "In chain").
+ *
+ *  The draft and not `voicePreset`, deliberately: that one falls back to the stored
+ *  variant, so an assertion about an edit would pass against a pane that recorded
+ *  nothing. Throwing is what the pane's old `App`-held copy did. */
+const draftPreset = (): VoicePreset => {
+  const pattern = getEditingPattern();
+  if (!pattern) throw new Error('no pattern open');
+  const draft = readVoiceDraft('pattern', pattern.id);
+  if (!draft) throw new Error('no unsaved edit — the pane recorded none');
+  return draft;
 };
+
+/**
+ * jsdom ships no `PointerEvent`, so `fireEvent.pointerDown` degrades to a bare `Event`
+ * and silently drops `pointerId` / `clientY`. A `MouseEvent` carries the coordinates and
+ * React reads `pointerId` straight off the native event — `Knob.test.tsx` builds its
+ * drags the same way, and so does user-event internally.
+ */
+function pointerEvent(type: string, init: { pointerId?: number; clientY?: number } = {}) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientY: init.clientY ?? 0,
+    button: 0,
+  });
+  Object.defineProperty(event, 'pointerId', { value: init.pointerId ?? 1 });
+  return event;
+}
 
 const pickVoice = (key: string) => userEvent.selectOptions(screen.getByLabelText('Voice'), key);
 const section = (name: string) => screen.getByRole('button', { name });
@@ -84,7 +99,8 @@ function stubConfirm(answer: boolean): string[] {
 }
 
 beforeEach(() => {
-  lastWorking = null;
+  // A module that outlives every unmount also outlives every test in this file.
+  clearVoiceDrafts();
   // Both stores are module singletons: the pattern's instrument comes from the lib's
   // global store at creation time, and variants persist to sessionStorage.
   useFretworkStore.getState().setInstrumentId('guitar');
@@ -154,7 +170,7 @@ describe('VoicePane', () => {
 
     // And nothing from the classic amp leaks in: that stage has its own section
     // and `wireChain` builds one or the other.
-    const stage = workingPreset().effects?.circuitAmp;
+    const stage = draftPreset().effects?.circuitAmp;
     expect(stage?.ampId).toBe('princeton-5f2a');
     expect(stage?.controls).toEqual({ volume: 0.5, tone: 0.5 });
   });
@@ -227,11 +243,11 @@ describe('VoicePane', () => {
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
 
-    const amp = workingPreset().effects?.amp;
+    const amp = draftPreset().effects?.amp;
     expect(amp?.preDrive).toBe(0.3); // required — seeded
     expect(amp?.enabled).toBeUndefined();
     expect(amp?.modelId).toBeUndefined();
-    expect(workingPreset().effects?.cabIR).toBeUndefined();
+    expect(draftPreset().effects?.cabIR).toBeUndefined();
   });
 
   it('offers the amp model’s suggested cab — nothing in the lib applies it', async () => {
@@ -249,6 +265,37 @@ describe('VoicePane', () => {
     expect(section('Cabinet')).toHaveAttribute('aria-expanded', 'true');
     expect((screen.getByLabelText('Cabinet') as HTMLSelectElement).value).toMatch(/^https?:/);
     expect(screen.queryByRole('button', { name: /Use suggested cab/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the edit that drags a knob away from a value and back', async () => {
+    // ⚠ THE BUG THE `presetRef` HACK USED TO HOLD OFF, now held off by the seam itself.
+    // `Knob` registers its drag listeners on `window` at pointerdown and never
+    // re-registers, so the WHOLE gesture runs against the `onChange` captured then. A
+    // handler that closed over the rendered preset would therefore compare each move
+    // against the preset as it was when the drag STARTED — and `setAtPath` returns that
+    // same object for a write that changes nothing, so the move BACK to the starting
+    // value would be the one edit silently dropped, leaving the store on the last
+    // intermediate value while the knob drew the original one.
+    //
+    // `voiceDrafts` reads the draft fresh inside every call, which is what makes this
+    // pass; it fails the moment a handler here rebuilds a preset from `preset`.
+    render(<Host />);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    const drive = screen.getByLabelText('Drive');
+    const start = getAtPath(draftPreset(), 'effects.amp.preDrive');
+
+    // A full 100 px sweep is min→max, so 20 px is a fifth of the range — well clear of
+    // the snap step, and back to exactly where it began.
+    fireEvent(drive, pointerEvent('pointerdown', { clientY: 100 }));
+    fireEvent(window, pointerEvent('pointermove', { clientY: 80 }));
+    const moved = getAtPath(draftPreset(), 'effects.amp.preDrive');
+    expect(moved).not.toBe(start);
+
+    fireEvent(window, pointerEvent('pointermove', { clientY: 100 }));
+    fireEvent(window, pointerEvent('pointerup', { clientY: 100 }));
+
+    expect(getAtPath(draftPreset(), 'effects.amp.preDrive')).toBe(start);
+    expect(screen.getByLabelText('Drive')).toHaveAttribute('aria-valuenow', String(start));
   });
 
   it('writes a slider edit into the working copy', async () => {
@@ -287,7 +334,7 @@ describe('VoicePane', () => {
     // The preset holds the pack's banks, not its id — which is why reading the
     // selection back needs `detectSamplePack`.
     expect((screen.getByLabelText('Pack') as HTMLSelectElement).value).toBe('casio-piano-demo');
-    expect(workingPreset().source).toMatchObject({ kind: 'sampler' });
+    expect(draftPreset().source).toMatchObject({ kind: 'sampler' });
 
     // Trailing-coalesced, so it lands after the change rather than during it.
     await waitFor(() => expect(fetched).toHaveBeenCalled());
@@ -549,7 +596,7 @@ describe('VoicePane', () => {
    * synth-sourced built-ins it was absent and the pane printed a read-only dump
    * of the params instead. Every one of them asserts against the WORKING PRESET
    * — the object handed to `onWorkingChange` and, in the same `commit`, to
-   * `applyVoicePreset`. A control that renders and writes nothing is invisible
+   * the store. A control that renders and writes nothing is invisible
    * from the row's side and obvious from the preset's.
    */
   it('switches the source and hands over a well-formed one', async () => {
@@ -562,7 +609,7 @@ describe('VoicePane', () => {
     // The WHOLE branch was replaced. `source.kind = 'fm-synth'` on its own would
     // leave `samples` beside it — an object matching no arm of `VoiceSource`,
     // which `Voice` reads `params` off and gets `undefined` from.
-    const source = workingPreset().source;
+    const source = draftPreset().source;
     expect(source.kind).toBe('fm-synth');
     expect(Object.keys(source).sort()).toEqual(['kind', 'params']);
     expect('samples' in source).toBe(false);
@@ -586,7 +633,7 @@ describe('VoicePane', () => {
     await userEvent.selectOptions(screen.getByLabelText('Source'), 'fm-synth');
     await userEvent.selectOptions(screen.getByLabelText('Source'), 'sampler');
 
-    const source = workingPreset().source;
+    const source = draftPreset().source;
     expect(source.kind).toBe('sampler');
     if (source.kind !== 'sampler') throw new Error('unreachable');
     expect(detectSamplePack(source.samples)?.id).toBe('philharmonia-classical');
@@ -616,7 +663,7 @@ describe('VoicePane', () => {
     fireEvent.keyDown(harmonicity, { key: 'ArrowUp' });
 
     // The descriptor's step is 0.05, and an encoder is relative: start + one step.
-    expect(getAtPath(workingPreset(), 'source.params.harmonicity')).toBeCloseTo(start + 0.05, 6);
+    expect(getAtPath(draftPreset(), 'source.params.harmonicity')).toBeCloseTo(start + 0.05, 6);
   });
 
   it('changing instrument re-offers that instrument’s voices', async () => {
@@ -633,7 +680,7 @@ describe('VoicePane', () => {
 
   // ─── the second source (`preset.layer`) ────────────────────────────────────
   //
-  // Every assertion here reads the preset the pane hands `applyVoicePreset`, not
+  // Every assertion here reads the draft the pane wrote, not
   // the DOM. That is the point: a layer is a branch nothing on screen renders
   // whole, and "a control exists" is exactly the check that would still pass with
   // the write deleted.
@@ -655,7 +702,7 @@ describe('VoicePane', () => {
     const layer = await openSecondSource();
     await userEvent.click(layer.getByRole('button', { name: 'Add Second source' }));
 
-    const added = workingPreset().layer;
+    const added = draftPreset().layer;
     expect(added).toBeDefined();
     expect(added!.source.kind).toBe('fm-synth');
     // The whole arm, not just the discriminant.
@@ -669,7 +716,7 @@ describe('VoicePane', () => {
     // that is audible is `gainDb + trim(layer) − trim(primary)` — and the Acoustic
     // Guitar this renders is a SAMPLER, trimmed 17 dB down. A bare
     // `gainDb <= -6` passes for every value of the thing that can be wrong here.
-    const preset = workingPreset();
+    const preset = draftPreset();
     const deltaDb = added!.gainDb + sourceTrimDb(added!.source) - sourceTrimDb(preset.source);
     expect(preset.source.kind).toBe('sampler');
     expect(deltaDb).toBeLessThanOrEqual(-6);
@@ -679,7 +726,7 @@ describe('VoicePane', () => {
     render(<Host />);
     const layer = await openSecondSource();
     await userEvent.click(layer.getByRole('button', { name: 'Add Second source' }));
-    expect(workingPreset().layer).toBeDefined();
+    expect(draftPreset().layer).toBeDefined();
 
     await userEvent.click(
       within(screen.getByRole('group', { name: 'Second source' })).getByRole('button', {
@@ -688,8 +735,8 @@ describe('VoicePane', () => {
     );
     // Absent, not `{}` — `removeAtPath` prunes, and a hollow branch reads as
     // present to `hasBranchAtPath` and so would keep the rows on screen.
-    expect(workingPreset().layer).toBeUndefined();
-    expect(Object.hasOwn(workingPreset(), 'layer')).toBe(false);
+    expect(draftPreset().layer).toBeUndefined();
+    expect(Object.hasOwn(draftPreset(), 'layer')).toBe(false);
   });
 
   it('shows a built-in`s real second source rather than the schema fallbacks', async () => {
@@ -731,21 +778,21 @@ describe('VoicePane', () => {
     const mix = layer.getByRole('spinbutton', { name: 'Second source Mix' });
     fireEvent.keyDown(mix, { key: 'ArrowUp' });
     // The descriptor's step is 0.5 dB, and an encoder is relative.
-    expect(getAtPath(workingPreset(), 'layer.gainDb')).toBeCloseTo(-7.5, 6);
+    expect(getAtPath(draftPreset(), 'layer.gainDb')).toBeCloseTo(-7.5, 6);
 
     // The primary's own harmonicity, read BEFORE the layer's is turned. The two
     // rows are one descriptor generated under two branches; if the generator ever
     // stopped substituting the prefix they would share a path, and nothing on
     // screen would say so.
-    const primaryHarmonicity = getAtPath(workingPreset(), 'source.params.harmonicity');
+    const primaryHarmonicity = getAtPath(draftPreset(), 'source.params.harmonicity');
     const harmonicity = layer.getByRole('spinbutton', { name: 'Second source Harmonicity' });
     fireEvent.keyDown(harmonicity, { key: 'ArrowUp' });
-    expect(getAtPath(workingPreset(), 'layer.source.params.harmonicity')).toBeCloseTo(0.55, 6);
-    expect(getAtPath(workingPreset(), 'source.params.harmonicity')).toBe(primaryHarmonicity);
+    expect(getAtPath(draftPreset(), 'layer.source.params.harmonicity')).toBeCloseTo(0.55, 6);
+    expect(getAtPath(draftPreset(), 'source.params.harmonicity')).toBe(primaryHarmonicity);
   });
 
   it('changes the second source`s kind both ways, and never the primary`s', async () => {
-    // ⚠ THE MIS-ROUTE GUARD. `trackVoiceDrafts` resolves any `source-kind` row
+    // ⚠ THE MIS-ROUTE GUARD. `voiceDrafts` resolves any `source-kind` row
     // through `withSourceKind`, which always replaces `preset.source` — so a layer
     // picker wired the obvious way re-kinds the PRIMARY and looks, on screen, like
     // it worked. Asserted on both branches of the preset, in both directions.
@@ -755,7 +802,7 @@ describe('VoicePane', () => {
     const layer = await openSecondSource();
 
     await userEvent.selectOptions(layer.getByLabelText('Second source Source'), 'pluck-synth');
-    let preset = workingPreset();
+    let preset = draftPreset();
     expect(preset.layer?.source.kind).toBe('pluck-synth');
     // The whole arm was replaced, so the FM params are gone rather than sitting
     // beside a pluck tag — the malformed union `withLayerSourceKind` prevents.
@@ -770,7 +817,7 @@ describe('VoicePane', () => {
       ),
       'fm-synth',
     );
-    preset = workingPreset();
+    preset = draftPreset();
     expect(preset.layer?.source.kind).toBe('fm-synth');
     expect(preset.layer?.source).toHaveProperty('params.harmonicity');
     expect(preset.source.kind).toBe('fm-synth');
@@ -804,7 +851,7 @@ describe('VoicePane', () => {
     await userEvent.click(section('Body filter'));
     await userEvent.click(bodyFilter().getByRole('button', { name: 'Add Body filter' }));
 
-    let filter = workingPreset().bodyFilter;
+    let filter = draftPreset().bodyFilter;
     expect(filter).toBeDefined();
     expect(filter!.envelope).toBeUndefined();
     // Near-transparent rather than Tone's 350 Hz default — adding a stage must not
@@ -814,7 +861,7 @@ describe('VoicePane', () => {
     expect(Object.hasOwn(filter!, 'enabled')).toBe(false);
 
     await userEvent.click(bodyFilter().getByRole('button', { name: 'Add Cutoff envelope' }));
-    filter = workingPreset().bodyFilter;
+    filter = draftPreset().bodyFilter;
     // The WHOLE envelope. `buildChain` reads all six off it; five `undefined`s is
     // what a row-by-row seeding would have produced.
     expect(Object.keys(filter!.envelope!).sort()).toEqual([
@@ -834,16 +881,16 @@ describe('VoicePane', () => {
     await userEvent.click(section('Body filter'));
     await userEvent.click(bodyFilter().getByRole('button', { name: 'Add Body filter' }));
     await userEvent.click(bodyFilter().getByRole('button', { name: 'Add Cutoff envelope' }));
-    expect(workingPreset().bodyFilter?.envelope).toBeDefined();
+    expect(draftPreset().bodyFilter?.envelope).toBeDefined();
 
     await userEvent.click(bodyFilter().getByRole('button', { name: 'Remove Cutoff envelope' }));
     // `removeAtPath` prunes an emptied parent — `bodyFilter` still holds cutoff and
     // q, so it must survive rather than be pruned along with its envelope.
-    expect(workingPreset().bodyFilter).toBeDefined();
-    expect(workingPreset().bodyFilter?.envelope).toBeUndefined();
+    expect(draftPreset().bodyFilter).toBeDefined();
+    expect(draftPreset().bodyFilter?.envelope).toBeUndefined();
 
     await userEvent.click(bodyFilter().getByRole('button', { name: 'Remove Body filter' }));
-    expect(workingPreset().bodyFilter).toBeUndefined();
+    expect(draftPreset().bodyFilter).toBeUndefined();
   });
 
   // ---------------------------------------------------------- the pedalboard ---
@@ -880,7 +927,7 @@ describe('VoicePane', () => {
 
     await userEvent.click(pedal('Chorus').getByRole('button', { name: 'Add Chorus' }));
     // Tone's own defaults, complete — not a subset assembled from row fallbacks.
-    expect(workingPreset().effects?.chorus).toEqual({
+    expect(draftPreset().effects?.chorus).toEqual({
       frequency: 1.5,
       depth: 0.7,
       wet: 0.5,
@@ -896,7 +943,7 @@ describe('VoicePane', () => {
     expect(pedal('Chorus').getByLabelText('Chorus Depth')).toBeInTheDocument();
 
     await userEvent.click(pedal('Chorus').getByRole('button', { name: 'Remove Chorus' }));
-    expect(workingPreset().effects?.chorus).toBeUndefined();
+    expect(draftPreset().effects?.chorus).toBeUndefined();
   });
 
   it('keeps a bypassed pedal on the board with its tuning', async () => {
@@ -909,12 +956,12 @@ describe('VoicePane', () => {
 
     const feedback = pedal('Delay').getByLabelText('Delay Feedback');
     fireEvent.change(feedback, { target: { value: '0.6' } });
-    expect(workingPreset().effects?.delay?.feedback).toBe(0.6);
+    expect(draftPreset().effects?.delay?.feedback).toBe(0.6);
 
     await userEvent.click(pedal('Delay').getByRole('switch', { name: 'Delay Enabled' }));
-    expect(workingPreset().effects?.delay?.enabled).toBe(false);
+    expect(draftPreset().effects?.delay?.enabled).toBe(false);
     // Still on the board, still tuned, and saying so.
-    expect(workingPreset().effects?.delay?.feedback).toBe(0.6);
+    expect(draftPreset().effects?.delay?.feedback).toBe(0.6);
     // The switch itself is what says so — a pedal card cannot fold, so there is no
     // second note in its header to fall out of step with it.
     expect(pedal('Delay').getByRole('switch', { name: 'Delay Enabled' })).toHaveTextContent(
@@ -930,8 +977,8 @@ describe('VoicePane', () => {
     render(<Host />);
     await userEvent.click(section('Pedals'));
     await userEvent.click(pedal('Compressor').getByRole('button', { name: 'Add Compressor' }));
-    expect(workingPreset().compressor?.ratio).toBe(12);
-    expect(getAtPath(workingPreset(), 'effects.compressor')).toBeUndefined();
+    expect(draftPreset().compressor?.ratio).toBe(12);
+    expect(getAtPath(draftPreset(), 'effects.compressor')).toBeUndefined();
   });
 
   it('gives the graphic EQ seven bands and a level, all of them endless', async () => {

@@ -19,9 +19,9 @@
  *     saves what the track ALREADY sounds like, read back through the seam.
  *     ⚠ There is no "make this dirtier" tool, and that is a DECISION rather
  *     than a missing seam. This header used to say no seam write existed to
- *     make one out of; that is stale. `voice/trackVoiceDrafts.ts` exposes
- *     `setTrackVoiceParam`, `addTrackVoiceSection`, `addTrackVoiceSubBranch`
- *     and `addTrackVoicePedal`, all reachable by id and value with no pointer,
+ *     make one out of; that is stale. `voice/voiceDrafts.ts` exposes
+ *     `setVoiceParam`, `addVoiceSection`, `addVoiceSubBranch`
+ *     and `addVoicePedal`, all reachable by id and value with no pointer,
  *     and they are deliberately left UNWRAPPED. Restated 2026-09-04: the agent
  *     builds patterns and compositions and CHOOSES a voice; designing one is a
  *     different kind of act. Wrapping them is a product decision to reopen, not

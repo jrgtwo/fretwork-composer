@@ -621,9 +621,10 @@ export function ensurePattern(): void {
  *
  * NOTHING ELSE IS LOST BY SWITCHING: every timeline edit is written straight to
  * the store as it is made, so there is no unsaved pattern state anywhere. The
- * app's one unsaved thing is the voice pane's working copy, which lives in `App`
- * and is keyed by pattern id — `App` confirms before stranding it, because this
- * function cannot see it and must not pretend to.
+ * app's one unsaved thing is the voice pane's edit, and it is keyed `pattern:<id>`
+ * in `voice/voiceDrafts` — so a switch strands nothing, asks nothing, and each
+ * pattern still has its own unsaved tone when it comes back. This function neither
+ * sees it nor needs to.
  */
 export function openPattern(id: string): Result<Pattern> {
   const target = findLibraryPattern(id);
@@ -699,6 +700,35 @@ export function duplicatePattern(id: string): Result<Pattern> {
 }
 
 /**
+ * Told when a pattern LEAVES THE LIBRARY, so state kept elsewhere and keyed by
+ * pattern id can be dropped with it.
+ *
+ * ⚠ THIS DIRECTION, and not the other one. `voice/voiceDrafts` holds an unsaved
+ * voice edit per pattern and has to prune it — a pattern library is unbounded
+ * and `openBlankPattern` mints ids freely — but that module already imports this
+ * one, so calling it from {@link deletePattern} would close an ESM cycle for the
+ * sake of a few hundred bytes. A notification carries no voice knowledge into
+ * this seam and leaves the dependency running one way.
+ *
+ * {@link deletePattern} is the only path a pattern leaves by; nothing else in
+ * this module removes one.
+ *
+ * Wrapped rather than stored bare, for `subscribeVoiceDrafts`' reason: a `Set`
+ * keyed by the function itself dedupes two subscribers that happen to pass the
+ * same module-level reference, and the first unsubscribe would then silence the
+ * other.
+ */
+const removalListeners = new Set<(patternId: string) => void>();
+
+export function subscribeRemovedPatterns(listener: (patternId: string) => void): () => void {
+  const wrapped = (patternId: string) => listener(patternId);
+  removalListeners.add(wrapped);
+  return () => {
+    removalListeners.delete(wrapped);
+  };
+}
+
+/**
  * Remove a library pattern, and leave something open.
  *
  * The lib's `deletePattern` nulls `editingPatternId` when it deletes the pattern
@@ -744,6 +774,7 @@ export function deletePattern(id: string): Result<Pattern> {
     store().setCursorTick(0);
     clearHistory();
   }
+  removalListeners.forEach((listener) => listener(id));
   return ok(target);
 }
 

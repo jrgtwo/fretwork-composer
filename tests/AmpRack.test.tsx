@@ -5,10 +5,11 @@ import userEvent from '@testing-library/user-event';
 import { CABINET_IRS, getCabinetIR, useFretworkStore, useVoiceStore } from '@fretwork/lib';
 import { AmpHead } from '../src/voice/rack/AmpHead';
 import { CabinetGraphic } from '../src/voice/rack/CabinetGraphic';
-import { VoicePane, type WorkingVoice } from '../src/voice/VoicePane';
+import { VoicePane } from '../src/voice/VoicePane';
 import { PARAM_SECTIONS, type SectionId } from '../src/voice/paramSchema';
 import { PLACED_CABINET_IRS } from '../src/voice/micPositions';
 import { openBlankPattern } from '../src/patterns/patternService';
+import { clearVoiceDrafts } from '../src/voice/voiceDrafts';
 
 /**
  * The graphic rack — `AmpHead`, `CabinetGraphic` and the pane wiring that renders the
@@ -24,7 +25,7 @@ import { openBlankPattern } from '../src/patterns/patternService';
  *     zero-sized baffle rather than hand `nearestIrAt` a `NaN`, so the pointer path here
  *     only exists because the test stubs the rect. The stub is the environment, not the
  *     assertion — the maths under it is `micPositions`' own, and tested there.
- *   - **No Web Audio.** Nothing here is audible; `applyVoicePreset` finds no engine.
+ *   - **No Web Audio.** Nothing here is audible; the draft notification finds no engine.
  */
 
 /** A baffle with a size, since jsdom gives every element none. 200×200 at the origin,
@@ -370,22 +371,17 @@ describe('CabinetGraphic', () => {
   });
 });
 
-/** The pane's own state lives in `App` in the real app; a host stands in for it. */
+/** Which sections are unfolded lives in `App` in the real app; a host stands in for
+ *  it. The unsaved edit does NOT — it is in `voice/voiceDrafts`, keyed by pattern. */
 function Host() {
-  const [working, setWorking] = useState<WorkingVoice | null>(null);
   const [openSections, setOpenSections] = useState<readonly SectionId[]>(['amp', 'cabinet']);
-  return (
-    <VoicePane
-      working={working}
-      onWorkingChange={setWorking}
-      openSections={openSections}
-      onOpenSectionsChange={setOpenSections}
-    />
-  );
+  return <VoicePane openSections={openSections} onOpenSectionsChange={setOpenSections} />;
 }
 
 describe('the rack, wired into the pane', () => {
   beforeEach(() => {
+    // A module that outlives every unmount also outlives every test in this file.
+    clearVoiceDrafts();
     useFretworkStore.getState().setInstrumentId('guitar');
     useVoiceStore.getState().reset();
     openBlankPattern('Amp rack test');

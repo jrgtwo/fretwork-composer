@@ -14,8 +14,8 @@
  *
  * The engine needs nothing new for this: `Voice.swapPreset` compares
  * `sameSource(prev, next)`, and a differing `kind` takes the dispose-and-rebuild
- * path rather than the retune-in-place one. `playbackService.applyVoicePreset`
- * and `trackVoiceDrafts` are already the two routes into it.
+ * path rather than the retune-in-place one. `playbackService`'s reconcile and
+ * `voiceDrafts` are already the two routes into it.
  *
  * ── ⚠ WHERE THE NUMBERS COME FROM, and where they deliberately do not ────────
  *
@@ -67,7 +67,7 @@ export const SOURCE_KINDS = Object.keys(SOURCE_KIND_LABELS) as readonly VoiceSou
 /**
  * `hasOwnProperty`, not `in`: `'toString' in SOURCE_KIND_LABELS` is TRUE through
  * the prototype chain, and this guard is what stands between an agent's
- * `setTrackVoiceParam(id, 'source.kind', 'toString')` and `defaultSourceFor`
+ * `setVoiceParam(id, 'source.kind', 'toString')` and `defaultSourceFor`
  * falling off the end of its switch. Caught by its own test.
  */
 export function isSourceKind(value: unknown): value is VoiceSourceKind {
@@ -206,8 +206,8 @@ export function withSourceKind(preset: VoicePreset, kind: VoiceSourceKind): Voic
  * `preset` with its SECOND source replaced by a well-formed one of `kind`.
  *
  * `withSourceKind` one level down, and separate from it rather than a `branch`
- * argument on it for a reason that is not stylistic: `trackVoiceDrafts`
- * `setTrackVoiceParam` handles a `source-kind` row by calling
+ * argument on it for a reason that is not stylistic: `voiceDrafts`
+ * `setVoiceParam` handles a `source-kind` row by calling
  * `withSourceKind(preset, value)` with no path at all, so ANY second row of that
  * kind in `PARAM_SECTIONS` would swap the PRIMARY source while the caller
  * pointed at the layer. That is why the layer's picker is declared on

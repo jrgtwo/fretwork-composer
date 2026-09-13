@@ -22,17 +22,20 @@ import {
   saveVoice,
   saveVoiceAs,
   selectVoice,
-  useEditingVoicePreset,
   useEditingVoiceRef,
+  useHolderVoicePreset,
   useSelectableVoices,
   voiceKey,
 } from './voiceService';
+import { previewNote, refreshVoice, usePlaybackEngine } from '../audio/playbackService';
 import {
-  applyVoicePreset,
-  previewNote,
-  refreshVoice,
-  usePlaybackEngine,
-} from '../audio/playbackService';
+  clearVoiceDrafts,
+  discardVoiceDraft,
+  isVoiceDirty,
+  setVoiceParam,
+  voiceDraftKeys,
+  voicePreset,
+} from './voiceDrafts';
 
 /**
  * Two seams in one file, because the second is only meaningful about the first:
@@ -184,6 +187,34 @@ const flushRebuild = () =>
     vi.runAllTimers();
   });
 
+const openPatternId = (): string => {
+  const pattern = getEditingPattern();
+  if (!pattern) throw new Error('no editing pattern');
+  return pattern.id;
+};
+
+/**
+ * Write one voice parameter into the open pattern's unsaved draft.
+ *
+ * THE PATH AN EDIT TAKES NOW. It used to be a whole preset pushed at `playbackService`,
+ * which then kept its own tagged mirror of it.
+ * There is one copy now: the edit lands in `voice/voiceDrafts` keyed `pattern:<id>`,
+ * the store notifies, and `playbackService` reconciles from the same object. Driving
+ * these tests through the real write seam is also what keeps them honest about the
+ * agent's route in, which is the only other caller.
+ */
+const edit = (path: string, value: unknown): void => {
+  const result = setVoiceParam('pattern', openPatternId(), path, value);
+  if (!result.ok) throw new Error(result.reason);
+};
+
+/** What the engine will build for the open pattern: its draft, or the stored variant. */
+const draftPreset = (): VoicePreset => {
+  const preset = voicePreset('pattern', openPatternId());
+  if (!preset) throw new Error('no editing pattern');
+  return preset;
+};
+
 beforeEach(() => {
   // Fake for the whole file so nothing accidentally depends on real-time coalescing.
   // Safe alongside the async tests here: those await promises, not timers.
@@ -192,10 +223,9 @@ beforeEach(() => {
   useVoiceStore.getState().reset();
   sessionStorage.clear();
   openBlankPattern('Voice test');
-  // `playbackService` holds the editor's working preset at module scope, so it would
-  // otherwise survive between tests. Discarding it is a first-class action — the
-  // editor closing does exactly this — so no test-only reset is needed.
-  applyVoicePreset(null);
+  // The draft store is a module that outlives every unmount, so an edit made by one
+  // test would otherwise still be what the next one plays.
+  clearVoiceDrafts();
 });
 
 afterEach(() => {
@@ -265,7 +295,7 @@ describe('voiceKey', () => {
 });
 
 // ------------------------------------------------------------------- hooks ---
-// The reactive reads, which can only fail at render time. `useEditingVoicePreset` is the
+// The reactive reads, which can only fail at render time. `useHolderVoicePreset` is the
 // one with teeth: it hand-rolls a `useVoiceStore` selector that ignores its state
 // argument, so it is correct only while every resolution returns a reference-stable
 // object (a `VOICE_PRESETS` const, or the stored `variant.preset`). Should either ever
@@ -287,7 +317,9 @@ describe('the reactive reads', () => {
     const saved = saveVoiceAs('Mine', getDefaultPresetForSlot('surf-amp'));
     if (!saved.ok) throw new Error(saved.reason);
 
-    const { result, rerender } = renderHook(() => useEditingVoicePreset());
+    const { result, rerender } = renderHook(() =>
+      useHolderVoicePreset('pattern', openPatternId()),
+    );
     const first = result.current;
     expect(first).toBe(useVoiceStore.getState().variants[0].preset);
 
@@ -619,14 +651,14 @@ describe('deleteVoice', () => {
 // identity has to rebuild and everything else must not — and neither failure announces
 // itself.
 
-describe('applyVoicePreset', () => {
+describe('an unsaved edit reaching the engine', () => {
   it('retunes the live voice in place for a level or effects edit', () => {
     const { voice } = startEngine();
-    const edited: VoicePreset = { ...editingPreset(), level: { volumeDb: -6, pan: 0.25 } };
 
-    act(() => applyVoicePreset(edited));
+    act(() => edit('level.volumeDb', -6));
 
-    expect(voice.swapPreset).toHaveBeenCalledWith(edited);
+    expect(voice.swapPreset).toHaveBeenCalledWith(draftPreset());
+    expect(draftPreset().level?.volumeDb).toBe(-6);
     // No teardown and no sampler re-download — the only reason dragging a slider on a
     // live voice is viable at all.
     expect(builtVoices()).toHaveLength(0);
@@ -642,24 +674,17 @@ describe('applyVoicePreset', () => {
     // failure is audible except the silence while it downloads.
     selectVoice({ kind: 'default', slotId: 'clean-amp' });
     const { voice } = startEngine();
-    const base = editingPreset();
-    const { amp } = base.effects ?? {};
+    const amp = editingPreset().effects?.amp;
     if (!amp) throw new Error('expected clean-amp to ship an amp');
 
-    const edited: VoicePreset = {
-      ...base,
-      effects: {
-        ...base.effects,
-        amp: { ...amp, preDrive: amp.preDrive + 0.2 },
-        // Adding a stage, not just retuning one: `clean-amp` ships no cabinet, and
-        // `swapPreset` handles a chain-shape change itself (`_rebuildChain` keeps the
-        // synth). Only the *source* needs a new `Voice`.
-        cabIR: { enabled: true, url: CABINET_IRS[0].url },
-      },
-    };
-    act(() => applyVoicePreset(edited));
+    act(() => edit('effects.amp.preDrive', Math.min(1, amp.preDrive + 0.2)));
+    // Adding a stage, not just retuning one: `clean-amp` ships no cabinet, and
+    // `swapPreset` handles a chain-shape change itself (`_rebuildChain` keeps the
+    // synth). Only the *source* needs a new `Voice`.
+    act(() => edit('effects.cabIR.url', CABINET_IRS[0].url));
 
-    expect(voice.swapPreset).toHaveBeenCalledWith(edited);
+    expect(draftPreset().effects?.cabIR?.url).toBe(CABINET_IRS[0].url);
+    expect(voice.swapPreset).toHaveBeenLastCalledWith(draftPreset());
     flushRebuild();
     expect(builtVoices()).toHaveLength(0);
     expect(voice.dispose).not.toHaveBeenCalled();
@@ -667,21 +692,18 @@ describe('applyVoicePreset', () => {
 
   it('rebuilds the voice for a sample-pack change', () => {
     const { voice, scheduler } = startEngine();
-    const base = editingPreset();
-    if (base.source.kind !== 'sampler') throw new Error('expected a sampler preset');
-    const pack = otherSamplePack(base);
+    const pack = otherSamplePack(editingPreset());
     // Everything but the banks held constant, so this cannot pass on the back of an
     // incidental `release` difference — the banks have to be in the fingerprint.
-    const edited: VoicePreset = { ...base, source: { ...base.source, samples: pack.samples } };
 
-    act(() => applyVoicePreset(edited));
+    act(() => edit('source.samples', pack.id));
     flushRebuild();
 
     // `swapPreset` would have accepted this and changed nothing audible: the banks are
     // only ever constructed in `_ensureBuilt`.
     expect(voice.swapPreset).not.toHaveBeenCalled();
     expect(builtVoices()).toHaveLength(1);
-    expect(lastVoice().preset).toBe(edited);
+    expect(lastVoice().preset).toBe(draftPreset());
     expect(voice.dispose).toHaveBeenCalled();
     expect(scheduler.setInstrument).toHaveBeenCalledWith(lastVoice());
     // Without this the new banks download only at the next `play()`.
@@ -690,11 +712,9 @@ describe('applyVoicePreset', () => {
 
   it('rebuilds the voice for a sampler release change', () => {
     const { voice } = startEngine();
-    const base = editingPreset();
-    const { source } = base;
-    if (source.kind !== 'sampler') throw new Error('expected a sampler preset');
+    if (editingPreset().source.kind !== 'sampler') throw new Error('expected a sampler preset');
 
-    act(() => applyVoicePreset({ ...base, source: { ...source, release: 3.5 } }));
+    act(() => edit('source.release', 0.9));
     flushRebuild();
 
     // `release` is only read where the banks are built, so it is source identity too.
@@ -707,40 +727,32 @@ describe('applyVoicePreset', () => {
     // drag is one `Tone.Sampler` per bank per pointermove — with the outgoing voice
     // disposed while its own loads are still in flight.
     const { voice } = startEngine();
-    const base = editingPreset();
-    const { source } = base;
-    if (source.kind !== 'sampler') throw new Error('expected a sampler preset');
+    if (editingPreset().source.kind !== 'sampler') throw new Error('expected a sampler preset');
 
-    for (const release of [1.5, 2, 2.5, 3]) {
-      act(() => applyVoicePreset({ ...base, source: { ...source, release } }));
+    for (const release of [0.4, 0.5, 0.6, 0.7]) {
+      act(() => edit('source.release', release));
     }
     expect(builtVoices()).toHaveLength(0);
 
     flushRebuild();
 
     expect(builtVoices()).toHaveLength(1);
-    expect(lastVoice().preset).toMatchObject({ source: { release: 3 } });
+    expect(lastVoice().preset).toMatchObject({ source: { release: 0.7 } });
     expect(voice.dispose).toHaveBeenCalledTimes(1);
   });
 
   it('rebuilds the voice for a source-kind change', () => {
     const { voice } = startEngine();
-    const edited: VoicePreset = {
-      ...editingPreset(),
-      source: {
-        kind: 'pluck-synth',
-        params: { attackNoise: 0.5, dampening: 4000, resonance: 0.85, release: 0.5 },
-      },
-    };
 
-    act(() => applyVoicePreset(edited));
+    act(() => edit('source.kind', 'pluck-synth'));
     flushRebuild();
 
     // `swapPreset` calls `this.dispose()` and returns on a kind change, leaving the
     // scheduler holding a corpse.
     expect(voice.swapPreset).not.toHaveBeenCalled();
     expect(builtVoices()).toHaveLength(1);
-    expect(lastVoice().preset).toBe(edited);
+    expect(lastVoice().preset).toBe(draftPreset());
+    expect(draftPreset().source.kind).toBe('pluck-synth');
   });
 
   it('does not build an audio graph when nothing has asked for a sound', () => {
@@ -749,26 +761,26 @@ describe('applyVoicePreset', () => {
     // the probe this test passes no matter what the code does.
     render(createElement(EngineProbe));
 
-    applyVoicePreset({ ...editingPreset(), level: { volumeDb: -3, pan: 0 } });
+    edit('level.volumeDb', -3);
     flushRebuild();
 
     expect(builtVoices()).toHaveLength(0);
     expect(audio.FakeScheduler.instances).toHaveLength(0);
   });
 
-  it('builds the next voice from the working copy, not from the stored variant', () => {
-    const edited: VoicePreset = { ...editingPreset(), level: { volumeDb: -3, pan: 0 } };
-    applyVoicePreset(edited);
+  it('builds the next voice from the unsaved draft, not from the stored variant', () => {
+    edit('level.volumeDb', -3);
+    const edited = draftPreset();
 
     render(createElement(EngineProbe));
     act(() => previewNote(0, 0));
 
-    // The working copy is not in the store, so nothing the lib resolves can see it.
+    // The draft is not in the store, so nothing the lib resolves can see it.
     expect(lastVoice().preset).toBe(edited);
   });
 
-  it('drops the working copy once the pattern points at a different voice', () => {
-    applyVoicePreset({ ...editingPreset(), level: { volumeDb: -3, pan: 0 } });
+  it('drops the draft once the pattern points at a different voice', () => {
+    edit('level.volumeDb', -3);
     selectVoice({ kind: 'default', slotId: 'metal-amp' });
 
     render(createElement(EngineProbe));
@@ -782,13 +794,12 @@ describe('applyVoicePreset', () => {
   it('never resurrects an abandoned edit when the pattern points back at its voice', () => {
     selectVoice({ kind: 'default', slotId: 'acoustic-guitar' });
     const stored = editingPreset();
-    applyVoicePreset({ ...stored, level: { volumeDb: -30, pan: 0 } });
+    edit('level.volumeDb', -30);
 
-    // Away and back to the *same* ref. The pane reset its own working copy on the way
-    // out, so a copy still tagged for this ref would be an engine playing something no
-    // UI shows — and a tag that only stops matching is not enough to prevent that, since
-    // it starts matching again on the way back. The `refreshVoice` a selection goes
-    // through is what retires it.
+    // Away and back to the *same* ref. A tag that only stops matching is not enough to
+    // prevent an abandoned edit coming back, since it starts matching again on the way
+    // back — the `refreshVoice` a selection goes through is what retires it, because
+    // `presetFor` reads (and so self-clears) the draft on the way past.
     selectVoice({ kind: 'default', slotId: 'metal-amp' });
     refreshVoice();
     selectVoice({ kind: 'default', slotId: 'acoustic-guitar' });
@@ -802,37 +813,40 @@ describe('applyVoicePreset', () => {
 
   it('does not carry an unsaved edit onto another pattern sharing the same voice', () => {
     const stored = editingPreset();
-    applyVoicePreset({ ...stored, level: { volumeDb: -30, pan: 0 } });
+    edit('level.volumeDb', -30);
 
-    // Same instrument, same (absent) ref — so the ref alone cannot tell them apart, and
-    // the tag has to carry the pattern id.
+    // Same instrument, same (absent) ref — so the tag alone cannot tell them apart, and
+    // the draft's KEY has to carry the pattern id. It also means the first pattern keeps
+    // its own edit, which is what makes a switch cost nothing.
+    const first = openPatternId();
     openBlankPattern('Second pattern');
     render(createElement(EngineProbe));
     act(() => previewNote(0, 0));
 
     expect(lastVoice().preset).toBe(stored);
+    expect(voicePreset('pattern', first)?.level?.volumeDb).toBe(-30);
   });
 
   it('restores the stored preset when the editor discards', () => {
     const { voice } = startEngine();
     const stored = editingPreset();
-    applyVoicePreset({ ...stored, level: { volumeDb: -30, pan: 0 } });
+    edit('level.volumeDb', -30);
 
-    act(() => applyVoicePreset(null));
+    act(() => discardVoiceDraft('pattern', openPatternId()));
 
     expect(voice.swapPreset).toHaveBeenLastCalledWith(stored);
   });
 
   it('discards even when the pattern was closed first', () => {
     const stored = editingPreset();
-    applyVoicePreset({ ...stored, level: { volumeDb: -30, pan: 0 } });
+    edit('level.volumeDb', -30);
 
     // The order a pane unmounts in is not ours to choose: closing the pattern can precede
     // the editor's own teardown, and a discard that no-ops then leaves the abandoned edit
     // as what plays the next time the pattern is opened.
     const pattern = getEditingPattern()!;
     usePatternsStore.getState().openPatternForEditing(null);
-    applyVoicePreset(null);
+    discardVoiceDraft('pattern', pattern.id);
     usePatternsStore.getState().openPatternForEditing(pattern.id);
 
     render(createElement(EngineProbe));
@@ -841,13 +855,100 @@ describe('applyVoicePreset', () => {
     expect(lastVoice().preset).toBe(stored);
   });
 
+  it('cancels a pending rebuild on a discard made after the pattern was closed', () => {
+    // The other half of the same order problem, and the one that only the timer can
+    // show: a rebuild-class edit leaves a trailing build armed, and the discard has to
+    // cancel it BEFORE the "is a pattern open" guard or the abandoned edit is what gets
+    // built the moment the window elapses.
+    //
+    // ⚠ THE ASSERTION IS THE TIMER, and it has to be. Letting the window elapse and
+    // counting voices cannot fail: the armed build re-reads inside the window, finds the
+    // draft gone and the key back at the engine's, and returns without building — so
+    // nothing is constructed whether or not the cancel ever happened.
+    const { voice } = startEngine();
+    const pattern = getEditingPattern()!;
+    // Counted as a DELTA: this file runs on fake timers and the render leaves its own
+    // behind, so the absolute count is not ours to predict.
+    const idle = vi.getTimerCount();
+    act(() => edit('source.release', 0.9));
+    expect(vi.getTimerCount()).toBe(idle + 1);
+
+    usePatternsStore.getState().openPatternForEditing(null);
+    discardVoiceDraft('pattern', pattern.id);
+
+    expect(vi.getTimerCount()).toBe(idle);
+
+    usePatternsStore.getState().openPatternForEditing(pattern.id);
+    flushRebuild();
+    expect(builtVoices()).toHaveLength(0);
+    expect(voice.dispose).not.toHaveBeenCalled();
+  });
+
+  it('leaves another pattern’s armed rebuild alone when one pattern discards', () => {
+    // `pendingRebuild` is ONE binding, belonging to whichever pattern is open, and this
+    // seam is addressed by id — so an unguarded cancel would let a discard aimed at some
+    // other pattern disarm the open one's source-identity build, with nothing to re-arm
+    // it and no sound to say so.
+    const other = openPatternId();
+    expect(setVoiceParam('pattern', other, 'level.volumeDb', -12).ok).toBe(true);
+    openBlankPattern('Second pattern');
+    const { voice } = startEngine();
+
+    const idle = vi.getTimerCount();
+    act(() => edit('source.release', 0.9));
+    expect(vi.getTimerCount()).toBe(idle + 1);
+
+    act(() => discardVoiceDraft('pattern', other));
+
+    // Still armed — and it still lands.
+    expect(vi.getTimerCount()).toBe(idle + 1);
+    flushRebuild();
+    expect(builtVoices()).toHaveLength(1);
+    expect(voice.dispose).toHaveBeenCalled();
+  });
+
+  it('retires an edit when the pattern’s voice ref moves behind the pane’s back', () => {
+    // A selection made through an editor calls `refreshVoice` itself. This is the one
+    // made by something else — a pattern undo restoring a snapshot with a different
+    // `voiceRef` — and the pane cannot catch it: `PaneStack` unmounts a collapsed pane's
+    // body, so the engine's own hook watches the tag instead.
+    const saved = saveVoiceAs('Mine', getDefaultPresetForSlot('clean-amp'));
+    if (!saved.ok) throw new Error(saved.reason);
+    const { voice } = startEngine();
+    const pattern = getEditingPattern()!;
+    act(() => edit('level.volumeDb', -30));
+    expect(isVoiceDirty('pattern', pattern.id)).toBe(true);
+
+    // The store write WITHOUT the seam call around it. `selectVoice` is this line plus
+    // a `refreshVoice`, and an undo that restores a snapshot carrying a different ref is
+    // this line with nothing at all — which is the case being pinned.
+    act(() => {
+      usePatternsStore.getState().setEditingPatternVoiceRef({
+        kind: 'default',
+        slotId: 'metal-amp',
+      });
+    });
+
+    // The entry is GONE, not merely shadowed by a tag that stopped matching: left
+    // standing, a redo back to the original ref resurrects an edit the user walked away
+    // from. Read through `voiceDraftKeys`, because every other read would do the
+    // clearing itself and pass either way.
+    expect(voiceDraftKeys()).not.toContain(`pattern:${pattern.id}`);
+
+    // And the engine goes and gets the stored voice rather than sounding that edit on.
+    // A rebuild rather than a retune because the REF moved: `voiceKeyOf` carries it.
+    flushRebuild();
+    expect(voice.dispose).toHaveBeenCalled();
+    expect(lastVoice().preset).toEqual(getDefaultPresetForSlot('metal-amp'));
+  });
+
   it("never writes the live voice's preset back into the store", () => {
     const saved = saveVoiceAs('Mine', editingPreset());
     if (!saved.ok) throw new Error(saved.reason);
     const stored = useVoiceStore.getState().variants[0].preset;
     startEngine();
 
-    act(() => applyVoicePreset({ ...stored, level: { volumeDb: -9, pan: 0 } }));
+    act(() => edit('level.volumeDb', -9));
 
     // `swapPreset` reassigns the voice's own copy of the preset from what it managed to
     // apply, and for a sampler the banks in it are not the ones sounding — so the voice

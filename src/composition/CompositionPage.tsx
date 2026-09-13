@@ -108,7 +108,7 @@ export function CompositionPage({
    * Which voice racks are folded, owned by `App` for the reason `mode` is —
    * this page unmounts on every visit to the pattern page. The UNSAVED edits
    * those racks hold are a different problem with a different answer: they are
-   * in `voice/trackVoiceDrafts`, above every component, because the engine has
+   * in `voice/voiceDrafts`, above every component, because the engine has
    * to read them too. See that module.
    */
   collapsedRacks?: readonly string[];

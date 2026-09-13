@@ -16,10 +16,11 @@ import {
   type VoiceOption,
 } from '../voice/voiceService';
 import {
-  discardTrackVoiceDraft,
-  useTrackVoiceDirty,
-  useTrackVoiceWorkingPreset,
-} from '../voice/trackVoiceDrafts';
+  discardVoiceDraft,
+  setVoiceName,
+  useVoiceDirty,
+  useVoiceWorkingPreset,
+} from '../voice/voiceDrafts';
 import { SHARED_VOICE_REFUSAL_TEXT, useNameForm, voiceButtonClass } from '../voice/voiceChrome';
 import { DirtyPill } from '../voice/DirtyPill';
 import { NameForm } from '../voice/NameForm';
@@ -77,7 +78,7 @@ import { NameForm } from '../voice/NameForm';
  *
  * The indicator here reflects the SELECTED track's draft and nothing else, so
  * switching tracks switches what it says without either draft being touched —
- * `trackVoiceDrafts` holds up to eight of them above every unmount.
+ * `voiceDrafts` holds up to eight of them above every unmount.
  *
  * There is deliberately NO Revert button in this rail. The rack's strip already
  * has one and it is CANONICAL: an edit was made on the rack, so the way to throw
@@ -140,13 +141,18 @@ function TrackVoicePicker({ track }: { track: Track }) {
   // What the rack is showing and the engine is building: the unsaved edit when
   // there is one, the resolved variant otherwise. The SAME call the rack edits
   // through, so Save writes exactly the draft the rack is showing.
-  const preset = useTrackVoiceWorkingPreset(track);
-  const dirty = useTrackVoiceDirty(track);
+  //
+  // BY ID, so the composition store is the authority for the preset and the `track`
+  // prop is chrome only (its name, and the rail's own status row). The two cannot
+  // disagree about the voice even for a render, which is the point of addressing the
+  // seam rather than reading the document it was handed.
+  const preset = useVoiceWorkingPreset('track', track.id);
+  const dirty = useVoiceDirty('track', track.id);
 
   const [notice, setNotice] = useState<string | null>(null);
   // Transient by design: switching track discards a half-typed name, which is
   // what pressing Escape would do anyway. The state that must survive an unmount
-  // is the draft, and that is in `trackVoiceDrafts`. The hook is `VoicePane`'s —
+  // is the draft, and that is in `voiceDrafts`. The hook is `VoicePane`'s —
   // the focus-return it carries is the half two copies would eventually disagree
   // about, and it is invisible in a screenshot.
   const {
@@ -155,6 +161,11 @@ function TrackVoicePicker({ track }: { track: Track }) {
     open: openNameForm,
     close: closeNameForm,
   } = useNameForm();
+
+  // Unreachable: this component is only rendered for a track this rail found in
+  // `useTracks`, which is the same list the draft store resolves against.
+  // Guarded rather than asserted, and after every hook above has run.
+  if (!preset) return null;
 
   const ref = readTrackVoiceRef(track);
   const currentKey = ref ? voiceKey(ref) : '';
@@ -173,10 +184,10 @@ function TrackVoicePicker({ track }: { track: Track }) {
   const report = (result: { ok: true } | { ok: false; reason: string }) =>
     setNotice(result.ok ? null : result.reason);
 
-  /** Retire this track's draft, and tell the engine. `discardTrackVoiceDraft`
-   *  notifies even when it deletes nothing to delete, which is what makes the
-   *  live voice go back to what the store now holds. */
-  const discard = () => discardTrackVoiceDraft(track.id);
+  /** Retire this track's draft, and tell the engine. `discardVoiceDraft` notifies
+   *  whenever it deletes one, which is what makes the live voice go back to what
+   *  the store now holds. */
+  const discard = () => discardVoiceDraft('track', track.id);
 
   /**
    * Land a pick: report whatever came back, and RETIRE THE DRAFT — but only if the
@@ -185,9 +196,9 @@ function TrackVoicePicker({ track }: { track: Track }) {
    *
    * ⚠ The discard is not redundant with the repoint. A new ref only makes the
    * draft's tag STOP MATCHING, which is not the same as retiring it:
-   * `readTrackVoiceDraft` self-clears on a mismatch, but the only readers a page
-   * that has never pressed Play has are `useTrackVoiceDirty` /
-   * `useTrackVoiceWorkingPreset`, and those compare the tag WITHOUT deleting (a
+   * `readVoiceDraft` self-clears on a mismatch, but the only readers a page
+   * that has never pressed Play has are `useVoiceDirty` /
+   * `useVoiceWorkingPreset`, and those compare the tag WITHOUT deleting (a
    * store write during render is a React error). Left standing, the entry
    * resurrects the moment the track is pointed back at the voice it was taken
    * from — and the user is then playing an edit they threw away.
@@ -268,7 +279,17 @@ function TrackVoicePicker({ track }: { track: Track }) {
       setNotice(REFUSAL_TEXT[result.reason]);
       return;
     }
-    setNotice(null);
+    // The draft carries the OLD name and `saveTrackVoice` writes the record's name
+    // back from `preset.name`, so without this the next Save would silently undo the
+    // rename — which is why Rename used to be disabled while dirty. A no-op when
+    // there is no draft.
+    //
+    // Reported like every other seam call here, and not because the refusal is
+    // reachable today (this one pre-trims the name, and the rename above has already
+    // proved the holder is live): the rail's contract is that a refusal is rendered
+    // rather than swallowed, and the one call that ignored its `Result` is where that
+    // stops being true.
+    report(setVoiceName('track', track.id, trimmed));
     closeNameForm();
   };
 
@@ -353,19 +374,12 @@ function TrackVoicePicker({ track }: { track: Track }) {
         <button
           type="button"
           onClick={openNameForm('rename', preset.name)}
-          // ⚠ DISABLED WHILE DIRTY, and not merely to keep things tidy: the draft
-          // carries the OLD name, and `saveTrackVoice` writes the record's name
-          // back from `preset.name` — so a rename made now would be silently
-          // undone by the next Save. `VoicePane` patches its working copy instead,
-          // which this surface cannot do: `trackVoiceDrafts` exposes writes for
-          // schema params only, by design. A name write there is the better answer
-          // and is a change to that module, not to this one.
-          disabled={isBuiltIn || dirty}
-          title={
-            dirty && !isBuiltIn
-              ? 'Save or revert this track’s edits first — a rename would be undone by the next Save'
-              : undefined
-          }
+          // Renaming WHILE DIRTY is fine now, and it was not before: the draft
+          // carries the old name and `saveTrackVoice` writes the record's name back
+          // from `preset.name`, so a rename used to be silently undone by the next
+          // Save and this button was disabled to say so. `voiceDrafts.setVoiceName`
+          // patches the draft, which is the write that module was missing.
+          disabled={isBuiltIn}
           className={voiceButtonClass}
         >
           Rename

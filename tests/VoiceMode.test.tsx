@@ -10,6 +10,7 @@ import {
   sourceTrimDb,
   useVoiceStore,
   type Track,
+  type VoicePreset,
 } from '@fretwork/lib';
 import { App } from '../src/App';
 import { ArrangementGrid } from '../src/composition/ArrangementGrid';
@@ -30,19 +31,19 @@ import {
   type SectionId,
 } from '../src/voice/paramSchema';
 import {
-  addTrackVoiceSection,
-  addTrackVoicePedal,
-  addTrackVoiceSubBranch,
-  clearTrackVoiceDrafts,
-  discardTrackVoiceDraft,
-  isTrackVoiceDirty,
-  removeTrackVoiceSection,
-  removeTrackVoiceSubBranch,
-  setTrackVoiceParam,
-  setTrackVoiceSubBranchKind,
-  trackVoicePreset,
-  removeTrackVoicePedal,
-} from '../src/voice/trackVoiceDrafts';
+  addVoiceSection,
+  addVoicePedal,
+  addVoiceSubBranch,
+  clearVoiceDrafts,
+  discardVoiceDraft,
+  isVoiceDirty,
+  removeVoiceSection,
+  removeVoiceSubBranch,
+  setVoiceParam,
+  setVoiceSubBranchKind,
+  voicePreset,
+  removeVoicePedal,
+} from '../src/voice/voiceDrafts';
 import { playComposition, useCompositionPlayback } from '../src/audio/playbackService';
 import { getAtPath } from '../src/voice/presetPaths';
 import { SEED_BODY_FILTER_ENVELOPE } from '../src/voice/sourceDefaults';
@@ -274,7 +275,21 @@ function place(patternId: string, trackId: string, atTick = 0): void {
   if (!result.ok) throw new Error(result.reason);
 }
 
-const volumeOf = (track: Track): unknown => getAtPath(trackVoicePreset(track), VOLUME_PATH);
+/**
+ * The draft seam addressed for a TRACK, which is how the store is keyed now — see
+ * `voiceDrafts`, which takes a holder kind and an id rather than a document, so a
+ * caller with no pointer can reach it. Null means "no such track", which these
+ * tests never mean.
+ */
+const presetOf = (track: Track): VoicePreset => {
+  const preset = voicePreset('track', track.id);
+  if (!preset) throw new Error(`no such track: ${track.id}`);
+  return preset;
+};
+
+const dirtyOf = (track: Track): boolean => isVoiceDirty('track', track.id);
+
+const volumeOf = (track: Track): unknown => getAtPath(presetOf(track), VOLUME_PATH);
 
 /** One stage of one track's rack. The landmark IS the disambiguation: eight
  *  racks put eight sliders called "Volume" on the page, and `RackFace`'s region
@@ -367,7 +382,7 @@ beforeEach(() => {
   selectPlacements([]);
   selectTrack(null);
   // A module that outlives every unmount also outlives every test in this file.
-  clearTrackVoiceDrafts();
+  clearVoiceDrafts();
   lib.reset();
 });
 
@@ -376,23 +391,23 @@ beforeEach(() => {
 describe('the per-track voice draft seam', () => {
   it('edits one track and leaves the other exactly where it was', () => {
     const tracks = twoTracks();
-    const before = trackVoicePreset(tracks[1]);
+    const before = presetOf(tracks[1]);
 
-    expect(setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6).ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6).ok).toBe(true);
 
     expect(volumeOf(getTracks()[0])).toBe(-6);
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(true);
+    expect(dirtyOf(getTracks()[0])).toBe(true);
     // The failure this ticket is most likely to ship: one working copy shared by
     // every rack. Both halves are asserted — the value AND the dirty flag.
-    expect(trackVoicePreset(getTracks()[1])).toBe(before);
-    expect(isTrackVoiceDirty(getTracks()[1])).toBe(false);
+    expect(presetOf(getTracks()[1])).toBe(before);
+    expect(dirtyOf(getTracks()[1])).toBe(false);
   });
 
   it('gives two tracks two independent unsaved tones', () => {
     const tracks = twoTracks();
 
-    setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6);
-    setTrackVoiceParam(tracks[1].id, VOLUME_PATH, 3);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
+    setVoiceParam('track', tracks[1].id, VOLUME_PATH, 3);
 
     expect(volumeOf(getTracks()[0])).toBe(-6);
     expect(volumeOf(getTracks()[1])).toBe(3);
@@ -400,16 +415,16 @@ describe('the per-track voice draft seam', () => {
 
   it('refuses in words rather than throwing, and writes nothing', () => {
     const tracks = twoTracks();
-    const before = trackVoicePreset(tracks[0]);
+    const before = presetOf(tracks[0]);
 
     // A number past the schema's declared range. A knob clamps itself; a caller
     // with no pointer hands over whatever it computed, which is the case this
     // guard exists for.
-    const tooLoud = setTrackVoiceParam(tracks[0].id, VOLUME_PATH, 900);
-    const notAParam = setTrackVoiceParam(tracks[0].id, 'effects.reverb.wet', 0.5);
-    const wrongKind = setTrackVoiceParam(tracks[0].id, VOLUME_PATH, 'loud');
-    const noTrack = setTrackVoiceParam('not-a-track', VOLUME_PATH, 0);
-    const noSuchPack = setTrackVoiceParam(tracks[0].id, 'source.samples', 'nope');
+    const tooLoud = setVoiceParam('track', tracks[0].id, VOLUME_PATH, 900);
+    const notAParam = setVoiceParam('track', tracks[0].id, 'effects.reverb.wet', 0.5);
+    const wrongKind = setVoiceParam('track', tracks[0].id, VOLUME_PATH, 'loud');
+    const noTrack = setVoiceParam('track', 'not-a-track', VOLUME_PATH, 0);
+    const noSuchPack = setVoiceParam('track', tracks[0].id, 'source.samples', 'nope');
 
     expect(tooLoud).toEqual({ ok: false, reason: expect.stringContaining('Volume') });
     // Per-voice reverb is deliberately undeclared in `paramSchema`, so the path
@@ -419,46 +434,46 @@ describe('the per-track voice draft seam', () => {
     expect(wrongKind).toEqual({ ok: false, reason: expect.stringContaining('number') });
     expect(noTrack).toEqual({ ok: false, reason: 'No such track.' });
     expect(noSuchPack).toEqual({ ok: false, reason: expect.stringContaining('sample pack') });
-    expect(trackVoicePreset(getTracks()[0])).toBe(before);
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(false);
+    expect(presetOf(getTracks()[0])).toBe(before);
+    expect(dirtyOf(getTracks()[0])).toBe(false);
   });
 
   it('does not mark a track dirty for a control reporting its own value', () => {
     const tracks = twoTracks();
-    const current = getAtPath(trackVoicePreset(tracks[0]), VOLUME_PATH);
+    const current = getAtPath(presetOf(tracks[0]), VOLUME_PATH);
 
-    expect(setTrackVoiceParam(tracks[0].id, VOLUME_PATH, current).ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, VOLUME_PATH, current).ok).toBe(true);
 
     // `setAtPath` returns the same object for a no-op write, and a rack that
     // marked itself unsaved on mount would offer a Revert with nothing to
     // revert — and would rebuild a sampler for a change that is not one.
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(false);
+    expect(dirtyOf(getTracks()[0])).toBe(false);
   });
 
   it('retires a draft when the track is pointed at a different voice', () => {
     const tracks = twoTracks();
     const other = listSelectableVoices('guitar').builtIns[1];
-    setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6);
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(true);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
+    expect(dirtyOf(getTracks()[0])).toBe(true);
 
     expect(setTrackVoice(tracks[0].id, other.ref).ok).toBe(true);
 
     // A draft is an edit OF a voice. Following the user onto the next one is how
     // an abandoned edit resurrects — and it would be showing the wrong amp's
     // numbers while doing it.
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(false);
-    expect(trackVoicePreset(getTracks()[0]).name).toBe(other.name);
+    expect(dirtyOf(getTracks()[0])).toBe(false);
+    expect(presetOf(getTracks()[0]).name).toBe(other.name);
   });
 
   it('discards back to the stored voice', () => {
     const tracks = twoTracks();
-    const stored = trackVoicePreset(tracks[0]);
-    setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6);
+    const stored = presetOf(tracks[0]);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
 
-    expect(discardTrackVoiceDraft(tracks[0].id).ok).toBe(true);
+    expect(discardVoiceDraft('track', tracks[0].id).ok).toBe(true);
 
-    expect(trackVoicePreset(getTracks()[0])).toBe(stored);
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(false);
+    expect(presetOf(getTracks()[0])).toBe(stored);
+    expect(dirtyOf(getTracks()[0])).toBe(false);
   });
 
   it('adds a missing stage by seeding the schema’s own fallbacks, and removes it whole', () => {
@@ -466,15 +481,15 @@ describe('the per-track voice draft seam', () => {
     // Whatever the fixture voice ships with, both ends of the round trip are
     // asserted rather than the starting state — `ACOUSTIC_GUITAR_PRESET` has no
     // `effects` object at all, and other built-ins do.
-    expect(removeTrackVoiceSection(tracks[0].id, 'amp').ok).toBe(true);
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'effects.amp')).toBeUndefined();
+    expect(removeVoiceSection('track', tracks[0].id, 'amp').ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.amp')).toBeUndefined();
 
-    expect(addTrackVoiceSection(tracks[0].id, 'amp').ok).toBe(true);
+    expect(addVoiceSection('track', tracks[0].id, 'amp').ok).toBe(true);
 
     // Required params only: the optional ones are left out on purpose, because
     // the lib documents its own default for each and writing our guess would
     // turn "unspecified" into a value the user never chose.
-    const amp = trackVoicePreset(getTracks()[0]);
+    const amp = presetOf(getTracks()[0]);
     expect(getAtPath(amp, 'effects.amp.preDrive')).toBe(0.3);
     expect(getAtPath(amp, 'effects.amp.bass')).toBe(0);
     expect(getAtPath(amp, 'effects.amp.enabled')).toBeUndefined();
@@ -485,7 +500,7 @@ describe('the per-track voice draft seam', () => {
 
     // `source` is not a branch a voice can be without: switching KIND is the
     // operation, and `Source` declares no `removableBranch`.
-    expect(removeTrackVoiceSection(tracks[0].id, 'source')).toEqual({
+    expect(removeVoiceSection('track', tracks[0].id, 'source')).toEqual({
       ok: false,
       reason: expect.stringContaining('cannot be removed'),
     });
@@ -497,21 +512,21 @@ describe('the per-track voice draft seam', () => {
     // and the seam has to know it is not a `setAtPath`. Writing the discriminant
     // alone would leave the sampler's `samples` beside an `fm-synth` tag.
     const tracks = twoTracks();
-    expect(trackVoicePreset(tracks[0]).source.kind).toBe('sampler');
+    expect(presetOf(tracks[0]).source.kind).toBe('sampler');
 
-    expect(setTrackVoiceParam(tracks[0].id, 'source.kind', 'fm-synth')).toEqual({
+    expect(setVoiceParam('track', tracks[0].id, 'source.kind', 'fm-synth')).toEqual({
       ok: true,
       value: undefined,
     });
 
-    const source = trackVoicePreset(getTracks()[0]).source;
+    const source = presetOf(getTracks()[0]).source;
     expect(source.kind).toBe('fm-synth');
     expect(Object.keys(source).sort()).toEqual(['kind', 'params']);
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.samples')).toBeUndefined();
+    expect(getAtPath(presetOf(getTracks()[0]), 'source.samples')).toBeUndefined();
     // Tone's documented FMSynth default, so the voice plays before anything is
     // turned. And the OTHER track is untouched, as with every write here.
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.params.harmonicity')).toBe(3);
-    expect(trackVoicePreset(getTracks()[1]).source.kind).toBe('sampler');
+    expect(getAtPath(presetOf(getTracks()[0]), 'source.params.harmonicity')).toBe(3);
+    expect(presetOf(getTracks()[1]).source.kind).toBe('sampler');
   });
 
   it('refuses a param the current source does not have', () => {
@@ -519,22 +534,22 @@ describe('the per-track voice draft seam', () => {
     // written onto a sampler would widen the preset with a field `Voice` never
     // reads, and the caller would be told nothing.
     const tracks = twoTracks();
-    expect(trackVoicePreset(tracks[0]).source.kind).toBe('sampler');
+    expect(presetOf(tracks[0]).source.kind).toBe('sampler');
 
-    const wrongKind = setTrackVoiceParam(tracks[0].id, 'source.params.harmonicity', 2);
+    const wrongKind = setVoiceParam('track', tracks[0].id, 'source.params.harmonicity', 2);
     expect(wrongKind).toEqual({ ok: false, reason: expect.stringContaining('source') });
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.params')).toBeUndefined();
+    expect(getAtPath(presetOf(getTracks()[0]), 'source.params')).toBeUndefined();
 
     // Switch, and the same write is now accepted — an encoder takes any finite
     // number, because Tone publishes no bound for harmonicity.
-    setTrackVoiceParam(tracks[0].id, 'source.kind', 'fm-synth');
-    expect(setTrackVoiceParam(tracks[0].id, 'source.params.harmonicity', 12.5)).toEqual({
+    setVoiceParam('track', tracks[0].id, 'source.kind', 'fm-synth');
+    expect(setVoiceParam('track', tracks[0].id, 'source.params.harmonicity', 12.5)).toEqual({
       ok: true,
       value: undefined,
     });
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.params.harmonicity')).toBe(12.5);
+    expect(getAtPath(presetOf(getTracks()[0]), 'source.params.harmonicity')).toBe(12.5);
     // …and still refuses a non-number, which is the only thing an encoder checks.
-    expect(setTrackVoiceParam(tracks[0].id, 'source.params.harmonicity', 'more')).toEqual({
+    expect(setVoiceParam('track', tracks[0].id, 'source.params.harmonicity', 'more')).toEqual({
       ok: false,
       reason: expect.stringContaining('number'),
     });
@@ -546,12 +561,12 @@ describe('the per-track voice draft seam', () => {
     // would answer yes to it through the prototype chain, and the seam would
     // then hand `defaultSourceFor` a kind its switch has no case for.
     for (const bogus of ['wavetable', 'toString', 7]) {
-      expect(setTrackVoiceParam(tracks[0].id, 'source.kind', bogus)).toEqual({
+      expect(setVoiceParam('track', tracks[0].id, 'source.kind', bogus)).toEqual({
         ok: false,
         reason: expect.stringContaining('options'),
       });
     }
-    expect(trackVoicePreset(getTracks()[0]).source.kind).toBe('sampler');
+    expect(presetOf(getTracks()[0]).source.kind).toBe('sampler');
   });
 });
 
@@ -583,18 +598,18 @@ describe('the second source and the body filter, through the track seam', () => 
   it('accepts a second source row on a voice that has one', () => {
     const track = bassTrackWithLayer();
     // The built-in's real values, not the schema's fallbacks.
-    expect(getAtPath(trackVoicePreset(track), 'layer.gainDb')).toBe(-8);
-    expect(getAtPath(trackVoicePreset(track), 'layer.octaveOffset')).toBe(-1);
+    expect(getAtPath(presetOf(track), 'layer.gainDb')).toBe(-8);
+    expect(getAtPath(presetOf(track), 'layer.octaveOffset')).toBe(-1);
 
-    expect(setTrackVoiceParam(track.id, 'layer.gainDb', -5)).toEqual({
+    expect(setVoiceParam('track', track.id, 'layer.gainDb', -5)).toEqual({
       ok: true,
       value: undefined,
     });
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'layer.gainDb')).toBe(-5);
+    expect(getAtPath(presetOf(getTracks()[0]), 'layer.gainDb')).toBe(-5);
     // The layer's synth is addressable too, and it is a different path from the
     // primary's — the same descriptor generated under two branches.
-    expect(setTrackVoiceParam(track.id, 'layer.source.params.harmonicity', 1.25).ok).toBe(true);
-    const preset = trackVoicePreset(getTracks()[0]);
+    expect(setVoiceParam('track', track.id, 'layer.source.params.harmonicity', 1.25).ok).toBe(true);
+    const preset = presetOf(getTracks()[0]);
     expect(getAtPath(preset, 'layer.source.params.harmonicity')).toBe(1.25);
     expect(getAtPath(preset, 'source.params.harmonicity')).not.toBe(1.25);
   });
@@ -605,28 +620,28 @@ describe('the second source and the body filter, through the track seam', () => 
     // write would create `layer: { gainDb: -5 }` — a `VoiceLayer` with no
     // `source`, which is what `Voice._buildLayer` calls `buildSynth(undefined)` on.
     const tracks = twoTracks();
-    expect(trackVoicePreset(tracks[0]).layer).toBeUndefined();
+    expect(presetOf(tracks[0]).layer).toBeUndefined();
 
-    expect(setTrackVoiceParam(tracks[0].id, 'layer.gainDb', -5).ok).toBe(false);
-    expect(trackVoicePreset(getTracks()[0]).layer).toBeUndefined();
+    expect(setVoiceParam('track', tracks[0].id, 'layer.gainDb', -5).ok).toBe(false);
+    expect(presetOf(getTracks()[0]).layer).toBeUndefined();
   });
 
   it('refuses to re-kind a second source, rather than re-kinding the primary', () => {
-    // ⚠ THE MIS-ROUTE. `setTrackVoiceParam` resolves ANY `source-kind` row through
+    // ⚠ THE MIS-ROUTE. `setVoiceParam` resolves ANY `source-kind` row through
     // `withSourceKind`, which takes no path and always replaces `preset.source` —
     // so a `layer.source.kind` row in `section.params` would let this call swap the
     // PRIMARY while the caller pointed at the layer, silently and audibly. The
     // picker is declared on `ParamSubBranch.kindRow` instead, which keeps the path
     // out of the seam's map: refused, and the primary is where it was.
     const track = bassTrackWithLayer();
-    const before = trackVoicePreset(track);
+    const before = presetOf(track);
     expect(before.source.kind).toBe('fm-synth');
     expect(before.layer?.source.kind).toBe('fm-synth');
 
-    const refused = setTrackVoiceParam(track.id, 'layer.source.kind', 'pluck-synth');
+    const refused = setVoiceParam('track', track.id, 'layer.source.kind', 'pluck-synth');
     expect(refused.ok).toBe(false);
 
-    const after = trackVoicePreset(getTracks()[0]);
+    const after = presetOf(getTracks()[0]);
     expect(after.source.kind).toBe('fm-synth');
     expect(after.layer?.source.kind).toBe('fm-synth');
     expect(after.source).toBe(before.source);
@@ -634,70 +649,70 @@ describe('the second source and the body filter, through the track seam', () => 
 
   it('adds a body filter as a static one, and refuses envelope rows until there is an envelope', () => {
     const tracks = twoTracks();
-    expect(trackVoicePreset(tracks[0]).bodyFilter).toBeUndefined();
+    expect(presetOf(tracks[0]).bodyFilter).toBeUndefined();
 
-    expect(addTrackVoiceSection(tracks[0].id, 'body-filter').ok).toBe(true);
-    const filter = trackVoicePreset(getTracks()[0]).bodyFilter;
+    expect(addVoiceSection('track', tracks[0].id, 'body-filter').ok).toBe(true);
+    const filter = presetOf(getTracks()[0]).bodyFilter;
     expect(filter).toBeDefined();
-    // `addTrackVoiceSection` seeds every REQUIRED row and skips the optional ones,
+    // `addVoiceSection` seeds every REQUIRED row and skips the optional ones,
     // and every envelope row is gated on a branch that does not exist yet — so what
     // it produces is a fixed cutoff, which is a sound of its own.
     expect(filter?.envelope).toBeUndefined();
     expect(Object.keys(filter!).sort()).toEqual(['cutoff', 'q']);
 
     // …and the envelope's rows are refused rather than minting a partial one.
-    expect(setTrackVoiceParam(tracks[0].id, 'bodyFilter.envelope.attack', 0.1).ok).toBe(false);
-    expect(trackVoicePreset(getTracks()[0]).bodyFilter?.envelope).toBeUndefined();
+    expect(setVoiceParam('track', tracks[0].id, 'bodyFilter.envelope.attack', 0.1).ok).toBe(false);
+    expect(presetOf(getTracks()[0]).bodyFilter?.envelope).toBeUndefined();
 
     // The filter's own rows are live, and removing the stage takes all of it.
-    expect(setTrackVoiceParam(tracks[0].id, 'bodyFilter.cutoff', 4000).ok).toBe(true);
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'bodyFilter.cutoff')).toBe(4000);
-    expect(removeTrackVoiceSection(tracks[0].id, 'body-filter').ok).toBe(true);
-    expect(trackVoicePreset(getTracks()[0]).bodyFilter).toBeUndefined();
+    expect(setVoiceParam('track', tracks[0].id, 'bodyFilter.cutoff', 4000).ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'bodyFilter.cutoff')).toBe(4000);
+    expect(removeVoiceSection('track', tracks[0].id, 'body-filter').ok).toBe(true);
+    expect(presetOf(getTracks()[0]).bodyFilter).toBeUndefined();
     // The other track never had one.
-    expect(trackVoicePreset(getTracks()[1]).bodyFilter).toBeUndefined();
+    expect(presetOf(getTracks()[1]).bodyFilter).toBeUndefined();
   });
 
   // REMOVED 2026-09-01, see docs/HANDOFF.md — it reached for Electric Guitar because
   // that was the only shipped voice carrying a body filter with an envelope.
 
   it('adds, re-kinds and removes a second source with no pointer at all', () => {
-    // ⚠ THE AGENT'S ROUTE IN. `addTrackVoiceSection` is `SectionId`-keyed and a
+    // ⚠ THE AGENT'S ROUTE IN. `addVoiceSection` is `SectionId`-keyed and a
     // sub-branch is not a section; every `layer.*` write is refused while the
     // branch is absent. So without these three, a track with no second source
     // could never gain one from anything but a mouse, and every feature here is
     // supposed to be callable without one.
     const tracks = twoTracks();
-    expect(trackVoicePreset(tracks[0]).layer).toBeUndefined();
+    expect(presetOf(tracks[0]).layer).toBeUndefined();
 
-    expect(addTrackVoiceSubBranch(tracks[0].id, 'layer')).toEqual({
+    expect(addVoiceSubBranch('track', tracks[0].id, 'layer')).toEqual({
       ok: true,
       value: undefined,
     });
-    const added = trackVoicePreset(getTracks()[0]).layer;
+    const added = presetOf(getTracks()[0]).layer;
     // A whole `VoiceSource`, which is the reason `seed` exists — `_buildLayer`
     // calls `buildSynth(layer.source)` and reads `.kind` off it.
     expect(added?.source.kind).toBe('fm-synth');
     expect(added?.source).toHaveProperty('params.envelope.attack');
     expect(added?.octaveOffset).toBe(0);
     // Under the primary at the mixer, whichever family the primary is.
-    const primarySource = trackVoicePreset(getTracks()[0]).source;
+    const primarySource = presetOf(getTracks()[0]).source;
     expect(
       added!.gainDb + sourceTrimDb(added!.source) - sourceTrimDb(primarySource),
     ).toBeLessThanOrEqual(-6);
-    // Idempotent, like `addTrackVoiceSection`: a caller that cannot see the rack
+    // Idempotent, like `addVoiceSection`: a caller that cannot see the rack
     // must not have to look first.
-    expect(addTrackVoiceSubBranch(tracks[0].id, 'layer').ok).toBe(true);
-    expect(trackVoicePreset(getTracks()[0]).layer?.gainDb).toBe(added?.gainDb);
+    expect(addVoiceSubBranch('track', tracks[0].id, 'layer').ok).toBe(true);
+    expect(presetOf(getTracks()[0]).layer?.gainDb).toBe(added?.gainDb);
 
     // …and now the rows it gates are accepted, where they were refused before.
-    expect(setTrackVoiceParam(tracks[0].id, 'layer.octaveOffset', -1).ok).toBe(true);
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'layer.octaveOffset')).toBe(-1);
+    expect(setVoiceParam('track', tracks[0].id, 'layer.octaveOffset', -1).ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'layer.octaveOffset')).toBe(-1);
 
     // The kind swap is the branch-aware one, and never touches the primary.
-    const primaryBefore = trackVoicePreset(getTracks()[0]).source;
-    expect(setTrackVoiceSubBranchKind(tracks[0].id, 'layer', 'pluck-synth').ok).toBe(true);
-    let preset = trackVoicePreset(getTracks()[0]);
+    const primaryBefore = presetOf(getTracks()[0]).source;
+    expect(setVoiceSubBranchKind('track', tracks[0].id, 'layer', 'pluck-synth').ok).toBe(true);
+    let preset = presetOf(getTracks()[0]);
     expect(preset.layer?.source.kind).toBe('pluck-synth');
     expect(preset.layer?.source).toHaveProperty('params.attackNoise');
     expect(preset.layer?.source).not.toHaveProperty('params.harmonicity');
@@ -705,36 +720,36 @@ describe('the second source and the body filter, through the track seam', () => 
     // The layer's own tuning outside `source` survives the swap.
     expect(preset.layer?.octaveOffset).toBe(-1);
 
-    expect(removeTrackVoiceSubBranch(tracks[0].id, 'layer').ok).toBe(true);
-    preset = trackVoicePreset(getTracks()[0]);
+    expect(removeVoiceSubBranch('track', tracks[0].id, 'layer').ok).toBe(true);
+    preset = presetOf(getTracks()[0]);
     expect(preset.layer).toBeUndefined();
     expect(Object.hasOwn(preset, 'layer')).toBe(false);
     // The other track was never touched by any of it.
-    expect(trackVoicePreset(getTracks()[1]).layer).toBeUndefined();
+    expect(presetOf(getTracks()[1]).layer).toBeUndefined();
   });
 
   it('refuses the sub-branch seams in words rather than doing nothing', () => {
     const tracks = twoTracks();
     // A branch the table does not declare.
-    expect(addTrackVoiceSubBranch(tracks[0].id, 'reverb').ok).toBe(false);
-    expect(removeTrackVoiceSubBranch(tracks[0].id, 'reverb').ok).toBe(false);
+    expect(addVoiceSubBranch('track', tracks[0].id, 'reverb').ok).toBe(false);
+    expect(removeVoiceSubBranch('track', tracks[0].id, 'reverb').ok).toBe(false);
     // A sub-branch with no source of its own — the cutoff envelope carries no
     // `kindRow`, so there is nothing for a kind to name.
-    expect(setTrackVoiceSubBranchKind(tracks[0].id, 'body-filter-envelope', 'fm-synth').ok).toBe(
+    expect(setVoiceSubBranchKind('track', tracks[0].id, 'body-filter-envelope', 'fm-synth').ok).toBe(
       false,
     );
     // ⚠ AND: re-kinding a layer that is not there is refused, not reported as a
     // success that changed nothing. `withLayerSourceKind` returns the preset
     // untouched when `preset.layer` is undefined, so without the guard this call
     // would answer `ok` and leave no layer behind.
-    expect(trackVoicePreset(tracks[0]).layer).toBeUndefined();
-    expect(setTrackVoiceSubBranchKind(tracks[0].id, 'layer', 'fm-synth').ok).toBe(false);
-    expect(trackVoicePreset(getTracks()[0]).layer).toBeUndefined();
+    expect(presetOf(tracks[0]).layer).toBeUndefined();
+    expect(setVoiceSubBranchKind('track', tracks[0].id, 'layer', 'fm-synth').ok).toBe(false);
+    expect(presetOf(getTracks()[0]).layer).toBeUndefined();
     // A kind the picker does not offer, on a layer that does exist.
-    expect(addTrackVoiceSubBranch(tracks[0].id, 'layer').ok).toBe(true);
-    expect(setTrackVoiceSubBranchKind(tracks[0].id, 'layer', 'sampler').ok).toBe(false);
-    expect(setTrackVoiceSubBranchKind(tracks[0].id, 'layer', 'wavetable').ok).toBe(false);
-    expect(trackVoicePreset(getTracks()[0]).layer?.source.kind).toBe('fm-synth');
+    expect(addVoiceSubBranch('track', tracks[0].id, 'layer').ok).toBe(true);
+    expect(setVoiceSubBranchKind('track', tracks[0].id, 'layer', 'sampler').ok).toBe(false);
+    expect(setVoiceSubBranchKind('track', tracks[0].id, 'layer', 'wavetable').ok).toBe(false);
+    expect(presetOf(getTracks()[0]).layer?.source.kind).toBe('fm-synth');
   });
 
   it('refuses a frequency of zero and a fractional octave, which are silence and a rounding', () => {
@@ -745,21 +760,21 @@ describe('the second source and the body filter, through the track seam', () => 
     // `baseFrequency = 0` pins the whole sweep at DC, so one call yields a track
     // that plays silence with every control reading normally.
     const tracks = twoTracks();
-    expect(addTrackVoiceSection(tracks[0].id, 'body-filter').ok).toBe(true);
+    expect(addVoiceSection('track', tracks[0].id, 'body-filter').ok).toBe(true);
 
-    expect(setTrackVoiceParam(tracks[0].id, 'bodyFilter.cutoff', 0).ok).toBe(false);
-    expect(setTrackVoiceParam(tracks[0].id, 'bodyFilter.cutoff', -400).ok).toBe(false);
-    expect(setTrackVoiceParam(tracks[0].id, 'bodyFilter.q', -1).ok).toBe(false);
+    expect(setVoiceParam('track', tracks[0].id, 'bodyFilter.cutoff', 0).ok).toBe(false);
+    expect(setVoiceParam('track', tracks[0].id, 'bodyFilter.cutoff', -400).ok).toBe(false);
+    expect(setVoiceParam('track', tracks[0].id, 'bodyFilter.q', -1).ok).toBe(false);
     // …while the encoder itself is still unbounded ABOVE, which is the whole
     // point of it being an encoder: nothing here invented a maximum.
-    expect(setTrackVoiceParam(tracks[0].id, 'bodyFilter.cutoff', 19000).ok).toBe(true);
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'bodyFilter.cutoff')).toBe(19000);
+    expect(setVoiceParam('track', tracks[0].id, 'bodyFilter.cutoff', 19000).ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'bodyFilter.cutoff')).toBe(19000);
 
-    expect(addTrackVoiceSubBranch(tracks[0].id, 'body-filter-envelope').ok).toBe(true);
-    expect(setTrackVoiceParam(tracks[0].id, 'bodyFilter.envelope.baseFrequency', 0).ok).toBe(
+    expect(addVoiceSubBranch('track', tracks[0].id, 'body-filter-envelope').ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, 'bodyFilter.envelope.baseFrequency', 0).ok).toBe(
       false,
     );
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'bodyFilter.envelope.baseFrequency')).toBe(
+    expect(getAtPath(presetOf(getTracks()[0]), 'bodyFilter.envelope.baseFrequency')).toBe(
       SEED_BODY_FILTER_ENVELOPE.baseFrequency,
     );
 
@@ -767,15 +782,15 @@ describe('the second source and the body filter, through the track seam', () => 
     // `transposeNote`, so 0.3 is 3.6 semitones and an arbitrary rounded note.
     // In range, on the step grid of no fader — the check the slider arm did not
     // have, because this is the table's first integral field.
-    expect(addTrackVoiceSubBranch(tracks[0].id, 'layer').ok).toBe(true);
-    expect(setTrackVoiceParam(tracks[0].id, 'layer.octaveOffset', 0.3).ok).toBe(false);
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'layer.octaveOffset')).toBe(0);
-    expect(setTrackVoiceParam(tracks[0].id, 'layer.octaveOffset', -1).ok).toBe(true);
+    expect(addVoiceSubBranch('track', tracks[0].id, 'layer').ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, 'layer.octaveOffset', 0.3).ok).toBe(false);
+    expect(getAtPath(presetOf(getTracks()[0]), 'layer.octaveOffset')).toBe(0);
+    expect(setVoiceParam('track', tracks[0].id, 'layer.octaveOffset', -1).ok).toBe(true);
     // …and a fractional value on a NON-integral slider is still fine: a step is a
     // detent, not a grid the preset has to sit on.
-    expect(addTrackVoiceSection(tracks[0].id, 'amp').ok).toBe(true);
-    expect(setTrackVoiceParam(tracks[0].id, 'effects.amp.preGainDb', 3.7).ok).toBe(true);
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'effects.amp.preGainDb')).toBe(3.7);
+    expect(addVoiceSection('track', tracks[0].id, 'amp').ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, 'effects.amp.preGainDb', 3.7).ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.amp.preGainDb')).toBe(3.7);
   });
 });
 
@@ -783,20 +798,20 @@ describe('the second source and the body filter, through the track seam', () => 
 
 describe('the pedalboard, through the track seam', () => {
   it('adds and removes a pedal with no pointer at all', () => {
-    // ⚠ THE AGENT'S ROUTE IN, and there is no other. `addTrackVoiceSection` is
+    // ⚠ THE AGENT'S ROUTE IN, and there is no other. `addVoiceSection` is
     // `SectionId`-keyed and the pedalboard section is always present, so it can
     // neither name a pedal nor create one; meanwhile every `effects.distortion.*`
     // write is refused while the branch is absent, because each row declares
     // `requiresBranch`. Without this pair a track with no distortion could never
     // gain one from anything but a mouse.
     const tracks = twoTracks();
-    expect(trackVoicePreset(tracks[0]).effects?.distortion).toBeUndefined();
+    expect(presetOf(tracks[0]).effects?.distortion).toBeUndefined();
 
-    expect(addTrackVoicePedal(tracks[0].id, 'distortion')).toEqual({
+    expect(addVoicePedal('track', tracks[0].id, 'distortion')).toEqual({
       ok: true,
       value: undefined,
     });
-    const added = trackVoicePreset(getTracks()[0]).effects?.distortion;
+    const added = presetOf(getTracks()[0]).effects?.distortion;
     // The COMPLETE params object, in one write. `Voice.buildChain` reads every
     // field of this straight into a `Tone.Distortion`, so a half-seeded branch is
     // a node constructed with `undefined`s rather than a stage awaiting tuning.
@@ -804,17 +819,17 @@ describe('the pedalboard, through the track seam', () => {
 
     // Idempotent, like both sibling adds: a caller that cannot see the rack must
     // not have to look first.
-    expect(addTrackVoicePedal(tracks[0].id, 'distortion').ok).toBe(true);
-    expect(trackVoicePreset(getTracks()[0]).effects?.distortion).toEqual(added);
+    expect(addVoicePedal('track', tracks[0].id, 'distortion').ok).toBe(true);
+    expect(presetOf(getTracks()[0]).effects?.distortion).toEqual(added);
 
     // …and now the rows it gates are accepted, where they were refused before.
-    expect(setTrackVoiceParam(tracks[0].id, 'effects.distortion.drive', 0.8).ok).toBe(true);
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'effects.distortion.drive')).toBe(0.8);
+    expect(setVoiceParam('track', tracks[0].id, 'effects.distortion.drive', 0.8).ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.distortion.drive')).toBe(0.8);
 
-    expect(removeTrackVoicePedal(tracks[0].id, 'distortion').ok).toBe(true);
-    expect(trackVoicePreset(getTracks()[0]).effects?.distortion).toBeUndefined();
+    expect(removeVoicePedal('track', tracks[0].id, 'distortion').ok).toBe(true);
+    expect(presetOf(getTracks()[0]).effects?.distortion).toBeUndefined();
     // The other track was never touched by any of it.
-    expect(trackVoicePreset(getTracks()[1]).effects?.distortion).toBeUndefined();
+    expect(presetOf(getTracks()[1]).effects?.distortion).toBeUndefined();
   });
 
   it('refuses a pedal row while its pedal is absent', () => {
@@ -823,9 +838,9 @@ describe('the pedalboard, through the track seam', () => {
     // `effects.autoWah: { q: 4 }`, an `AutoWahParams` missing five required
     // fields, and `buildChain` hands the lot to `new Tone.AutoWah`.
     const tracks = twoTracks();
-    expect(trackVoicePreset(tracks[0]).effects?.autoWah).toBeUndefined();
-    expect(setTrackVoiceParam(tracks[0].id, 'effects.autoWah.q', 4).ok).toBe(false);
-    expect(trackVoicePreset(getTracks()[0]).effects?.autoWah).toBeUndefined();
+    expect(presetOf(tracks[0]).effects?.autoWah).toBeUndefined();
+    expect(setVoiceParam('track', tracks[0].id, 'effects.autoWah.q', 4).ok).toBe(false);
+    expect(presetOf(getTracks()[0]).effects?.autoWah).toBeUndefined();
   });
 
   it('leaves a bypassed pedal’s tuning alone when asked to add it again', () => {
@@ -833,12 +848,12 @@ describe('the pedalboard, through the track seam', () => {
     // silently discard the tuning of a pedal the user switched off on purpose, and
     // an agent calling the idempotent add is the caller most likely to do it.
     const tracks = twoTracks();
-    expect(addTrackVoicePedal(tracks[0].id, 'delay').ok).toBe(true);
-    expect(setTrackVoiceParam(tracks[0].id, 'effects.delay.feedback', 0.6).ok).toBe(true);
-    expect(setTrackVoiceParam(tracks[0].id, 'effects.delay.enabled', false).ok).toBe(true);
+    expect(addVoicePedal('track', tracks[0].id, 'delay').ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, 'effects.delay.feedback', 0.6).ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, 'effects.delay.enabled', false).ok).toBe(true);
 
-    expect(addTrackVoicePedal(tracks[0].id, 'delay').ok).toBe(true);
-    const delay = trackVoicePreset(getTracks()[0]).effects?.delay;
+    expect(addVoicePedal('track', tracks[0].id, 'delay').ok).toBe(true);
+    const delay = presetOf(getTracks()[0]).effects?.delay;
     expect(delay?.feedback).toBe(0.6);
     expect(delay?.enabled).toBe(false);
   });
@@ -848,8 +863,8 @@ describe('the pedalboard, through the track seam', () => {
     // because everything else about a pedal is uniform, so a path assembled by
     // pattern rather than read off the descriptor would work five times out of six.
     const tracks = twoTracks();
-    expect(addTrackVoicePedal(tracks[0].id, 'compressor').ok).toBe(true);
-    const preset = trackVoicePreset(getTracks()[0]);
+    expect(addVoicePedal('track', tracks[0].id, 'compressor').ok).toBe(true);
+    const preset = presetOf(getTracks()[0]);
     expect(preset.compressor).toEqual({
       threshold: -24,
       ratio: 12,
@@ -859,22 +874,22 @@ describe('the pedalboard, through the track seam', () => {
     });
     // And nowhere else: a path assembled as `effects.<id>` would land here.
     expect(getAtPath(preset, 'effects.compressor')).toBeUndefined();
-    expect(setTrackVoiceParam(tracks[0].id, 'compressor.ratio', 8).ok).toBe(true);
-    expect(trackVoicePreset(getTracks()[0]).compressor?.ratio).toBe(8);
+    expect(setVoiceParam('track', tracks[0].id, 'compressor.ratio', 8).ok).toBe(true);
+    expect(presetOf(getTracks()[0]).compressor?.ratio).toBe(8);
   });
 
   it('refuses the pedal seams in words rather than doing nothing', () => {
     const tracks = twoTracks();
     // A pedal the table does not declare — including one that IS a lib stage but
     // is not a pedal, which is the plausible mistake rather than a typo.
-    expect(addTrackVoicePedal(tracks[0].id, 'reverb').ok).toBe(false);
-    expect(removeTrackVoicePedal(tracks[0].id, 'reverb').ok).toBe(false);
-    expect(addTrackVoicePedal(tracks[0].id, 'graphicEq').ok).toBe(false);
+    expect(addVoicePedal('track', tracks[0].id, 'reverb').ok).toBe(false);
+    expect(removeVoicePedal('track', tracks[0].id, 'reverb').ok).toBe(false);
+    expect(addVoicePedal('track', tracks[0].id, 'graphicEq').ok).toBe(false);
     // A track that is gone.
-    expect(addTrackVoicePedal('no-such-track', 'chorus').ok).toBe(false);
+    expect(addVoicePedal('track', 'no-such-track', 'chorus').ok).toBe(false);
     // Removing one that was never there is a no-op, not a refusal — the same
     // contract the add has, for a caller that cannot look first.
-    expect(removeTrackVoicePedal(tracks[0].id, 'chorus').ok).toBe(true);
+    expect(removeVoicePedal('track', tracks[0].id, 'chorus').ok).toBe(true);
   });
 
   it('range-checks a pedal row against the bound Tone actually publishes', () => {
@@ -883,20 +898,20 @@ describe('the pedalboard, through the track seam', () => {
     // can be refused for being out of range at all. An agent hands over whatever
     // it computed; a knob clamps itself.
     const tracks = twoTracks();
-    expect(addTrackVoicePedal(tracks[0].id, 'compressor').ok).toBe(true);
-    expect(setTrackVoiceParam(tracks[0].id, 'compressor.ratio', 40).ok).toBe(false);
-    expect(setTrackVoiceParam(tracks[0].id, 'compressor.threshold', 12).ok).toBe(false);
-    expect(setTrackVoiceParam(tracks[0].id, 'compressor.ratio', 20).ok).toBe(true);
+    expect(addVoicePedal('track', tracks[0].id, 'compressor').ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, 'compressor.ratio', 40).ok).toBe(false);
+    expect(setVoiceParam('track', tracks[0].id, 'compressor.threshold', 12).ok).toBe(false);
+    expect(setVoiceParam('track', tracks[0].id, 'compressor.ratio', 20).ok).toBe(true);
 
     // …and the encoders are not range-checked, because Tone publishes no bound
     // for them. A graphic-EQ band of +40 dB is a decision, not an error — the
     // lib's "typical ±15" is a description of use, not a limit the node has.
-    expect(addTrackVoicePedal(tracks[0].id, 'graphic-eq').ok).toBe(true);
-    expect(setTrackVoiceParam(tracks[0].id, 'effects.graphicEq.band100Hz', 40).ok).toBe(true);
+    expect(addVoicePedal('track', tracks[0].id, 'graphic-eq').ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, 'effects.graphicEq.band100Hz', 40).ok).toBe(true);
     // Finiteness is still enforced: that check is about a number reaching Tone at
     // all, not about a range this app invented.
     expect(
-      setTrackVoiceParam(tracks[0].id, 'effects.graphicEq.band100Hz', Number.NaN).ok,
+      setVoiceParam('track', tracks[0].id, 'effects.graphicEq.band100Hz', Number.NaN).ok,
     ).toBe(false);
   });
 });
@@ -997,21 +1012,21 @@ describe('the rack in a lane', () => {
     fireEvent.keyDown(layer.getByRole('spinbutton', { name: `${name} Second source Mix` }), {
       key: 'ArrowUp',
     });
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'layer.gainDb')).toBeCloseTo(-7.5, 6);
+    expect(getAtPath(presetOf(getTracks()[0]), 'layer.gainDb')).toBeCloseTo(-7.5, 6);
     // The other rack never had a layer and still does not.
-    expect(trackVoicePreset(getTracks()[1]).layer).toBeUndefined();
+    expect(presetOf(getTracks()[1]).layer).toBeUndefined();
     expect(track.id).toBe(getTracks()[0].id);
   });
 
   it('offers an Add on a voice with no second source, and no rows until it is pressed', () => {
     // The group is drawn either way now, because there IS a seam that creates a
-    // branch by path — `addTrackVoiceSubBranch`. What is absent when the branch
+    // branch by path — `addVoiceSubBranch`. What is absent when the branch
     // is, is the branch's rows.
     const tracks = twoTracks();
     render(<VoiceGrid />);
     openStage(getTracks()[0], 'Source');
 
-    expect(trackVoicePreset(getTracks()[0]).layer).toBeUndefined();
+    expect(presetOf(getTracks()[0]).layer).toBeUndefined();
     const layer = within(
       screen.getByRole('group', { name: `${tracks[0].name} Second source` }),
     );
@@ -1034,7 +1049,7 @@ describe('the rack in a lane', () => {
     openStage(getTracks()[0], 'Source');
 
     await user.click(screen.getByRole('button', { name: `Add Second source for ${name}` }));
-    const added = trackVoicePreset(getTracks()[0]).layer;
+    const added = presetOf(getTracks()[0]).layer;
     expect(added).toBeDefined();
     // A whole `VoiceSource`, which no row fallback could be — `_buildLayer` reads
     // `.kind` off it and `buildSynth(undefined)` is a TypeError, not a mistuning.
@@ -1043,22 +1058,22 @@ describe('the rack in a lane', () => {
     expect(added!.octaveOffset).toBe(0);
     // Under the primary AT THE MIXER — this track's voice is a sampler, whose own
     // trim the layer does not share. See `sourceDefaults.seedLayerFor`.
-    const primarySource = trackVoicePreset(getTracks()[0]).source;
+    const primarySource = presetOf(getTracks()[0]).source;
     expect(primarySource.kind).toBe('sampler');
     expect(
       added!.gainDb + sourceTrimDb(added!.source) - sourceTrimDb(primarySource),
     ).toBeLessThanOrEqual(-6);
     // The other rack took no edit — every button here is per track.
-    expect(trackVoicePreset(getTracks()[1]).layer).toBeUndefined();
+    expect(presetOf(getTracks()[1]).layer).toBeUndefined();
 
     // Re-kind, in both directions, and never the primary — the mis-route the
     // `kindRow` exists to prevent, now through the composition surface's own
-    // picker rather than through `setTrackVoiceParam`.
+    // picker rather than through `setVoiceParam`.
     await user.selectOptions(
       screen.getByRole('combobox', { name: `${name} Second source Source` }),
       'pluck-synth',
     );
-    let preset = trackVoicePreset(getTracks()[0]);
+    let preset = presetOf(getTracks()[0]);
     expect(preset.layer?.source.kind).toBe('pluck-synth');
     expect(preset.layer?.source).toHaveProperty('params.attackNoise');
     expect(preset.layer?.source).not.toHaveProperty('params.harmonicity');
@@ -1068,13 +1083,13 @@ describe('the rack in a lane', () => {
       screen.getByRole('combobox', { name: `${name} Second source Source` }),
       'fm-synth',
     );
-    preset = trackVoicePreset(getTracks()[0]);
+    preset = presetOf(getTracks()[0]);
     expect(preset.layer?.source.kind).toBe('fm-synth');
     expect(preset.source.kind).toBe('sampler');
 
     await user.click(screen.getByRole('button', { name: `Remove Second source for ${name}` }));
     // Absent, not `{}` — a hollow branch reads as present to `hasBranchAtPath`.
-    preset = trackVoicePreset(getTracks()[0]);
+    preset = presetOf(getTracks()[0]);
     expect(preset.layer).toBeUndefined();
     expect(Object.hasOwn(preset, 'layer')).toBe(false);
   });
@@ -1089,22 +1104,22 @@ describe('the rack in a lane', () => {
       screen.getByRole('button', { name: `Remove Amp for ${getTracks()[0].name}` }),
     );
 
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'effects.amp')).toBeUndefined();
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.amp')).toBeUndefined();
     // Absent, not bypassed: the branch is gone and the stage says so in words
     // rather than merely going dark.
     expect(stage(getTracks()[0], 'Amp').getByText(/No amp stage/i)).toBeInTheDocument();
     // The other rack took no edit — the buttons are per track, like everything
     // else here.
-    expect(isTrackVoiceDirty(getTracks()[1])).toBe(false);
+    expect(dirtyOf(getTracks()[1])).toBe(false);
 
     await user.click(
       screen.getByRole('button', { name: `Add Amp for ${getTracks()[0].name}` }),
     );
 
     // Seeded from the SCHEMA's own fallbacks, which is what makes the button a
-    // way of calling `addTrackVoiceSection` rather than a second authority on
+    // way of calling `addVoiceSection` rather than a second authority on
     // what an amp starts as.
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'effects.amp.preDrive')).toBe(0.3);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.amp.preDrive')).toBe(0.3);
   });
 
   it('shows the same Source rows the pattern pane does, and switches from them', async () => {
@@ -1125,7 +1140,7 @@ describe('the rack in a lane', () => {
 
     await user.selectOptions(source.getByLabelText('Source'), 'fm-synth');
 
-    const swapped = trackVoicePreset(getTracks()[0]).source;
+    const swapped = presetOf(getTracks()[0]).source;
     expect(swapped.kind).toBe('fm-synth');
     expect(Object.keys(swapped).sort()).toEqual(['kind', 'params']);
 
@@ -1135,29 +1150,29 @@ describe('the rack in a lane', () => {
     expect(after.getByRole('spinbutton', { name: 'Harmonicity' })).toBeInTheDocument();
     expect(after.queryByLabelText('Pack')).toBeNull();
     // The other rack is still a sampler and still not dirty.
-    expect(trackVoicePreset(getTracks()[1]).source.kind).toBe('sampler');
-    expect(isTrackVoiceDirty(getTracks()[1])).toBe(false);
+    expect(presetOf(getTracks()[1]).source.kind).toBe('sampler');
+    expect(dirtyOf(getTracks()[1])).toBe(false);
   });
 
   it('turns an encoder on one rack and the value reaches the draft', () => {
     // Same silent-failure guard as the pane's: an encoder is a `role="spinbutton"`
     // `<div>` with no form value, so only the draft can say the write landed.
     const tracks = twoTracks();
-    setTrackVoiceParam(tracks[0].id, 'source.kind', 'pluck-synth');
+    setVoiceParam('track', tracks[0].id, 'source.kind', 'pluck-synth');
     render(<VoiceGrid />);
     openStage(getTracks()[0], 'Source');
 
     const dial = stage(getTracks()[0], 'Source').getByRole('spinbutton', { name: 'Resonance' });
-    const before = getAtPath(trackVoicePreset(getTracks()[0]), 'source.params.resonance') as number;
+    const before = getAtPath(presetOf(getTracks()[0]), 'source.params.resonance') as number;
     fireEvent.keyDown(dial, { key: 'ArrowUp' });
 
     // One arrow key is one `step`, and the step is the SCHEMA's — the rack knows
     // no increments of its own.
-    expect(getAtPath(trackVoicePreset(getTracks()[0]), 'source.params.resonance')).toBeCloseTo(
+    expect(getAtPath(presetOf(getTracks()[0]), 'source.params.resonance')).toBeCloseTo(
       before + 0.01,
       6,
     );
-    expect(isTrackVoiceDirty(getTracks()[1])).toBe(false);
+    expect(dirtyOf(getTracks()[1])).toBe(false);
   });
 
   it('turns a knob on one rack without moving the other', () => {
@@ -1188,7 +1203,7 @@ describe('the rack in a lane', () => {
       'aria-valuenow',
       theirsBefore,
     );
-    expect(isTrackVoiceDirty(getTracks()[1])).toBe(false);
+    expect(dirtyOf(getTracks()[1])).toBe(false);
   });
 
   it('does not let a knob key also transpose the block selection', () => {
@@ -1208,7 +1223,7 @@ describe('the rack in a lane', () => {
     // doing two things is the bug `gestures.enabled` exists to prevent, and
     // voice mode needs the same lock edit mode already had.
     expect(getTracks()[0].placements[0].transposeSemitones ?? 0).toBe(0);
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(true);
+    expect(dirtyOf(getTracks()[0])).toBe(true);
   });
 
   it('says which rack is unsaved, and reverts only that one', async () => {
@@ -1229,7 +1244,7 @@ describe('the rack in a lane', () => {
 
     await user.click(revert);
 
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(false);
+    expect(dirtyOf(getTracks()[0])).toBe(false);
   });
 
   it('hides the ruler and every other statement about time', () => {
@@ -1348,8 +1363,8 @@ describe('the pedalboard in a rack', () => {
     fireEvent.click(
       screen.getByRole('button', { name: `Add Chorus for ${tracks[0].name}` }),
     );
-    expect(trackVoicePreset(getTracks()[0]).effects?.chorus?.depth).toBe(0.7);
-    expect(trackVoicePreset(getTracks()[1]).effects?.chorus).toBeUndefined();
+    expect(presetOf(getTracks()[0]).effects?.chorus?.depth).toBe(0.7);
+    expect(presetOf(getTracks()[1]).effects?.chorus).toBeUndefined();
 
     // The row it gates is now on screen, named by track AND pedal — the two axes
     // a listener needs, in the order the rack's landmarks already use.
@@ -1362,7 +1377,7 @@ describe('the pedalboard in a rack', () => {
     fireEvent.click(
       screen.getByRole('button', { name: `Remove Chorus for ${tracks[0].name}` }),
     );
-    expect(trackVoicePreset(getTracks()[0]).effects?.chorus).toBeUndefined();
+    expect(presetOf(getTracks()[0]).effects?.chorus).toBeUndefined();
   });
 
   it('starts folded, like every stage the schema does not open', () => {
@@ -1734,7 +1749,7 @@ describe('a rack edit reaches the engine', () => {
 
   it('builds a track’s voice from its unsaved edit, not from its stored ref', async () => {
     const tracks = twoPlayableTracks();
-    setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
     render(<CompositionProbe />);
 
     await start();
@@ -1767,8 +1782,8 @@ describe('a rack edit reaches the engine', () => {
     // Two writes microseconds apart, which is what one knob drag is. The window
     // has to collapse them into the last value rather than act twice.
     await act(async () => {
-      setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -3);
-      setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6);
+      setVoiceParam('track', tracks[0].id, VOLUME_PATH, -3);
+      setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
     });
 
     await waitFor(() => expect(retunesFor(running, tracks[0].id)).toHaveLength(1));
@@ -1796,8 +1811,8 @@ describe('a rack edit reaches the engine', () => {
     // settings, silently and until something else forced an update. The
     // per-track keying is the whole reason `pendingTrackRebuilds` is a Map.
     await act(async () => {
-      setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -3);
-      setTrackVoiceParam(tracks[1].id, VOLUME_PATH, -9);
+      setVoiceParam('track', tracks[0].id, VOLUME_PATH, -3);
+      setVoiceParam('track', tracks[1].id, VOLUME_PATH, -9);
     });
 
     await waitFor(() => {
@@ -1818,12 +1833,12 @@ describe('a rack edit reaches the engine', () => {
     probe.unmount();
 
     await act(async () => {
-      setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6);
+      setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
     });
-    // …and must not throw or lose the edit for it. `setTrackVoiceParam` is
+    // …and must not throw or lose the edit for it. `setVoiceParam` is
     // reachable by id and value with no pointer and no page on screen, so it
     // cannot require one.
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(true);
+    expect(dirtyOf(getTracks()[0])).toBe(true);
     lib.builtFromPreset.length = 0;
 
     render(<CompositionProbe />);
@@ -1853,19 +1868,19 @@ describe('a rack edit reaches the engine', () => {
 
   it('puts the track back on its stored voice when the edit is discarded', async () => {
     const tracks = twoPlayableTracks();
-    const stored = getAtPath(trackVoicePreset(tracks[0]), VOLUME_PATH) as number;
+    const stored = getAtPath(presetOf(tracks[0]), VOLUME_PATH) as number;
     expect(stored).not.toBe(-6);
 
     render(<CompositionProbe />);
     await start();
     const running = engine();
     await act(async () => {
-      setTrackVoiceParam(tracks[0].id, VOLUME_PATH, -6);
+      setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
     });
     await waitFor(() => expect(retunesFor(running, tracks[0].id)).toHaveLength(1));
 
     await act(async () => {
-      discardTrackVoiceDraft(tracks[0].id);
+      discardVoiceDraft('track', tracks[0].id);
     });
 
     // The engine's voice is carrying the draft's settings; nothing else would
@@ -1881,10 +1896,10 @@ describe('a rack edit reaches the engine', () => {
     render(<CompositionProbe />);
     await start();
     const running = engine();
-    const current = getAtPath(trackVoicePreset(tracks[0]), VOLUME_PATH) as number;
+    const current = getAtPath(presetOf(tracks[0]), VOLUME_PATH) as number;
 
     await act(async () => {
-      setTrackVoiceParam(tracks[0].id, VOLUME_PATH, current);
+      setVoiceParam('track', tracks[0].id, VOLUME_PATH, current);
     });
     // Long enough that a scheduled rebuild would have fired.
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -1912,10 +1927,12 @@ describe('the pattern page’s voice pane is untouched', () => {
     fireEvent.change(slider, { target: { value: '-6' } });
 
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
-    // …and no track's voice moved with it. `selectVoice` and the working copy
-    // are the pattern's; a rack edit is a track's.
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(false);
-    expect(isTrackVoiceDirty(getTracks()[1])).toBe(false);
+    // …and no track's voice moved with it. ONE store holds all of them now, keyed
+    // by holder — `pattern:<id>` against `track:<id>` — so this is the assertion
+    // that the key is what separates them and not two modules happening to agree.
+    expect(isVoiceDirty('pattern', getEditingPattern()!.id)).toBe(true);
+    expect(dirtyOf(getTracks()[0])).toBe(false);
+    expect(dirtyOf(getTracks()[1])).toBe(false);
   });
 
   it('is not moved by a rack edit, and no rack touches the active variant', async () => {
@@ -1933,7 +1950,9 @@ describe('the pattern page’s voice pane is untouched', () => {
     await user.click(modes().getByRole('button', { name: 'Voice mode' }));
     openStage(getTracks()[0], 'Level');
     fireEvent.keyDown(knob(getTracks()[0], 'Level', 'Volume'), { key: 'ArrowUp' });
-    expect(isTrackVoiceDirty(getTracks()[0])).toBe(true);
+    expect(dirtyOf(getTracks()[0])).toBe(true);
+    // The same store, and the pattern holder is untouched by a track write.
+    expect(isVoiceDirty('pattern', getEditingPattern()!.id)).toBe(false);
 
     expect(useVoiceStore.getState().activeVariants).toEqual(activeBefore);
     // Nothing was saved either: a draft is unsaved by definition, and writing

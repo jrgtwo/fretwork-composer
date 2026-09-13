@@ -28,7 +28,7 @@
  *
  * ── WHY A WHOLE VALUE RATHER THAN ROW FALLBACKS ──────────────────────────────
  *
- * `addTrackVoiceSection` builds a section by writing each required row's
+ * `addVoiceSection` builds a section by writing each required row's
  * `fallback` one at a time. That works for a flat stage and it is not what a
  * pedal wants: a pedal is added as one branch in one write, so the value has to
  * be well-formed the instant it lands — the same argument `ParamSubBranch.seed`

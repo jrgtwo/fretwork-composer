@@ -43,6 +43,7 @@ import {
   type VoicePreset,
 } from '@fretwork/lib';
 import {
+  findLibraryPattern,
   getEditingPattern,
   patternInstrumentId,
   setEditingPatternVoiceRef,
@@ -178,18 +179,6 @@ export function getEditingVoicePreset(): VoicePreset | null {
   return pattern ? resolveVoicePreset(pattern) : null;
 }
 
-/** React hook: the resolved preset for the editing pattern. */
-export function useEditingVoicePreset(): VoicePreset | null {
-  const pattern = useEditingPattern();
-  // The selector ignores its argument on purpose. `resolveActiveVoice` reads the
-  // voice store itself and is not reactive, so subscribing through `useVoiceStore`
-  // is the only thing that makes a variant edit, rename or delete reach the pane.
-  // Sound as a `useSyncExternalStore` snapshot because every resolution returns
-  // either a stored object or a built-in const, so the reference is stable between
-  // calls and React's cache check passes.
-  return useVoiceStore(() => (pattern ? resolveVoicePreset(pattern) : null));
-}
-
 // ----------------------------------------------------------------- listing ---
 
 /**
@@ -309,7 +298,7 @@ export function resolveTrackVoicePreset(track: Track): VoicePreset {
 /**
  * React hook: the resolved preset for one track.
  *
- * Subscribed through `useVoiceStore` for {@link useEditingVoicePreset}'s reason —
+ * Subscribed through `useVoiceStore` for {@link useHolderVoicePreset}'s reason —
  * `resolveActiveVoice` reads that store and is not reactive, so a rename, an edit
  * or a change of the instrument's global active variant would otherwise never
  * reach the picker. The `track` argument carries the ref itself and comes from the
@@ -317,6 +306,90 @@ export function resolveTrackVoicePreset(track: Track): VoicePreset {
  */
 export function useTrackVoicePreset(track: Track): VoicePreset {
   return useVoiceStore(() => resolveTrackVoicePreset(track));
+}
+
+// ------------------------------------------------------------ the holders ---
+// A voice belongs to a PATTERN or to a TRACK, and `voiceDrafts` holds an unsaved
+// edit for either. Addressed by kind and id and never by the document itself —
+// `CLAUDE.md`'s rule is that the agent must be able to act without a pointer, and
+// a `{ kind: 'pattern'; pattern: Pattern }` argument would take that away.
+
+/** Which kind of document a voice edit belongs to. Declared HERE and not in
+ *  `voiceDrafts` because that module imports this one; the other way round is a
+ *  cycle. */
+export type HolderKind = 'pattern' | 'track';
+
+type VoiceHolder =
+  | { readonly kind: 'pattern'; readonly pattern: Pattern }
+  | { readonly kind: 'track'; readonly track: Track };
+
+/**
+ * The document `kind` and `id` name, or null when it is gone.
+ *
+ * The EDITING pattern wins over the library row of the same id, and that is not
+ * an optimisation: a placement's snapshot carries the id of the library pattern
+ * it was cut from (`patternService.openPattern` says so), so the two can be
+ * different documents under one id — and the one the engine plays is the one
+ * that is open.
+ */
+function findVoiceHolder(kind: HolderKind, id: string): VoiceHolder | null {
+  if (kind === 'track') {
+    const track = findTrack(id);
+    return track ? { kind: 'track', track } : null;
+  }
+  const editing = getEditingPattern();
+  if (editing?.id === id) return { kind: 'pattern', pattern: editing };
+  const stored = findLibraryPattern(id);
+  return stored ? { kind: 'pattern', pattern: stored } : null;
+}
+
+/**
+ * Instrument + ref, with no preset content in it — what a draft is tagged with,
+ * so an edit OF a voice retires when the holder is pointed at a different one.
+ *
+ * Null when the holder is gone, which is also how the draft store tells "no such
+ * track" from "a track with no edit".
+ *
+ * Built from the ref's discriminant rather than `JSON.stringify`, so a ref
+ * rehydrated as `{id, kind}` keys the same as the `{kind, id}` a picker mints.
+ */
+export function holderVoiceTag(kind: HolderKind, id: string): string | null {
+  const holder = findVoiceHolder(kind, id);
+  if (!holder) return null;
+  const instrumentId =
+    holder.kind === 'pattern'
+      ? patternInstrumentId(holder.pattern)
+      : trackInstrumentId(holder.track);
+  const ref =
+    holder.kind === 'pattern' ? readVoiceRef(holder.pattern) : readTrackVoiceRef(holder.track);
+  return `${instrumentId}|${ref ? voiceKey(ref) : 'none'}`;
+}
+
+/** The preset a holder plays through with no unsaved edit in front of it — the
+ *  lib's own resolution, whichever kind of holder it is. Null when it is gone. */
+export function resolveHolderVoicePreset(kind: HolderKind, id: string): VoicePreset | null {
+  const holder = findVoiceHolder(kind, id);
+  if (!holder) return null;
+  return holder.kind === 'pattern'
+    ? resolveVoicePreset(holder.pattern)
+    : resolveTrackVoicePreset(holder.track);
+}
+
+/**
+ * React hook: {@link resolveHolderVoicePreset}, subscribed.
+ *
+ * Subscribed through `useVoiceStore`, and that is the load-bearing half: the
+ * selector ignores its state argument, because `resolveActiveVoice` reads the voice
+ * store itself and is not reactive — so a rename, a save or a change to the
+ * instrument's global active variant would otherwise never reach the editor. Sound
+ * as a snapshot only because every resolution returns either a stored object or a
+ * built-in const, so the reference is stable between renders; a resolution that
+ * started spreading would render-loop its consumer rather than fail an assertion. The HOLDER half is the caller's own subscription: the pane
+ * reads `useEditingPattern`, the rack is handed a `Track` by a grid that reads
+ * the composition store, and either re-renders this.
+ */
+export function useHolderVoicePreset(kind: HolderKind, id: string): VoicePreset | null {
+  return useVoiceStore(() => resolveHolderVoicePreset(kind, id));
 }
 
 /**
@@ -539,8 +612,8 @@ export function describeVoiceRefusal(reason: TrackVoiceRefusal): string {
  * Nothing becomes audible as a side effect. `playbackService` keys its live voice on
  * this ref, so the change lands the next time the engine is asked for one; to hear it
  * mid-playback the caller follows this with `playbackService.refreshVoice()`. Not
- * `applyVoicePreset` — that would pin the newly resolved preset as an unsaved working
- * copy and shadow the store for as long as the ref stays put.
+ * the draft store — recording the newly resolved preset there would pin it as an unsaved
+ * edit and shadow the store for as long as the ref stays put.
  *
  * Follow it with `refreshVoice()` even when nothing is playing: that call is also what
  * retires the working copy the user just walked away from, so it cannot come back if
@@ -748,8 +821,8 @@ export function deleteVoice(id: string): VoiceWriteResult {
  * Overwrite the variant ONE TRACK points at.
  *
  * Takes the preset rather than reading the track's draft, exactly as
- * {@link saveVoice} does: `trackVoiceDrafts` imports this module, so reading it
- * from here would be a cycle. The caller passes `trackVoicePreset(track)`.
+ * {@link saveVoice} does: `voiceDrafts` imports this module, so reading it
+ * from here would be a cycle. The caller passes `voicePreset('track', trackId)`.
  *
  * Remember that a variant is SHARED. This retunes every pattern AND every other
  * track pointing at the same ref, which is intended and is why the rail says so

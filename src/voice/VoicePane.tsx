@@ -1,15 +1,18 @@
 /**
- * The Instrument & Amp pane — the UI over `voiceService` and `paramSchema`.
+ * The Instrument & Amp pane — the UI over `voiceService`, `voiceDrafts` and
+ * `paramSchema`.
  *
  * Every control in here is one row of `PARAM_SECTIONS`, addressed into the preset by
  * `presetPaths`. That is the whole design: the pane renders a table, so adding the
  * compressor or the EQs later is a change to the descriptors, not to this file.
  *
- * THE WORKING COPY. Edits do not go into the voice store. They accumulate in a working
- * preset held by `App` (not here — `PaneStack` unmounts a collapsed pane's body and
- * would forget it), pushed at the engine on every change so the next note sounds like
- * the pane looks, and written to the store only by Save / Save as…. Three consequences
- * worth knowing before changing anything:
+ * THE UNSAVED EDIT. Edits do not go into the voice store. They accumulate in
+ * `voice/voiceDrafts`, keyed `pattern:<id>` — a module, not React state, for the two
+ * reasons that module's header gives: `PaneStack` unmounts a collapsed pane's body and
+ * would forget an edit held here, and every control has to be a way of CALLING a
+ * capability the agent can call by kind, id and value. The engine reads the same store,
+ * so there is exactly one copy of the edit in the app. Three consequences worth knowing
+ * before changing anything:
  *
  *   - A voice is a SHARED asset. Save overwrites the variant for every pattern pointing
  *     at it, which is intended and was decided with the user. There is no per-pattern
@@ -17,10 +20,15 @@
  *   - The fourteen built-in slots are readonly lib consts with no setter anywhere, so
  *     Save is *impossible* for them, not merely discouraged. The button is disabled and
  *     the pane says why — guitar-tutor's Sound Lab shipped exactly this wording.
- *   - The working copy is keyed (see `workingKey`). Switch voice, instrument or pattern
- *     and it stops applying — which is why every switch confirms first.
+ *   - A draft is tagged with the instrument and ref it is an edit OF, so switching
+ *     voice or instrument retires it — here by the explicit `discard()` on every
+ *     gesture that repoints the pattern, and for a repoint made behind this pane's back
+ *     by the tag watch in `playbackService.usePlaybackEngine` (this pane cannot own
+ *     that: `PaneStack` unmounts a collapsed pane's body). Switching PATTERN retires
+ *     nothing: the key carries the pattern id, so each pattern keeps its own unsaved
+ *     tone and a switch costs nothing and asks nothing.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import {
   detectSamplePack,
   getAmpModel,
@@ -36,8 +44,9 @@ import {
   patternInstrumentId,
   setEditingPatternInstrument,
   useEditingPattern,
+  type Result,
 } from '../patterns/patternService';
-import { applyVoicePreset, refreshVoice } from '../audio/playbackService';
+import { refreshVoice } from '../audio/playbackService';
 import {
   deleteVoice,
   parseVoiceKey,
@@ -45,7 +54,6 @@ import {
   saveVoice,
   saveVoiceAs,
   selectVoice,
-  useEditingVoicePreset,
   useEditingVoiceRef,
   useSelectableVoices,
   voiceKey,
@@ -57,7 +65,6 @@ import {
   branchParams,
   enabledParamOf,
   ownParams,
-  paramApplies,
   sectionPresence,
   visibleParams,
   subBranchApplies,
@@ -71,8 +78,22 @@ import {
   type SliderParam,
   type SourceKindParam,
 } from './paramSchema';
-import { isSourceKind, withLayerSourceKind, withSourceKind } from './sourceDefaults';
-import { getAtPath, removeAtPath, setAtPath } from './presetPaths';
+import {
+  addVoicePedal,
+  addVoiceSection,
+  addVoiceSubBranch,
+  discardVoiceDraft,
+  removeVoicePedal,
+  removeVoiceSection,
+  removeVoiceSubBranch,
+  setVoiceName,
+  setVoiceParam,
+  setVoiceSubBranchKind,
+  useVoiceDirty,
+  useVoiceWorkingPreset,
+} from './voiceDrafts';
+import { isSourceKind, withSourceKind } from './sourceDefaults';
+import { getAtPath } from './presetPaths';
 import { VoiceSection, type SectionStatus } from './VoiceSection';
 import { ParamSlider } from './controls/ParamSlider';
 import { ParamEnum } from './controls/ParamEnum';
@@ -84,12 +105,6 @@ import { DirtyPill } from './DirtyPill';
 import { NameForm } from './NameForm';
 import { AmpHead } from './rack/AmpHead';
 import { CabinetGraphic } from './rack/CabinetGraphic';
-
-/** An unsaved edit, tagged with the voice it belongs to. Lives in `App`. */
-export interface WorkingVoice {
-  readonly key: string;
-  readonly preset: VoicePreset;
-}
 
 const INSTRUMENTS = listInstruments();
 
@@ -167,13 +182,9 @@ const statusOf = (preset: VoicePreset, section: ParamSection): SectionStatus =>
   sectionPresence(preset, section);
 
 export function VoicePane({
-  working,
-  onWorkingChange,
   openSections,
   onOpenSectionsChange,
 }: {
-  working: WorkingVoice | null;
-  onWorkingChange: (working: WorkingVoice | null) => void;
   openSections: readonly SectionId[];
   onOpenSectionsChange: (open: readonly SectionId[]) => void;
 }) {
@@ -194,8 +205,6 @@ export function VoicePane({
   return (
     <VoiceEditor
       pattern={pattern}
-      working={working}
-      onWorkingChange={onWorkingChange}
       openSections={openSections}
       onOpenSectionsChange={onOpenSectionsChange}
     />
@@ -204,64 +213,35 @@ export function VoicePane({
 
 function VoiceEditor({
   pattern,
-  working,
-  onWorkingChange,
   openSections,
   onOpenSectionsChange,
 }: {
   pattern: Pattern;
-  working: WorkingVoice | null;
-  onWorkingChange: (working: WorkingVoice | null) => void;
   openSections: readonly SectionId[];
   onOpenSectionsChange: (open: readonly SectionId[]) => void;
 }) {
   const instrumentId = patternInstrumentId(pattern);
   const ref = useEditingVoiceRef();
-  const stored = useEditingVoicePreset();
   const voices = useSelectableVoices(instrumentId);
+  // The one copy of the unsaved edit, keyed by pattern — see the header. Tagged
+  // with the instrument and ref, so a voice or instrument change stops it matching
+  // without anything here having to watch for one; what DROPS it is the discard on
+  // each of those gestures, and the engine's tag watch for the ones made elsewhere.
+  const preset = useVoiceWorkingPreset('pattern', pattern.id);
+  const dirty = useVoiceDirty('pattern', pattern.id);
 
   const [notice, setNotice] = useState<string | null>(null);
   // Transient, so it is allowed to live here: collapsing the pane mid-rename cancels the
-  // rename, which is the same thing pressing Escape would do. The working copy and the
-  // open sections are the state that must survive, and they are in `App`. The hook is
-  // shared with the rail — see `voiceChrome.useNameForm` for the focus-return it carries.
+  // rename, which is the same thing pressing Escape would do. The state that must
+  // survive an unmount is the unsaved edit, and that is in `voiceDrafts`; the open
+  // sections are in `App`. The hook is shared with the rail — see
+  // `voiceChrome.useNameForm` for the focus-return it carries.
   const {
     form: nameForm,
     setForm: setNameForm,
     open: openNameForm,
     close: closeNameForm,
   } = useNameForm();
-
-  // Mirrors `playbackService`'s `workingTagOf`: pattern + instrument + ref. The pattern id
-  // is in it because an unsaved edit belongs to the editor that is open, while two
-  // patterns sharing a voice legitimately share the *saved* one.
-  const workingKey = `${pattern.id}|${instrumentId}|${ref ? voiceKey(ref) : 'none'}`;
-  const dirty = working !== null && working.key === workingKey;
-  const preset = dirty ? working.preset : stored;
-
-  // Retire a copy whose key has stopped matching. Every switch made *through this pane*
-  // already clears it; this catches the ones made behind its back — an undo that restores
-  // a `Pattern` snapshot carrying a different `voiceRef`, say.
-  //
-  // `applyVoicePreset(null)` and not merely `onWorkingChange(null)`: the engine keeps its
-  // own tagged copy, and that one self-clears only when something *consults* it. Nothing
-  // here does. Drop only the pane's and a redo back to the original ref makes the tag
-  // match again, so the abandoned edit is what plays while the pane says "Saved".
-  useEffect(() => {
-    if (working === null || working.key === workingKey) return;
-    onWorkingChange(null);
-    applyVoicePreset(null);
-  }, [working, workingKey, onWorkingChange]);
-
-  /**
-   * The live preset, for `commit`'s identity guard. See the comment there — a drag
-   * transport calls the `onChange` it captured at pointerdown, so `commit` would
-   * otherwise be comparing against the preset as it was when the gesture started.
-   */
-  const presetRef = useRef<VoicePreset | null>(null);
-  useEffect(() => {
-    presetRef.current = preset ?? null;
-  });
 
   if (!preset) return null; // Unreachable: a pattern is open, so the lib resolves a voice.
 
@@ -272,33 +252,39 @@ function VoiceEditor({
   const isBuiltIn = ref === null || ref.kind === 'default';
 
   /**
-   * Record an edit and make it audible.
+   * Every write in this pane, and its refusal.
    *
-   * The identity check is not an optimisation: `setAtPath` returns the SAME object when
-   * the write changes nothing, so a control reporting its current value must not mark the
-   * preset dirty.
+   * ⚠ THE SEAM READS THE DRAFT FRESH INSIDE THE CALL, which is why this pane no
+   * longer keeps a ref to the live preset. `Knob` and `CabinetGraphic` register their
+   * drag listeners on `window` at pointerdown and never re-register, so the whole
+   * gesture runs against the handler captured then: a handler that closed over the
+   * RENDERED preset would compare a drag's last value against the preset as it was
+   * when the gesture started, and dragging away from a value and back would be the one
+   * edit silently dropped (`setAtPath` returns the same object for a write that changes
+   * nothing). Nothing below may re-introduce that closure — pass a path and a value,
+   * never a preset built from `preset`.
    *
-   * AGAINST `presetRef`, NOT AGAINST `preset`. `Knob` and `CabinetGraphic` register their
-   * drag listeners on `window` at pointerdown and never re-register, so the whole gesture
-   * runs against the `onChange` — and so the `preset` — captured at pointerdown. Drag a
-   * knob away from its starting value and back and `setAtPath(startPreset, path,
-   * startValue)` returns `startPreset` itself, which is exactly what the captured `preset`
-   * is: the edit that restores the original value would be the one edit silently dropped.
-   * The ref holds the preset as it is *now*, which is what the guard means.
-   *
-   * A refusal is cleared here rather than left standing: `notice` describes a write that
-   * was rejected, and once the user is turning knobs again it describes nothing.
+   * A refusal is rendered rather than swallowed, and cleared on the next write that
+   * lands: `notice` describes a write that was rejected, and once the user is turning
+   * knobs again it describes nothing.
    */
-  const commit = (next: VoicePreset) => {
-    if (next === (presetRef.current ?? preset)) return;
-    setNotice(null);
-    onWorkingChange({ key: workingKey, preset: next });
-    applyVoicePreset(next);
+  const report = (result: Result<unknown>) => {
+    setNotice(result.ok ? null : result.reason);
   };
 
+  const write = (path: string, value: unknown) =>
+    report(setVoiceParam('pattern', pattern.id, path, value));
+
+  /** Throw the unsaved edit away and tell the engine. The seam notifies even when the
+   *  pane is unmounted, which is what makes the live voice go back to the store. */
+  const discard = () => discardVoiceDraft('pattern', pattern.id);
+
   /** guitar-tutor's answer, kept: one `window.confirm` in front of every switch that
-   *  would strand the working copy. Routed through one function so replacing it with a
-   *  real dialog is a single edit. */
+   *  would strand the unsaved edit. Routed through one function so replacing it with a
+   *  real dialog is a single edit.
+   *
+   *  Switching PATTERN is deliberately not one of them any more — the draft is keyed by
+   *  pattern, so nothing is stranded and there is nothing to ask about. */
   const confirmDiscard = () =>
     !dirty || window.confirm('Discard unsaved changes to this voice?');
 
@@ -307,11 +293,11 @@ function VoiceEditor({
     if (!next || !confirmDiscard()) return;
     setNotice(null);
     setNameForm(null);
-    onWorkingChange(null);
+    discard();
     selectVoice(next);
-    // Not `applyVoicePreset`: pushing the newly resolved preset through it would pin it
-    // as an unsaved working copy and shadow the store. `refreshVoice` is also what
-    // retires the edit just abandoned.
+    // A SELECTION must not go through the draft store: recording the newly resolved
+    // preset there would pin it as an unsaved edit and shadow the store. `refreshVoice`
+    // is also what retires an edit abandoned behind this pane's back.
     refreshVoice();
   };
 
@@ -319,7 +305,7 @@ function VoiceEditor({
     if (next === instrumentId || !confirmDiscard()) return;
     setNotice(null);
     setNameForm(null);
-    onWorkingChange(null);
+    discard();
     setEditingPatternInstrument(next);
     // The pattern's ref may not be resolvable on the new instrument; the lib's resolver
     // falls through to that instrument's first default, and this is what makes the
@@ -334,11 +320,10 @@ function VoiceEditor({
       return;
     }
     setNotice(null);
-    onWorkingChange(null);
-    // The store now holds what the working copy held, so the copy has to go — otherwise
-    // a later Save or rename against the same shared variant would never reach the
+    // The store now holds what the draft held, so the draft has to go — otherwise a
+    // later Save or rename against the same shared variant would never reach the
     // engine.
-    applyVoicePreset(null);
+    discard();
   };
 
   const submitName = () => {
@@ -353,9 +338,12 @@ function VoiceEditor({
       }
       setNotice(null);
       closeNameForm();
-      // `saveVoiceAs` has already repointed the pattern at the new variant.
-      onWorkingChange(null);
-      applyVoicePreset(null);
+      // `saveVoiceAs` has already repointed the pattern at the new variant, so the draft
+      // has to go — it was an edit OF the voice this one was made from. `refreshVoice`
+      // and not the discard alone: Save as… can be pressed with nothing unsaved, and the
+      // repoint still has to reach the engine.
+      discard();
+      refreshVoice();
       return;
     }
 
@@ -365,10 +353,14 @@ function VoiceEditor({
       setNotice(REFUSAL_TEXT[result.reason]);
       return;
     }
-    // The working copy carries the old name, and `saveVoice` writes the record's name
-    // back from `preset.name` — so without this the next Save silently undoes the rename.
-    if (dirty) onWorkingChange({ key: workingKey, preset: { ...preset, name: trimmed } });
-    setNotice(null);
+    // The draft carries the old name, and `saveVoice` writes the record's name back from
+    // `preset.name` — so without this the next Save silently undoes the rename. A no-op
+    // when nothing is unsaved, which is why it is not guarded on `dirty` here.
+    //
+    // Reported like every other write in this pane. Its refusal is unreachable today
+    // only because `renameVoice` above rejects an empty name first, which is an
+    // ordering accident rather than a guarantee.
+    report(setVoiceName('pattern', pattern.id, trimmed));
     closeNameForm();
   };
 
@@ -388,7 +380,7 @@ function VoiceEditor({
     }
     setNotice(null);
     setNameForm(null);
-    onWorkingChange(null);
+    discard();
     refreshVoice();
   };
 
@@ -398,64 +390,35 @@ function VoiceEditor({
     );
 
   /**
-   * Take a section from absent to present by seeding every REQUIRED param with its
-   * `fallback` — which is why some fallbacks in the schema are not zero. The optional
-   * ones are left out on purpose: the lib documents its own default for each, and writing
-   * our guess would turn "unspecified" into a value the user never chose.
+   * Take a section from absent to present, or throw its whole branch away.
+   *
+   * The SEEDING rule — every required param gets its `fallback`, the optional ones are
+   * left out so "unspecified" does not become a value the user never chose — lives in
+   * `voiceDrafts.addVoiceSection`, where the agent reaches it too. This is the button.
    */
-  const addSection = (section: ParamSection) => {
-    let next = preset;
-    for (const param of section.params) {
-      if (param.optional) continue;
-      if (!paramApplies(next, param)) continue;
-      // A `switch` rather than a list of kinds to skip, and the exhaustive `default` is
-      // the point: `source-kind` and `sample-pack` are both rows whose value is NOT what
-      // `setAtPath(path, fallback)` would write — a bare `source.kind: 'sampler'` leaves
-      // `source.params` beside a sampler tag with no banks, the malformed union
-      // `sourceDefaults` exists to make unrepresentable. Unreachable today (no section
-      // holding one is removable, so nothing calls this for them), which is exactly why
-      // it has to be a `tsc` failure rather than a silent write the day one is.
-      switch (param.kind) {
-        case 'slider':
-        case 'encoder':
-        case 'enum':
-        case 'toggle':
-          next = setAtPath(next, param.path, param.fallback);
-          break;
-        case 'sample-pack':
-        case 'source-kind':
-          break;
-        default:
-          param satisfies never;
-      }
-    }
-    commit(next);
-  };
+  const addSection = (section: ParamSection) =>
+    report(addVoiceSection('pattern', pattern.id, section.id));
 
-  const removeSection = (section: ParamSection) => {
-    if (!section.removableBranch) return;
-    commit(removeAtPath(preset, section.removableBranch));
-  };
+  const removeSection = (section: ParamSection) =>
+    report(removeVoiceSection('pattern', pattern.id, section.id));
 
   /**
    * A sub-branch is created in ONE write, from the seed on its descriptor —
-   * unlike `addSection`, which builds a section out of its rows' fallbacks.
+   * unlike a section, which is built out of its rows' fallbacks.
    *
    * That difference is the whole reason `ParamSubBranch` exists: a `VoiceLayer`
-   * contains a `VoiceSource`, and no row fallback can produce one (the
-   * `source-kind` case above is precisely the row `addSection` has to skip). A
-   * layer seeded the row-by-row way would be `{ gainDb, octaveOffset }` with no
-   * source at all, which is what `Voice._buildLayer` would hand to `buildSynth`.
+   * contains a `VoiceSource`, and no row fallback can produce one. A layer seeded
+   * the row-by-row way would be `{ gainDb, octaveOffset }` with no source at all,
+   * which is what `Voice._buildLayer` would hand to `buildSynth`. The seam owns
+   * both rules; these two are the buttons.
    */
   const addSubBranch = (sub: ParamSubBranch) =>
-    // `sub.seed(preset)`, not a constant: a layer's mix level is only meaningful
-    // relative to the primary it is about to sit under, and the primary's
-    // calibration trim differs by source kind. See `sourceDefaults.seedLayerFor`.
-    commit(setAtPath(preset, sub.branch, sub.seed(preset)));
+    report(addVoiceSubBranch('pattern', pattern.id, sub.id));
 
   /** Absent, not bypassed: a sub-branch has no `enabled` flag — you have one or
    *  you don't — so this throws the tuning away, and the Add beside it says so. */
-  const removeSubBranch = (sub: ParamSubBranch) => commit(removeAtPath(preset, sub.branch));
+  const removeSubBranch = (sub: ParamSubBranch) =>
+    report(removeVoiceSubBranch('pattern', pattern.id, sub.id));
 
   /**
    * One row of the table.
@@ -489,7 +452,7 @@ function VoiceEditor({
             step={param.step}
             unit={param.unit}
             precision={param.precision}
-            onChange={(value) => commit(setAtPath(preset, param.path, value))}
+            onChange={(value) => write(param.path, value)}
           />
         );
 
@@ -506,7 +469,7 @@ function VoiceEditor({
             // because the label column is 74px wide.
             ariaLabel={scoped(param.label) ?? `${section.label} ${param.label}`}
             value={typeof raw === 'boolean' ? raw : param.fallback}
-            onChange={(value) => commit(setAtPath(preset, param.path, value))}
+            onChange={(value) => write(param.path, value)}
           />
         );
 
@@ -521,7 +484,7 @@ function VoiceEditor({
             options={param.options}
             badgeOf={param.badgeOf}
             mod={param.mod}
-            onChange={(next) => commit(setAtPath(preset, param.path, next))}
+            onChange={(next) => write(param.path, next)}
           />
         );
 
@@ -536,7 +499,7 @@ function VoiceEditor({
             precision={param.precision}
             unit={param.unit}
             fallback={param.fallback}
-            onChange={(value) => commit(setAtPath(preset, param.path, value))}
+            onChange={(value) => write(param.path, value)}
           />
         );
 
@@ -552,17 +515,18 @@ function VoiceEditor({
             // of source kinds to be missing from — an unrecognised discriminant is a
             // stored variant this build cannot play.
             placeholder="Unrecognised source"
-            // NOT `setAtPath(preset, param.path, …)`. The discriminant cannot move
-            // on its own — see `sourceDefaults.withSourceKind`, which swaps the
-            // whole branch and returns the same object when the kind is unchanged.
+            // The seam does the branch swap — the discriminant cannot move on its
+            // own, see `sourceDefaults.withSourceKind`, which replaces the whole
+            // branch and returns the same object when the kind is unchanged.
             onChange={(next) => {
               if (!isSourceKind(next)) return;
+              // Computed here only to know what to WARM: a fresh sampler is a fresh
+              // set of banks nothing has fetched, and `reconcile` will not build a
+              // graph on a silent page — same reason the pack picker warms. The
+              // write itself goes through the seam by path and value.
               const swapped = withSourceKind(preset, next);
-              // A fresh sampler is a fresh set of banks nothing has fetched, and
-              // `reconcile` will not build a graph on a silent page — same reason
-              // the pack picker warms.
               if (swapped.source.kind === 'sampler') warmSampleBanks(swapped.source.samples);
-              commit(swapped);
+              write(param.path, next);
             }}
           />
         );
@@ -586,11 +550,14 @@ function VoiceEditor({
               label: option.label,
               description: option.description,
             }))}
+            // The seam takes the PACK ID and resolves the maps itself, so a caller
+            // with no pointer addresses a registry entry rather than authoring a
+            // sample map. `getSamplePack` is consulted here for the warm.
             onChange={(packId) => {
               const pack = getSamplePack(packId);
               if (!pack) return;
               warmSampleBanks(pack.samples);
-              commit(setAtPath(preset, param.path, pack.samples));
+              write(param.path, packId);
             }}
           />
         );
@@ -601,32 +568,28 @@ function VoiceEditor({
   /**
    * The sub-branch's source picker.
    *
-   * NOT `renderParam`'s `source-kind` case, and the difference is the write:
-   * that one calls `withSourceKind`, which always replaces `preset.source`. The
-   * only sub-branch carrying a `kindRow` today is the layer, so the branch-aware
-   * swap it needs is `withLayerSourceKind` — named for its branch rather than
-   * parameterised by one, because the value's SHAPE is the point and a typed
-   * spread is checked where a dotted path is not. A second `kindRow` would need
-   * its own; `paramSchema.test.ts` fails the day one appears without it.
+   * NOT `renderParam`'s `source-kind` case, and the difference is the write: that
+   * one routes through `setVoiceParam`, which resolves a `source-kind` row with
+   * `withSourceKind` — a function that takes no path and always replaces the
+   * PRIMARY source. `setVoiceSubBranchKind` is the branch-aware seam, and it is
+   * why the layer's picker is declared on `ParamSubBranch.kindRow` rather than in
+   * `section.params`.
    */
-  const renderSubBranchKind = (row: SourceKindParam, nameScope: string) => (
+  const renderSubBranchKind = (row: SourceKindParam, sub: ParamSubBranch) => (
     <ParamEnum
       key={row.path}
       id={domId(row.path)}
       label={row.label}
       // "Source" is also the primary's picker's label, and both are in the Source
       // stage at once — see `renderParam`'s note on why the group does not name it.
-      ariaLabel={`${nameScope} ${row.label}`}
+      ariaLabel={`${sub.label} ${row.label}`}
       value={row.resolve(getAtPath(preset, row.path))}
       options={row.options}
       // A stored kind the picker does not offer resolves fine and simply has no
       // option — `ParamEnum` shows this instead of silently selecting the first
       // entry. See `LAYER_SUB_BRANCH` for which kinds a layer is offered and why.
       placeholder="Not offered here"
-      onChange={(next) => {
-        if (!isSourceKind(next)) return;
-        commit(withLayerSourceKind(preset, next));
-      }}
+      onChange={(next) => report(setVoiceSubBranchKind('pattern', pattern.id, sub.id, next))}
     />
   );
 
@@ -674,7 +637,7 @@ function VoiceEditor({
 
         {present ? (
           <>
-            {sub.kindRow ? renderSubBranchKind(sub.kindRow, sub.label) : null}
+            {sub.kindRow ? renderSubBranchKind(sub.kindRow, sub) : null}
             {branchParams(preset, section).map((param) =>
               renderParam(section, param, sub.label),
             )}
@@ -726,7 +689,7 @@ function VoiceEditor({
         step={param.step}
         defaultValue={param.fallback}
         formatValue={(v) => `${v.toFixed(param.precision)}${param.unit ? ` ${param.unit}` : ''}`}
-        onChange={(value) => commit(setAtPath(preset, param.path, value))}
+        onChange={(value) => write(param.path, value)}
       />
     );
   };
@@ -747,11 +710,11 @@ function VoiceEditor({
    * field by field is a node built with `undefined`s rather than one waiting to
    * be finished.
    */
-  const addPedal = (pedal: Pedal) => commit(setAtPath(preset, pedal.branch, pedal.seed));
+  const addPedal = (pedal: Pedal) => report(addVoicePedal('pattern', pattern.id, pedal.id));
 
   /** Absent, not bypassed — this throws the pedal's tuning away, and the switch
    *  beside it is the non-lossy way to take it out of the chain. */
-  const removePedal = (pedal: Pedal) => commit(removeAtPath(preset, pedal.branch));
+  const removePedal = (pedal: Pedal) => report(removeVoicePedal('pattern', pattern.id, pedal.id));
 
   /**
    * The pedalboard: six stages inside one always-present section.
@@ -855,7 +818,7 @@ function VoiceEditor({
             power
               ? {
                   label: `${section.label} ${power.label}`,
-                  onChange: (next) => commit(setAtPath(preset, power.path, next)),
+                  onChange: (next) => write(power.path, next),
                 }
               : undefined
           }
@@ -890,7 +853,7 @@ function VoiceEditor({
           {cab ? (
             <CabinetGraphic
               url={cab.resolve(getAtPath(preset, cab.path))}
-              onChange={(url) => commit(setAtPath(preset, cab.path, url))}
+              onChange={(url) => write(cab.path, url)}
               bypassed={statusOf(preset, section) === 'bypassed'}
             />
           ) : null}
@@ -930,7 +893,7 @@ function VoiceEditor({
       <button
         type="button"
         onClick={() => {
-          commit(setAtPath(preset, CAB_URL_PATH, suggested.url));
+          write(CAB_URL_PATH, suggested.url);
           if (!openSections.includes('cabinet')) onOpenSectionsChange([...openSections, 'cabinet']);
         }}
         className={`${voiceButtonClass} self-start`}

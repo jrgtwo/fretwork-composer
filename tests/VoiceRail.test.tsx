@@ -6,6 +6,7 @@ import {
   usePatternsStore,
   useVoiceStore,
   type Track,
+  type VoicePreset,
 } from '@fretwork/lib';
 import { CompositionPage } from '../src/composition/CompositionPage';
 import { VoiceRail } from '../src/composition/VoiceRail';
@@ -28,11 +29,11 @@ import {
   setTrackVoice,
 } from '../src/voice/voiceService';
 import {
-  clearTrackVoiceDrafts,
-  isTrackVoiceDirty,
-  setTrackVoiceParam,
-  trackVoicePreset,
-} from '../src/voice/trackVoiceDrafts';
+  clearVoiceDrafts,
+  isVoiceDirty,
+  setVoiceParam,
+  voicePreset,
+} from '../src/voice/voiceDrafts';
 import { getAtPath } from '../src/voice/presetPaths';
 import { getEditingPattern, openBlankPattern } from '../src/patterns/patternService';
 
@@ -99,7 +100,21 @@ function twoTracks(): readonly Track[] {
 const lead = () => getTracks()[0];
 const rhythm = () => getTracks()[1];
 
-const volumeOf = (track: Track): unknown => getAtPath(trackVoicePreset(track), VOLUME_PATH);
+/**
+ * The draft seam addressed for a TRACK, which is how the store is keyed now — see
+ * `voiceDrafts`, which takes a holder kind and an id rather than a document, so a
+ * caller with no pointer can reach it. Null means "no such track", which these
+ * tests never mean.
+ */
+const presetOf = (track: Track): VoicePreset => {
+  const preset = voicePreset('track', track.id);
+  if (!preset) throw new Error(`no such track: ${track.id}`);
+  return preset;
+};
+
+const dirtyOf = (track: Track): boolean => isVoiceDirty('track', track.id);
+
+const volumeOf = (track: Track): unknown => getAtPath(presetOf(track), VOLUME_PATH);
 
 /** A built-in guitar voice by name, so a test names a tone rather than a slot id. */
 function builtIn(name: string) {
@@ -125,7 +140,7 @@ beforeEach(() => {
   useVoiceStore.getState().reset();
   selectTrack(null);
   // A module that outlives every unmount also outlives every test in this file.
-  clearTrackVoiceDrafts();
+  clearVoiceDrafts();
   lib.reset();
 });
 
@@ -228,14 +243,14 @@ describe('picking a voice', () => {
     selectTrack(lead().id);
     const clean = builtIn('Clean Amp');
     setTrackVoice(lead().id, clean.ref);
-    setTrackVoiceParam(lead().id, VOLUME_PATH, -6);
+    setVoiceParam('track', lead().id, VOLUME_PATH, -6);
     render(<VoiceRail />);
 
     // Answered NO: nothing moves, and the edit is still there to go back to.
     vi.stubGlobal('confirm', () => false);
     await userEvent.click(screen.getByRole('button', { name: builtIn('Crunch').name }));
     expect(readTrackVoiceRef(lead())).toEqual(clean.ref);
-    expect(isTrackVoiceDirty(lead())).toBe(true);
+    expect(dirtyOf(lead())).toBe(true);
 
     // Answered YES: the pick lands AND the draft is gone. Proved by pointing the
     // track back at the voice the draft was tagged with — a pick only SHADOWS a
@@ -245,7 +260,7 @@ describe('picking a voice', () => {
     await userEvent.click(screen.getByRole('button', { name: builtIn('Crunch').name }));
     expect(readTrackVoiceRef(lead())).toEqual(builtIn('Crunch').ref);
     setTrackVoice(lead().id, clean.ref);
-    expect(isTrackVoiceDirty(lead())).toBe(false);
+    expect(dirtyOf(lead())).toBe(false);
   });
 
   it('marks the current voice as pressed, so the list says what is playing', () => {
@@ -270,7 +285,7 @@ describe('saving', () => {
     twoTracks();
     selectTrack(lead().id);
     setTrackVoice(lead().id, builtIn('Clean Amp').ref);
-    setTrackVoiceParam(lead().id, VOLUME_PATH, -6);
+    setVoiceParam('track', lead().id, VOLUME_PATH, -6);
     render(<VoiceRail />);
 
     // Disabled AND explained: the fourteen slots are readonly lib consts with no
@@ -280,7 +295,7 @@ describe('saving', () => {
 
     // The seam refuses independently of the disabled attribute — which is what
     // the agent hits, since it never sees a button at all.
-    expect(saveTrackVoice(lead().id, trackVoicePreset(lead()))).toEqual({
+    expect(saveTrackVoice(lead().id, presetOf(lead()))).toEqual({
       ok: false,
       reason: 'built-in',
     });
@@ -290,7 +305,7 @@ describe('saving', () => {
     twoTracks();
     openBlankPattern('Riff');
     selectTrack(lead().id);
-    setTrackVoiceParam(lead().id, VOLUME_PATH, -6);
+    setVoiceParam('track', lead().id, VOLUME_PATH, -6);
     render(<VoiceRail />);
 
     await userEvent.click(actionButton('Save as…'));
@@ -311,7 +326,7 @@ describe('saving', () => {
     expect(readTrackVoiceRef(rhythm())).toBeNull();
     expect(readVoiceRef(getEditingPattern()!)).toBeNull();
     // The draft is RETIRED, not merely shadowed — asserted through the RAIL rather
-    // than through `isTrackVoiceDirty`, which self-clears on a tag mismatch and so
+    // than through `isVoiceDirty`, which self-clears on a tag mismatch and so
     // would destroy the very evidence it was called to look for. Pointing the track
     // back at the ref the draft was tagged with is what tells the two apart: a draft
     // that was only shadowed by the repoint matches again here and resurrects.
@@ -325,13 +340,13 @@ describe('saving', () => {
   it('Save writes the draft into the shared variant and clears the unsaved mark', async () => {
     twoTracks();
     selectTrack(lead().id);
-    const created = saveTrackVoiceAs(lead().id, 'Shared tone', trackVoicePreset(lead()));
+    const created = saveTrackVoiceAs(lead().id, 'Shared tone', presetOf(lead()));
     if (!created.ok) throw new Error(created.reason);
     // A SECOND track on the same variant, which is the surprising half: saving
     // retunes every holder, and that is settled behaviour rather than a bug.
     setTrackVoice(rhythm().id, { kind: 'user', id: created.id });
 
-    setTrackVoiceParam(lead().id, VOLUME_PATH, -9);
+    setVoiceParam('track', lead().id, VOLUME_PATH, -9);
     render(<VoiceRail />);
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
     // Said BEFORE the button is pressed, not after.
@@ -341,16 +356,20 @@ describe('saving', () => {
 
     const variant = useVoiceStore.getState().variants.find((v) => v.id === created.id)!;
     expect(getAtPath(variant.preset, VOLUME_PATH)).toBe(-9);
-    expect(isTrackVoiceDirty(lead())).toBe(false);
+    expect(dirtyOf(lead())).toBe(false);
     expect(screen.getByText('Saved')).toBeInTheDocument();
     // The other holder followed, because a voice is one shared object.
     expect(volumeOf(rhythm())).toBe(-9);
   });
 
-  it('will not rename under an unsaved edit, because the next Save would undo it', async () => {
+  it('renames under an unsaved edit, and the next Save keeps the new name', async () => {
+    // WAS DISABLED WHILE DIRTY. The draft carries the OLD name and `saveTrackVoice`
+    // writes the record's name back from `preset.name`, so a rename made mid-edit was
+    // silently reverted by the next Save — and this rail had no way to patch the draft.
+    // `voiceDrafts.setVoiceName` is that write, and it is why the button is live now.
     twoTracks();
     selectTrack(lead().id);
-    const created = saveTrackVoiceAs(lead().id, 'Named tone', trackVoicePreset(lead()));
+    const created = saveTrackVoiceAs(lead().id, 'Named tone', presetOf(lead()));
     if (!created.ok) throw new Error(created.reason);
 
     render(<VoiceRail />);
@@ -360,20 +379,35 @@ describe('saving', () => {
     // and a forced re-render would keep every assertion green against a plain
     // non-reactive read.
     act(() => {
-      setTrackVoiceParam(lead().id, VOLUME_PATH, -3);
+      setVoiceParam('track', lead().id, VOLUME_PATH, -3);
     });
+    expect(actionButton('Rename')).toBeEnabled();
 
-    // The draft carries the OLD name and `saveTrackVoice` writes the record's
-    // name back from `preset.name`, so a rename made now would be silently
-    // reverted. `trackVoiceDrafts` exposes no name write to patch it with.
-    expect(actionButton('Rename')).toBeDisabled();
+    await userEvent.click(actionButton('Rename'));
+    const name = screen.getByLabelText('Rename');
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Renamed tone');
+    await userEvent.click(actionButton('Apply'));
+
+    // The variant's record has the new name …
+    expect(useVoiceStore.getState().variants[0].name).toBe('Renamed tone');
+    // … and so does the draft, which is what the next Save writes back.
+    expect(presetOf(lead()).name).toBe('Renamed tone');
+    // The edit itself survived the rename — a name write must not disturb the tone.
+    expect(volumeOf(lead())).toBe(-3);
+    expect(dirtyOf(lead())).toBe(true);
+
+    await userEvent.click(actionButton('Save'));
+    expect(useVoiceStore.getState().variants[0].name).toBe('Renamed tone');
+    expect(useVoiceStore.getState().variants[0].preset.name).toBe('Renamed tone');
+    expect(dirtyOf(lead())).toBe(false);
   });
 
   it('deletes through the shared seam and clears this track’s ref', async () => {
     vi.stubGlobal('confirm', () => true);
     twoTracks();
     selectTrack(lead().id);
-    const created = saveTrackVoiceAs(lead().id, 'Doomed', trackVoicePreset(lead()));
+    const created = saveTrackVoiceAs(lead().id, 'Doomed', presetOf(lead()));
     if (!created.ok) throw new Error(created.reason);
     render(<VoiceRail />);
 
@@ -408,7 +442,7 @@ describe('what the rail says when a write is refused', () => {
   it('says a ref has gone dangling, and which of the two ways', async () => {
     twoTracks();
     selectTrack(lead().id);
-    const created = saveTrackVoiceAs(lead().id, 'Doomed', trackVoicePreset(lead()));
+    const created = saveTrackVoiceAs(lead().id, 'Doomed', presetOf(lead()));
     if (!created.ok) throw new Error(created.reason);
     // Deleted from UNDER the track — the pattern page can do this, and nothing
     // about the composition store moves when it happens.
@@ -425,7 +459,7 @@ describe('what the rail says when a write is refused', () => {
   it('says when a ref belongs to another instrument, which is a different sentence', () => {
     twoTracks();
     selectTrack(lead().id);
-    const created = saveTrackVoiceAs(lead().id, 'Guitar tone', trackVoicePreset(lead()));
+    const created = saveTrackVoiceAs(lead().id, 'Guitar tone', presetOf(lead()));
     if (!created.ok) throw new Error(created.reason);
     // The variant still exists; the TRACK moved out from under it. Written through
     // the COMPOSITION seam, which stores the ref opaquely — `setTrackVoice` refuses
@@ -453,7 +487,7 @@ describe('what the rail says when a write is refused', () => {
 
   it('repairs a track pointing at a variant that is already gone', () => {
     twoTracks();
-    const created = saveTrackVoiceAs(lead().id, 'Ghost', trackVoicePreset(lead()));
+    const created = saveTrackVoiceAs(lead().id, 'Ghost', presetOf(lead()));
     if (!created.ok) throw new Error(created.reason);
     act(() => useVoiceStore.getState().deleteVariant(created.id));
 
@@ -473,12 +507,12 @@ describe('the unsaved mark', () => {
     selectTrack(lead().id);
     render(<VoiceRail />);
 
-    // No `rerender` calls: `useTrackVoiceDirty` and `useTrackVoiceWorkingPreset`
+    // No `rerender` calls: `useVoiceDirty` and `useVoiceWorkingPreset`
     // subscribe, and forcing a re-render after every `act` would leave this green
     // even if they were swapped for a plain non-reactive read — which is exactly
     // the property this test is about.
     act(() => {
-      setTrackVoiceParam(lead().id, VOLUME_PATH, -6);
+      setVoiceParam('track', lead().id, VOLUME_PATH, -6);
     });
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
 
@@ -488,13 +522,13 @@ describe('the unsaved mark', () => {
     expect(screen.getByText('Saved')).toBeInTheDocument();
 
     act(() => {
-      setTrackVoiceParam(rhythm().id, VOLUME_PATH, 2);
+      setVoiceParam('track', rhythm().id, VOLUME_PATH, 2);
     });
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
 
     act(() => selectTrack(lead().id));
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
-    // Neither draft was lost by the switch — `trackVoiceDrafts` holds up to eight
+    // Neither draft was lost by the switch — `voiceDrafts` holds up to eight
     // of them above every unmount, and this is what that is for.
     expect(volumeOf(lead())).toBe(-6);
     expect(volumeOf(rhythm())).toBe(2);
@@ -503,7 +537,7 @@ describe('the unsaved mark', () => {
   it('leaves Revert to the rack, which is where the edit was made', () => {
     twoTracks();
     selectTrack(lead().id);
-    setTrackVoiceParam(lead().id, VOLUME_PATH, -6);
+    setVoiceParam('track', lead().id, VOLUME_PATH, -6);
     render(<VoiceRail />);
 
     // One draft, one discard button, and it is beside the knobs that made the

@@ -52,20 +52,28 @@ import {
   type VoicePreset,
   type VoiceSource,
 } from '@fretwork/lib';
-import { getEditingPattern, patternInstrumentId } from '../patterns/patternService';
 import {
-  findTrack,
+  getEditingPattern,
+  patternInstrumentId,
+  useEditingPattern,
+} from '../patterns/patternService';
+import {
   getEditingComposition,
   trackInstrumentId,
   useEditingComposition,
   type Result,
 } from '../composition/compositionService';
-import { readTrackVoiceRef, readVoiceRef, resolveVoicePreset } from '../voice/voiceService';
 import {
-  readTrackVoiceDraft,
-  subscribeTrackVoiceDrafts,
-  trackVoicePreset,
-} from '../voice/trackVoiceDrafts';
+  holderVoiceTag,
+  readTrackVoiceRef,
+  readVoiceRef,
+  resolveVoicePreset,
+} from '../voice/voiceService';
+import {
+  readVoiceDraft,
+  subscribeVoiceDrafts,
+  voicePreset,
+} from '../voice/voiceDrafts';
 import { clearTrackVoices, registerTrackVoice, setTrackFaders } from './levelMeters';
 import { audibleTransportTicks, wrapToDuration } from './transportClock';
 
@@ -161,21 +169,6 @@ let sharedMetronome: Metronome | null = null;
 // classification is SILENT — see `sourceFingerprint`.
 
 /**
- * The voice editor's unsaved working preset, tagged with the voice it belongs to.
- *
- * While the editor is open its working copy is the source of truth: it is not in the
- * voice store, so nothing the lib resolves can see it. Tagged rather than held bare
- * so it cannot outlive its subject — pick a different voice, change instrument or
- * open another pattern and the tag stops matching, and the stored preset takes over.
- *
- * Never written back from `voice.preset`. `swapPreset` reassigns the voice's own copy
- * from what it managed to apply — which was outright wrong for a sampler before gap 9b
- * was fixed upstream, and is still the wrong direction of travel: the working copy is
- * what the user is editing, and the voice is downstream of it.
- */
-let workingPreset: { tag: string; preset: VoicePreset } | null = null;
-
-/**
  * Identity of the *choice* — instrument plus ref, with no preset content in it.
  *
  * Built from the ref's discriminant rather than `JSON.stringify`, which would make
@@ -190,29 +183,18 @@ function refKeyOf(pattern: Pattern): string {
 }
 
 /**
- * What the working copy is tagged with. The pattern id is in it but deliberately NOT in
- * `refKeyOf`: two patterns can legitimately share a voice and must share the built
- * voice too, but an *unsaved* edit belongs to the pattern whose editor is open — without
- * the id it would follow the user onto the next pattern with the same instrument and ref.
+ * What the engine should build for this pattern: the editor's unsaved draft when one
+ * is in flight, otherwise whatever the lib resolves the pattern's ref to.
+ *
+ * ⚠ THE DRAFT STORE IS THE ONE COPY. There is no mirror here any more: the pattern
+ * page's unsaved edit lives in `voice/voiceDrafts`, keyed `pattern:<id>` and tagged
+ * with the instrument and ref it is an edit OF, exactly as a track's is. `readVoiceDraft`
+ * is also SELF-CLEARING — a tag that has stopped matching can never matter again, and
+ * leaving it live means an abandoned edit resurrects the moment the pattern points back
+ * at the ref it was taken from — which is why `reconcile` calls this unconditionally.
  */
-const workingTagOf = (pattern: Pattern) => `${pattern.id}|${refKeyOf(pattern)}`;
-
-/**
- * Self-clearing: a tag that has stopped matching can never matter again, and leaving it
- * live means an abandoned edit resurrects the moment the pattern points back at the ref
- * it was taken from — the pane's own working copy having long since been reset.
- */
-function workingPresetFor(pattern: Pattern): VoicePreset | null {
-  if (workingPreset === null) return null;
-  if (workingPreset.tag === workingTagOf(pattern)) return workingPreset.preset;
-  workingPreset = null;
-  return null;
-}
-
-/** What the engine should build for this pattern: the editor's working copy when one
- *  is in flight, otherwise whatever the lib resolves the pattern's ref to. */
 const presetFor = (pattern: Pattern): VoicePreset =>
-  workingPresetFor(pattern) ?? resolveVoicePreset(pattern);
+  readVoiceDraft('pattern', pattern.id) ?? resolveVoicePreset(pattern);
 
 /**
  * Everything about a preset that a live `Voice` has to be REBUILT for, as a string.
@@ -252,14 +234,15 @@ const voiceKeyOf = (pattern: Pattern) =>
   `${refKeyOf(pattern)}|${sourceFingerprint(presetFor(pattern).source)}`;
 
 function buildVoice(pattern: Pattern): Voice {
-  const working = workingPresetFor(pattern);
+  const draft = readVoiceDraft('pattern', pattern.id);
   // Two paths, one operation — `buildEffectiveVoice` is exactly
   // `new Voice(resolveActiveVoice(instrumentId, ref))`, and it reads none of the options
   // we pass. The lib's builder stays the path for a stored voice so the resolution order
-  // remains the lib's and stays the seam the audio tests mock; a working copy has no ref
-  // to resolve, so it is constructed directly. Both go through `workingPresetFor`, so the
-  // voice cannot disagree with the key `voiceKeyOf` computed from the same pattern.
-  if (working) return new Voice(working);
+  // remains the lib's and stays the seam the audio tests mock; a draft has no ref to
+  // resolve, so it is constructed directly — exactly as `buildTrackVoiceUnregistered`
+  // does for a track. Both go through `readVoiceDraft`, so the voice cannot disagree
+  // with the key `voiceKeyOf` computed from the same pattern.
+  if (draft) return new Voice(draft);
   return buildEffectiveVoice(patternInstrumentId(pattern), { voiceRef: readVoiceRef(pattern) })
     .voice;
 }
@@ -389,6 +372,27 @@ export function usePlaybackEngine(): void {
       disposeCompositionEngine();
     };
   }, [metronome]);
+
+  // RETIRE AN ABANDONED EDIT WHOSE VOICE HAS MOVED. A selection made through the
+  // pane calls `refreshVoice` itself, and that read is what drops the edit the user
+  // walked away from — but the editing pattern's ref can also move behind the pane's
+  // back: a pattern undo restoring a snapshot with a different `voiceRef`, say.
+  // `useVoiceWorkingPreset` only SHADOWS a draft whose tag has stopped matching (it
+  // compares without deleting, because a store write during render is a React error),
+  // so without this the engine goes on sounding an edit the pane already reads as
+  // "Saved" — and a redo back to the original ref resurrects it.
+  //
+  // Watched here rather than in `VoicePane`, which is where it used to be: `PaneStack`
+  // unmounts a collapsed pane's body, so the effect that lives there is the one that
+  // does not run. This hook's lifetime is exactly the engine's.
+  //
+  // The tag and not the pattern: it moves only when the instrument or the ref does,
+  // so editing notes does not retune a voice sixty times.
+  const editing = useEditingPattern();
+  const voiceTag = editing ? holderVoiceTag('pattern', editing.id) : null;
+  useEffect(() => {
+    refreshVoice();
+  }, [voiceTag]);
 }
 
 
@@ -503,9 +507,10 @@ export function previewNote(stringIndex: number, fret: number): void {
 }
 
 /**
- * Push the voice editor's working preset onto the live voice.
+ * Make one PATTERN's unsaved voice edit audible — the draft store's pattern-side
+ * subscriber, and the counterpart of {@link scheduleTrackVoiceRebuild}.
  *
- * The classification is the heart of this function and a mistake in it is SILENT:
+ * The classification is the heart of this path and a mistake in it is SILENT:
  *
  *   - **source identity** — the source `kind`, or a sampler's banks and `release` —
  *     rebuilds the voice's source. `swapPreset` now does that itself (gaps 9a and 9b,
@@ -523,38 +528,49 @@ export function previewNote(stringIndex: number, fret: number): void {
  * branch disposes the old voice and re-points the scheduler. It is coalesced — see
  * `REBUILD_COALESCE_MS`.
  *
- * Pass `null` when the editor closes or the user discards: the working copy is
- * dropped and the live voice goes back to whatever the pattern's ref resolves to.
+ * ⚠ IMMEDIATE, WHERE A TRACK'S IS COALESCED, and the two timings are deliberately NOT
+ * unified — see docs/SPEC-voice-editor.md §4. `reconcile` calls `swapPreset` on the spot
+ * and only a changed `voiceKeyOf` waits 120 ms; a track's `swapPreset` waits on that
+ * same window, keyed by track. Putting 120 ms in front of every pattern-page knob would
+ * degrade the surface whose only real verification is by ear, and taking the coalescing
+ * off the track path would turn one knob drag into sixty swaps across eight racks.
  *
- * For a voice *selection* rather than an edit, call `refreshVoice` — pushing the newly
- * resolved preset through here would pin it as a working copy and shadow the store.
+ * For a voice *selection* rather than an edit, call {@link refreshVoice} — a selection
+ * must not go through the draft store at all, or the newly resolved preset would be
+ * pinned as an unsaved edit and shadow the store.
  */
-export function applyVoicePreset(preset: VoicePreset | null): void {
-  // Before the pattern guard: a discard has to land even if the pattern was closed
-  // first, or the abandoned edit is still what plays when it is reopened.
-  if (preset === null) {
-    workingPreset = null;
-    cancelPendingRebuild();
-  }
-
+function reconcilePatternDraft(patternId: string): void {
+  const dropped = readVoiceDraft('pattern', patternId) === null;
   const pattern = getEditingPattern();
-  if (!pattern) return;
 
-  // Recorded even with no engine up, so the next play or preview builds from the
-  // working copy rather than from the stored variant it was taken from.
-  if (preset !== null) workingPreset = { tag: workingTagOf(pattern), preset };
+  // Before the pattern guard below, and the reason is a discard: the draft is already
+  // gone by the time this runs, so the pending rebuild it left behind has to be
+  // cancelled even if the pattern was closed first — otherwise the abandoned edit is
+  // still what plays when it is reopened.
+  //
+  // ⚠ ONLY WHEN THE NOTIFICATION IS ABOUT THE PATTERN THAT ARMED IT. `pendingRebuild`
+  // is one binding, belonging to whichever pattern is open; a discard addressed at some
+  // OTHER pattern — this seam is id-addressable, so an agent can make one — would
+  // otherwise disarm the open pattern's source-identity rebuild and nothing would re-arm
+  // it. Nothing open means nothing to protect, so that case cancels too.
+  if (dropped && (!pattern || pattern.id === patternId)) cancelPendingRebuild();
+  // An edit to a pattern that is not open changes nothing audible. It is still RECORDED
+  // — the draft store took it before this ran — so the next time that pattern is opened
+  // and played, `buildVoice` builds from it.
+  if (!pattern || pattern.id !== patternId) return;
 
   reconcile(pattern);
 }
 
 /**
- * Bring the live voice back in line with `presetFor` — without touching the working
- * copy.
+ * Bring the live voice back in line with `presetFor` — without writing a draft.
  *
- * This is how a *selection* becomes audible mid-playback. `applyVoicePreset` cannot do
- * that job: pushing the newly resolved preset through it would pin it as a working copy,
- * and from then on a `saveVoice` or `renameVoice` against the same shared variant —
- * from this pane or any other holder of the ref — would never reach the engine.
+ * This is how a *selection* becomes audible mid-playback, and it has a second job that
+ * is the whole reason a selection does not go through the draft store: `reconcile` reads
+ * `presetFor` unconditionally, and that read is what RETIRES the edit the user just
+ * walked away from. Record the newly resolved preset as a draft instead and it would
+ * shadow the store — from then on a `saveVoice` or `renameVoice` against the same shared
+ * variant, from this pane or any other holder of the ref, would never reach the engine.
  */
 export function refreshVoice(): void {
   const pattern = getEditingPattern();
@@ -563,9 +579,9 @@ export function refreshVoice(): void {
 
 function reconcile(pattern: Pattern): void {
   try {
-    // Computed before the engine check, and unconditionally: reading the working copy is
-    // also what *drops* one whose tag has stopped matching, and that has to happen
-    // whether or not there is an engine to retune. This is why a selection goes through
+    // Computed before the engine check, and unconditionally: reading the draft is also
+    // what *drops* one whose tag has stopped matching, and that has to happen whether or
+    // not there is an engine to retune. This is why a selection goes through
     // `refreshVoice` — that call is what retires the edit the user walked away from, so
     // it cannot come back when they return to the voice it was taken from.
     const key = voiceKeyOf(pattern);
@@ -744,13 +760,13 @@ const loopBoundaryOf = (composition: Composition): number =>
  * the pattern path needs simply does not arise for a track: there is nothing
  * live to retune.
  *
- * CP-14: a track's rack edits go through `trackVoiceDrafts`, which holds a
+ * CP-14: a track's rack edits go through `voiceDrafts`, which holds a
  * preset no variant has yet — so nothing the lib resolves can see it and the
  * draft has to be built directly, exactly as `buildVoice` does for the pattern
- * page's working copy. `new Voice(…, { autoConnectToMaster: false })` is the
+ * page's own draft. `new Voice(…, { autoConnectToMaster: false })` is the
  * same opt-out `buildEffectiveVoice` is passed, and it is REQUIRED rather than
  * preferred: a voice that wired itself to `MasterBus` would ignore its track's
- * fader, mute and solo entirely. `readTrackVoiceDraft` is also what retires a
+ * fader, mute and solo entirely. `readVoiceDraft` is also what retires a
  * draft whose voice choice has moved on, so this is the call that makes a
  * changed ref win over a stale edit.
  */
@@ -766,7 +782,7 @@ function buildTrackVoice(track: Track): Voice {
 }
 
 function buildTrackVoiceUnregistered(track: Track): Voice {
-  const draft = readTrackVoiceDraft(track);
+  const draft = readVoiceDraft('track', track.id);
   if (draft) return new Voice(draft, { autoConnectToMaster: false });
   return buildEffectiveVoice(trackInstrumentId(track), {
     autoConnectToMaster: false,
@@ -850,13 +866,15 @@ function scheduleTrackVoiceRebuild(trackId: string): void {
       if (!active) return;
 
       // The fast path. Both halves have to be present: the voice is missing if
-      // the engine was rebuilt inside the debounce window, and the track is gone
-      // if it was deleted or an undo retracted it between the drag and here.
+      // the engine was rebuilt inside the debounce window, and the preset is null
+      // if the track was deleted or an undo retracted it between the drag and
+      // here — `voicePreset` reports a holder that is gone rather than resolving
+      // one.
       const voice = liveTrackVoices.get(trackId);
-      const track = findTrack(trackId);
-      if (voice && track) {
+      const preset = voicePreset('track', trackId);
+      if (voice && preset) {
         try {
-          voice.swapPreset(trackVoicePreset(track));
+          voice.swapPreset(preset);
           return;
         } catch (error) {
           // Fall through to the rebuild rather than leave the edit unheard: a
@@ -894,22 +912,40 @@ function scheduleTrackVoiceRebuild(trackId: string): void {
 }
 
 /**
- * CP-14's live retune, subscribed HERE rather than from a component's effect.
+ * The live retune for BOTH pages, subscribed HERE rather than from a component's
+ * effect.
  *
- * Module scope because that is the ENGINE's scope: `compositionEngine` is a
- * module binding, and a listener whose job is "rebuild that engine's voice"
- * should live and die with it rather than with whichever component happened to
- * mount. `setTrackVoiceParam` is documented as reachable by id and value with no
- * pointer, so nothing about it should depend on a render tree existing.
+ * Module scope because that is the ENGINE's scope: `engine` and
+ * `compositionEngine` are module bindings, and a listener whose job is "rebuild
+ * that engine's voice" should live and die with it rather than with whichever
+ * component happened to mount. `setVoiceParam` is documented as reachable by
+ * kind, id and value with no pointer, so nothing about it should depend on a
+ * render tree existing.
  *
- * Never torn down, and nothing leaks by it: `scheduleTrackVoiceRebuild` no-ops
- * while `compositionEngine` is null (which is exactly the state the composition
- * page's unmount leaves behind — it stops playback and disposes both engines),
- * and `disposeCompositionEngine` cancels whatever is already in flight. A draft
- * written with no engine standing is not lost either: `buildTrackVoice` reads
- * the drafts store, so the next engine is built from it.
+ * ⚠ IT BRANCHES ON KIND, and the two arms are two TIMINGS rather than two
+ * mechanisms — both end in `Voice.swapPreset`, and both rebuild only on a
+ * source-identity change. The pattern arm swaps at once and coalesces only the
+ * rebuild; the track arm coalesces the swap itself, keyed by track. Unifying
+ * them would either put 120 ms in front of every pattern-page knob — on the
+ * surface whose only real verification is by ear — or take the drag coalescing
+ * off eight racks at once. See docs/SPEC-voice-editor.md §4.
+ *
+ * THE HOLDER IS NOT CARRIED, only its kind and id:
+ * {@link scheduleTrackVoiceRebuild} deliberately re-reads inside its window
+ * because the engine or the track can be gone by the time it fires, and
+ * {@link reconcilePatternDraft} re-reads for the same reason.
+ *
+ * Never torn down, and nothing leaks by it: both arms no-op while their engine is
+ * null (which is exactly the state each page's unmount leaves behind), and
+ * `disposeEngine` / `disposeCompositionEngine` cancel whatever is already in
+ * flight. A draft written with no engine standing is not lost either:
+ * `buildVoice` and `buildTrackVoice` read the drafts store, so the next engine is
+ * built from it.
  */
-subscribeTrackVoiceDrafts(scheduleTrackVoiceRebuild);
+subscribeVoiceDrafts((kind, id) => {
+  if (kind === 'track') scheduleTrackVoiceRebuild(id);
+  else reconcilePatternDraft(id);
+});
 
 /**
  * Tracks whose voice change the ENGINE'S OWN DIFF will miss.
@@ -1314,7 +1350,7 @@ export function useCompositionPlayback(): void {
   }, [composition]);
 
   // CP-14's live retune is NOT wired here — see the module-scope
-  // `subscribeTrackVoiceDrafts` call. A rack edit writes a preset no variant
+  // `subscribeVoiceDrafts` call. A rack edit writes a preset no variant
   // holds, so the composition store does not move and `syncComposition` above
   // never runs; that subscription is the only path from a turned knob to a
   // sounding one, and it belongs to the engine's lifetime, not to this hook's.

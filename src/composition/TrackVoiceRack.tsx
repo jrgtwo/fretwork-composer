@@ -56,10 +56,10 @@
  *
  * ── Where the edits go ───────────────────────────────────────────────────────
  *
- * Not into the voice store. They accumulate in `trackVoiceDrafts`, which lives
+ * Not into the voice store. They accumulate in `voiceDrafts`, which lives
  * above every component in the app because this one unmounts twice over (leaving
  * voice mode, and every visit to the pattern page) — and because a knob has to
- * be a way of CALLING a capability the agent can call by id and value. Every
+ * be a way of CALLING a capability the agent can call by kind, id and value. Every
  * write here is one seam call whose refusal is rendered rather than swallowed.
  *
  * Saving a draft to a variant is CP-15's, along with the variant list. That is
@@ -85,16 +85,16 @@
  * `paramSchema` carries two optional branches nested inside stages — the second
  * source, in Source, and the body filter's cutoff envelope. Their ROWS work here
  * like every other row, because they are declared in `section.params` and so are
- * in `trackVoiceDrafts`' path map.
+ * in `voiceDrafts`' path map.
  *
- * The BRANCH itself needs three seams of its own, because `addTrackVoiceSection`
- * / `removeTrackVoiceSection` are keyed by `SectionId` and a sub-branch is not a
- * section, and because `setTrackVoiceParam` resolves a `source-kind` row through
+ * The BRANCH itself needs three seams of its own, because `addVoiceSection`
+ * / `removeVoiceSection` are keyed by `SectionId` and a sub-branch is not a
+ * section, and because `setVoiceParam` resolves a `source-kind` row through
  * `withSourceKind`, which takes no path and always replaces the PRIMARY source —
  * which is exactly why the layer's picker is declared on `ParamSubBranch.kindRow`
  * and kept out of `section.params` in the first place. They are
- * `addTrackVoiceSubBranch`, `removeTrackVoiceSubBranch` and
- * `setTrackVoiceSubBranchKind` in `voice/trackVoiceDrafts.ts`, and this surface
+ * `addVoiceSubBranch`, `removeVoiceSubBranch` and
+ * `setVoiceSubBranchKind` in `voice/voiceDrafts.ts`, and this surface
  * draws all three — so a track with no second source can gain one from here or
  * from an agent's call, which is the same test every other capability on this
  * page passes.
@@ -129,18 +129,18 @@ import {
 } from '../voice/paramSchema';
 import { getAtPath } from '../voice/presetPaths';
 import {
-  addTrackVoicePedal,
-  addTrackVoiceSection,
-  addTrackVoiceSubBranch,
-  discardTrackVoiceDraft,
-  removeTrackVoicePedal,
-  removeTrackVoiceSection,
-  removeTrackVoiceSubBranch,
-  setTrackVoiceParam,
-  setTrackVoiceSubBranchKind,
-  useTrackVoiceDirty,
-  useTrackVoiceWorkingPreset,
-} from '../voice/trackVoiceDrafts';
+  addVoicePedal,
+  addVoiceSection,
+  addVoiceSubBranch,
+  discardVoiceDraft,
+  removeVoicePedal,
+  removeVoiceSection,
+  removeVoiceSubBranch,
+  setVoiceParam,
+  setVoiceSubBranchKind,
+  useVoiceDirty,
+  useVoiceWorkingPreset,
+} from '../voice/voiceDrafts';
 import { PowerLamp, RackFace } from '../voice/rack/RackFace';
 import { Section } from '../shell/Section';
 import { AmpHead } from '../voice/rack/AmpHead';
@@ -226,8 +226,20 @@ export function TrackVoiceRack({
    *  does — there is no room for a per-rack alert and no reason for one. */
   onNotice: (message: string) => void;
 }) {
-  const preset = useTrackVoiceWorkingPreset(track);
-  const dirty = useTrackVoiceDirty(track);
+  // Addressed by kind and id, never by the `Track` itself — see `voiceDrafts`'
+  // header. The prop stays because this file reads the track's own fields
+  // (`name`, `inputGainDb`) for chrome the draft store knows nothing about — and
+  // those are the only things it is the authority for. The PRESET is resolved from
+  // the composition store by id, so a prop a render behind the store cannot make
+  // this rack draw a voice that is not the one playing.
+  const preset = useVoiceWorkingPreset('track', track.id);
+  const dirty = useVoiceDirty('track', track.id);
+
+  // Unreachable: the grid only draws a rack for a track of the composition the
+  // draft store resolves against. Guarded rather than asserted because the
+  // alternative is a non-null assertion on a store lookup, and every hook above
+  // has already run.
+  if (!preset) return null;
 
   const toggleSection = (id: SectionId) =>
     onCollapsedSectionsChange?.(
@@ -245,7 +257,7 @@ export function TrackVoiceRack({
   };
 
   const write = (path: string, value: unknown) =>
-    report(setTrackVoiceParam(track.id, path, value));
+    report(setVoiceParam('track', track.id, path, value));
 
   /**
    * The same `SliderParam`, drawn as a rotary instead of a row — `VoicePane`'s
@@ -492,8 +504,8 @@ export function TrackVoiceRack({
                 onClick={() =>
                   report(
                     present
-                      ? removeTrackVoicePedal(track.id, pedal.id)
-                      : addTrackVoicePedal(track.id, pedal.id),
+                      ? removeVoicePedal('track', track.id, pedal.id)
+                      : addVoicePedal('track', track.id, pedal.id),
                   )
                 }
                 className={buttonClass}
@@ -521,8 +533,8 @@ export function TrackVoiceRack({
         onClick={() =>
           report(
             present
-              ? removeTrackVoiceSection(track.id, section.id)
-              : addTrackVoiceSection(track.id, section.id),
+              ? removeVoiceSection('track', track.id, section.id)
+              : addVoiceSection('track', track.id, section.id),
           )
         }
         className={buttonClass}
@@ -611,9 +623,9 @@ export function TrackVoiceRack({
    * The sub-branch's source picker — the second source's kind.
    *
    * NOT `renderParam`'s `source-kind` case, and the difference is the write:
-   * that one routes through `setTrackVoiceParam`, which resolves a `source-kind`
+   * that one routes through `setVoiceParam`, which resolves a `source-kind`
    * row with `withSourceKind` — a function that takes no path and always
-   * replaces the PRIMARY source. `setTrackVoiceSubBranchKind` is the
+   * replaces the PRIMARY source. `setVoiceSubBranchKind` is the
    * branch-aware seam, and it is why the layer's picker is declared on
    * `ParamSubBranch.kindRow` rather than in `section.params`.
    */
@@ -629,7 +641,7 @@ export function TrackVoiceRack({
       // A stored kind the picker does not offer resolves fine and simply has no
       // option — see `LAYER_SOURCE_KIND_OPTIONS` for which kinds and why.
       placeholder="Not offered here"
-      onChange={(value) => report(setTrackVoiceSubBranchKind(track.id, sub.id, value))}
+      onChange={(value) => report(setVoiceSubBranchKind('track', track.id, sub.id, value))}
     />
   );
 
@@ -643,7 +655,7 @@ export function TrackVoiceRack({
    * landmark, so a listener gets the track, the stage, then the group.
    *
    * Add and Remove are drawn whether or not the branch is there, exactly as the
-   * stage buttons are: `addTrackVoiceSubBranch` / `removeTrackVoiceSubBranch`
+   * stage buttons are: `addVoiceSubBranch` / `removeVoiceSubBranch`
    * are the seams for it, so neither button is a refusal waiting to happen.
    */
   const renderSubBranch = (section: ParamSection) => {
@@ -669,8 +681,8 @@ export function TrackVoiceRack({
             onClick={() =>
               report(
                 present
-                  ? removeTrackVoiceSubBranch(track.id, sub.id)
-                  : addTrackVoiceSubBranch(track.id, sub.id),
+                  ? removeVoiceSubBranch('track', track.id, sub.id)
+                  : addVoiceSubBranch('track', track.id, sub.id),
               )
             }
             className={buttonClass}
@@ -789,7 +801,7 @@ export function TrackVoiceRack({
             type="button"
             aria-label={`Discard voice changes for ${track.name}`}
             title="Put this track back on its stored voice"
-            onClick={() => report(discardTrackVoiceDraft(track.id))}
+            onClick={() => report(discardVoiceDraft('track', track.id))}
             className={buttonClass}
           >
             Revert

@@ -87,7 +87,7 @@ describe('CIRCUIT_AMP_SECTION', () => {
 /**
  * Adding the stage through the generic gesture.
  *
- * `addTrackVoiceSection` (and `VoicePane.addSection`, its twin) seeds a section
+ * `addVoiceSection` — the one seam both editors add through — seeds a section
  * by writing each non-optional row's `fallback` in declaration order. For this
  * section that WORKS — but only because `ampId` is declared before the control
  * rows that are gated on it: the loop updates the preset as it goes, so by the

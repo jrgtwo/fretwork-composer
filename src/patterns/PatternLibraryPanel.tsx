@@ -61,21 +61,6 @@ const ROW_ACTION =
   'control pressable flex-1 rounded-md px-1 py-0.5 font-mono text-[8.5px] font-semibold tracking-[0.1em] uppercase';
 
 /**
- * Asked before anything changes which pattern is open.
- *
- * Returns what to run ONCE THE SWITCH HAS ACTUALLY HAPPENED, or null to cancel
- * it — two steps rather than one boolean because the answer costs something.
- * `App`'s guard discards the voice pane's unsaved working copy, and a create can
- * still be refused after it has been asked (the lib's `createPattern` declines at
- * the tier cap), which in one step means unsaved work destroyed for a switch that
- * never took place.
- */
-export type SwitchGuard = () => (() => void) | null;
-
-/** No caller above, so nothing to strand and nothing to run afterwards. */
-const NO_GUARD: SwitchGuard = () => () => {};
-
-/**
  * How many patterns the library holds, as its own subscriber.
  *
  * A leaf on purpose. It is the rail SECTION's header that shows the count, and
@@ -155,12 +140,14 @@ export function PatternLibraryCount() {
  * is a smaller debt than a generic tree with one caller. One line shorter than it
  * was: the header went to `shell/Section`.
  *
- * WHAT SWITCHING COSTS. Nothing in the timeline: every edit is written to the
- * store as it is made, so there is no unsaved pattern state to lose. The one
- * unsaved thing in the app is the voice pane's working preset, which is keyed by
- * pattern id and lives in `App` — `confirmSwitch` is `App`'s chance to ask before
- * it is stranded, and every action here that changes which pattern is open goes
- * through it.
+ * WHAT SWITCHING COSTS: NOTHING, AND IT ASKS NOTHING. Every timeline edit is
+ * written to the store as it is made, so there is no unsaved pattern state to
+ * lose. The app's one unsaved thing is the voice editor's draft, and it is keyed
+ * BY PATTERN in `voice/voiceDrafts` — so a switch strands nothing and each
+ * pattern keeps its own unsaved tone for when you come back. There used to be a
+ * `confirmSwitch` guard here, threaded up to `App`, because the draft was one
+ * React value shared by whatever pattern happened to be open; per-pattern keying
+ * is what deleted it, and the confirmation with it.
  *
  * IT ALSO COSTS THE TRANSPORT, which is why {@link stop} is called on every
  * action that lands on a different pattern. `play` snapshots the pattern into
@@ -181,12 +168,7 @@ export function PatternLibraryCount() {
  * would buy that edge case at the price of two sources of truth that can
  * disagree about what is open.
  */
-export function PatternLibraryPanel({
-  confirmSwitch,
-}: {
-  /** Absent when there is nothing above this that could be stranded. */
-  confirmSwitch?: SwitchGuard;
-}) {
+export function PatternLibraryPanel() {
   const patterns = useLibraryPatterns();
   const open = useEditingPattern();
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -200,23 +182,13 @@ export function PatternLibraryPanel({
     return result.ok ? result.value : null;
   };
 
-  const ask = confirmSwitch ?? NO_GUARD;
-
-  /** Everything that follows a change of open pattern, in order: release the
-   *  transport (it is still streaming the pattern that WAS open — see the module
-   *  note), then let the caller act on the switch it agreed to. */
-  const switched = (commit: () => void) => {
-    stop();
-    commit();
-  };
-
   const create = () => {
     setRefusal(null);
-    const commit = ask();
-    if (!commit) return;
     const made = report(openBlankPattern());
     if (!made) return;
-    switched(commit);
+    // The transport is still streaming the pattern that WAS open — see the module
+    // note — so a change of open pattern releases it.
+    stop();
     // A blank pattern arrives named but unnamed-by-you. Opening the rename form
     // on it is how you say what it is while you still know — and it is the same
     // form the Rename button opens, not a second naming flow.
@@ -226,9 +198,7 @@ export function PatternLibraryPanel({
   const choose = (pattern: Pattern) => {
     setRefusal(null);
     if (pattern.id === open?.id) return;
-    const commit = ask();
-    if (!commit) return;
-    if (report(openPattern(pattern.id))) switched(commit);
+    if (report(openPattern(pattern.id))) stop();
   };
 
   const remove = (pattern: Pattern) => {
@@ -244,13 +214,11 @@ export function PatternLibraryPanel({
         ? `Delete "${pattern.name}"? This cannot be undone.`
         : `Delete "${pattern.name}"? Its ${notes} ${notes === 1 ? 'note goes' : 'notes go'} with it, and this cannot be undone.`;
     if (!window.confirm(message)) return;
-    // Only deleting the OPEN one changes what is open, so only that one can
-    // strand the voice pane's working copy.
+    // Only deleting the OPEN one changes what is open, so only that one has a
+    // transport to release.
     const isOpen = pattern.id === open?.id;
-    const commit = isOpen ? ask() : null;
-    if (isOpen && !commit) return;
     if (renamingId === pattern.id) setRenamingId(null);
-    if (report(deletePattern(pattern.id)) && commit) switched(commit);
+    if (report(deletePattern(pattern.id)) && isOpen) stop();
   };
 
   return (

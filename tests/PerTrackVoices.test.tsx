@@ -19,6 +19,7 @@ import {
   getEditingComposition,
   getTracks,
   openBlankComposition,
+  removeTrack,
   selectPlacements,
   selectTrack,
   setTrackInstrument,
@@ -36,7 +37,7 @@ import {
   voiceKey,
 } from '../src/voice/voiceService';
 import { playComposition, useCompositionPlayback } from '../src/audio/playbackService';
-import { addTrackVoiceSection, setTrackVoiceParam } from '../src/voice/trackVoiceDrafts';
+import { addVoiceSection, setVoiceParam, voiceDraftKeys } from '../src/voice/voiceDrafts';
 import {
   getEditingPattern,
   openBlankPattern,
@@ -353,6 +354,25 @@ describe('the track path in voiceService', () => {
     const after = getTracks();
     expect(resolveTrackVoicePreset(after[0]).name).toBe(first.name);
     expect(resolveTrackVoicePreset(after[1]).name).toBe(second.name);
+  });
+
+  it('keeps a removed track’s unsaved voice, where a deleted pattern’s is pruned', () => {
+    // The other half of the collection decision in `voiceDrafts`' header, and it is a
+    // decision rather than an omission: the track population is bounded at
+    // `MAX_COMPOSITION_TRACKS`, track ids are unique so nothing resurrects, and pruning
+    // from `compositionService.removeTrack` would put the composition seam back into
+    // this module's own importer — a cycle, to collect a few hundred bytes. Pinned
+    // because "nothing happens here" is the behaviour that gets tidied away by someone
+    // making the two kinds look symmetrical.
+    const tracks = twoTracks();
+    const gone = tracks[0].id;
+    expect(setVoiceParam('track', gone, 'level.volumeDb', -7).ok).toBe(true);
+    expect(voiceDraftKeys()).toContain(`track:${gone}`);
+
+    expect(removeTrack(gone).ok).toBe(true);
+
+    expect(getTracks().map((track) => track.id)).not.toContain(gone);
+    expect(voiceDraftKeys()).toContain(`track:${gone}`);
   });
 
   it('is NOT selectVoice — the pattern write moves no track at all', () => {
@@ -743,29 +763,29 @@ describe('the circuit amp\u2019s switches through the seam', () => {
   /** A track with the circuit-amp stage added and the 5E3 selected. */
   function trackOnThe5E3(): string {
     const track = twoTracks()[0];
-    const added = addTrackVoiceSection(track.id, 'circuit-amp');
+    const added = addVoiceSection('track', track.id, 'circuit-amp');
     if (!added.ok) throw new Error(added.reason);
-    const picked = setTrackVoiceParam(track.id, 'effects.circuitAmp.ampId', 'deluxe-5e3');
+    const picked = setVoiceParam('track', track.id, 'effects.circuitAmp.ampId', 'deluxe-5e3');
     if (!picked.ok) throw new Error(picked.reason);
     return track.id;
   }
 
-  // The enum arm in `trackVoiceDrafts` validates against the row's own
+  // The enum arm in `voiceDrafts` validates against the row's own
   // `options`, so this confirms the new switch rows REACH it — not new
   // machinery. An agent with no pointer is exactly the caller that would try
   // 'jumper' for 'jumpered', or 'normal' now that the three-way is gone.
   it('refuses an input value the 5E3 does not offer', () => {
     const trackId = trackOnThe5E3();
     for (const bad of ['jumper', 'normal', 'HI', '']) {
-      const result = setTrackVoiceParam(trackId, 'effects.circuitAmp.controls.input', bad);
+      const result = setVoiceParam('track', trackId, 'effects.circuitAmp.controls.input', bad);
       expect(result.ok, `accepted ${JSON.stringify(bad)}`).toBe(false);
     }
   });
 
   it('refuses a number where a switch is declared, and a string where a pot is', () => {
     const trackId = trackOnThe5E3();
-    expect(setTrackVoiceParam(trackId, 'effects.circuitAmp.controls.jumpered', 1).ok).toBe(false);
-    expect(setTrackVoiceParam(trackId, 'effects.circuitAmp.controls.volumeNormal', 'loud').ok)
+    expect(setVoiceParam('track', trackId, 'effects.circuitAmp.controls.jumpered', 1).ok).toBe(false);
+    expect(setVoiceParam('track', trackId, 'effects.circuitAmp.controls.volumeNormal', 'loud').ok)
       .toBe(false);
   });
 
@@ -778,7 +798,7 @@ describe('the circuit amp\u2019s switches through the seam', () => {
       ['inverter', ['split', 'composed']],
     ] as const) {
       for (const value of values) {
-        const result = setTrackVoiceParam(
+        const result = setVoiceParam('track', 
           trackId, `effects.circuitAmp.controls.${path}`, value,
         );
         expect(result.ok, `${path} = ${value}: ${result.ok ? '' : result.reason}`).toBe(true);
@@ -790,11 +810,11 @@ describe('the circuit amp\u2019s switches through the seam', () => {
   // control id, so `tone` is shared deliberately — `input` is not.
   it('refuses a 5E3 switch while the Princeton is selected', () => {
     const track = twoTracks()[0];
-    const added = addTrackVoiceSection(track.id, 'circuit-amp');
+    const added = addVoiceSection('track', track.id, 'circuit-amp');
     if (!added.ok) throw new Error(added.reason);
-    expect(setTrackVoiceParam(track.id, 'effects.circuitAmp.controls.input', 'lo').ok).toBe(false);
+    expect(setVoiceParam('track', track.id, 'effects.circuitAmp.controls.input', 'lo').ok).toBe(false);
     // ...while the id they SHARE still writes.
-    expect(setTrackVoiceParam(track.id, 'effects.circuitAmp.controls.tone', 0.7).ok).toBe(true);
+    expect(setVoiceParam('track', track.id, 'effects.circuitAmp.controls.tone', 0.7).ok).toBe(true);
   });
 });
 
@@ -966,7 +986,7 @@ describe('per-track voices reach the engine', () => {
     const running = engine();
 
     await act(async () => {
-      const result = setTrackVoiceParam(tracks[1].id, 'source.kind', 'pluck-synth');
+      const result = setVoiceParam('track', tracks[1].id, 'source.kind', 'pluck-synth');
       if (!result.ok) throw new Error(result.reason);
     });
     // The rebuild is coalesced on a trailing timer, so let it land.

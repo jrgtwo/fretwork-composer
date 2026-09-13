@@ -197,7 +197,7 @@ describe('switching source', () => {
 
   it('re-kinds the LAYER and leaves the primary source where it was', () => {
     // The whole reason this is a second function rather than a `branch` argument
-    // on `withSourceKind`: `trackVoiceDrafts` calls that one with no path, so any
+    // on `withSourceKind`: `voiceDrafts` calls that one with no path, so any
     // second `source-kind` row in the table would swap the primary while the
     // caller pointed at the layer. Asserted on both branches at once.
     const layered: VoicePreset = { ...START, layer: SEED_LAYER };
