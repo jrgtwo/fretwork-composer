@@ -214,18 +214,26 @@ describe('state that outlives the page swap', () => {
   it('preserves the amp pane unsaved voice and its open sections', async () => {
     render(<App />);
 
-    // `Level` starts folded, so opening it is a change to `openSections`; the
-    // slider edit inside it is working-voice state the pane never persists.
+    // `Level` starts folded, so opening it is a change to the folded-sections
+    // list `App` holds; the knob edit inside it is draft state the pane never
+    // persists. A `Knob`, not a range input — the pattern page draws the
+    // composition page's controls now.
     await userEvent.click(screen.getByRole('button', { name: 'Level' }));
-    const volume = screen.getByLabelText('Volume') as HTMLInputElement;
-    fireEvent.change(volume, { target: { value: '-6' } });
+    const volume = screen.getByRole('slider', { name: 'Volume' });
+    const before = Number(volume.getAttribute('aria-valuenow'));
+    fireEvent.keyDown(volume, { key: 'ArrowUp' });
+    const edited = Number(screen.getByRole('slider', { name: 'Volume' }).getAttribute('aria-valuenow'));
+    expect(edited).toBeGreaterThan(before);
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
 
     await goTo('Composition');
     await goTo('Pattern');
 
     expect(screen.getByRole('button', { name: 'Level' })).toHaveAttribute('aria-expanded', 'true');
-    expect((screen.getByLabelText('Volume') as HTMLInputElement).value).toBe('-6');
+    expect(screen.getByRole('slider', { name: 'Volume' })).toHaveAttribute(
+      'aria-valuenow',
+      String(edited),
+    );
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
   });
 

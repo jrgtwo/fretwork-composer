@@ -2,23 +2,21 @@
  * The chrome the two voice surfaces share — the half of it that is not a
  * component (those are `DirtyPill.tsx` and `NameForm.tsx`, beside this).
  *
- * `VoicePane` (the pattern page) and `TrackVoiceRack` (one track's rack on the
- * composition page) are the two surfaces that SAVE a voice: one addresses the
- * editing PATTERN, the other one TRACK, and that half of them is deliberately
- * separate. The SEAM is one now — the same functions under a `kind` argument — but
- * which holder each surface names, and the wording that explains a refusal to
- * whoever is looking at it, still differ. What does NOT differ is the furniture:
- * the unsaved pill, the name form with its focus-return, and the window a
- * `<select>`'s writes are collected in.
+ * ⚠ THE EDITOR IS ONE COMPONENT NOW — `VoiceEditor`, rendered by `VoicePane` for
+ * the editing PATTERN and by `TrackVoiceRack` for one TRACK. What is left in here
+ * is what the two WRAPPERS still decide between them: the refusal wording that
+ * names their own holder, the knob sizes their width allows, and the furniture
+ * both sides of the merge brought — the unsaved pill, the name form with its
+ * focus-return, and the window a `<select>`'s writes are collected in.
  *
- * The BUTTON SKIN is the one piece that is no longer shared by all three: the rack
- * draws the four saving buttons in its own denser class, because `voiceButtonClass`
- * was sized for the 300 px rail and the rack header already had a Revert beside
- * them. It stays here for `VoicePane` and `NameForm`, which are that size.
+ * The BUTTON SKIN is the one piece the editor no longer takes: it draws its own
+ * denser class, because `voiceButtonClass` was sized for the 300 px rail the
+ * saving buttons came from. It stays here for `NameForm` and for `VoicePane`'s
+ * own chrome, which are that size.
  *
- * `VoiceRail` used to be the second of those and is now only a list: saving moved
- * into the rack header, where the knobs that made the edit are, so the rail takes
- * `SHARED_VOICE_REFUSAL_TEXT` alone.
+ * `VoiceRail` is only a list: saving moved into the editor's header, where the
+ * knobs that made the edit are, so the rail takes `SHARED_VOICE_REFUSAL_TEXT`
+ * alone.
  *
  * Kept here rather than copied because the copies were byte-identical, and the
  * failure mode of two copies is not drift in the classes — it is one of them
@@ -44,13 +42,37 @@ import type { VoiceRefusal } from './voiceService';
  * step. A list of BUTTONS needs no such window, which is why `VoiceRail` has none:
  * arrowing through buttons moves focus and commits nothing.
  *
- * THREE `<select>`s share it — this rack header's picker, `TrackControls`' compact
+ * THREE `<select>`s share it — the editor header's picker, `TrackControls`' compact
  * one, and whatever comes next. It was a private const in `TrackControls` until the
  * second one appeared; one exported const is what stops two windows drifting into
  * two different answers to the same gesture. Rowed as permanent adapter work in
  * `docs/FOLLOW-UPS.md`.
  */
 export const VOICE_COMMIT_MS = 120;
+
+/**
+ * Knob diameters, in px — the two sizes `VoiceEditor` draws its stages at.
+ *
+ * ⚠ NAMED FOR WHAT DECIDES THEM — the WIDTH the editor has been given — and not
+ * for the page it is on. A rack lane has to fit eight amp knobs plus a cabinet
+ * and a level stage across one track's row; the Instrument & Amp pane has a
+ * whole pane's column, which is what `Knob`'s and `ParamEncoder`'s own 56 px
+ * default was drawn for. ONE RULE, passed in as a prop: a renderer that asked
+ * which page it was on would be the branch the merged editor exists to delete,
+ * and two per-page constants inside it would be that branch spelled differently.
+ */
+export interface KnobScale {
+  /** The amp plate's knobs, which are the largest thing on any stage. */
+  readonly amp: number;
+  /** Everything else — cabinet, pedals, source, level, and every encoder. */
+  readonly small: number;
+}
+
+/** One track's row of the arrangement, where up to eight racks are stacked. */
+export const LANE_KNOB_SCALE: KnobScale = { amp: 42, small: 38 };
+
+/** A whole pane column, with one holder on the page. */
+export const PANE_KNOB_SCALE: KnobScale = { amp: 56, small: 56 };
 
 export const voiceButtonClass =
   'pressable control flex-none rounded-lg px-2 py-1 font-mono text-[9px] font-bold tracking-[0.06em] uppercase disabled:cursor-not-allowed disabled:opacity-40';
@@ -70,9 +92,9 @@ export const voiceLabelClass = 'font-mono text-[9px] tracking-[0.1em] text-ink-m
  * reason: the two surfaces word it differently, the pane keeping Sound Lab's
  * shipped sentence verbatim, and unifying them would silently reword shipped copy.
  *
- * Each SAVING surface declares a complete `Record` of the union on top of this,
- * which is what makes a new refusal a compile error in both places rather than a
- * missing sentence in one. `VoiceRail` declares none: the only refusal a list of
+ * Each WRAPPER declares a complete `Record` of the union on top of this and hands
+ * it to `VoiceEditor`, which is what makes a new refusal a compile error in both
+ * places rather than a missing sentence in one. `VoiceRail` declares none: the only refusal a list of
  * buttons can raise is `unknown-variant`, which is here.
  */
 export const SHARED_VOICE_REFUSAL_TEXT: Readonly<

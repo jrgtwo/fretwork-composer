@@ -374,8 +374,11 @@ describe('CabinetGraphic', () => {
 /** Which sections are unfolded lives in `App` in the real app; a host stands in for
  *  it. The unsaved edit does NOT — it is in `voice/voiceDrafts`, keyed by pattern. */
 function Host() {
-  const [openSections, setOpenSections] = useState<readonly SectionId[]>(['amp', 'cabinet']);
-  return <VoicePane openSections={openSections} onOpenSectionsChange={setOpenSections} />;
+  // `undefined` rather than a list: nobody has folded anything yet, which is the
+  // state `App` starts in and is NOT the same as an empty list (every stage open,
+  // and the user said so). The pane opens on the schema's default either way.
+  const [collapsed, setCollapsed] = useState<readonly SectionId[] | undefined>(undefined);
+  return <VoicePane collapsedSections={collapsed} onCollapsedSectionsChange={setCollapsed} />;
 }
 
 describe('the rack, wired into the pane', () => {

@@ -155,7 +155,7 @@ describe('Knob', () => {
     });
 
     it('reports a value outside the range clamped, while the readout keeps the truth', () => {
-      // Reachable only from a preset authored elsewhere; ParamSlider documents the
+      // Reachable only from a preset authored elsewhere; the component documents the
       // same trade. ARIA forbids valuenow outside the bounds, so that one clamps.
       const { dial } = setup({ value: 5, min: 0, max: 1 });
       expect(dial).toHaveAttribute('aria-valuenow', '1');
@@ -217,7 +217,7 @@ describe('Knob', () => {
       expect(onlyCall(onChange)).toBe(0);
     });
 
-    it('pages by ten steps, matching the native range input in ParamSlider', async () => {
+    it('pages by ten steps, as the native range input it replaced does', async () => {
       const { user, onChange, dial } = setup({ value: 0.5, step: 0.01 });
       dial.focus();
       await user.keyboard('{PageUp}');

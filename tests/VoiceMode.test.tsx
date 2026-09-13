@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
@@ -7,6 +7,7 @@ import {
   PPQ,
   useMetronomeStore,
   usePatternsStore,
+  getSamplePack,
   sourceTrimDb,
   useVoiceStore,
   type Track,
@@ -34,7 +35,7 @@ import {
   saveVoiceAs,
   selectVoice,
 } from '../src/voice/voiceService';
-import { VOICE_COMMIT_MS } from '../src/voice/voiceChrome';
+import { LANE_KNOB_SCALE, PANE_KNOB_SCALE, VOICE_COMMIT_MS } from '../src/voice/voiceChrome';
 import {
   DEFAULT_OPEN_SECTIONS,
   PARAM_SECTIONS,
@@ -54,6 +55,7 @@ import {
   voicePreset,
   removeVoicePedal,
 } from '../src/voice/voiceDrafts';
+import { clearPendingWarms } from '../src/voice/sampleWarm';
 import { playComposition, useCompositionPlayback } from '../src/audio/playbackService';
 import { getAtPath } from '../src/voice/presetPaths';
 import { SEED_BODY_FILTER_ENVELOPE } from '../src/voice/sourceDefaults';
@@ -311,6 +313,18 @@ const knob = (track: Track, section: string, name: string) =>
   stage(track, section).getByRole('slider', { name });
 
 /**
+ * A knob's drawn diameter, in px.
+ *
+ * ⚠ THE ONE PIECE OF GEOMETRY THIS FILE IS ALLOWED TO ASSERT. jsdom has no
+ * layout, so nothing here can say a rack fits its row — but `Knob` and
+ * `ParamEncoder` put their `size` straight onto the `<svg>` as an attribute, and
+ * an attribute is readable. That is what makes the `scale` PROP — the thing the
+ * merged editor uses instead of asking which page it is on — testable at all.
+ */
+const diameterOf = (slider: HTMLElement): number =>
+  Number(slider.querySelector('svg')?.getAttribute('width'));
+
+/**
  * What a rack nobody has touched has FOLDED: everything the schema does not name
  * in `DEFAULT_OPEN_SECTIONS`. Derived rather than listed for the same reason the
  * rack derives it — a fifth `ParamSection` must not need this file edited.
@@ -361,8 +375,9 @@ function openStage(track: Track, section: string): void {
 }
 
 /** A rack's own header strip — the disclosure button's row, which carries the
- *  voice name and the Unsaved/Saved word. Not a landmark, so it is reached
- *  through the one named thing in it. */
+ *  voice name. Not a landmark, so it is reached through the one named thing in
+ *  it. The Unsaved/Saved word is NOT here any more: it moved into the shared
+ *  editor's button row with the Save it qualifies, and is asked of `rack()`. */
 const strip = (track: Track) =>
   within(
     screen.getByRole('button', { name: `Voice rack for ${track.name}` })
@@ -393,7 +408,23 @@ beforeEach(() => {
   selectTrack(null);
   // A module that outlives every unmount also outlives every test in this file.
   clearVoiceDrafts();
+  // …and so does the sample-bank warm, whose timers would otherwise fire inside
+  // a later test against whatever `fetch` that one had standing.
+  clearPendingWarms();
   lib.reset();
+});
+
+/**
+ * `vitest.config` sets neither `unstubGlobals` nor `restoreMocks`, so a stub set
+ * in one test is still standing in the next one — and the warm test below stubs
+ * `fetch`, which every test after it would otherwise run behind.
+ *
+ * The timers go back too: the same test fakes them, and a file whose later tests
+ * `await userEvent` under frozen timers hangs rather than fails.
+ */
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 // --------------------------------------------------------------- the seam ---
@@ -1419,7 +1450,7 @@ describe('saving a voice from the track’s own rack', () => {
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -9);
 
     render(<ArrangementGrid mode="voice" />);
-    expect(strip(tracks[0]).getByText('Unsaved')).toBeInTheDocument();
+    expect(rack(tracks[0]).getByText('Unsaved')).toBeInTheDocument();
 
     await user.click(
       rack(tracks[0]).getByRole('button', { name: `Save ${tracks[0].name}’s voice` }),
@@ -1428,7 +1459,7 @@ describe('saving a voice from the track’s own rack', () => {
     const variant = useVoiceStore.getState().variants.find((v) => v.id === created.id)!;
     expect(getAtPath(variant.preset, VOLUME_PATH)).toBe(-9);
     expect(dirtyOf(getTracks()[0])).toBe(false);
-    expect(strip(getTracks()[0]).getByText('Saved')).toBeInTheDocument();
+    expect(rack(getTracks()[0]).getByText('Saved')).toBeInTheDocument();
     // The other holder followed, because a voice is one shared object.
     expect(volumeOf(getTracks()[1])).toBe(-9);
     // …and the open PATTERN did not: `'track'` is the kind at every call site here,
@@ -1469,11 +1500,11 @@ describe('saving a voice from the track’s own rack', () => {
     // destroy the evidence it was called to look for. Pointing the track back at the
     // ref the draft was tagged with is what tells the two apart: a draft that was
     // only shadowed by the repoint matches again here and resurrects.
-    expect(strip(getTracks()[0]).getByText('Saved')).toBeInTheDocument();
+    expect(rack(getTracks()[0]).getByText('Saved')).toBeInTheDocument();
     act(() => {
       selectVoice('track', getTracks()[0].id, null);
     });
-    expect(strip(getTracks()[0]).getByText('Saved')).toBeInTheDocument();
+    expect(rack(getTracks()[0]).getByText('Saved')).toBeInTheDocument();
   });
 
   it('renames under an unsaved edit, and the next Save keeps the new name', async () => {
@@ -2675,6 +2706,195 @@ describe('a rack edit reaches the engine', () => {
  * This is the tripwire for that move: `VoicePane` is a different surface with a
  * different working copy, and it must not have acquired the composition page's.
  */
+describe('ONE editor, two pages', () => {
+  /** Go to the composition page and into voice mode. The composition is seeded
+   *  by the caller — CP-17 stopped the page creating one on arrival. */
+  async function intoVoiceMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await user.click(nav().getByRole('button', { name: 'Composition' }));
+    await user.click(modes().getByRole('button', { name: 'Voice mode' }));
+  }
+
+  it('draws the same control for the same schema row on both pages, driven the same way', async () => {
+    // ⚠ THE POINT OF CP-18's LAST STEP. `level.volumeDb` is one `SliderParam` in
+    // `paramSchema`, and it used to be a range row on the pattern page and a
+    // `Knob` in a rack — two renderers, which is how a section gained a custom
+    // renderer on one side and not the other. There is one of each renderer now,
+    // so the two surfaces cannot disagree about what a row IS.
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: /Level/ }));
+    const paneVolume = screen.getByRole('slider', { name: 'Volume' });
+    const patternBefore = Number(paneVolume.getAttribute('aria-valuenow'));
+    // The knob's own gesture, which a range input does not answer in jsdom at
+    // all — so this assertion could not have passed against the old pane.
+    fireEvent.keyDown(paneVolume, { key: 'ArrowUp' });
+    expect(isVoiceDirty('pattern', getEditingPattern()!.id)).toBe(true);
+    const patternAfter = Number(
+      screen.getByRole('slider', { name: 'Volume' }).getAttribute('aria-valuenow'),
+    );
+    expect(patternAfter).toBeGreaterThan(patternBefore);
+
+    await intoVoiceMode(user);
+    openStage(getTracks()[0], 'Level');
+    const rackVolume = knob(getTracks()[0], 'Level', 'Volume');
+    const trackBefore = volumeOf(getTracks()[0]) as number;
+
+    // The same element type, the same role, the same keyboard contract — asked
+    // of the DOM rather than of the source, because "both files call `Knob`" is
+    // exactly what a reader cannot check from one of them.
+    expect(rackVolume.tagName).toBe(paneVolume.tagName);
+    expect(rackVolume.getAttribute('role')).toBe(paneVolume.getAttribute('role'));
+    // ⚠ AND THE ONE THING THAT IS ALLOWED TO DIFFER — the diameter, which follows
+    // the WIDTH the editor was given and not the file it is in. jsdom has no
+    // layout, but `size` is a plain SVG attribute, so the scale prop is
+    // assertable where nothing else about the drawing is. Swap the two scales in
+    // `voiceChrome` and this is what says so.
+    // LITERALS, not the constants. A test that reads `PANE_KNOB_SCALE.small`
+    // passes whatever that constant says, so it cannot fail on the numbers
+    // changing — only on the prop being unwired. These are the two the merge was
+    // told to keep: `Knob`'s own 56 px default on the pane, and the rack's 38.
+    expect(diameterOf(paneVolume)).toBe(56);
+    expect(diameterOf(rackVolume)).toBe(38);
+    expect(PANE_KNOB_SCALE.small).toBe(56);
+    expect(LANE_KNOB_SCALE.small).toBe(38);
+    fireEvent.keyDown(rackVolume, { key: 'ArrowUp' });
+    expect(volumeOf(getTracks()[0])).toBe(trackBefore + (patternAfter - patternBefore));
+    // …and the two holders stayed apart, which is the other half of one editor
+    // rendering twice: the draft is keyed, not the component.
+    expect(dirtyOf(getTracks()[1])).toBe(false);
+    expect(tracks).toHaveLength(2);
+  });
+
+  it('gives a track the TRACK’s input level and a pattern the PRESET’s', async () => {
+    // ⚠ THE ONE BRANCH ON HOLDER KIND IN THE SHARED EDITOR, and the only test of
+    // it. `inputGainDb` exists in two places: a preset carries one, and it is the
+    // wrong one to put on a track — a preset is chosen and swapped, so a level
+    // stored there is thrown away every time the user tries a different amp. The
+    // TRACK's survives the swap. A pattern has no track to hold one, so it shows
+    // the preset's row, which the rack filters out.
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    render(<App />);
+
+    await user.click(screen.getByRole('button', { name: /Level/ }));
+    const paneLevel = within(screen.getByRole('region', { name: 'Level stage' }));
+    // The preset's row, engraved as the schema names it.
+    expect(paneLevel.getByRole('slider', { name: 'Input gain' })).toBeInTheDocument();
+    expect(paneLevel.queryByRole('slider', { name: 'Input' })).toBeNull();
+
+    await intoVoiceMode(user);
+    openStage(getTracks()[0], 'Level');
+    const rackLevel = stage(getTracks()[0], 'Level');
+    // The track's own, and the preset's filtered out — two faders fighting over
+    // one job is exactly what this branch exists to prevent.
+    expect(rackLevel.queryByRole('slider', { name: 'Input gain' })).toBeNull();
+    const input = rackLevel.getByRole('slider', { name: 'Input' });
+
+    // An untouched track reads as unity while the STORED value stays undefined:
+    // `Track.inputGainDb` means "the preset decides" when absent and "unity
+    // regardless" at 0.
+    expect(getTracks()[0].inputGainDb).toBeUndefined();
+    fireEvent.keyDown(input, { key: 'ArrowUp' });
+
+    // The composition seam took it — and the draft did not, which is the half a
+    // renderer wired to the generic row would have got wrong while looking right.
+    expect(getTracks()[0].inputGainDb).toBe(0.5);
+    expect(getAtPath(presetOf(getTracks()[0]), 'inputGainDb')).not.toBe(0.5);
+    expect(getTracks()[1].inputGainDb).toBeUndefined();
+    expect(tracks).toHaveLength(2);
+  });
+
+  it('sizes a knob by the width the editor was given, not by the page', async () => {
+    // ⚠ THE ONE THING THE USER PUSHED BACK ON — "this seems context dependent,
+    // whats the problem". It is context dependent, and the context is WIDTH: a
+    // lane has to carry eight amp knobs plus a cabinet and a level stage, and the
+    // pane has a whole column. So it is one rule passed in as a prop, and this is
+    // the assertion that says the prop is wired rather than that two per-page
+    // constants happen to exist. Swap `LANE_KNOB_SCALE` and `PANE_KNOB_SCALE` in
+    // `voiceChrome` and this fails; nothing else in the suite does.
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    // The default guitar voice is `Acoustic Guitar`, which has no `effects` at
+    // all — so an amp knob only exists on a voice that HAS an amp, on both sides.
+    const crunch = voiceNamed('Crunch');
+    openBlankPattern('Scale');
+    selectVoice('pattern', getEditingPattern()!.id, crunch.ref);
+    selectVoice('track', tracks[0].id, crunch.ref);
+    render(<App />);
+
+    // Amp is open by default on both surfaces, so no fold gesture is needed.
+    const paneDrive = within(screen.getByRole('region', { name: 'Amp stage' })).getByRole(
+      'slider',
+      { name: 'Drive' },
+    );
+    // Literal, for the reason the Volume test states: reading the constant here
+    // would make the assertion agree with whatever the constant says.
+    expect(diameterOf(paneDrive)).toBe(56);
+
+    await intoVoiceMode(user);
+    expect(diameterOf(knob(getTracks()[0], 'Amp', 'Drive'))).toBe(42);
+    // The lane's plate is the one sized to fit eight of these across a row.
+    expect(PANE_KNOB_SCALE.amp).toBe(56);
+    expect(LANE_KNOB_SCALE.amp).toBe(42);
+    expect(tracks).toHaveLength(2);
+  });
+
+  it('warms each holder’s sample banks, so two racks do not drop one another’s', async () => {
+    // ⚠ THE MULTI-INSTANCE HAZARD THE MERGE CREATED. The warm in front of the
+    // lib's `prefetchSampleBanks` was module-level singleton state — one timer,
+    // one `pendingBanks` — because only the pattern page had one. Rendered eight
+    // times it is last-writer-wins, and two racks touching their pack pickers
+    // inside one coalescing window dropped one warm entirely. It is keyed by
+    // holder now, and BOTH packs have to be in flight.
+    //
+    // ⚠ FAKE TIMERS ARE WHAT MAKES THIS DISCRIMINATE. The window is ~120 ms of
+    // WALL CLOCK, and each `selectOptions` re-renders a whole rack — dozens of
+    // SVG knobs — with a macrotask per synthetic event. Under real timers a
+    // loaded machine can spend longer than the window between the two picks, and
+    // then the singleton version passes too: the first warm has already fired and
+    // there is nothing left to clobber. Frozen, the two picks are inside one
+    // window by construction and the singleton fails every run.
+    vi.useFakeTimers();
+    const fetched = vi.fn((url: string) => Promise.resolve(url));
+    vi.stubGlobal('fetch', fetched);
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+
+    openStage(tracks[0], 'Source');
+    openStage(tracks[1], 'Source');
+    // `fireEvent` rather than `userEvent`: picking an option is one synchronous
+    // `change`, and `userEvent`'s own scheduling does not survive frozen timers.
+    fireEvent.change(stage(getTracks()[0], 'Source').getByLabelText('Pack'), {
+      target: { value: 'casio-piano-demo' },
+    });
+    fireEvent.change(stage(getTracks()[1], 'Source').getByLabelText('Pack'), {
+      target: { value: 'salamander-piano-demo' },
+    });
+
+    // Nothing yet: both picks are still inside their own coalescing window, which
+    // is the state the singleton lost one of them in.
+    expect(fetched).not.toHaveBeenCalled();
+    // Well past the window, so neither warm can be merely late — and awaited,
+    // because the lib's warm consults the sample store before it reaches the
+    // network, so the `fetch` is a microtask behind the timer rather than in it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    const first = Object.values(getSamplePack('casio-piano-demo')!.samples[0])[0];
+    const second = Object.values(getSamplePack('salamander-piano-demo')!.samples[0])[0];
+    const urls = fetched.mock.calls.map(([url]) => String(url));
+    expect(urls).toContain(first);
+    expect(urls).toContain(second);
+    // Both drafts took their pack too — a warm without a write would be a
+    // download of something nothing plays.
+    expect(presetOf(getTracks()[0]).source.kind).toBe('sampler');
+    expect(presetOf(getTracks()[1]).source.kind).toBe('sampler');
+  });
+});
+
 describe('the pattern page’s voice pane is untouched', () => {
   it('still edits the pattern’s voice and marks itself unsaved', async () => {
     const user = userEvent.setup();
@@ -2684,8 +2904,10 @@ describe('the pattern page’s voice pane is untouched', () => {
     // `Level` starts folded on the pattern page — the same section the racks
     // above edit, which is what makes this a real crossing test.
     await user.click(screen.getByRole('button', { name: /Level/ }));
-    const slider = screen.getByRole('slider', { name: 'Volume' });
-    fireEvent.change(slider, { target: { value: '-6' } });
+    // The same `Knob` the racks above draw — one editor, one control, and the
+    // arrow is the gesture on both pages.
+    const volume = screen.getByRole('slider', { name: 'Volume' });
+    fireEvent.keyDown(volume, { key: 'ArrowUp' });
 
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
     // …and no track's voice moved with it. ONE store holds all of them now, keyed

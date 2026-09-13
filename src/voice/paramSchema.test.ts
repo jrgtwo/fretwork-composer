@@ -1282,7 +1282,7 @@ describe('row conditions', () => {
 describe('circuit-amp control rows', () => {
   // The lib's control union reaches the schema as two different row kinds. A
   // switch emitted as a slider would write a number into a field the renderer
-  // reads as a string, and `ParamSlider` would render a fader for a three-way
+  // reads as a string, and `VoiceEditor` would draw a knob for a three-way
   // switch.
   it('emits an enum row for every declared switch and a slider for every pot', () => {
     for (const amp of CIRCUIT_AMPS) {

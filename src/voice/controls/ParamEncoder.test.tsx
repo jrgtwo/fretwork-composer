@@ -283,7 +283,7 @@ describe('ParamEncoder', () => {
       expect(onlyCall(onChange)).toBe(4);
     });
 
-    it('pages up by ten increments, matching Knob and the native range in ParamSlider', async () => {
+    it('pages up by ten increments, matching Knob', async () => {
       const { user, onChange, dial } = setup({ value: 3, step: 0.1 });
       dial.focus();
       await user.keyboard('{PageUp}');

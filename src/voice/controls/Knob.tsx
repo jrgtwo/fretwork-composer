@@ -97,8 +97,8 @@ export function Knob({
   );
 
   // A value outside [min, max] pins the dial to the bound while the readout shows the
-  // true number — the same trade `ParamSlider` documents, for the same reason: hiding
-  // it would hide that the preset holds something this editor cannot represent. No
+  // true number, rather than clamping it: hiding it would hide that the preset holds
+  // something this editor cannot represent. No
   // built-in reaches it today (the ten samplers' over-long `source.release` did until
   // the lib retuned them — FOLLOW-UPS row 24); a hand-authored variant still can.
   const fraction = max === min ? 0 : Math.min(1, Math.max(0, (value - min) / (max - min)));
@@ -185,9 +185,9 @@ export function Knob({
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (disabled) return;
       const delta = step * (e.shiftKey ? KEY_MULTIPLIER : 1);
-      // PageUp/Down because the native range input in `ParamSlider` answers them, and
-      // the two renderers sit over one schema — the same parameter must not answer
-      // different keys depending on which one drew it.
+      // PageUp/Down because a native range input answers them, and this replaced
+      // one: the same parameter must not answer different keys for having been
+      // redrawn as a dial.
       const pageDelta = step * KEY_MULTIPLIER;
       if (e.key === 'ArrowUp' || e.key === 'ArrowRight') {
         e.preventDefault();

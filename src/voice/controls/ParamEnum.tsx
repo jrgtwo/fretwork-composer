@@ -2,9 +2,9 @@
  * One "pick from a registry" voice parameter — the amp model, the cabinet IR and the
  * sample pack all funnel through here.
  *
- * A native `<select>`, for the same reason `ParamSlider` uses a native range: it is
- * keyboard- and screen-reader-complete out of the box, and it collapses a nine-entry
- * registry into one row of a pane that has three other sections to fit.
+ * A native `<select>`: it is keyboard- and screen-reader-complete out of the box, and
+ * it collapses a nine-entry registry into one row of a pane that has three other
+ * sections to fit.
  *
  * Two things the plain element cannot do, handled here:
  *
@@ -97,8 +97,9 @@ export function ParamEnum({
         </div>
         <select
           id={id}
-          // Exclusive, for the reason `ParamSlider` gives: `aria-label` outranks
-          // a `<label for>`, so passing nothing leaves the engraving in charge.
+          // Exclusive rather than additive: `aria-label` outranks a `<label
+          // for>` in the accessible-name computation, so passing nothing leaves
+          // the engraving in charge.
           {...(ariaLabel ? { 'aria-label': ariaLabel } : {})}
           value={selected ? selected.value : ''}
           onChange={(event) => onChange(event.currentTarget.value)}

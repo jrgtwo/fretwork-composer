@@ -37,7 +37,7 @@ import { VOICE_COMMIT_MS } from '../voice/voiceChrome';
  * How long a voice pick waits before it is written.
  *
  * The same window, and the same reason, as `playbackService`'s
- * `REBUILD_COALESCE_MS` and `VoicePane`'s `WARM_COALESCE_MS`: a native `<select>`
+ * `REBUILD_COALESCE_MS` and `VoiceEditor`'s `WARM_COALESCE_MS`: a native `<select>`
  * fires `change` once per arrow key while closed, so a keyboard user stepping the
  * eleven guitar voices passes through all of them. Ten of those slots are
  * sampler-sourced, and once the page has played, every one of those writes reaches
@@ -612,15 +612,16 @@ export function TrackControls({
             S
           </button>
           {/* A native range: already keyboard-operable and already announcing
-              its value, exactly as `ParamSlider` argues at length. dB straight
-              through — no 0–100 conversion, because the model, the clamp and
-              the gain node are all dB and a percentage would only be a second
-              unit to get wrong.
+              its value. dB straight through — no 0–100 conversion, because the
+              model, the clamp and the gain node are all dB and a percentage
+              would only be a second unit to get wrong.
 
-              NOT `ParamSlider` itself, and the reason is layout rather than
-              taste: it requires an `id` and spends a fixed 74 px + 52 px on a
-              visible `<label>` and readout, which is more than half of this
-              header's 200 px. `aria-label` and a 30 px readout is what fits.
+              NOT the voice editor's `Knob`, and the reason is layout rather
+              than taste: a dial spends a square on a value this header reads as
+              one number, and the 200 px column has room for a line and a 30 px
+              readout. The labelled range row this was modelled on is gone from
+              the voice editor entirely — every row there is a knob since the two
+              editors merged.
 
               `?? 0` because the field is optional on the model and
               `migrateCompositionToTracks` returns an already-populated
@@ -640,7 +641,7 @@ export function TrackControls({
           />
           {/* `aria-hidden`: the range already reports this number, and read out
               twice it becomes "volume for Rhythm minus six minus six".
-              `toFixed(1)`, as `ParamSlider` does: the step is 0.5, and rounding
+              `toFixed(1)`: the step is 0.5, and rounding
               would print −0.5 as "0" — indistinguishable from unity. */}
           <span
             aria-hidden

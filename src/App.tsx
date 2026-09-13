@@ -16,7 +16,7 @@ import { CommandPanel } from './ai/CommandPanel';
 import { VoicePane } from './voice/VoicePane';
 // The default lives with the schema it indexes, so the pattern page's pane and the
 // composition page's racks cannot open on different stages (see `paramSchema`).
-import { DEFAULT_OPEN_SECTIONS, type SectionId } from './voice/paramSchema';
+import type { SectionId } from './voice/paramSchema';
 
 /** The stack's starting order. Which panes exist is decided below; this is only
  *  the order they open in, and the stack reconciles the two. */
@@ -103,10 +103,19 @@ export function App() {
   // a collapse belongs above the stack, which is here.
   const [referenceView, setReferenceView] = useState<ReferenceViewId>('fretboard');
 
-  // Which voice sections are unfolded. The pane's UNSAVED EDIT is deliberately not
-  // beside it — see `voice/voiceDrafts`, which holds one per pattern and one per
-  // track, above every component and readable by the engine without a render.
-  const [openSections, setOpenSections] = useState<readonly SectionId[]>(DEFAULT_OPEN_SECTIONS);
+  // Which voice stages the pattern page has FOLDED — the same polarity the racks
+  // hold, because the two are one component now: a list of folded names cannot
+  // hide a section `paramSchema` gains, where a list of open ones would. `undefined`
+  // is "nobody has folded this yet" and opens on the schema's default, which is NOT
+  // the same as an empty list — empty is a user who has unfolded everything, and
+  // collapsing it back to `undefined` would re-fold two stages under them.
+  //
+  // The pane's UNSAVED EDIT is deliberately not beside it — see `voice/voiceDrafts`,
+  // which holds one per pattern and one per track, above every component and
+  // readable by the engine without a render.
+  const [collapsedVoiceSections, setCollapsedVoiceSections] = useState<
+    readonly SectionId[] | undefined
+  >(undefined);
 
   // And the same again for the stack itself: `PaneStack` is unmounted outright
   // when the composition page takes the body, so a collapse or a reorder held
@@ -205,7 +214,10 @@ export function App() {
       id: 'amp',
       title: 'Instrument & Amp',
       children: (
-        <VoicePane openSections={openSections} onOpenSectionsChange={setOpenSections} />
+        <VoicePane
+          collapsedSections={collapsedVoiceSections}
+          onCollapsedSectionsChange={setCollapsedVoiceSections}
+        />
       ),
     },
     {

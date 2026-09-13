@@ -12,6 +12,12 @@ import { RackFace } from './rack/RackFace';
  * and the split is deliberate — a shared section that knew what a bypassed
  * effects branch was would not be shared, it would be relocated.
  *
+ * ONE OF THESE PER STAGE, EVERYWHERE. The composition page used to bolt its own
+ * `Section` + `RackFace` together inline, because this file hard-coded the
+ * landmark as `${label} stage` and carried the pane's status vocabulary. Both
+ * are now the caller's, as `buttonLabel` and `regionName`, and there is one
+ * stage chassis for both pages — see `VoiceEditor`, its only caller.
+ *
  * So this file keeps exactly two things:
  *
  * THE CHASSIS. `RackFace` — a thin raised faceplate with the unit's name
@@ -27,21 +33,21 @@ import { RackFace } from './rack/RackFace';
  *                object whatsoever, so this is reachable from a stock built-in and not
  *                merely a state the editor can create.
  *
- * The status goes to `RackFace`'s own `note` slot rather than through
- * `Section`'s, because `RackFace` places a note to the LEFT of the faceplate
- * where the rail's chassis right-aligns it. Both are outside the disclosure
- * button, which is the part `Section` guarantees and the part that matters.
+ * ⚠ ONLY `bypassed` IS WORDED. An absent stage used to say "Not on this preset"
+ * here and say nothing on the composition page; the rack's silence-plus-dark-lamp
+ * won, because the body of an absent stage already says so in a sentence and its
+ * Add button is the affordance. The note goes to `RackFace`'s own slot rather than
+ * through `Section`'s, because `RackFace` places a note to the LEFT of the
+ * faceplate where the rail's chassis right-aligns it. Both are outside the
+ * disclosure button, which is the part `Section` guarantees and the part that
+ * matters.
  */
 export type SectionStatus = 'active' | 'bypassed' | 'absent';
 
-const STATUS_NOTE: Record<SectionStatus, string | null> = {
-  active: null,
-  bypassed: 'Bypassed',
-  absent: 'Not on this preset',
-};
-
 export function VoiceSection({
   label,
+  buttonLabel,
+  regionName,
   status,
   open,
   onToggle,
@@ -49,6 +55,13 @@ export function VoiceSection({
   children,
 }: {
   label: string;
+  /** Accessible name for the disclosure button. Up to eight racks are on screen
+   *  at once and each has an "Amp" stage, so the name has to carry the track
+   *  where there is one; with a single holder the visible label is enough. */
+  buttonLabel?: string;
+  /** The landmark's name — what tells eight racks' identically named controls
+   *  apart, for a screen reader and for the tests that scope by it. */
+  regionName: string;
   status: SectionStatus;
   open: boolean;
   onToggle: () => void;
@@ -61,21 +74,23 @@ export function VoiceSection({
   return (
     <Section
       label={label}
+      buttonLabel={buttonLabel}
       open={open}
       onToggle={onToggle}
       actions={actions}
-      bodyClassName="flex flex-col gap-1.5 px-2 py-1.5"
+      bodyClassName="flex flex-col gap-1 px-1.5 py-1"
       chassis={(parts) => (
         <RackFace
           lit={status === 'active'}
-          regionName={`${label} stage`}
+          regionName={regionName}
+          // The chassis owns the material, and its engraved names are muted.
+          name={<span className="text-ink-mut">{parts.name}</span>}
           // Outside the disclosure button on purpose: inside, the status would be read as
-          // part of its name ("Amp, not on this preset, collapsed"), and the lamp would be
+          // part of its name ("Amp, bypassed, collapsed"), and the lamp would be
           // the only thing distinguishing two identically-named buttons in a pane that has
           // thirty controls.
-          note={STATUS_NOTE[status]}
+          note={status === 'bypassed' ? 'Bypassed' : null}
           actions={parts.actions}
-          name={parts.name}
         >
           {parts.region}
         </RackFace>

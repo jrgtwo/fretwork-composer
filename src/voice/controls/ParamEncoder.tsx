@@ -23,7 +23,7 @@
  * offers to type into a dial that takes no typing. An `<input type="number">` with no
  * min/max would carry the role natively AND accept a typed value — worth doing, but it
  * is a different control from the one the pane's other four are, and typed entry is a
- * pane-wide affordance (`Knob` and `ParamSlider` have not got it either) rather than
+ * pane-wide affordance (`Knob` has not got it either) rather than
  * this control's alone. Not `aria-readonly`: it is not read-only, it is not typeable.
  *
  * WHY THE MATHS IS RELATIVE, not snapped to a grid. `Knob` quantises to `min + n*step`
@@ -273,10 +273,10 @@ export function ParamEncoder({
         e.preventDefault();
         emit(spin(latest.current, -KEY_MULTIPLIER));
       }
-      // Home/End are deliberately unhandled. Both `Knob` and the native range in
-      // `ParamSlider` answer them with min/max, and there is no min or max here —
-      // binding them to anything else would give one gesture two meanings across two
-      // renderers of the same pane. Double-click is the reset.
+      // Home/End are deliberately unhandled. `Knob` answers them with min/max,
+      // and there is no min or max here — binding them to anything else would give
+      // one gesture two meanings between two controls of the same stage.
+      // Double-click is the reset.
     },
     [disabled, emit, spin],
   );

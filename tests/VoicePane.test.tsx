@@ -6,16 +6,21 @@ import {
   ACOUSTIC_GUITAR_PRESET,
   CABINET_IRS,
   detectSamplePack,
+  getSamplePack,
   sourceTrimDb,
+  usePatternsStore,
   useFretworkStore,
   useVoiceStore,
   type CabIRParams,
   type VoicePreset,
 } from '@fretwork/lib';
 import { VoicePane } from '../src/voice/VoicePane';
-import type { SectionId } from '../src/voice/paramSchema';
+import { PARAM_SECTIONS, type SectionId } from '../src/voice/paramSchema';
 import { getAtPath } from '../src/voice/presetPaths';
-import { clearVoiceDrafts, readVoiceDraft } from '../src/voice/voiceDrafts';
+import { clearVoiceDrafts, isVoiceDirty, readVoiceDraft } from '../src/voice/voiceDrafts';
+import { readVoiceRef } from '../src/voice/voiceService';
+import { VOICE_COMMIT_MS } from '../src/voice/voiceChrome';
+import { clearPendingWarms } from '../src/voice/sampleWarm';
 import { getEditingPattern, openBlankPattern } from '../src/patterns/patternService';
 
 /**
@@ -39,16 +44,20 @@ import { getEditingPattern, openBlankPattern } from '../src/patterns/patternServ
  *     programmatic callers — Add/Remove stage, "Use suggested cab" — which is why it is
  *     not dead code.
  *
- * `openSections` is hoisted into a host component because that is where it lives in the
- * real app — `App`, above `PaneStack`, which unmounts a collapsed pane's body. THE
- * UNSAVED EDIT IS NOT hoisted, and that is the change this file records: it lives in
- * `voice/voiceDrafts`, keyed `pattern:<id>`, above every component and readable without
- * a render. `draftPreset()` below reads it from there.
+ * `collapsedSections` — the FOLDED set, which is the polarity both surfaces hold
+ * since the two editors merged — is hoisted into a host component because that is where
+ * it lives in the real app: `App`, above `PaneStack`, which unmounts a collapsed pane's
+ * body. THE UNSAVED EDIT IS NOT hoisted, and that is the change this file records: it
+ * lives in `voice/voiceDrafts`, keyed `pattern:<id>`, above every component and readable
+ * without a render. `draftPreset()` below reads it from there.
  */
 
 function Host() {
-  const [openSections, setOpenSections] = useState<readonly SectionId[]>(['amp', 'cabinet']);
-  return <VoicePane openSections={openSections} onOpenSectionsChange={setOpenSections} />;
+  // `undefined` rather than a list: nobody has folded anything yet, which is the
+  // state `App` starts in and is NOT the same as an empty list (every stage open,
+  // and the user said so). The pane opens on the schema's default either way.
+  const [collapsed, setCollapsed] = useState<readonly SectionId[] | undefined>(undefined);
+  return <VoicePane collapsedSections={collapsed} onCollapsedSectionsChange={setCollapsed} />;
 }
 
 /** The unsaved DRAFT the open pattern is holding — the only way to see fields the
@@ -83,8 +92,26 @@ function pointerEvent(type: string, init: { pointerId?: number; clientY?: number
   return event;
 }
 
-const pickVoice = (key: string) => userEvent.selectOptions(screen.getByLabelText('Voice'), key);
+/**
+ * Pick a voice, and let the commit window close.
+ *
+ * The header's picker coalesces its writes for `VOICE_COMMIT_MS` — a native
+ * `<select>` fires `change` once per arrow key while closed, and on a sampler
+ * voice every one of those is a bank load — and LEAVING THE FIELD ends the
+ * window early. That is the same gesture a keyboard user makes on the way to the
+ * next control, so it is what these tests make rather than a timer advance.
+ */
+const pickVoice = async (key: string) => {
+  const picker = screen.getByLabelText('Voice');
+  await userEvent.selectOptions(picker, key);
+  fireEvent.blur(picker);
+};
 const section = (name: string) => screen.getByRole('button', { name });
+/** The ref the open pattern actually holds, read through the seam rather than off
+ *  the `<select>` — the picker shows a DRAFT key for up to `VOICE_COMMIT_MS`
+ *  after a pick, and the whole question below is whether that draft has landed. */
+const liveRef = () => readVoiceRef(getEditingPattern()!);
+
 
 /** Both `window.confirm` sites — discard-on-switch and delete — are stubbed rather than
  *  left to jsdom's "not implemented" throw. Returns the messages asked, so a test can
@@ -101,6 +128,9 @@ function stubConfirm(answer: boolean): string[] {
 beforeEach(() => {
   // A module that outlives every unmount also outlives every test in this file.
   clearVoiceDrafts();
+  // …and so does the sample-bank warm, whose timers would otherwise fire inside a
+  // later test against whatever `fetch` that one had standing.
+  clearPendingWarms();
   // Both stores are module singletons: the pattern's instrument comes from the lib's
   // global store at creation time, and variants persist to sessionStorage.
   useFretworkStore.getState().setInstrumentId('guitar');
@@ -109,6 +139,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // The timers go back before the stubs: a test that froze them and then failed
+  // would otherwise hang every `await userEvent` after it.
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -185,7 +218,12 @@ describe('VoicePane', () => {
     // Four, not three: the experimental circuit amp is a section of its own and no
     // shipped preset carries one, by design — `wireChain` builds one amp or the
     // other, so a built-in voiced on the classic amp must not also carry a circuit.
-    expect(screen.getAllByText('Not on this preset')).toHaveLength(4);
+    // The rack's terse sentence, which is now both surfaces': the pane used to
+    // print an explanatory paragraph here and the composition page a lamp and a
+    // line. One editor, one wording — and the dark lamp beside it is the other
+    // half, which jsdom cannot read.
+    expect(screen.getAllByText(/stage on this voice\./)).toHaveLength(4);
+    expect(screen.queryByText('Not on this preset')).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
     const toggle = screen.getByRole('switch', { name: 'Cabinet Enabled' });
@@ -299,16 +337,88 @@ describe('VoicePane', () => {
   });
 
   it('writes a slider edit into the working copy', async () => {
+    // ⚠ EVERY `SliderParam` IS A KNOB HERE NOW — the rack's vocabulary, adopted
+    // by the pattern page when the two editors merged. So the value is on
+    // `aria-valuenow` rather than on `.value`, and the keyboard gesture is the
+    // knob's arrow rather than a range input's `change`. `Knob` keeps
+    // `role="slider"`, which is what this query and every other one in the file
+    // still reaches.
     render(<Host />);
     await userEvent.click(section('Level'));
-    const volume = screen.getByLabelText('Volume') as HTMLInputElement;
+    const volume = screen.getByLabelText('Volume');
+    expect(volume).toHaveAttribute('role', 'slider');
 
     volume.focus();
     expect(document.activeElement).toBe(volume);
+    const start = Number(volume.getAttribute('aria-valuenow'));
 
-    fireEvent.change(volume, { target: { value: '-6' } });
-    expect((screen.getByLabelText('Volume') as HTMLInputElement).value).toBe('-6');
+    fireEvent.keyDown(volume, { key: 'ArrowUp' });
+    expect(Number(screen.getByLabelText('Volume').getAttribute('aria-valuenow'))).toBeGreaterThan(
+      start,
+    );
+    expect(getAtPath(draftPreset(), 'level.volumeDb')).toBeGreaterThan(start);
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
+  });
+
+  it('keeps the folded set as the holder’s, so `undefined` and `[]` are different states', async () => {
+    // ⚠ THE POLARITY, and the distinction the caller has to keep. The pane stores
+    // the FOLDED stages now, exactly as the racks do — a list of open ones would
+    // hide a section `paramSchema` gains, and a name nobody has heard of must be
+    // open on a control surface. `undefined` is "nobody has folded this yet" and
+    // opens on the schema's default; `[]` is a user who unfolded everything.
+    // Collapsing the second back into the first would re-fold two stages under
+    // them on the next render.
+    const { unmount } = render(
+      <VoicePane collapsedSections={undefined} onCollapsedSectionsChange={() => {}} />,
+    );
+    for (const name of ['Source', 'Level']) {
+      expect(section(name)).toHaveAttribute('aria-expanded', 'false');
+    }
+    for (const name of ['Amp', 'Cabinet']) {
+      expect(section(name)).toHaveAttribute('aria-expanded', 'true');
+    }
+    unmount();
+
+    render(<VoicePane collapsedSections={[]} onCollapsedSectionsChange={() => {}} />);
+    for (const name of ['Source', 'Body filter', 'Pedals', 'Amp', 'Cabinet', 'Level']) {
+      expect(section(name)).toHaveAttribute('aria-expanded', 'true');
+    }
+  });
+
+  it('reports the fold as the whole folded list, not a diff', async () => {
+    const folded: (readonly SectionId[])[] = [];
+    render(<VoicePane collapsedSections={undefined} onCollapsedSectionsChange={(next) => folded.push(next)} />);
+
+    // Unfolding Level — folded by default — is a REMOVAL from the folded list,
+    // which is the half "Use suggested cab" also writes. What travels is the
+    // WHOLE list, so the stages nobody touched are still in it.
+    await userEvent.click(section('Level'));
+    expect(folded).toHaveLength(1);
+    expect(folded[0]).not.toContain('level');
+    expect(folded[0]).toContain('source');
+  });
+
+  it('still warms the pack it just picked, now that the warm is keyed by holder', async () => {
+    // ⚠ THE PATTERN PAGE'S PREFETCH SURVIVED THE MERGE. It was module-level
+    // singleton state — one timer, one `pendingBanks` — because only this surface
+    // had one; the shared editor keys it by holder instead (the racks' half of
+    // that is in `VoiceMode.test.tsx`). Picking a pack does NOT download on its
+    // own: `reconcile` will not build a graph on a page that has never made a
+    // sound, so without this the first Play after a pack change stalls on the
+    // whole bank.
+    const fetched = vi.fn((url: string) => Promise.resolve(url));
+    vi.stubGlobal('fetch', fetched);
+
+    render(<Host />);
+    await userEvent.click(section('Source'));
+    await userEvent.selectOptions(screen.getByLabelText('Pack'), 'casio-piano-demo');
+
+    // The PICKED pack's own URLs, not merely "something was fetched" — a warm of
+    // the pack that was already there would satisfy a bare call count.
+    const wanted = Object.values(getSamplePack('casio-piano-demo')!.samples[0])[0];
+    await waitFor(() => {
+      expect(fetched.mock.calls.map(([url]) => String(url))).toContain(wanted);
+    });
   });
 
   it('highlights the active sample pack by shape, not by id', async () => {
@@ -491,6 +601,134 @@ describe('VoicePane', () => {
     );
   });
 
+  it('says so when there is no pattern to edit', async () => {
+    // One of the only two things this file renders on its own now — the other is
+    // the instrument row — and until CP-18 it had no test at all.
+    act(() => {
+      usePatternsStore.setState({ editingPatternId: null });
+    });
+    render(<Host />);
+    expect(screen.getByText('No pattern open')).toBeInTheDocument();
+    // And no editor under it: every control below belongs to a holder that is not
+    // there, and drawing them against nothing is the failure this guards.
+    expect(screen.queryByLabelText('Voice')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Save as…' })).toBeNull();
+  });
+
+  it('puts the pattern back on its stored voice when Revert is pressed', async () => {
+    // ⚠ THE PATTERN PAGE GAINED THIS FROM THE RACK. Revert used to be a rack-strip
+    // button; it is in the shared editor's row now, so the pane has one too and
+    // nothing was asserting it.
+    render(<Host />);
+    await userEvent.click(section('Level'));
+    const before = screen.getByLabelText('Volume').getAttribute('aria-valuenow');
+    fireEvent.keyDown(screen.getByLabelText('Volume'), { key: 'ArrowUp' });
+    expect(isVoiceDirty('pattern', getEditingPattern()!.id)).toBe(true);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Discard voice changes' }));
+
+    expect(isVoiceDirty('pattern', getEditingPattern()!.id)).toBe(false);
+    expect(screen.getByLabelText('Volume')).toHaveAttribute('aria-valuenow', String(before));
+    expect(screen.getByText('Saved')).toBeInTheDocument();
+    // Gone with the edit it qualifies — there is nothing left to discard.
+    expect(screen.queryByRole('button', { name: 'Discard voice changes' })).toBeNull();
+  });
+
+  it('waits out the commit window before a pick is written', async () => {
+    // ⚠ THE PANE'S PICKER IS DEBOUNCED NOW, which it was not before the merge: it
+    // wrote on `change`. Every other test in this file ends the window with a
+    // blur, which is the gesture a keyboard user makes anyway — so delete the
+    // timer and commit synchronously and they all still pass. This is the one
+    // that does not.
+    vi.useFakeTimers();
+    render(<Host />);
+    const picker = screen.getByLabelText('Voice');
+    fireEvent.change(picker, { target: { value: 'default:karoryfer-green-guitar' } });
+
+    // The control shows the pick; the pattern has not taken it.
+    expect((picker as HTMLSelectElement).value).toBe('default:karoryfer-green-guitar');
+    expect(liveRef()).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(VOICE_COMMIT_MS);
+    });
+    expect(liveRef()).toEqual({ kind: 'default', slotId: 'karoryfer-green-guitar' });
+  });
+
+  it('drops a pick the instrument switch overtook, rather than writing it to the new one', async () => {
+    // ⚠ THE WINDOW THE DEBOUNCE OPENED. `readVoiceRef` is deliberately re-read at
+    // commit time, and that does NOT catch this on its own: after the switch the
+    // pattern's ref legitimately differs from the picked key, so the
+    // already-on-it short-circuit misses and a GUITAR variant lands on a BASS
+    // pattern — a voice the picker then has to show as "Unavailable", with no
+    // gesture the user can connect it to.
+    vi.useFakeTimers();
+    render(<Host />);
+    fireEvent.change(screen.getByLabelText('Voice'), {
+      target: { value: 'default:karoryfer-green-guitar' },
+    });
+    fireEvent.change(screen.getByLabelText('Instrument'), { target: { value: 'bass' } });
+
+    act(() => {
+      vi.advanceTimersByTime(VOICE_COMMIT_MS * 4);
+    });
+
+    expect((screen.getByLabelText('Instrument') as HTMLSelectElement).value).toBe('bass');
+    // The pick went nowhere, and the picker went back to what the pattern holds
+    // rather than sitting on a draft key for a voice this neck cannot play.
+    expect(liveRef()).toBeNull();
+    expect((screen.getByLabelText('Voice') as HTMLSelectElement).value).toBe('');
+    expect(screen.queryByRole('option', { name: 'Unavailable voice' })).toBeNull();
+  });
+
+  it('clears the notice and the open name form when the instrument changes', async () => {
+    // Both pieces of state live in the shared editor now, and the pane cannot
+    // reach them — so an instrument switch used to leave a refusal about the
+    // PREVIOUS instrument's voice standing in the live region, and a half-filled
+    // Save as… form whose Create then wrote the new instrument's working copy
+    // under the old voice's suggested name.
+    render(<Host />);
+    await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
+    await userEvent.clear(screen.getByLabelText('New name'));
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+    expect(screen.getByText(/Give the variant a name/)).toBeInTheDocument();
+    expect(screen.getByLabelText('New name')).toBeInTheDocument();
+
+    await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
+
+    expect(screen.queryByText(/Give the variant a name/)).toBeNull();
+    expect(screen.queryByLabelText('New name')).toBeNull();
+  });
+
+  it('drops a pick the next pattern overtook, and leaves both patterns where they were', async () => {
+    // The other holder change, and the one the racks never had: `App` renders one
+    // pane and swaps the PATTERN under it.
+    //
+    // TWO THINGS STAND BETWEEN THE PICK AND PATTERN B, and this pins the outcome
+    // rather than either mechanism: the editor cancels the pending commit when
+    // the holder changes, and `selectVoice`'s pattern arm resolves its `id`
+    // against the pattern that is actually open and refuses a stale one. Remove
+    // the cancel and this still passes, off the seam's guard — which is the
+    // order the two were meant to be in.
+    vi.useFakeTimers();
+    const first = getEditingPattern()!.id;
+    render(<Host />);
+    fireEvent.change(screen.getByLabelText('Voice'), {
+      target: { value: 'default:karoryfer-green-guitar' },
+    });
+    act(() => {
+      openBlankPattern('Second');
+    });
+    act(() => {
+      vi.advanceTimersByTime(VOICE_COMMIT_MS * 4);
+    });
+
+    const second = getEditingPattern()!;
+    expect(second.id).not.toBe(first);
+    expect(readVoiceRef(second)).toBeNull();
+    expect((screen.getByLabelText('Voice') as HTMLSelectElement).value).toBe('');
+  });
+
   it('confirms an instrument switch too, and moves the pattern when accepted', async () => {
     // `chooseInstrument`'s `next === instrumentId` guard is not asserted here and cannot
     // be: React's value tracker drops a `change` whose value did not move, so re-picking
@@ -508,23 +746,48 @@ describe('VoicePane', () => {
     expect(screen.queryByRole('option', { name: 'Acoustic Bass' })).toBeInTheDocument();
   });
 
-  it('clears a refusal once the user is editing again', async () => {
+  it('refuses Save into a variant that has left the library, and says so', async () => {
+    // ⚠ THE STRICTER GUARD, which the pattern page gained from the rack when the
+    // two editors merged: a ref can name a variant that is gone, and Save is
+    // refused rather than offered-and-then-rejected. The seam refuses it too —
+    // this is a mirror of the rule, not the rule.
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
 
-    // Pulled out from under the pane — a second tab, or another holder of the same
-    // shared variant. The ref survives, so Save is still offered and still refused.
+    // Pulled out from under the pane — a second tab, or another holder of the
+    // same shared variant.
     const id = useVoiceStore.getState().variants[0].id;
     act(() => useVoiceStore.getState().deleteVariant(id));
-    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    // Said where the refusal is: a disabled button with no reason is the thing
+    // this pane would be most blamed for.
     expect(screen.getByText(/no longer in your library/)).toBeInTheDocument();
+    // And the picker admits it rather than silently displaying the first option.
+    expect(
+      within(screen.getByLabelText('Voice')).getByRole('option', { name: 'Unavailable voice' }),
+    ).toBeDisabled();
+  });
+
+  it('clears a refusal once the user is editing again', async () => {
+    render(<Host />);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+
+    // A refusal that is still reachable from the buttons: the seam rejects a
+    // nameless variant, and the pane renders the sentence rather than swallowing
+    // it.
+    await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
+    await userEvent.clear(screen.getByLabelText('New name'));
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+    expect(screen.getByText(/needs a name|Give the variant a name/)).toBeInTheDocument();
 
     // A notice describes a write that was rejected. Once knobs are moving again it
     // describes nothing, and it sits directly above the controls.
     fireEvent.keyDown(screen.getByLabelText('Drive'), { key: 'ArrowUp' });
-    expect(screen.queryByText(/no longer in your library/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/needs a name|Give the variant a name/)).not.toBeInTheDocument();
   });
 
   it('shows a ref the current instrument cannot play as unavailable', async () => {
@@ -692,6 +955,26 @@ describe('VoicePane', () => {
     return within(screen.getByRole('group', { name: 'Second source' }));
   };
 
+  it('says what an absent branch would do, off the schema rather than off its id', async () => {
+    // ⚠ MIGRATED, not dropped. The rack said nothing here and the pane explained
+    // itself; the merge kept the explanation, because an unexplained empty space
+    // beside an Add button is a defect rather than density — and moved the
+    // sentence onto `ParamSubBranch.absentNote`, so the shared renderer has no
+    // `sub.id === 'layer'` case in it.
+    const layer = PARAM_SECTIONS.find((candidate) => candidate.id === 'source')!.subBranch!;
+    expect(layer.absentNote).toBeTruthy();
+
+    render(<Host />);
+    const group = await openSecondSource();
+    expect(group.getByText(layer.absentNote!)).toBeInTheDocument();
+
+    // …and it goes the moment the branch is there: it describes an absence.
+    await userEvent.click(screen.getByRole('button', { name: 'Add Second source' }));
+    expect(
+      within(screen.getByRole('group', { name: 'Second source' })).queryByText(layer.absentNote!),
+    ).toBeNull();
+  });
+
   it('adds a second source as a whole VoiceLayer, not a half of one', async () => {
     // `Voice._buildLayer` calls `buildSynth(layer.source)` and reads `.kind` off
     // it, so a layer seeded field-by-field from row fallbacks — which is what
@@ -752,7 +1035,9 @@ describe('VoicePane', () => {
       'aria-valuenow',
       '-8',
     );
-    expect(layer.getByLabelText('Second source Octave')).toHaveValue('-1');
+    // A knob now, so the value is on `aria-valuenow` — the only place a screen
+    // reader reads it either.
+    expect(layer.getByLabelText('Second source Octave')).toHaveAttribute('aria-valuenow', '-1');
     expect(
       layer.getByRole('spinbutton', { name: 'Second source Harmonicity' }),
     ).toHaveAttribute('aria-valuenow', '0.5');
@@ -922,8 +1207,23 @@ describe('VoicePane', () => {
     await userEvent.click(section('Pedals'));
     // The stock acoustic guitar has no `effects` object at all, so every pedal
     // starts absent and the branch has to be created by the gesture.
-    // All six — the board is present and empty, which is a state of its own.
-    expect(screen.getAllByText(/Not on this voice/)).toHaveLength(6);
+    // All six — the board is present and empty, which is a state of its own. Said
+    // by the six Add buttons rather than by six paragraphs: the rack's vocabulary
+    // won when the two editors merged, and up to eight boards are on screen at
+    // once on the composition page.
+    const board = screen.getByRole('region', { name: 'Pedals stage' });
+    expect(
+      within(board)
+        .getAllByRole('button', { name: /^Add / })
+        .map((button) => button.getAttribute('aria-label')),
+    ).toEqual([
+      'Add Compressor',
+      'Add Distortion',
+      'Add Chorus',
+      'Add Delay',
+      'Add Auto-wah',
+      'Add Graphic EQ',
+    ]);
 
     await userEvent.click(pedal('Chorus').getByRole('button', { name: 'Add Chorus' }));
     // Tone's own defaults, complete — not a subset assembled from row fallbacks.
@@ -954,14 +1254,16 @@ describe('VoicePane', () => {
     await userEvent.click(section('Pedals'));
     await userEvent.click(pedal('Delay').getByRole('button', { name: 'Add Delay' }));
 
-    const feedback = pedal('Delay').getByLabelText('Delay Feedback');
-    fireEvent.change(feedback, { target: { value: '0.6' } });
-    expect(draftPreset().effects?.delay?.feedback).toBe(0.6);
+    // A knob, like every other `SliderParam` here now — `End` is its max, which
+    // is the one edit whose result is a stated number rather than a step count.
+    const feedback = pedal('Delay').getByRole('slider', { name: 'Delay Feedback' });
+    fireEvent.keyDown(feedback, { key: 'End' });
+    expect(draftPreset().effects?.delay?.feedback).toBe(1);
 
     await userEvent.click(pedal('Delay').getByRole('switch', { name: 'Delay Enabled' }));
     expect(draftPreset().effects?.delay?.enabled).toBe(false);
     // Still on the board, still tuned, and saying so.
-    expect(draftPreset().effects?.delay?.feedback).toBe(0.6);
+    expect(draftPreset().effects?.delay?.feedback).toBe(1);
     // The switch itself is what says so — a pedal card cannot fold, so there is no
     // second note in its header to fall out of step with it.
     expect(pedal('Delay').getByRole('switch', { name: 'Delay Enabled' })).toHaveTextContent(
@@ -1010,12 +1312,16 @@ describe('VoicePane', () => {
     await userEvent.click(section('Pedals'));
     await userEvent.click(pedal('Compressor').getByRole('button', { name: 'Add Compressor' }));
 
-    const threshold = pedal('Compressor').getByLabelText('Compressor Threshold');
-    expect(threshold).toHaveAttribute('min', '-100');
-    expect(threshold).toHaveAttribute('max', '0');
-    const ratio = pedal('Compressor').getByLabelText('Compressor Ratio');
-    expect(ratio).toHaveAttribute('min', '1');
-    expect(ratio).toHaveAttribute('max', '20');
+    // A bounded control rather than an endless encoder — which is the claim, and
+    // it survives the row being drawn as a knob: the bounds moved from a range
+    // input's `min`/`max` to `aria-valuemin`/`aria-valuemax`, where a screen
+    // reader reads them and where the encoders above have none at all.
+    const threshold = pedal('Compressor').getByRole('slider', { name: 'Compressor Threshold' });
+    expect(threshold).toHaveAttribute('aria-valuemin', '-100');
+    expect(threshold).toHaveAttribute('aria-valuemax', '0');
+    const ratio = pedal('Compressor').getByRole('slider', { name: 'Compressor Ratio' });
+    expect(ratio).toHaveAttribute('aria-valuemin', '1');
+    expect(ratio).toHaveAttribute('aria-valuemax', '20');
   });
 
 });

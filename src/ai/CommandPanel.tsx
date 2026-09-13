@@ -20,7 +20,7 @@ import { beginEditGesture, endEditGesture, useEditingPattern } from '../patterns
  * and for the selected one a control per slot chosen by `slot.kind` alone. There
  * is no branch anywhere below on a command id, and if one is ever needed then
  * either a slot type is missing or the row does not belong in a catalog. Same
- * rule that keeps `VoicePane` a renderer of `paramSchema`.
+ * rule that keeps `VoiceEditor` a renderer of `paramSchema`.
  *
  * ── WHAT AG-07 TOOK, AND WHAT IT LEFT ───────────────────────────────────────
  *

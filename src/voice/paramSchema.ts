@@ -8,13 +8,15 @@
  * assert every path and range against every built-in preset, which hand-written
  * JSX can never do.
  *
- * ⚠ TWO SURFACES RENDER THIS ONE TABLE — the pattern page's `VoicePane` and the
- * composition page's `TrackVoiceRack` — so a section with a CUSTOM RENDERER
- * needs one on BOTH sides. Without the twin, the second surface falls into its
- * generic branch and dumps the section's rows out flat: for the pedalboard that
- * is thirty-eight rows with no way to tell which pedal a "Mix" belongs to and no
- * way to add or remove one. Amp, Cabinet, Level and Pedals each have a pair
- * today; the reasoning is written out on `TrackVoiceRack`'s `renderPedals`.
+ * ⚠ ONE COMPONENT RENDERS THIS TABLE — `voice/VoiceEditor.tsx` — and both pages
+ * draw that one component (`VoicePane` wraps it for the editing pattern,
+ * `TrackVoiceRack` for one track). It used to be two, and the rule here was that
+ * a section with a CUSTOM RENDERER needed one on BOTH sides: without the twin,
+ * the second surface fell into its generic branch and dumped the section's rows
+ * out flat — for the pedalboard, thirty-eight rows with no way to tell which
+ * pedal a "Mix" belongs to and no way to add or remove one. A custom renderer is
+ * now written once and both pages have it (2026-09-13); the reasoning for the
+ * pedalboard being one section is written out on `VoiceEditor`'s `renderPedals`.
  *
  * ⚠ THE NUMBERS ARE NOT SOUND LAB'S. Every bound below is either the range Tone
  * publishes on `https://tonejs.github.io/` for the node the lib builds, cited by
@@ -376,7 +378,7 @@ export type SectionId =
  * — are the definition of "present", "bypassed" and "absent" for this app, and a
  * pedal that answered those questions with its own copy of the logic is a lamp
  * that can disagree with the ear. `sectionPresence` already carries that argument
- * for the two editors; a second stage type is the third caller it was written for.
+ * for the editor; a second stage type is the second caller it was written for.
  */
 export interface ParamStage {
   readonly label: string;
@@ -450,10 +452,20 @@ export interface ParamSubBranch {
    * row sitting in `PARAM_BY_PATH` would therefore let any caller (the agent
    * included) ask to re-kind the SECOND source and silently re-kind the primary
    * instead. Keeping it out of `section.params` keeps it out of that map, so the
-   * seam refuses the path outright. `VoicePane` renders it through
-   * `sourceDefaults.withLayerSourceKind`, which does take the branch.
+   * seam refuses the path outright. `VoiceEditor` renders it through
+   * `voiceDrafts.setVoiceSubBranchKind`, which does take the branch.
    */
   readonly kindRow?: SourceKindParam;
+  /**
+   * What the branch would DO, said while it is absent — the one sentence the Add
+   * button beside it cannot carry.
+   *
+   * Here rather than in the renderer because the renderer is shared by both
+   * surfaces now and a `sub.id === 'layer'` conditional inside it is the
+   * per-branch special case the merge exists to delete. Optional: a branch whose
+   * name says the whole of it needs no sentence, and then nothing is drawn.
+   */
+  readonly absentNote?: string;
 }
 
 // ------------------------------------------------------------ option lists ---
@@ -866,6 +878,8 @@ const LAYER_SUB_BRANCH: ParamSubBranch = {
   label: 'Second source',
   branch: 'layer',
   seed: seedLayerFor,
+  absentNote:
+    'No second source. Adding one mixes a quiet synth under every note, which you can then tune, transpose or remove.',
   kindRow: {
     kind: 'source-kind',
     path: 'layer.source.kind',
@@ -1204,6 +1218,8 @@ const BODY_FILTER_SECTION: ParamSection = {
     id: 'body-filter-envelope',
     label: 'Cutoff envelope',
     branch: 'bodyFilter.envelope',
+    absentNote:
+      'No cutoff envelope — the filter sits at a fixed cutoff, which is a sound of its own. Adding one sweeps the cutoff per note instead.',
     // The whole envelope in one write. It could in principle be seeded from the
     // six `fallback`s the way `addSection` seeds a section — every field is a
     // plain number — but then the pane would have two ways of creating a branch

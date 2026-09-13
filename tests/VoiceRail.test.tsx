@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   DEFAULT_PATTERNS_STATE,
@@ -274,8 +274,12 @@ describe('picking a voice', () => {
     // makes a pattern's selection audible on its own, and this call is also what
     // retires an edit abandoned behind the pane's back — so it is made even with
     // nothing playing.
-    render(<VoicePane openSections={[]} onOpenSectionsChange={() => {}} />);
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Voice' }), clean.key);
+    render(<VoicePane onCollapsedSectionsChange={() => {}} />);
+    const picker = screen.getByRole('combobox', { name: 'Voice' });
+    await userEvent.selectOptions(picker, clean.key);
+    // The pane's picker is the rack's now, so it coalesces its writes for
+    // `VOICE_COMMIT_MS`; leaving the field is what ends that window early.
+    fireEvent.blur(picker);
 
     expect(readVoiceRef(getEditingPattern()!)).toEqual(clean.ref);
     // Counted, not merely called: a double refresh rebuilds the voice twice, and
