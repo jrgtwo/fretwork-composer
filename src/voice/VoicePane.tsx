@@ -112,7 +112,14 @@ const INSTRUMENTS = listInstruments();
  *  needs a sentence. `built-in` is Sound Lab's shipped wording, kept verbatim. */
 const REFUSAL_TEXT: Record<VoiceRefusal, string> = {
   ...SHARED_VOICE_REFUSAL_TEXT,
-  // The two that name the holder, and so cannot be shared with the rail.
+  // The three that cannot be shared with the rail. The seam's own `no-holder`
+  // sentence has to cover both kinds and says "no such pattern is open"; this pane
+  // only ever addresses the pattern that IS open, so it can say the shorter true
+  // thing. ⚠ WHICH MEANS THE PANE HAS TWO WORDINGS FOR ONE STATE: a refused Save
+  // renders this map, while a refused PICK renders `selectVoice`'s `Result`, which
+  // carries the seam's prose rather than a code. Both are true sentences; the pick
+  // path has no code to map because its answer is the composition seam's `Result`.
+  'no-holder': 'No pattern is open.',
   'no-voice': 'This pattern has no voice of its own. Use Save as… to keep these tweaks.',
   'built-in': 'Defaults are read-only. Use Save as new variant to keep your tweaks.',
 };
@@ -291,13 +298,21 @@ function VoiceEditor({
   const chooseVoice = (key: string) => {
     const next = parseVoiceKey(key);
     if (!next || !confirmDiscard()) return;
-    setNotice(null);
     setNameForm(null);
+    // 'pattern', always: the same seam writes a TRACK's ref under 'track', and the
+    // kind is never inferred. Its refusals are unreachable from this pane — the
+    // holder is the open pattern and a picker never sends null — but they are
+    // reported rather than dropped, like every other write here.
+    const result = selectVoice('pattern', pattern.id, next);
+    report(result);
+    // Before `discard()`, deliberately: the user consented to losing the edit in
+    // exchange for a switch, so a refused switch must not take it anyway.
+    if (!result.ok) return;
     discard();
-    selectVoice(next);
     // A SELECTION must not go through the draft store: recording the newly resolved
     // preset there would pin it as an unsaved edit and shadow the store. `refreshVoice`
-    // is also what retires an edit abandoned behind this pane's back.
+    // is also what retires an edit abandoned behind this pane's back, and it is the
+    // PATTERN arm's obligation — the track arm's caller must not make this call.
     refreshVoice();
   };
 
@@ -314,7 +329,7 @@ function VoiceEditor({
   };
 
   const save = () => {
-    const result = saveVoice(preset);
+    const result = saveVoice('pattern', pattern.id, preset);
     if (!result.ok) {
       setNotice(REFUSAL_TEXT[result.reason]);
       return;
@@ -331,7 +346,7 @@ function VoiceEditor({
     const trimmed = nameForm.value.trim();
 
     if (nameForm.mode === 'save-as') {
-      const result = saveVoiceAs(trimmed, preset);
+      const result = saveVoiceAs('pattern', pattern.id, trimmed, preset);
       if (!result.ok) {
         setNotice(REFUSAL_TEXT[result.reason]);
         return;
@@ -373,7 +388,7 @@ function VoiceEditor({
     ) {
       return;
     }
-    const result = deleteVoice(ref.id);
+    const result = deleteVoice('pattern', pattern.id, ref.id);
     if (!result.ok) {
       setNotice(REFUSAL_TEXT[result.reason]);
       return;

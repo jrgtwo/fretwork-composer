@@ -262,13 +262,13 @@ export function useSelectableVoices(instrumentId: FretInstrumentId): SelectableV
  * explicitRef)`), bypassing the global `activeVariants` map, so per-track voices
  * need no new resolution order — only a read, a resolve and a write of their own.
  *
- * ⚠ {@link selectVoice} IS THE FUNCTION THAT LOOKS RIGHT AND IS WRONG for a
- * track. It writes the EDITING PATTERN's ref: called from a track control it
- * would retune whatever pattern happens to be open (on this page, the placement
- * being edited) and leave every track exactly as it was — which, with a single
- * track on screen and that track on the fallback, can even look like it worked.
- * {@link setTrackVoice} is the track write. They are deliberately named so that
- * neither completes into the other.
+ * ⚠ {@link selectVoice} WITH THE WRONG `kind` IS THE TRAP, and since the write
+ * seam merged it is the only one left. `selectVoice('pattern', …)` writes the
+ * EDITING PATTERN's ref: aimed at a track it would retune whatever pattern
+ * happens to be open (on this page, the placement being edited) and leave every
+ * track exactly as it was — which, with a single track on screen and that track
+ * on the fallback, can even look like it worked. The `kind` is the whole of the
+ * difference between the two writes and it is never inferred.
  *
  * The `unknown` cast stays in this module for tracks too: `compositionService`
  * stores `Track.voiceRef` opaquely by charter and must not narrow it.
@@ -344,6 +344,22 @@ function findVoiceHolder(kind: HolderKind, id: string): VoiceHolder | null {
 }
 
 /**
+ * The pattern arm's holder: the EDITING pattern, and only when it is the one
+ * named.
+ *
+ * Narrower than {@link findVoiceHolder} on purpose, and only the WRITES use it.
+ * `setEditingPatternVoiceRef` is the only pattern-side ref write the pattern seam
+ * has, so a library row handed in by id could be read and never repointed — a
+ * Save-as that minted a variant and then could not point the document at it is a
+ * worse answer than a refusal. The reads above stay on `findVoiceHolder`, which
+ * is right for them: a tag or a resolved preset is answerable for any pattern.
+ */
+function editingPatternById(id: string): Pattern | null {
+  const editing = getEditingPattern();
+  return editing?.id === id ? editing : null;
+}
+
+/**
  * Instrument + ref, with no preset content in it — what a draft is tagged with,
  * so an edit OF a voice retires when the holder is pointed at a different one.
  *
@@ -411,7 +427,7 @@ export function useHolderVoicePreset(kind: HolderKind, id: string): VoicePreset 
  */
 export type TrackVoiceStatus = 'none' | 'ok' | 'deleted' | 'wrong-instrument';
 
-/** The shared classifier, so {@link setTrackVoice}'s refusal and the picker's
+/** The shared classifier, so the track arm of {@link selectVoice} and the picker's
  *  label can never disagree about which of the two failures this is. */
 function voiceStatusOf(
   instrumentId: FretInstrumentId,
@@ -454,9 +470,172 @@ export function useTrackVoiceStatus(track: Track): TrackVoiceStatus {
   }, [track, variants]);
 }
 
+// ----------------------------------------------------------------- writing ---
 /**
- * Point ONE track at a voice. `null` clears the override and puts the track back
- * on the instrument's global active variant.
+ * ⚠ FIVE WRITES, EACH WITH TWO ARMS.
+ *
+ * A voice belongs to a PATTERN or to a TRACK, and the writes below take
+ * `(kind, id, …)` so one caller — the agent included — can address either
+ * without holding the document. `renameVoice` is the exception and takes
+ * neither: it addresses a VARIANT by id, and a variant is a shared asset with no
+ * per-holder identity to disagree about.
+ *
+ * The arms are kept apart INSIDE each function rather than flattened. The two
+ * holders validate differently, repair differently, and one of them needs a
+ * `refreshVoice()` after the call that the other must never make. A merged
+ * signature is the point; a merged body would be the bug.
+ */
+
+/**
+ * Why a write was refused. Returned rather than thrown because every one of these
+ * is a state a surface can legitimately be in, and the surface has to say which:
+ *
+ *   `no-holder`       — nothing open to attach a voice to: no pattern open (or a
+ *                       different one open), or no such track in this
+ *                       composition. ONE code for both kinds, because a surface
+ *                       only ever renders its own; the prose that names the kind
+ *                       is {@link describeVoiceRefusal}'s and each surface's own.
+ *   `no-voice`        — the holder has no explicit ref, so it is playing whatever
+ *                       the instrument's active voice resolves to. Nothing
+ *                       addressable to write back to; Save-as is the way out.
+ *   `built-in`        — one of the fourteen readonly slot presets.
+ *   `unknown-variant` — the ref names a variant that no longer exists.
+ *   `empty-name`      — a variant with a blank name is unfindable in the picker.
+ *   `capped`          — the lib's tier gate refused and has already opened its own
+ *                       signup/upgrade prompt.
+ */
+export type VoiceRefusal =
+  | 'no-holder'
+  | 'no-voice'
+  | 'built-in'
+  | 'unknown-variant'
+  | 'empty-name'
+  | 'capped';
+
+export type VoiceWriteResult =
+  | { readonly ok: true; readonly id: string }
+  | { readonly ok: false; readonly reason: VoiceRefusal };
+
+const refuse = (reason: VoiceRefusal): VoiceWriteResult => ({ ok: false, reason });
+
+/**
+ * The refusal as a SENTENCE.
+ *
+ * The codes above are for a surface that wants to render each state differently
+ * (`VoicePane` and `VoiceRail` both map them with a `Record`, and get to phrase
+ * them in their own voice next to the control that caused them). A caller with no
+ * surface — the agent's tools, a log line — needs prose, and `'built-in'` on its
+ * own is not prose. Authored HERE rather than in the tool layer so there is one
+ * map to widen when the union grows, and so a new refusal cannot reach a caller
+ * as a bare identifier.
+ *
+ * ⚠ THE KIND IS A PARAMETER, NOT A FIELD ON THE REFUSAL, and merging `no-pattern`
+ * and `no-track` into `no-holder` is what forced the choice: "no holder" is not a
+ * sentence anyone can act on, so the prose has to name which document is missing.
+ * Carrying the kind on the refusal would make it an object, and both surfaces
+ * index these codes as `Record` keys — it has to stay a bare union member for
+ * that to compile, and for a new refusal to be a compile error in both surfaces
+ * rather than a missing sentence in one. Every caller already knows its kind: a
+ * surface is one holder, and the agent's voice tools are the track path.
+ *
+ * Deliberately not wired into the two surfaces' refusal maps: their copy sits
+ * next to the button and can say less, and each says "this pattern" or "this
+ * track" where this one has to be self-contained. The ONE place a surface does
+ * render this wording is {@link selectVoice}, whose arms answer with the
+ * composition seam's `Result` — prose, not a code — so a refused PICK reads in
+ * this voice while a refused Save reads in the surface's own.
+ */
+export function describeVoiceRefusal(kind: HolderKind, reason: VoiceRefusal): string {
+  switch (reason) {
+    case 'no-holder':
+      // Not "no pattern is open": the pattern arm also refuses a pattern that is
+      // in the library but not the one open, and "is open" would be a confidently
+      // wrong sentence for it.
+      return kind === 'pattern'
+        ? 'No such pattern is open.'
+        : 'That track is no longer in this composition.';
+    case 'no-voice':
+      return 'That has no voice of its own to save — it is playing the instrument’s active voice. Save it as a new voice instead.';
+    case 'built-in':
+      return 'That is one of the built-in voices — they cannot be renamed, deleted or overwritten. Save it as a new voice instead.';
+    case 'unknown-variant':
+      return 'That voice is not in your library (or belongs to another instrument).';
+    case 'empty-name':
+      return 'A voice needs a name.';
+    case 'capped':
+      return 'Your library is at its voice limit, so nothing was saved.';
+  }
+}
+
+/**
+ * Point a pattern, or ONE track, at a voice.
+ *
+ * Returns the COMPOSITION seam's `Result` rather than {@link VoiceWriteResult} on
+ * both arms: the track write lands in the composition store, its refusals are
+ * composition facts ("no such track"), and every other track write on that page
+ * already reports that way. The pattern arm reported nothing at all before the
+ * merge and gained one here — strictly more than it used to say, and on the path
+ * a picker can reach it can only be `ok`.
+ *
+ * ⚠ THREE THINGS DIFFER BETWEEN THE ARMS, and none of them survives a flattening:
+ *
+ *   1. VALIDATION. The track arm asks {@link listSelectableVoices} whether this
+ *      track could be OFFERED the ref and refuses `deleted` and
+ *      `wrong-instrument` in words, because a variant for another instrument
+ *      would resolve to a preset for a neck the track has not got. The pattern
+ *      arm validates nothing beyond the holder, deliberately: it is the write
+ *      the pattern picker has always made, and a pattern whose ref stops
+ *      resolving falls through to the instrument's first default rather than
+ *      breaking. Tightening it is a change to make on purpose, not here.
+ *   2. NULL. `null` means "follow the instrument's global active variant". That
+ *      is a real choice for a track and NOT one for a pattern: a pattern with no
+ *      ref plays the global `activeVariants` entry that every other ref-less
+ *      pattern plays, so "clear it" hands the document over to a setting the
+ *      user did not name from here. There has never been a clear-the-ref write
+ *      on the pattern side and there still is not — it is refused in words
+ *      rather than quietly ignored.
+ *   3. `refreshVoice()`. The PATTERN arm needs the caller to follow with
+ *      `playbackService.refreshVoice()`: it is what makes the selection audible,
+ *      and it is also what retires an edit abandoned behind the pane's back, so
+ *      it is called even when nothing is playing. The TRACK arm must not —
+ *      `playbackService` picks a track's ref change up from the composition
+ *      store and swaps that one track's voice, while `refreshVoice` rebuilds the
+ *      EDITING PATTERN's voice, which this write never touched. The seam cannot
+ *      make either call itself: `playbackService` imports this module, so the
+ *      arrow only points one way.
+ */
+export function selectVoice(kind: HolderKind, id: string, ref: VariantRef | null): Result {
+  return kind === 'track' ? selectTrackVoice(id, ref) : selectPatternVoice(id, ref);
+}
+
+/**
+ * The PATTERN arm of {@link selectVoice}.
+ *
+ * Writes `pattern.voiceRef` and nothing else. In particular not the global
+ * `activeVariants` map: that is the instrument-wide default shared by every
+ * pattern without an explicit ref, and setting it here would silently retune all
+ * of them.
+ *
+ * Nothing becomes audible as a side effect — see point 3 above.
+ */
+function selectPatternVoice(patternId: string, ref: VariantRef | null): Result {
+  const pattern = editingPatternById(patternId);
+  if (!pattern) return { ok: false, reason: describeVoiceRefusal('pattern', 'no-holder') };
+  if (ref === null) {
+    return {
+      ok: false,
+      reason:
+        'A pattern’s voice cannot be cleared: with no voice of its own it plays the instrument’s active voice, which every other pattern without one plays too. Pick a voice instead.',
+    };
+  }
+  // The pattern seam's own `Result`, not a fabricated one: it is the write that
+  // could fail, and re-stating its answer would be this arm's second opinion.
+  return setEditingPatternVoiceRef(ref);
+}
+
+/**
+ * The TRACK arm of {@link selectVoice}. `null` clears the override and puts the
+ * track back on the instrument's global active variant.
  *
  * Refused rather than coerced when the ref is not one this track could be offered
  * — a variant that has been deleted, or one belonging to another instrument, which
@@ -464,10 +643,6 @@ export function useTrackVoiceStatus(track: Track): TrackVoiceStatus {
  * of {@link listSelectableVoices}, so the picker's offer set and the write can
  * never disagree; the agent reaches the same guard by calling this with a ref of
  * its own.
- *
- * Returns the COMPOSITION seam's `Result` rather than {@link VoiceWriteResult}: the
- * write lands in the composition store, its refusals are composition facts ("no
- * such track"), and every other track write on this page already reports that way.
  *
  * Nothing is disposed or rebuilt here. `playbackService` picks the change up from
  * the composition store — the engine's own diff swaps that track's voice and only
@@ -484,9 +659,12 @@ export function useTrackVoiceStatus(track: Track): TrackVoiceStatus {
  * which fires nothing on an unchanged value; squarely reachable by the agent,
  * which is the caller that matters here.
  */
-export function setTrackVoice(trackId: string, ref: VariantRef | null): Result {
+function selectTrackVoice(trackId: string, ref: VariantRef | null): Result {
   const track = findTrack(trackId);
-  if (!track) return { ok: false, reason: 'No such track.' };
+  // Through {@link describeVoiceRefusal} rather than a sentence of its own: this is
+  // the same `no-holder` state `saveVoice` and `deleteVoice` refuse on this arm, and
+  // two authorings of it is two vocabularies reaching the agent from one seam.
+  if (!track) return { ok: false, reason: describeVoiceRefusal('track', 'no-holder') };
   // Cleared straight through: "follow the instrument" is always a legal choice,
   // and there is nothing to validate about it. `== null` rather than `=== null`
   // because `createEmptyTrack` never sets the field at all — a fresh track holds
@@ -517,114 +695,8 @@ export function setTrackVoice(trackId: string, ref: VariantRef | null): Result {
   return setTrackVoiceRef(trackId, ref);
 }
 
-// ----------------------------------------------------------------- writing ---
-
 /**
- * Why a write was refused. Returned rather than thrown because every one of these
- * is a state a pane can legitimately be in, and the pane has to say which:
- *
- *   `no-pattern`      — nothing open to attach a voice to.
- *   `no-voice`        — the pattern has no explicit ref, so it is playing whatever
- *                       the instrument's active voice resolves to. Nothing
- *                       addressable to write back to; Save-as is the way out.
- *   `built-in`        — one of the fourteen readonly slot presets.
- *   `unknown-variant` — the ref names a variant that no longer exists.
- *   `empty-name`      — a variant with a blank name is unfindable in the picker.
- *   `capped`          — the lib's tier gate refused and has already opened its own
- *                       signup/upgrade prompt.
- */
-export type VoiceRefusal =
-  | 'no-pattern'
-  | 'no-voice'
-  | 'built-in'
-  | 'unknown-variant'
-  | 'empty-name'
-  | 'capped';
-
-export type VoiceWriteResult =
-  | { readonly ok: true; readonly id: string }
-  | { readonly ok: false; readonly reason: VoiceRefusal };
-
-const refuse = (reason: VoiceRefusal): VoiceWriteResult => ({ ok: false, reason });
-
-/**
- * The same refusals, plus the one only a track can suffer.
- *
- * A SUPERSET rather than a member of {@link VoiceRefusal}, deliberately:
- * `VoicePane` maps that union with a `Record`, so widening it would make the
- * pattern page fail to compile for a state it can never be in. `no-pattern` is
- * carried along because {@link renameVoice} and {@link deleteVoice} are shared
- * with the pattern page and are typed on the narrower union — neither can
- * actually return it, but a rail rendering their results has to have a sentence
- * for every member it is handed.
- */
-export type TrackVoiceRefusal = VoiceRefusal | 'no-track';
-
-export type TrackVoiceWriteResult =
-  | { readonly ok: true; readonly id: string }
-  | { readonly ok: false; readonly reason: TrackVoiceRefusal };
-
-/**
- * The refusal as a SENTENCE.
- *
- * The codes above are for a pane that wants to render each state differently
- * (`VoicePane` maps them with a `Record`, and gets to phrase them in its own
- * voice next to the control that caused them). A caller with no pane — the
- * agent's tools, a log line — needs prose, and `'built-in'` on its own is not
- * prose. Authored HERE rather than in the tool layer so there is one map to
- * widen when the union grows, and so a new refusal cannot reach a caller as a
- * bare identifier.
- *
- * Deliberately not wired into `VoicePane`: its copy sits inside a rail with its
- * own layout and can say less because the button is right there. Two audiences,
- * one union, and only this one has to be self-contained.
- */
-export function describeVoiceRefusal(reason: TrackVoiceRefusal): string {
-  switch (reason) {
-    case 'no-pattern':
-      return 'No pattern is open.';
-    case 'no-track':
-      return 'No such track.';
-    case 'no-voice':
-      return 'That has no voice of its own to save — it is playing the instrument’s active voice. Save it as a new voice instead.';
-    case 'built-in':
-      return 'That is one of the built-in voices — they cannot be renamed, deleted or overwritten. Save it as a new voice instead.';
-    case 'unknown-variant':
-      return 'That voice is not in your library (or belongs to another instrument).';
-    case 'empty-name':
-      return 'A voice needs a name.';
-    case 'capped':
-      return 'Your library is at its voice limit, so nothing was saved.';
-  }
-}
-
-/**
- * Point the EDITING PATTERN at a voice.
- *
- * ⚠ NOT the track write — {@link setTrackVoice} is. This one addresses whichever
- * pattern is open, so from a composition track control it would retune the
- * placement being edited and change no track at all.
- *
- * Writes `pattern.voiceRef` and nothing else. In particular not the global
- * `activeVariants` map: that is the instrument-wide default shared by every pattern
- * without an explicit ref, and setting it here would silently retune all of them.
- *
- * Nothing becomes audible as a side effect. `playbackService` keys its live voice on
- * this ref, so the change lands the next time the engine is asked for one; to hear it
- * mid-playback the caller follows this with `playbackService.refreshVoice()`. Not
- * the draft store — recording the newly resolved preset there would pin it as an unsaved
- * edit and shadow the store for as long as the ref stays put.
- *
- * Follow it with `refreshVoice()` even when nothing is playing: that call is also what
- * retires the working copy the user just walked away from, so it cannot come back if
- * they later return to the voice it was taken from.
- */
-export function selectVoice(ref: VariantRef): void {
-  setEditingPatternVoiceRef(ref);
-}
-
-/**
- * Overwrite the variant the editing pattern points at with `preset`.
+ * Overwrite the variant a pattern or a track points at with `preset`.
  *
  * The built-in refusal is the real guard, not a mirror of a disabled button: the
  * fourteen slot presets are `readonly` consts reached through
@@ -632,23 +704,38 @@ export function selectVoice(ref: VariantRef): void {
  * only `updateVariant`, which addresses user variants by id. A UI that let this
  * through would look like it saved and lose the edit on the next reload.
  *
- * Remember that a variant is SHARED: this changes the voice for every pattern
- * pointing at the same ref, which is intended.
+ * Remember that a variant is SHARED: this changes the voice for every pattern AND
+ * every track pointing at the same ref, which is intended and is why both
+ * surfaces say so before the button is pressed. There is deliberately no
+ * per-holder fork.
+ *
+ * Takes the preset rather than reading the holder's draft: `voiceDrafts` imports
+ * this module, so reading it from here would be a cycle. The caller passes
+ * `voicePreset(kind, id)`.
+ *
+ * The arms differ only in WHOSE ref and instrument they resolve — the four guards
+ * in {@link writeVariant} are the whole of Save's semantics and are shared, so
+ * the built-in refusal has one place to drift from.
  */
-export function saveVoice(preset: VoicePreset): VoiceWriteResult {
-  const pattern = getEditingPattern();
-  if (!pattern) return refuse('no-pattern');
+export function saveVoice(kind: HolderKind, id: string, preset: VoicePreset): VoiceWriteResult {
+  if (kind === 'track') {
+    const track = findTrack(id);
+    if (!track) return refuse('no-holder');
+    return writeVariant(readTrackVoiceRef(track), trackInstrumentId(track), preset);
+  }
+  const pattern = editingPatternById(id);
+  if (!pattern) return refuse('no-holder');
   return writeVariant(readVoiceRef(pattern), patternInstrumentId(pattern), preset);
 }
 
 /**
- * Overwrite the variant a ref names — the shared core of {@link saveVoice} and
- * {@link saveTrackVoice}.
+ * Overwrite the variant a ref names — the shared core of {@link saveVoice}'s two
+ * arms.
  *
- * The two callers differ only in WHOSE ref and instrument they resolve. Shared
- * rather than copied because these four guards are the whole of Save's
- * semantics, and a second copy of the built-in refusal is a second place for it
- * to drift from the one the buttons are disabled by.
+ * The arms differ only in WHOSE ref and instrument they resolve. Shared rather
+ * than copied because these four guards are the whole of Save's semantics, and a
+ * second copy of the built-in refusal is a second place for it to drift from the
+ * one the buttons are disabled by.
  */
 function writeVariant(
   ref: VariantRef | null,
@@ -674,29 +761,60 @@ function writeVariant(
 }
 
 /**
- * Copy `preset` into a new user variant and point the pattern at it.
+ * Copy `preset` into a new user variant and point the holder at it.
  *
- * The repoint is the whole point: without it the pattern keeps playing the built-in
- * the copy was taken from, and the saved variant sits in the library unused.
- *
- * Folders are a later slice, so the variant lands at the root. `collectionId` has to
- * be passed regardless — the lib's `addVariant` takes the whole record minus its
- * generated fields.
+ * The repoint is the whole point: without it the holder keeps playing the built-in
+ * the copy was taken from, and the saved variant sits in the library unused. It is
+ * also the half that differs between the arms — everything before it is the same
+ * mint through {@link addUserVariant}, and folders are a later slice either way,
+ * so the variant lands at the root.
  */
-export function saveVoiceAs(name: string, preset: VoicePreset): VoiceWriteResult {
-  const pattern = getEditingPattern();
-  if (!pattern) return refuse('no-pattern');
-
+export function saveVoiceAs(
+  kind: HolderKind,
+  id: string,
+  name: string,
+  preset: VoicePreset,
+): VoiceWriteResult {
   const trimmed = name.trim();
+
+  if (kind === 'track') {
+    const track = findTrack(id);
+    if (!track) return refuse('no-holder');
+    if (!trimmed) return refuse('empty-name');
+
+    const variantId = addUserVariant(trimmed, trackInstrumentId(track), preset);
+    if (!variantId) return refuse('capped');
+
+    // The variant was just minted FOR this track's instrument, so the membership
+    // half of the track arm cannot refuse it; the only reachable refusal left is
+    // the track having gone, which this synchronous stretch makes impossible. The
+    // guard stands anyway, and the variant is deliberately NOT rolled back if it
+    // ever fires — a voice the user has named is not garbage, and it is now in the
+    // library where they can point anything at it.
+    const pointed = selectVoice('track', id, { kind: 'user', id: variantId });
+    // Reported as the only refusal that could still be true rather than collapsing
+    // three into one: the track arm also refuses `deleted` and `wrong-instrument`,
+    // and printing "that track is no longer in this composition" for either would
+    // be a confidently wrong sentence the day `voiceStatusOf` changes.
+    if (!pointed.ok) {
+      return refuse(findTrack(id) ? 'unknown-variant' : 'no-holder');
+    }
+    return { ok: true, id: variantId };
+  }
+
+  const pattern = editingPatternById(id);
+  if (!pattern) return refuse('no-holder');
   if (!trimmed) return refuse('empty-name');
 
-  const id = addUserVariant(trimmed, patternInstrumentId(pattern), preset);
+  const variantId = addUserVariant(trimmed, patternInstrumentId(pattern), preset);
   // `addVariant` returns '' when the tier gate refuses; it has already opened its
   // own signup/upgrade prompt, so there is nothing for us to report but the refusal.
-  if (!id) return refuse('capped');
+  if (!variantId) return refuse('capped');
 
-  selectVoice({ kind: 'user', id });
-  return { ok: true, id };
+  // No result to weigh: the pattern arm refuses only a holder that is not open and
+  // a null ref, and the line above has just ruled out both.
+  selectVoice('pattern', id, { kind: 'user', id: variantId });
+  return { ok: true, id: variantId };
 }
 
 /**
@@ -704,10 +822,10 @@ export function saveVoiceAs(name: string, preset: VoicePreset): VoiceWriteResult
  * tier gate refuses.
  *
  * The COPY only — pointing something at the result is the caller's, and it is
- * the whole difference between {@link saveVoiceAs} and {@link saveTrackVoiceAs}.
- * Folders are a later slice, so the variant lands at the root; `collectionId`
- * has to be passed regardless, because the lib's `addVariant` takes the whole
- * record minus its generated fields.
+ * the whole difference between {@link saveVoiceAs}'s two arms. Folders are a
+ * later slice, so the variant lands at the root; `collectionId` has to be passed
+ * regardless, because the lib's `addVariant` takes the whole record minus its
+ * generated fields.
  */
 function addUserVariant(
   name: string,
@@ -732,7 +850,7 @@ function addUserVariant(
  * and the WRITE path.
  *
  * Everything that offers a voice hands out keys (`listSelectableVoices`,
- * `voiceKey`) and `setTrackVoice` takes a ref, but {@link renameVoice} and
+ * `voiceKey`) and {@link selectVoice} takes a ref, but {@link renameVoice} and
  * {@link deleteVoice} take a bare VARIANT ID, which a built-in slot does not
  * have. A caller holding only keys therefore had to strip the prefix itself and
  * got `unknown-variant` back for `default:clean-amp` — which is a wrong sentence
@@ -773,133 +891,71 @@ export function renameVoice(id: string, name: string): VoiceWriteResult {
 }
 
 /**
- * Delete a user variant.
+ * Delete a user variant AND repair the holder that pointed at it — one act.
  *
- * The lib's `deleteVariant` repoints the global `activeVariants` map off the deleted
- * id but knows nothing about patterns, so the editing pattern's ref is cleared here.
- * Left dangling it would resolve — silently, by design — to the instrument's first
- * built-in, and the pane would show nothing selected while the pattern still played.
+ * ⚠ TWO REPAIRS, NOT ONE, and this is the function where flattening them would be
+ * silent. The lib's `deleteVariant` repoints the global `activeVariants` map off
+ * the deleted id and knows nothing about documents, so a dangling ref is left in
+ * whatever pointed at the variant. Left alone it would resolve — silently, by
+ * design — to the instrument's first built-in, with the surface showing nothing
+ * selected while the holder still played.
  *
- * Only the editing pattern is repaired: other patterns in the library can hold the
- * same ref and there is no bulk pattern write to fix them with (LIB-GAP(1) is the
- * same missing primitive). They fall back cleanly, which is the lib's own answer.
+ *   - The EDITING PATTERN's ref is repaired on BOTH arms, in
+ *     {@link destroyVariant}. It is not the track arm's business who else
+ *     pointed at the variant, but a delete made from a composition while a
+ *     pattern is open leaves that pattern dangling just the same, and that is
+ *     what the pre-merge `deleteTrackVoice` did by calling `deleteVoice`.
+ *   - The TRACK's own ref is repaired on the track arm only, through
+ *     {@link selectVoice}, which is the only way to write it.
+ *
+ * Only the named holder is repaired, on either arm: other patterns and other
+ * tracks can hold the same ref and there is no bulk write to fix them with
+ * (LIB-GAP(1) is the same missing primitive). They fall back cleanly, which is
+ * the lib's own answer.
  */
-export function deleteVoice(id: string): VoiceWriteResult {
-  if (!store().variants.some((variant) => variant.id === id)) {
+export function deleteVoice(kind: HolderKind, id: string, variantId: string): VoiceWriteResult {
+  if (kind === 'track') {
+    const track = findTrack(id);
+    if (!track) return refuse('no-holder');
+
+    const deleted = destroyVariant(variantId);
+    // `unknown-variant` is the ONLY refusal `destroyVariant` has, and it means the
+    // variant is already gone — this track's ref is the dangling remains of it, so
+    // the repair below still has to happen. Anything else left the library
+    // untouched and the ref is still good.
+    if (!deleted.ok && deleted.reason !== 'unknown-variant') return deleted;
+
+    const ref = readTrackVoiceRef(track);
+    if (ref?.kind === 'user' && ref.id === variantId) {
+      const repaired = selectVoice('track', id, null);
+      if (!repaired.ok) return refuse('no-holder');
+    }
+    return { ok: true, id: variantId };
+  }
+
+  if (!editingPatternById(id)) return refuse('no-holder');
+  return destroyVariant(variantId);
+}
+
+/**
+ * Destroy the variant and repair the editing PATTERN's ref — the half both arms
+ * of {@link deleteVoice} run.
+ *
+ * The pattern repair goes straight to `setEditingPatternVoiceRef` rather than
+ * through {@link selectVoice}: the pattern arm of that one refuses `null` on
+ * purpose, because clearing a ref is not a choice a picker gets to make. Clearing
+ * a ref whose variant has just ceased to exist is a different act — there is
+ * nothing left to point at.
+ */
+function destroyVariant(variantId: string): VoiceWriteResult {
+  if (!store().variants.some((variant) => variant.id === variantId)) {
     return refuse('unknown-variant');
   }
-  store().deleteVariant(id);
+  store().deleteVariant(variantId);
 
   const pattern = getEditingPattern();
   const ref = pattern ? readVoiceRef(pattern) : null;
-  if (ref?.kind === 'user' && ref.id === id) setEditingPatternVoiceRef(null);
+  if (ref?.kind === 'user' && ref.id === variantId) setEditingPatternVoiceRef(null);
 
-  return { ok: true, id };
-}
-
-// --------------------------------------------------------- track writing ---
-/**
- * ⚠ THE SECOND WRITE PATH, and the same trap as {@link selectVoice}.
- *
- * {@link saveVoice} and {@link saveVoiceAs} resolve their target through
- * `getEditingPattern()`. Called from a composition surface they would overwrite
- * the variant the OPEN PATTERN points at and repoint that pattern — leaving
- * every track exactly as it was, which with one track on the fallback can even
- * look like it worked. The two below resolve through a `Track` instead and
- * repoint through {@link setTrackVoice}. They share `writeVariant` and
- * `addUserVariant` with the pattern pair, so the refusals cannot drift.
- *
- * {@link renameVoice} is NOT duplicated here: it addresses a variant by id, and a
- * variant is a SHARED asset with no per-holder identity — renaming one from a
- * track and from a pattern are the same act on the same object. Deleting is the
- * same act too, but it leaves a dangling ref BEHIND it, and the holder to repair
- * differs — hence {@link deleteTrackVoice}, which is `deleteVoice` plus that one
- * repair rather than a second implementation of it.
- */
-
-/**
- * Overwrite the variant ONE TRACK points at.
- *
- * Takes the preset rather than reading the track's draft, exactly as
- * {@link saveVoice} does: `voiceDrafts` imports this module, so reading it
- * from here would be a cycle. The caller passes `voicePreset('track', trackId)`.
- *
- * Remember that a variant is SHARED. This retunes every pattern AND every other
- * track pointing at the same ref, which is intended and is why the rail says so
- * before the button is pressed. There is deliberately no per-track fork.
- */
-export function saveTrackVoice(trackId: string, preset: VoicePreset): TrackVoiceWriteResult {
-  const track = findTrack(trackId);
-  if (!track) return { ok: false, reason: 'no-track' };
-  return writeVariant(readTrackVoiceRef(track), trackInstrumentId(track), preset);
-}
-
-/**
- * Copy a preset into a new user variant and point ONE TRACK at it.
- *
- * The repoint is the whole point, and it is the half that differs from
- * {@link saveVoiceAs}: without it the track keeps playing the built-in the copy
- * was taken from and the saved variant sits in the library unused.
- */
-export function saveTrackVoiceAs(
-  trackId: string,
-  name: string,
-  preset: VoicePreset,
-): TrackVoiceWriteResult {
-  const track = findTrack(trackId);
-  if (!track) return { ok: false, reason: 'no-track' };
-
-  const trimmed = name.trim();
-  if (!trimmed) return { ok: false, reason: 'empty-name' };
-
-  const id = addUserVariant(trimmed, trackInstrumentId(track), preset);
-  if (!id) return { ok: false, reason: 'capped' };
-
-  // The variant was just minted FOR this track's instrument, so the membership
-  // half of `setTrackVoice` cannot refuse it; the only reachable refusal left is
-  // the track having gone, which this synchronous stretch makes impossible. The
-  // guard stands anyway, and the variant is deliberately NOT rolled back if it
-  // ever fires — a voice the user has named is not garbage, and it is now in the
-  // library where they can point anything at it.
-  const pointed = setTrackVoice(trackId, { kind: 'user', id });
-  // Reported as the only refusal that could still be true rather than collapsing
-  // three into one: `setTrackVoice` also refuses `deleted` and `wrong-instrument`,
-  // and printing "that track is no longer in this composition" for either would be
-  // a confidently wrong sentence the day `voiceStatusOf` changes.
-  if (!pointed.ok) {
-    return { ok: false, reason: findTrack(trackId) ? 'unknown-variant' : 'no-track' };
-  }
-
-  return { ok: true, id };
-}
-
-/**
- * Delete a user variant AND repair the track that pointed at it — one act.
- *
- * {@link deleteVoice} repairs the editing PATTERN's ref and knows nothing about
- * tracks, so a caller with no pointer would get the pattern fixed and every track
- * left dangling. Pairing them here is what keeps the gesture and the seam doing
- * the same thing: one command, one undo step, callable by id.
- *
- * Only THIS track is repaired, for the same reason only the editing pattern is:
- * there is no bulk track write to fix the others with (LIB-GAP(1) is the same
- * missing primitive), and they fall back cleanly, which is the lib's own answer.
- */
-export function deleteTrackVoice(trackId: string, id: string): TrackVoiceWriteResult {
-  const track = findTrack(trackId);
-  if (!track) return { ok: false, reason: 'no-track' };
-
-  const deleted = deleteVoice(id);
-  // `unknown-variant` is the ONLY refusal `deleteVoice` has, and it means the
-  // variant is already gone — this track's ref is the dangling remains of it, so
-  // the repair below still has to happen. Anything else left the library untouched
-  // and the ref is still good.
-  if (!deleted.ok && deleted.reason !== 'unknown-variant') return deleted;
-
-  const ref = readTrackVoiceRef(track);
-  if (ref?.kind === 'user' && ref.id === id) {
-    const repaired = setTrackVoice(trackId, null);
-    if (!repaired.ok) return { ok: false, reason: 'no-track' };
-  }
-  return { ok: true, id };
+  return { ok: true, id: variantId };
 }

@@ -24,7 +24,7 @@ import {
   selectTrack,
   setTrackInstrument,
 } from '../src/composition/compositionService';
-import { listSelectableVoices, setTrackVoice } from '../src/voice/voiceService';
+import { listSelectableVoices, selectVoice } from '../src/voice/voiceService';
 import {
   DEFAULT_OPEN_SECTIONS,
   PARAM_SECTIONS,
@@ -456,7 +456,7 @@ describe('the per-track voice draft seam', () => {
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
     expect(dirtyOf(getTracks()[0])).toBe(true);
 
-    expect(setTrackVoice(tracks[0].id, other.ref).ok).toBe(true);
+    expect(selectVoice('track', tracks[0].id, other.ref).ok).toBe(true);
 
     // A draft is an edit OF a voice. Following the user onto the next one is how
     // an abandoned edit resurrects — and it would be showing the wrong amp's
@@ -590,7 +590,7 @@ function bassTrackWithLayer(): Track {
     (voice) => voice.name === 'Acoustic Bass',
   );
   if (!bass) throw new Error('no built-in bass voice called Acoustic Bass');
-  expect(setTrackVoice(tracks[0].id, bass.ref).ok).toBe(true);
+  expect(selectVoice('track', tracks[0].id, bass.ref).ok).toBe(true);
   return getTracks()[0];
 }
 
@@ -921,8 +921,8 @@ describe('the rack in a lane', () => {
     const tracks = twoTracks();
     const mineVoice = listSelectableVoices('guitar').builtIns[0];
     const theirsVoice = listSelectableVoices('guitar').builtIns[1];
-    setTrackVoice(tracks[0].id, mineVoice.ref);
-    setTrackVoice(tracks[1].id, theirsVoice.ref);
+    selectVoice('track', tracks[0].id, mineVoice.ref);
+    selectVoice('track', tracks[1].id, theirsVoice.ref);
     // The fixture is only a real test of "each on its OWN voice" if the two are
     // different — otherwise every assertion below passes on a shared one.
     expect(theirsVoice.name).not.toBe(mineVoice.name);
@@ -954,7 +954,7 @@ describe('the rack in a lane', () => {
     // `Acoustic Guitar` — the default — has no `effects` at all, so both tracks
     // go on a voice that really has a cabinet before asking about its picker.
     const cabbed = voiceNamed('Crunch');
-    getTracks().forEach((track) => setTrackVoice(track.id, cabbed.ref));
+    getTracks().forEach((track) => selectVoice('track', track.id, cabbed.ref));
 
     render(<ArrangementGrid mode="voice" />);
 
@@ -1097,7 +1097,7 @@ describe('the rack in a lane', () => {
   it('adds and removes a stage from the rack’s own buttons', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
-    setTrackVoice(tracks[0].id, voiceNamed('Crunch').ref);
+    selectVoice('track', tracks[0].id, voiceNamed('Crunch').ref);
     render(<ArrangementGrid mode="voice" />);
 
     await user.click(
@@ -1540,8 +1540,8 @@ describe('the stages stack, and the row fits them', () => {
 
   it('hides a folded stage’s controls and keeps the region its button points at', () => {
     const tracks = twoTracks();
-    setTrackVoice(tracks[0].id, voiceNamed('Crunch').ref);
-    setTrackVoice(tracks[1].id, voiceNamed('Crunch').ref);
+    selectVoice('track', tracks[0].id, voiceNamed('Crunch').ref);
+    selectVoice('track', tracks[1].id, voiceNamed('Crunch').ref);
 
     render(
       <ArrangementGrid

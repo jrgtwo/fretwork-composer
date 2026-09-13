@@ -4,10 +4,11 @@
  *
  * `VoicePane` (the pattern page) and `VoiceRail` (the composition page) are two
  * different pickers over the same library: one addresses the editing PATTERN, the
- * other one TRACK, and that half of them is deliberately separate — the seams
- * differ, the refusals differ, and the wording that explains them differs. What
- * does NOT differ is the furniture: the button skin, the unsaved pill, and the
- * name form with its focus-return.
+ * other one TRACK, and that half of them is deliberately separate. The SEAM is one
+ * now — the same functions under a `kind` argument — but which holder each surface
+ * names, and the wording that explains a refusal to whoever is looking at it, still
+ * differ. What does NOT differ is the furniture: the button skin, the unsaved
+ * pill, and the name form with its focus-return.
  *
  * Kept here rather than copied because the copies were byte-identical, and the
  * failure mode of two copies is not drift in the classes — it is one of them
@@ -23,18 +24,25 @@ export const voiceButtonClass =
 export const voiceLabelClass = 'font-mono text-[9px] tracking-[0.1em] text-ink-mut uppercase';
 
 /**
- * The four refusals that say the same thing wherever they are raised.
+ * The three refusals that say the same thing wherever they are raised.
  *
- * `no-voice` and `built-in` are deliberately NOT here: both name the holder in
- * their sentence ("this pattern" / "this track follows its instrument's voice"),
- * so a shared wording could only be vaguer than either. Each surface declares a
- * complete `Record` of its own union on top of this, which is what makes a new
- * refusal a compile error in both places rather than a missing sentence in one.
+ * `no-holder`, `no-voice` and `built-in` are deliberately NOT here, and for two
+ * reasons rather than one. `no-holder` and `no-voice` name the holder in their
+ * sentence ("no pattern is open" / "this track follows its instrument's voice"),
+ * and only the surface knows which holder it is; `no-holder` was the fourth member
+ * until the refusal union merged `no-pattern` and `no-track`, and one code for both
+ * kinds means one shared sentence would have to say "no holder", which is not
+ * something to show anyone. `built-in` names no holder — it is here for the other
+ * reason: the two surfaces word it differently, the pane keeping Sound Lab's
+ * shipped sentence verbatim, and unifying them would silently reword shipped copy.
+ *
+ * Each surface declares a complete `Record` of the union on top of this, which is
+ * what makes a new refusal a compile error in both places rather than a missing
+ * sentence in one.
  */
 export const SHARED_VOICE_REFUSAL_TEXT: Readonly<
-  Pick<Record<VoiceRefusal, string>, 'no-pattern' | 'unknown-variant' | 'empty-name' | 'capped'>
+  Pick<Record<VoiceRefusal, string>, 'unknown-variant' | 'empty-name' | 'capped'>
 > = {
-  'no-pattern': 'No pattern is open.',
   'unknown-variant': 'That voice is no longer in your library.',
   'empty-name': 'Give the variant a name.',
   capped: 'Your plan’s variant limit has been reached.',

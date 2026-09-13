@@ -2,17 +2,17 @@ import { useState, type ReactNode } from 'react';
 import type { Track } from '@fretwork/lib';
 import { trackInstrumentId, useSelectedTrackId, useTracks } from './compositionService';
 import {
-  deleteTrackVoice,
+  deleteVoice,
   parseVoiceKey,
   readTrackVoiceRef,
   renameVoice,
-  saveTrackVoice,
-  saveTrackVoiceAs,
-  setTrackVoice,
+  saveVoice,
+  saveVoiceAs,
+  selectVoice,
   useSelectableVoices,
   useTrackVoiceStatus,
   voiceKey,
-  type TrackVoiceRefusal,
+  type VoiceRefusal,
   type VoiceOption,
 } from '../voice/voiceService';
 import {
@@ -43,15 +43,17 @@ import { NameForm } from '../voice/NameForm';
  * belongs to a track, so this rail follows tracks; the note or block that happens
  * to be selected is not its business.
  *
- * ⚠ `voiceService.selectVoice` IS THE FUNCTION THAT LOOKS RIGHT AND IS WRONG here,
- * and so are `saveVoice` / `saveVoiceAs`. All three resolve their target through
- * the EDITING PATTERN, so from this rail they would retune whatever pattern is
- * open and change no track at all — which, with one track on the fallback, can
- * even look like it worked. `setTrackVoice`, `saveTrackVoice` and
- * `saveTrackVoiceAs` are the track path. `renameVoice` is shared with the pattern
+ * ⚠ `'pattern'` IS THE ARGUMENT THAT LOOKS RIGHT AND IS WRONG here. Every write
+ * below goes through the same seam as the pattern page's and differs from it only
+ * in the `kind` passed first: under `'pattern'` `selectVoice`, `saveVoice` and
+ * `saveVoiceAs` resolve their target through the EDITING PATTERN, so from this
+ * rail they would retune whatever pattern is open and change no track at all —
+ * which, with one track on the fallback, can even look like it worked. The kind is
+ * `'track'` at every call site here and is never inferred. `renameVoice` takes
+ * none, and is shared with the pattern
  * page deliberately: it addresses a variant by id, and a variant has no per-holder
  * identity to disagree about. Deleting is the same act with a dangling ref left
- * behind it, and the holder to repair differs — hence `deleteTrackVoice`.
+ * behind it, and the holder to repair differs — hence the kind on `deleteVoice`.
  *
  * ── Two rules inherited from the rails that came first ───────────────────────
  *
@@ -110,16 +112,14 @@ export function VoiceRail() {
   return <TrackVoicePicker key={track.id} track={track} />;
 }
 
-/** Every refusal the track write path can hand back needs a sentence, since each
- *  is a state this rail can legitimately be in. `no-pattern` is unreachable from
- *  here and is carried because `renameVoice` is shared with the pattern page and
- *  typed on its wider union. `built-in` is Sound Lab's
- *  shipped wording, kept. */
-const REFUSAL_TEXT: Record<TrackVoiceRefusal, string> = {
+/** Every refusal the write seam can hand back needs a sentence, since each is a
+ *  state this rail can legitimately be in. `built-in` is Sound Lab's shipped
+ *  wording, kept. */
+const REFUSAL_TEXT: Record<VoiceRefusal, string> = {
   ...SHARED_VOICE_REFUSAL_TEXT,
-  'no-track': 'That track is no longer in this composition.',
-  // The two that name the holder, which is why they are stated here rather than
+  // The three that name the holder, which is why they are stated here rather than
   // shared with `VoicePane`: its versions say "this pattern".
+  'no-holder': 'That track is no longer in this composition.',
   'no-voice':
     'This track follows its instrument’s voice. Use Save as… to keep these tweaks as a voice of its own.',
   'built-in': 'Presets are read-only. Use Save as… to keep your tweaks.',
@@ -221,7 +221,7 @@ function TrackVoicePicker({ track }: { track: Track }) {
     // absence: a null ref puts the track on the instrument's global active voice,
     // which is the lib's documented meaning for one.
     if (key === '') {
-      commitPick(setTrackVoice(track.id, null));
+      commitPick(selectVoice('track', track.id, null));
       return;
     }
     const next = parseVoiceKey(key);
@@ -232,11 +232,11 @@ function TrackVoicePicker({ track }: { track: Track }) {
       setNotice(REFUSAL_TEXT['unknown-variant']);
       return;
     }
-    commitPick(setTrackVoice(track.id, next));
+    commitPick(selectVoice('track', track.id, next));
   };
 
   const save = () => {
-    const result = saveTrackVoice(track.id, preset);
+    const result = saveVoice('track', track.id, preset);
     if (!result.ok) {
       setNotice(REFUSAL_TEXT[result.reason]);
       return;
@@ -253,14 +253,14 @@ function TrackVoicePicker({ track }: { track: Track }) {
     const trimmed = nameForm.value.trim();
 
     if (nameForm.mode === 'save-as') {
-      const result = saveTrackVoiceAs(track.id, trimmed, preset);
+      const result = saveVoiceAs('track', track.id, trimmed, preset);
       if (!result.ok) {
         setNotice(REFUSAL_TEXT[result.reason]);
         return;
       }
       setNotice(null);
       closeNameForm();
-      // `saveTrackVoiceAs` has already repointed the track, which retires the
+      // `saveVoiceAs` has already repointed the track, which retires the
       // draft by tag on its own; this is what tells the engine to go and rebuild
       // from the variant rather than from the copy it was made out of.
       discard();
@@ -279,7 +279,7 @@ function TrackVoicePicker({ track }: { track: Track }) {
       setNotice(REFUSAL_TEXT[result.reason]);
       return;
     }
-    // The draft carries the OLD name and `saveTrackVoice` writes the record's name
+    // The draft carries the OLD name and `saveVoice` writes the record's name
     // back from `preset.name`, so without this the next Save would silently undo the
     // rename — which is why Rename used to be disabled while dirty. A no-op when
     // there is no draft.
@@ -304,12 +304,12 @@ function TrackVoicePicker({ track }: { track: Track }) {
       : 'Any pattern or track using it falls back to a built-in voice.';
     if (!window.confirm(`Delete “${preset.name}”? ${consequence}`)) return;
 
-    // ONE seam call, because it is one act: `deleteVoice` repairs the editing
-    // PATTERN's ref and knows nothing about tracks, so a caller with no pointer
-    // would get the pattern fixed and this track left dangling — resolving
-    // silently to a built-in while the rail showed nothing selected. The button
-    // must not do more than the function.
-    const result = deleteTrackVoice(track.id, ref.id);
+    // ONE seam call, because it is one act: the seam destroys the variant and
+    // repairs this track's dangling ref itself, which is what `'track'` buys —
+    // under `'pattern'` the same call would fix the open pattern and leave this
+    // track resolving silently to a built-in while the rail showed nothing
+    // selected. The button must not do more than the function.
+    const result = deleteVoice('track', track.id, ref.id);
     if (!result.ok) {
       setNotice(REFUSAL_TEXT[result.reason]);
       return;
@@ -375,7 +375,7 @@ function TrackVoicePicker({ track }: { track: Track }) {
           type="button"
           onClick={openNameForm('rename', preset.name)}
           // Renaming WHILE DIRTY is fine now, and it was not before: the draft
-          // carries the old name and `saveTrackVoice` writes the record's name back
+          // carries the old name and `saveVoice` writes the record's name back
           // from `preset.name`, so a rename used to be silently undone by the next
           // Save and this button was disabled to say so. `voiceDrafts.setVoiceName`
           // patches the draft, which is the write that module was missing.

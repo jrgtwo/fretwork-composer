@@ -32,7 +32,6 @@ import {
   readVoiceRef,
   resolveTrackVoicePreset,
   selectVoice,
-  setTrackVoice,
   trackVoiceRefStatus,
   voiceKey,
 } from '../src/voice/voiceService';
@@ -63,8 +62,8 @@ import {
  * The fake `MultiTrackPlayback` mirrors `diffTracks`' documented priority
  * (restream > voice > gain) rather than being inert, because LIB-GAP(18) IS that
  * priority: a track whose placements and voiceRef move in the same update gets
- * restreamed and keeps its old voice, and the seam's explicit `setTrackVoice` is
- * what covers it. An inert fake could not tell the two apart.
+ * restreamed and keeps its old voice, and `playbackService`'s explicit
+ * `MultiTrackPlayback.setTrackVoice` is what covers it. An inert fake could not tell the two apart.
  */
 const lib = vi.hoisted(() => {
   const startAudio = vi.fn(async () => {});
@@ -261,8 +260,8 @@ function place(patternId: string, trackId: string, atTick = 0): string {
   return result.value;
 }
 
-/** Two tracks on the SAME instrument — the only shape that can catch the
- *  `selectVoice` trap. */
+/** Two tracks on the SAME instrument — the only shape that can catch a write
+ *  that landed on the wrong holder. */
 function twoTracks(): readonly Track[] {
   // Idempotent, as the `ensureComposition` this replaced was: a helper that
   // CREATES unconditionally would switch away from a composition the test had
@@ -329,7 +328,7 @@ describe('the track path in voiceService', () => {
     const tracks = twoTracks();
     const driven = userVoice('Driven');
 
-    const result = setTrackVoice(tracks[0].id, driven);
+    const result = selectVoice('track', tracks[0].id, driven);
 
     expect(result.ok).toBe(true);
     const after = getTracks();
@@ -348,8 +347,8 @@ describe('the track path in voiceService', () => {
     // assertion below would then hold for a seam that ignored the ref entirely.
     expect(first.name).not.toBe(second.name);
 
-    setTrackVoice(tracks[0].id, first.ref);
-    setTrackVoice(tracks[1].id, second.ref);
+    selectVoice('track', tracks[0].id, first.ref);
+    selectVoice('track', tracks[1].id, second.ref);
 
     const after = getTracks();
     expect(resolveTrackVoicePreset(after[0]).name).toBe(first.name);
@@ -375,14 +374,16 @@ describe('the track path in voiceService', () => {
     expect(voiceDraftKeys()).toContain(`track:${gone}`);
   });
 
-  it('is NOT selectVoice — the pattern write moves no track at all', () => {
+  it('is NOT the pattern arm — the same call under ’pattern’ moves no track', () => {
     const tracks = twoTracks();
     seedPattern('Riff');
     const driven = userVoice('Driven');
 
-    selectVoice(driven);
+    // One argument apart from the writes above, which is the whole hazard now
+    // that the two write paths are one function.
+    expect(selectVoice('pattern', getEditingPattern()!.id, driven).ok).toBe(true);
 
-    // `selectVoice` writes the EDITING PATTERN's ref. It did something…
+    // The pattern arm writes the EDITING PATTERN's ref. It did something…
     const pattern = getEditingPattern();
     expect(pattern && readVoiceRef(pattern)).toEqual(driven);
     // …and that something was not this. Both tracks, because a one-track
@@ -398,7 +399,7 @@ describe('the track path in voiceService', () => {
     const tracks = twoTracks();
     const driven = userVoice('Driven');
     const other = builtInVoice(1);
-    setTrackVoice(tracks[0].id, other.ref);
+    selectVoice('track', tracks[0].id, other.ref);
 
     // The lib's documented fallback: a null ref resolves through the global
     // `activeVariants` map, which is what the pattern page writes.
@@ -412,11 +413,39 @@ describe('the track path in voiceService', () => {
 
   it('clears back to the fallback', () => {
     const tracks = twoTracks();
-    setTrackVoice(tracks[0].id, userVoice('Driven'));
+    selectVoice('track', tracks[0].id, userVoice('Driven'));
 
-    expect(setTrackVoice(tracks[0].id, null).ok).toBe(true);
+    expect(selectVoice('track', tracks[0].id, null).ok).toBe(true);
 
     expect(readTrackVoiceRef(getTracks()[0])).toBeNull();
+  });
+
+  it('takes null for a track and refuses it for a pattern, in words', () => {
+    // The one asymmetry the merged `selectVoice` keeps in its signature rather
+    // than in its name, so it is the one most likely to be flattened by someone
+    // making the two arms look alike.
+    const tracks = twoTracks();
+    seedPattern('Riff');
+    const driven = userVoice('Driven');
+    expect(selectVoice('track', tracks[0].id, driven).ok).toBe(true);
+    expect(selectVoice('pattern', getEditingPattern()!.id, driven).ok).toBe(true);
+
+    // "Follow the instrument" is a real choice for a track: the lib's documented
+    // fallback resolves through the global active variant.
+    expect(selectVoice('track', tracks[0].id, null).ok).toBe(true);
+    expect(readTrackVoiceRef(getTracks()[0])).toBeNull();
+
+    // It is NOT one for a pattern. With no ref of its own a pattern plays that
+    // same global entry — shared with every other ref-less pattern — so clearing
+    // one here would hand the document over to a setting made somewhere else.
+    // There has never been a clear-the-ref write on the pattern side; it is
+    // refused in a sentence rather than quietly ignored.
+    const refused = selectVoice('pattern', getEditingPattern()!.id, null);
+    expect(refused).toEqual({
+      ok: false,
+      reason: expect.stringContaining('cannot be cleared'),
+    });
+    expect(readVoiceRef(getEditingPattern()!)).toEqual(driven);
   });
 
   it('is idempotent by VALUE, not by reference', () => {
@@ -429,9 +458,9 @@ describe('the track path in voiceService', () => {
     const again = builtInVoice(1).ref;
     expect(once).not.toBe(again);
 
-    setTrackVoice(tracks[0].id, once);
+    selectVoice('track', tracks[0].id, once);
     const written = getTracks()[0];
-    expect(setTrackVoice(tracks[0].id, again).ok).toBe(true);
+    expect(selectVoice('track', tracks[0].id, again).ok).toBe(true);
 
     // The same track object: no store write, so no bumped `updatedAt`, no
     // re-render of every subscriber, and — during playback — no `'voice'` from
@@ -445,7 +474,7 @@ describe('the track path in voiceService', () => {
     // and `undefined !== null` is a write the reference guard cannot catch.
     const before = getTracks()[0];
 
-    expect(setTrackVoice(before.id, null).ok).toBe(true);
+    expect(selectVoice('track', before.id, null).ok).toBe(true);
 
     expect(getTracks()[0]).toBe(before);
     expect(tracks).toHaveLength(2);
@@ -458,13 +487,18 @@ describe('the track path in voiceService', () => {
     // A variant for another instrument would resolve to a preset for a neck this
     // track has not got — and the picker never offers it, so a write that landed
     // would set a voice the user cannot see from where they are standing.
-    const wrongInstrument = setTrackVoice(tracks[0].id, bassVoice);
-    const noTrack = setTrackVoice('not-a-track', builtInVoice().ref);
+    const wrongInstrument = selectVoice('track', tracks[0].id, bassVoice);
+    const noTrack = selectVoice('track', 'not-a-track', builtInVoice().ref);
     act(() => useVoiceStore.getState().deleteVariant((bassVoice as { id: string }).id));
-    const gone = setTrackVoice(tracks[0].id, { kind: 'user', id: 'deleted-id' });
+    const gone = selectVoice('track', tracks[0].id, { kind: 'user', id: 'deleted-id' });
 
     expect(wrongInstrument).toEqual({ ok: false, reason: expect.stringContaining('guitar') });
-    expect(noTrack).toEqual({ ok: false, reason: 'No such track.' });
+    // The seam's ONE authoring of this sentence — the same `no-holder` state the
+    // save and delete arms refuse, so it has to read the same way from all three.
+    expect(noTrack).toEqual({
+      ok: false,
+      reason: 'That track is no longer in this composition.',
+    });
     expect(gone).toEqual({ ok: false, reason: expect.stringContaining('no longer') });
     expect(readTrackVoiceRef(getTracks()[0])).toBeNull();
   });
@@ -510,7 +544,7 @@ describe('the per-track voice picker', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     const driven = userVoice('Driven') as { kind: 'user'; id: string };
-    setTrackVoice(tracks[0].id, driven);
+    selectVoice('track', tracks[0].id, driven);
     // `deleteVoice` repairs the editing PATTERN and leaves other holders to the
     // lib's clean fallback, so a track's ref can dangle from two clicks away.
     act(() => useVoiceStore.getState().deleteVariant(driven.id));
@@ -531,7 +565,7 @@ describe('the per-track voice picker', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     const bass = userVoice('Thumpy', 'bass');
-    // Straight past `setTrackVoice`, which refuses this — the shape reaches a
+    // Straight past the write seam, which refuses this — the shape reaches a
     // document through persistence, a hand edit, or an instrument change under a
     // ref the lib did not clear. The seam has to name it for what it is.
     setTrackVoiceRef(tracks[0].id, bass);
@@ -548,7 +582,7 @@ describe('the per-track voice picker', () => {
   it('goes back to Auto, which is a choice rather than an absence', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
-    setTrackVoice(tracks[0].id, userVoice('Driven'));
+    selectVoice('track', tracks[0].id, userVoice('Driven'));
     render(<ArrangementGrid mode={MODE} />);
 
     await pickVoice(user, tracks[0], '');
@@ -639,7 +673,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     const tracks = twoTracks();
     // Nothing placed, so `strandedByInstrument` is 0 — before CP-13 this change
     // applied silently, and the voice went with it.
-    setTrackVoice(tracks[0].id, userVoice('Driven'));
+    selectVoice('track', tracks[0].id, userVoice('Driven'));
     render(<ArrangementGrid mode={MODE} />);
 
     await user.selectOptions(instrumentPicker(tracks[0]), 'bass');
@@ -655,7 +689,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     const user = userEvent.setup();
     const tracks = twoTracks();
     const driven = userVoice('Driven');
-    setTrackVoice(tracks[0].id, driven);
+    selectVoice('track', tracks[0].id, driven);
     render(<ArrangementGrid mode={MODE} />);
 
     await user.selectOptions(instrumentPicker(tracks[0]), 'bass');
@@ -685,7 +719,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     const user = userEvent.setup();
     const tracks = twoTracks();
     const driven = userVoice('Driven') as { kind: 'user'; id: string };
-    setTrackVoice(tracks[0].id, driven);
+    selectVoice('track', tracks[0].id, driven);
     // The variant goes; the track fell back to the instrument's voice the moment
     // it did. There is nothing left for the write to destroy, and a confirmation
     // for a free action is how people learn to click through confirmations.
@@ -705,7 +739,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     const tracks = twoTracks();
     const patternId = seedPattern('High riff', [0, 4, 5]);
     place(patternId, tracks[0].id, 0);
-    setTrackVoice(tracks[0].id, userVoice('Driven'));
+    selectVoice('track', tracks[0].id, userVoice('Driven'));
     render(<ArrangementGrid mode={MODE} />);
 
     await user.selectOptions(instrumentPicker(tracks[0]), 'bass');
@@ -718,7 +752,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     const user = userEvent.setup();
     const tracks = twoTracks();
     const patternId = seedPattern('Riff');
-    setTrackVoice(tracks[0].id, userVoice('Driven'));
+    selectVoice('track', tracks[0].id, userVoice('Driven'));
     // An undoable arrangement edit, captured while the override was still set.
     place(patternId, tracks[0].id, 0);
     render(<ArrangementGrid mode={MODE} />);
@@ -825,7 +859,7 @@ describe('per-track voices reach the engine', () => {
     place(patternId, tracks[0].id, 0);
     place(patternId, tracks[1].id, BAR);
     const driven = userVoice('Driven');
-    setTrackVoice(tracks[1].id, driven);
+    selectVoice('track', tracks[1].id, driven);
     render(<CompositionProbe />);
 
     await start();
@@ -849,7 +883,7 @@ describe('per-track voices reach the engine', () => {
     const driven = userVoice('Driven');
 
     await act(async () => {
-      setTrackVoice(tracks[1].id, driven);
+      selectVoice('track', tracks[1].id, driven);
     });
 
     // Audible without a restart: the engine rebuilds that one voice and hands it
@@ -877,7 +911,7 @@ describe('per-track voices reach the engine', () => {
     // keep playing the old voice with nothing to notice it by.
     await act(async () => {
       place(patternId, tracks[1].id, 2 * BAR);
-      setTrackVoice(tracks[1].id, driven);
+      selectVoice('track', tracks[1].id, driven);
     });
 
     expect(running.voiceSwaps).toEqual([tracks[1].id]);
@@ -954,13 +988,13 @@ describe('per-track voices reach the engine', () => {
     const running = engine();
 
     await act(async () => {
-      setTrackVoice(tracks[1].id, driven);
+      selectVoice('track', tracks[1].id, driven);
     });
     await act(async () => {
       // Equal by value, a different object — which is what `listSelectableVoices`
       // and `parseVoiceKey` hand out, and what `diffTracks` would read as a
       // change. A second sampler load, and the track silent until it decodes.
-      setTrackVoice(tracks[1].id, { ...driven });
+      selectVoice('track', tracks[1].id, { ...driven });
     });
 
     expect(running.voiceSwaps).toEqual([tracks[1].id]);

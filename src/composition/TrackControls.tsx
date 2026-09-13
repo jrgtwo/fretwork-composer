@@ -21,7 +21,7 @@ import {
 import {
   parseVoiceKey,
   readTrackVoiceRef,
-  setTrackVoice,
+  selectVoice,
   useSelectableVoices,
   useTrackVoicePreset,
   useTrackVoiceStatus,
@@ -43,7 +43,7 @@ import {
  * PERMANENT ADAPTER, not a masked lib gap: the lib cannot know it is behind a
  * `<select>`, which is exactly the argument the prefetch-rate row in
  * docs/FOLLOW-UPS.md already makes. It lives in the GESTURE and not in the seam —
- * `voiceService.setTrackVoice` writes on the call, so the agent is never
+ * `voiceService.selectVoice` writes on the call, so the agent is never
  * debounced, and one command stays one undo step.
  */
 /**
@@ -187,9 +187,9 @@ export function TrackControls({
   const voices = useSelectableVoices(instrumentId);
   const voicePreset = useTrackVoicePreset(track);
   // A ref can outlive its variant, or outlive the instrument it made sense for:
-  // `voiceService.deleteVoice` repairs the editing PATTERN and deliberately
-  // leaves every other holder to the lib's clean fallback, so deleting a variant
-  // in the voice pane leaves any track pointing at it dangling. Asked of the seam
+  // `voiceService.deleteVoice` repairs the holder it was given and deliberately
+  // leaves every other one to the lib's clean fallback, so deleting a variant in
+  // the voice pane leaves any track pointing at it dangling. Asked of the seam
   // rather than derived from `voices` here, because "gone" and "for another
   // instrument" are indistinguishable from a membership test and are not the same
   // sentence — nor the same answer to whether an instrument change costs anything.
@@ -232,7 +232,7 @@ export function TrackControls({
     // absence — it puts the track back on the instrument's global active voice,
     // which is the lib's documented meaning for a null ref.
     if (key === '') {
-      report(setTrackVoice(track.id, null));
+      report(selectVoice('track', track.id, null));
       return;
     }
     const ref = parseVoiceKey(key);
@@ -243,7 +243,7 @@ export function TrackControls({
       onNotice('That voice is no longer in your library.');
       return;
     }
-    report(setTrackVoice(track.id, ref));
+    report(selectVoice('track', track.id, ref));
   };
 
   const onVoiceChange = (key: string) => {
@@ -499,10 +499,10 @@ export function TrackControls({
         </div>
       ) : voiceOpen ? (
         <div className="flex items-center gap-1">
-          {/* ⚠ NOT `voiceService.selectVoice`, which writes the editing PATTERN's
-              ref and would change no track at all. `setTrackVoice` writes this
-              track's `Track.voiceRef` and nothing else — the whole point being
-              that two guitar tracks can sound different.
+          {/* ⚠ NOT `selectVoice('pattern', …)`, which writes the editing
+              PATTERN's ref and would change no track at all. Under `'track'` the
+              same seam writes this track's `Track.voiceRef` and nothing else —
+              the whole point being that two guitar tracks can sound different.
 
               A voice is a SHARED asset: picking a user variant here points at the
               same variant the pattern page edits, so a later Save retunes both.

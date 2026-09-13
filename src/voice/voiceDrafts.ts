@@ -440,8 +440,8 @@ export function setVoiceParam(
  * Rename the voice INSIDE an unsaved copy — the one write here that is not a
  * schema param.
  *
- * ⚠ WITHOUT THIS A RENAME IS SILENTLY UNDONE. `saveVoice` / `saveTrackVoice`
- * write the record's name back from `preset.name`, and a draft carries the name
+ * ⚠ WITHOUT THIS A RENAME IS SILENTLY UNDONE. `saveVoice`, under either kind,
+ * writes the record's name back from `preset.name`, and a draft carries the name
  * the voice had when the edit started — so renaming a variant while an edit is
  * in flight, then saving, puts the old name back. `VoicePane` used to patch its
  * own React copy; `VoiceRail` could not, and disabled Rename while dirty to say

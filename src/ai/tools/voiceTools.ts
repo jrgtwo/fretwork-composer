@@ -2,16 +2,18 @@
  * The agent's capabilities over the VOICE seam — which voice a track plays
  * through, and the user's own saved voices.
  *
- * ⚠ THE TRACK PATH, never the pattern one. `voiceService.selectVoice` is the
- * function that looks right and is wrong here: it writes the EDITING PATTERN's
- * ref, so from a composition it would retune whichever pattern happens to be
- * open and leave every track exactly as it was — which, with one track on the
- * fallback, can even look like it worked. `setTrackVoice` is the track write,
- * and it is the only one wrapped below.
+ * ⚠ THE TRACK PATH, never the pattern one. Every voice write takes its holder
+ * kind first, and `'pattern'` is the argument that looks right and is wrong here:
+ * under it `selectVoice` writes the EDITING PATTERN's ref, so from a composition
+ * it would retune whichever pattern happens to be open and leave every track
+ * exactly as it was — which, with one track on the fallback, can even look like
+ * it worked. Every call below passes `'track'`, literally and never from a
+ * variable, and `describeVoiceRefusal` is told the same kind so its `no-holder`
+ * sentence names a track.
  *
  * ── What is deliberately NOT here ───────────────────────────────────────────
  *
- *   - **Save-over** (`saveTrackVoice`), and voice PARAMETERS generally. Both
+ *   - **Save-over** (`saveVoice`), and voice PARAMETERS generally. Both
  *     take a whole `VoicePreset` — an amp model, a cabinet IR, a sample pack, an
  *     effects chain — which is a synth-design surface, not a musical one, and
  *     nothing a model can author from a schema without inventing values that do
@@ -26,22 +28,24 @@
  *     builds patterns and compositions and CHOOSES a voice; designing one is a
  *     different kind of act. Wrapping them is a product decision to reopen, not
  *     a gap to close.
- *   - **The global active variant** (`selectVoice` and the `activeVariants`
- *     map). It is the instrument-wide default shared by every pattern with no
- *     explicit ref, so writing it retunes documents the user never mentioned.
- *   - **The pattern's own voice.** Same function, same trap; a pattern-side
- *     voice tool can be added when a pattern-side command needs one.
+ *   - **The global active variant** (the `activeVariants` map). It is the
+ *     instrument-wide default shared by every pattern with no explicit ref, so
+ *     writing it retunes documents the user never mentioned, and the seam keeps
+ *     it read-only from here for that reason.
+ *   - **The pattern's own voice** — `selectVoice('pattern', …)`. Same functions,
+ *     one argument apart; a pattern-side voice tool can be added when a
+ *     pattern-side command needs one.
  */
 import {
-  deleteTrackVoice,
+  deleteVoice,
   describeVoiceRefusal,
   listSelectableVoices,
   parseVoiceKey,
   readTrackVoiceRef,
   renameVoice,
   resolveTrackVoicePreset,
-  saveTrackVoiceAs,
-  setTrackVoice,
+  saveVoiceAs,
+  selectVoice,
   trackVoiceRefStatus,
   variantIdFromKey,
   voiceKey,
@@ -107,7 +111,7 @@ const setForTrack = defineTool<{ trackId: string; voiceKey: string | null }>({
     // the failure this whole layer is built to avoid.
     const ref = key === null ? null : parseVoiceKey(key);
     if (key !== null && ref === null) return fail(`Not a voice key: ${key}.`);
-    const result = setTrackVoice(trackId, ref);
+    const result = selectVoice('track', trackId, ref);
     return result.ok ? ok({ trackId, voiceKey: key }) : fail(result.reason);
   },
 });
@@ -127,13 +131,13 @@ const saveAsForTrack = defineTool<{ trackId: string; name: string }>({
     // `VoicePreset` is an amp model, a cabinet IR, a sample pack and an effects
     // chain, and a caller inventing those would be inventing values that do not
     // exist. "Save what this already sounds like" is the whole capability.
-    const result = saveTrackVoiceAs(trackId, name, resolveTrackVoicePreset(track));
+    const result = saveVoiceAs('track', trackId, name, resolveTrackVoicePreset(track));
     return result.ok
       // Built through `voiceKey` and not by hand: the key format is authored in
       // one place on purpose, which is the same argument `variantIdFromKey`
       // makes for the way back.
       ? ok({ trackId, name, voiceKey: voiceKey({ kind: 'user', id: result.id }) })
-      : fail(describeVoiceRefusal(result.reason));
+      : fail(describeVoiceRefusal('track', result.reason));
   },
 });
 
@@ -151,12 +155,16 @@ const rename = defineTool<{ voiceKey: string; name: string }>({
     // a built-in as `built-in` rather than as "unknown" — which is why this is
     // not a `key.split(':')` here.
     const variant = variantIdFromKey(key);
-    if (!variant.ok) return fail(describeVoiceRefusal(variant.reason));
+    // The kind is inert on this path and only `describeVoiceRefusal`'s signature
+    // asks for it: rename addresses a VARIANT by id — a variant has no holder to
+    // disagree about — so neither of these results can be `no-holder`, the one
+    // refusal whose sentence branches on the kind.
+    if (!variant.ok) return fail(describeVoiceRefusal('track', variant.reason));
     const result = renameVoice(variant.id, name);
     // The seam's refusals are enum CODES so a pane can render each state its own
     // way; `describeVoiceRefusal` is the one authoring of the sentence, and it
     // lives at the seam so this layer cannot invent a second wording.
-    return result.ok ? ok({ voiceKey: key, name }) : fail(describeVoiceRefusal(result.reason));
+    return result.ok ? ok({ voiceKey: key, name }) : fail(describeVoiceRefusal('track', result.reason));
   },
 });
 
@@ -173,9 +181,9 @@ const deleteForTrack = defineTool<{ trackId: string; voiceKey: string }>({
   ),
   run: ({ trackId, voiceKey: key }) => {
     const variant = variantIdFromKey(key);
-    if (!variant.ok) return fail(describeVoiceRefusal(variant.reason));
-    const result = deleteTrackVoice(trackId, variant.id);
-    return result.ok ? ok({ voiceKey: key }) : fail(describeVoiceRefusal(result.reason));
+    if (!variant.ok) return fail(describeVoiceRefusal('track', variant.reason));
+    const result = deleteVoice('track', trackId, variant.id);
+    return result.ok ? ok({ voiceKey: key }) : fail(describeVoiceRefusal('track', result.reason));
   },
 });
 
