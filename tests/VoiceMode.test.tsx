@@ -23,8 +23,18 @@ import {
   selectPlacements,
   selectTrack,
   setTrackInstrument,
+  setTrackVoiceRef,
 } from '../src/composition/compositionService';
-import { listSelectableVoices, selectVoice } from '../src/voice/voiceService';
+import {
+  deleteVoice,
+  listSelectableVoices,
+  readTrackVoiceRef,
+  readVoiceRef,
+  saveVoice,
+  saveVoiceAs,
+  selectVoice,
+} from '../src/voice/voiceService';
+import { VOICE_COMMIT_MS } from '../src/voice/voiceChrome';
 import {
   DEFAULT_OPEN_SECTIONS,
   PARAM_SECTIONS,
@@ -1325,6 +1335,757 @@ const row = (track: Track) => {
   if (!el) throw new Error(`no row rendered for ${track.name}`);
   return el;
 };
+
+// ------------------------------------------------- saving, in the rack header ---
+
+/** Everything in ONE rack, scoped by the lane row the track owns. The saving
+ *  controls used to render once, in the rail, and now render up to eight times —
+ *  so every query here goes through the track's own row, and a test that passed by
+ *  reaching the neighbouring rack's button would be the exact bug this scoping is
+ *  for. */
+const rack = (track: Track) => within(row(track));
+
+/** The rack header's picker. Named for the track rather than "Voice for <track>",
+ *  which is `TrackControls`' compact picker — both can be on screen in voice mode. */
+const picker = (track: Track) =>
+  screen.getByRole('combobox', { name: `${track.name} voice` });
+
+/** This rack's own message line. There is one per rack, because a refusal about
+ *  the fifth track read at the top of the page names none of them. */
+const notice = (track: Track) =>
+  screen.getByRole('status', { name: `${track.name} voice messages` });
+
+describe('saving a voice from the track’s own rack', () => {
+  it('refuses a built-in slot, in the button and in the seam, with a reason', () => {
+    const tracks = twoTracks();
+    selectVoice('track', tracks[0].id, voiceNamed('Clean Amp').ref);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
+    render(<ArrangementGrid mode="voice" />);
+
+    // Disabled AND explained: the fourteen slots are readonly lib consts with no
+    // setter, so Save is impossible rather than discouraged.
+    expect(rack(tracks[0]).getByRole('button', { name: `Save ${tracks[0].name}’s voice` }))
+      .toBeDisabled();
+    expect(rack(tracks[0]).getByText(/Presets are read-only/)).toBeInTheDocument();
+
+    // The seam refuses independently of the disabled attribute — which is what the
+    // agent hits, since it never sees a button at all.
+    expect(saveVoice('track', tracks[0].id, presetOf(getTracks()[0]))).toEqual({
+      ok: false,
+      reason: 'built-in',
+    });
+  });
+
+  it('explains the fallback rather than the read-only rule when there is no ref at all', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    // `no-voice`, not `built-in`: there is nothing read-only here, there is simply
+    // nothing to save INTO, and the two have different things to do about them.
+    expect(rack(tracks[0]).getByText(/follows its instrument’s voice/)).toBeInTheDocument();
+    expect(rack(tracks[0]).queryByText(/Presets are read-only/)).not.toBeInTheDocument();
+  });
+
+  it('says what Save would overwrite, naming the variant, before Save is pressed', () => {
+    const tracks = twoTracks();
+    const created = saveVoiceAs('track', tracks[0].id, 'Shared tone', presetOf(tracks[0]));
+    if (!created.ok) throw new Error(created.reason);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -9);
+    render(<ArrangementGrid mode="voice" />);
+
+    // A voice is a SHARED asset: this is the sentence that travels with the button,
+    // and it has to be readable BEFORE the button is pressed rather than after.
+    expect(
+      rack(tracks[0]).getByText(
+        /Saving overwrites “Shared tone” everywhere it is used — every pattern and every other track on it\./,
+      ),
+    ).toBeInTheDocument();
+    // Per rack, and it says something DIFFERENT here: the other track is on the
+    // fallback, so there is nothing for its Save to overwrite. One sentence for the
+    // whole page could not be both.
+    expect(rack(tracks[1]).queryByText(/Saving overwrites/)).not.toBeInTheDocument();
+    expect(rack(tracks[1]).getByText(/follows its instrument’s voice/)).toBeInTheDocument();
+  });
+
+  it('writes the draft into the shared variant, and every holder of it follows', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    openBlankPattern('Riff');
+    const created = saveVoiceAs('track', tracks[0].id, 'Shared tone', presetOf(tracks[0]));
+    if (!created.ok) throw new Error(created.reason);
+    // A SECOND track on the same variant, which is the surprising half: saving
+    // retunes every holder, and that is settled behaviour rather than a bug.
+    selectVoice('track', tracks[1].id, { kind: 'user', id: created.id });
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -9);
+
+    render(<ArrangementGrid mode="voice" />);
+    expect(strip(tracks[0]).getByText('Unsaved')).toBeInTheDocument();
+
+    await user.click(
+      rack(tracks[0]).getByRole('button', { name: `Save ${tracks[0].name}’s voice` }),
+    );
+
+    const variant = useVoiceStore.getState().variants.find((v) => v.id === created.id)!;
+    expect(getAtPath(variant.preset, VOLUME_PATH)).toBe(-9);
+    expect(dirtyOf(getTracks()[0])).toBe(false);
+    expect(strip(getTracks()[0]).getByText('Saved')).toBeInTheDocument();
+    // The other holder followed, because a voice is one shared object.
+    expect(volumeOf(getTracks()[1])).toBe(-9);
+    // …and the open PATTERN did not: `'track'` is the kind at every call site here,
+    // and `'pattern'` is the argument that looks right and is wrong.
+    expect(readVoiceRef(getEditingPattern()!)).toBeNull();
+  });
+
+  it('Save as… creates a variant this track plays and every picker offers, on this track only', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    openBlankPattern('Riff');
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
+    render(<ArrangementGrid mode="voice" />);
+
+    await user.click(
+      rack(tracks[0]).getByRole('button', {
+        name: `Save ${tracks[0].name}’s voice as a new voice`,
+      }),
+    );
+    const name = rack(getTracks()[0]).getByLabelText('New name');
+    await user.clear(name);
+    await user.type(name, 'Rack tone');
+    await user.click(rack(getTracks()[0]).getByRole('button', { name: 'Create' }));
+
+    const variant = useVoiceStore.getState().variants.find((v) => v.name === 'Rack tone')!;
+    expect(getAtPath(variant.preset, VOLUME_PATH)).toBe(-6);
+    // Repointed, or the track keeps playing the voice the copy was taken from and
+    // the saved variant sits in the library unused.
+    expect(readTrackVoiceRef(getTracks()[0])).toEqual({ kind: 'user', id: variant.id });
+    // The library is shared, so the OTHER rack's picker offers it too — while that
+    // track's own voice is untouched.
+    expect(within(picker(getTracks()[1])).getByRole('option', { name: 'Rack tone' }))
+      .toBeInTheDocument();
+    expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
+    expect(readVoiceRef(getEditingPattern()!)).toBeNull();
+    // The draft is RETIRED, not merely shadowed — asserted through the STRIP rather
+    // than through `isVoiceDirty`, which self-clears on a tag mismatch and so would
+    // destroy the evidence it was called to look for. Pointing the track back at the
+    // ref the draft was tagged with is what tells the two apart: a draft that was
+    // only shadowed by the repoint matches again here and resurrects.
+    expect(strip(getTracks()[0]).getByText('Saved')).toBeInTheDocument();
+    act(() => {
+      selectVoice('track', getTracks()[0].id, null);
+    });
+    expect(strip(getTracks()[0]).getByText('Saved')).toBeInTheDocument();
+  });
+
+  it('renames under an unsaved edit, and the next Save keeps the new name', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    const created = saveVoiceAs('track', tracks[0].id, 'Named tone', presetOf(tracks[0]));
+    if (!created.ok) throw new Error(created.reason);
+
+    render(<ArrangementGrid mode="voice" />);
+    const renameButton = rack(tracks[0]).getByRole('button', {
+      name: `Rename ${tracks[0].name}’s voice`,
+    });
+    expect(renameButton).toBeEnabled();
+
+    // No `rerender` anywhere below: the subscriptions are the property under test,
+    // and a forced re-render would keep every assertion green against a plain
+    // non-reactive read.
+    act(() => {
+      setVoiceParam('track', getTracks()[0].id, VOLUME_PATH, -3);
+    });
+    // STILL enabled while dirty — `voiceDrafts.setVoiceName` patches the draft, so
+    // the next Save cannot silently undo the rename.
+    expect(renameButton).toBeEnabled();
+
+    await user.click(renameButton);
+    const name = rack(getTracks()[0]).getByLabelText('Rename');
+    await user.clear(name);
+    await user.type(name, 'Renamed tone');
+    await user.click(rack(getTracks()[0]).getByRole('button', { name: 'Apply' }));
+
+    expect(useVoiceStore.getState().variants[0].name).toBe('Renamed tone');
+    // …and so does the draft, which is what the next Save writes back.
+    expect(presetOf(getTracks()[0]).name).toBe('Renamed tone');
+    // The edit itself survived the rename — a name write must not disturb the tone.
+    expect(volumeOf(getTracks()[0])).toBe(-3);
+    expect(dirtyOf(getTracks()[0])).toBe(true);
+
+    await user.click(
+      rack(getTracks()[0]).getByRole('button', { name: `Save ${getTracks()[0].name}’s voice` }),
+    );
+    expect(useVoiceStore.getState().variants[0].name).toBe('Renamed tone');
+    expect(useVoiceStore.getState().variants[0].preset.name).toBe('Renamed tone');
+    expect(dirtyOf(getTracks()[0])).toBe(false);
+  });
+
+  it('deletes through the shared seam, names the consequence, and clears this track’s ref', async () => {
+    const user = userEvent.setup();
+    const asked: string[] = [];
+    vi.stubGlobal('confirm', (message: string) => {
+      asked.push(message);
+      return true;
+    });
+    const tracks = twoTracks();
+    const created = saveVoiceAs('track', tracks[0].id, 'Doomed', presetOf(tracks[0]));
+    if (!created.ok) throw new Error(created.reason);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
+    render(<ArrangementGrid mode="voice" />);
+
+    await user.click(
+      rack(tracks[0]).getByRole('button', { name: `Delete ${tracks[0].name}’s voice` }),
+    );
+
+    // ONE dialog, not two, and the unsaved edit it also destroys is named inside it
+    // — asking twice in a row is how people learn to click through confirmations.
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('Doomed');
+    expect(asked[0]).toContain('Your unsaved edits to it go too');
+    expect(useVoiceStore.getState().variants).toHaveLength(0);
+    // Cleared rather than left dangling: a dangling ref resolves silently to a
+    // built-in while the picker shows nothing selected.
+    expect(readTrackVoiceRef(getTracks()[0])).toBeNull();
+    expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('refuses a Save into a ref that cannot be written back to, both ways', () => {
+    const tracks = twoTracks();
+    const doomed = saveVoiceAs('track', tracks[0].id, 'Doomed', presetOf(tracks[0]));
+    const stranded = saveVoiceAs('track', tracks[1].id, 'Stranded', presetOf(tracks[1]));
+    if (!doomed.ok) throw new Error(doomed.reason);
+    if (!stranded.ok) throw new Error(stranded.reason);
+    // ONE: deleted from under the track — the pattern page can do this, and nothing
+    // about the composition store moves when it happens.
+    act(() => useVoiceStore.getState().deleteVariant(doomed.id));
+    // TWO: the variant still exists and the TRACK moved out from under it. Written
+    // through the COMPOSITION seam, which stores the ref opaquely — the voice seam
+    // refuses this pairing outright and `setTrackInstrument` clears the override on
+    // the way past, so this is the shape a rehydrated document arrives in.
+    setTrackInstrument(tracks[1].id, 'ukulele');
+    setTrackVoiceRef(tracks[1].id, { kind: 'user', id: stranded.id });
+    // Both tracks dirty, so `!dirty` is not what is disabling either button.
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
+    setVoiceParam('track', tracks[1].id, VOLUME_PATH, -6);
+
+    render(<ArrangementGrid mode="voice" />);
+
+    // The rail's guard, which is the stricter of the two the app had: `status`
+    // refuses a deleted variant and a variant belonging to another instrument, and
+    // the seam refuses both rather than overwriting a voice the user cannot see
+    // from where they are standing.
+    for (const track of getTracks()) {
+      expect(rack(track).getByRole('button', { name: `Save ${track.name}’s voice` }))
+        .toBeDisabled();
+      // Delete goes with it: `preset` has already fallen back to a built-in here, so
+      // a live Delete would put a name in its dialog that is not the ref's.
+      expect(rack(track).getByRole('button', { name: `Delete ${track.name}’s voice` }))
+        .toBeDisabled();
+      expect(saveVoice('track', track.id, presetOf(track))).toEqual({
+        ok: false,
+        reason: 'unknown-variant',
+      });
+    }
+
+    // ONE seam code, TWO sentences: the codes collapse both failures into
+    // `unknown-variant`, and a rack showing "no longer in your library" under an
+    // `<option>` reading "Another instrument's voice" contradicts itself.
+    expect(rack(getTracks()[0]).getByText('That voice is no longer in your library.'))
+      .toBeInTheDocument();
+    expect(rack(getTracks()[1]).getByText('That voice belongs to another instrument.'))
+      .toBeInTheDocument();
+  });
+
+  it('renders the seam’s own reason rather than inventing copy', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    await user.click(
+      rack(tracks[0]).getByRole('button', {
+        name: `Save ${tracks[0].name}’s voice as a new voice`,
+      }),
+    );
+    const name = rack(getTracks()[0]).getByLabelText('New name');
+    await user.clear(name);
+    await user.click(rack(getTracks()[0]).getByRole('button', { name: 'Create' }));
+
+    // `saveVoiceAs` refuses `empty-name`; the rack's job is to say which.
+    expect(notice(getTracks()[0])).toHaveTextContent('Give the variant a name.');
+    // …and nothing was written on the way to saying so.
+    expect(useVoiceStore.getState().variants).toHaveLength(0);
+  });
+
+  it('keeps two racks’ name forms and notice lines apart', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    // Two forms open at once, which has never been possible before: one input id,
+    // one label, one live region — each rendered twice.
+    await user.click(
+      rack(tracks[0]).getByRole('button', {
+        name: `Save ${tracks[0].name}’s voice as a new voice`,
+      }),
+    );
+    await user.click(
+      rack(tracks[1]).getByRole('button', {
+        name: `Save ${tracks[1].name}’s voice as a new voice`,
+      }),
+    );
+
+    const first = rack(getTracks()[0]).getByLabelText('New name');
+    const second = rack(getTracks()[1]).getByLabelText('New name');
+    // `<label htmlFor>` resolves to whichever element with that id mounted FIRST,
+    // so an unscoped id leaves the second form's label pointing at the first
+    // form's input — and every value typed into it landing in the wrong rack.
+    expect(first).not.toBe(second);
+    expect(first.id).not.toBe(second.id);
+    expect(second.id).toContain(getTracks()[1].id);
+
+    await user.clear(first);
+    await user.type(first, 'Lead tone');
+    await user.clear(second);
+    await user.type(second, 'Rhythm tone');
+    expect(first).toHaveValue('Lead tone');
+    expect(second).toHaveValue('Rhythm tone');
+
+    // A refusal raised in ONE rack appears in that rack and nowhere else. In the
+    // rail there was one line for the page and it could not say which track it was
+    // about; with eight racks that is unattributable.
+    await user.clear(first);
+    await user.click(rack(getTracks()[0]).getByRole('button', { name: 'Create' }));
+    expect(notice(getTracks()[0])).toHaveTextContent('Give the variant a name.');
+    expect(notice(getTracks()[1])).toHaveTextContent('');
+    // The other form is still open and still holds what was typed into it: a
+    // refusal in one rack must not close or clear another's.
+    expect(rack(getTracks()[1]).getByLabelText('New name')).toHaveValue('Rhythm tone');
+  });
+  it('clears its own notice when the next write lands, rather than leaving it standing', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+
+    // A real refusal, raised from this rack: `saveVoiceAs` refuses `empty-name`.
+    await user.click(
+      rack(tracks[0]).getByRole('button', {
+        name: `Save ${tracks[0].name}’s voice as a new voice`,
+      }),
+    );
+    await user.clear(rack(getTracks()[0]).getByLabelText('New name'));
+    await user.click(rack(getTracks()[0]).getByRole('button', { name: 'Create' }));
+    expect(notice(getTracks()[0])).toHaveTextContent('Give the variant a name.');
+
+    openStage(getTracks()[0], 'Level');
+    fireEvent.keyDown(knob(getTracks()[0], 'Level', 'Volume'), { key: 'ArrowUp' });
+
+    // One line says everything this rack has to say, so a refusal left standing
+    // beside a control that has since worked reads as a refusal of THAT write.
+    expect(notice(getTracks()[0])).toHaveTextContent('');
+    expect(dirtyOf(getTracks()[0])).toBe(true);
+  });
+
+  it('names the track in the delete question, and claims no unsaved loss when there is none', async () => {
+    const user = userEvent.setup();
+    const asked: string[] = [];
+    vi.stubGlobal('confirm', (message: string) => {
+      asked.push(message);
+      return true;
+    });
+    const tracks = twoTracks();
+    const created = saveVoiceAs('track', tracks[0].id, 'Shared tone', presetOf(tracks[0]));
+    if (!created.ok) throw new Error(created.reason);
+    // BOTH tracks on the one variant, which is the case the variant's name alone
+    // cannot disambiguate — two racks, two Delete buttons, one name in the dialog.
+    selectVoice('track', tracks[1].id, { kind: 'user', id: created.id });
+    render(<ArrangementGrid mode="voice" />);
+
+    await user.click(
+      rack(getTracks()[1]).getByRole('button', { name: `Delete ${getTracks()[1].name}’s voice` }),
+    );
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('Shared tone');
+    expect(asked[0]).toContain(getTracks()[1].name);
+    // Nothing is unsaved here, so the sentence must not claim an edit goes with it.
+    expect(asked[0]).not.toContain('Your unsaved edits');
+    expect(useVoiceStore.getState().variants).toHaveLength(0);
+    // The seam repairs the track that ASKED and the open pattern, and deliberately
+    // no one else — so the other holder of a shared variant is left pointing at a
+    // voice that is gone. That is a state the rack has a sentence for rather than a
+    // silent fallback, which is the whole reason `status` is asked of the seam.
+    expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
+    expect(readTrackVoiceRef(getTracks()[0])).toEqual({ kind: 'user', id: created.id });
+    expect(rack(getTracks()[0]).getByText('That voice is no longer in your library.'))
+      .toBeInTheDocument();
+    expect(rack(getTracks()[0]).getByRole('button', { name: `Save ${getTracks()[0].name}’s voice` }))
+      .toBeDisabled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// --------------------------------------------- picking, from the rack header ---
+
+describe('the rack header’s voice picker', () => {
+  it('moves its own track and no other, and leaves the open pattern alone', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    openBlankPattern('Riff');
+    render(<ArrangementGrid mode="voice" />);
+
+    const clean = voiceNamed('Clean Amp');
+    await user.selectOptions(picker(tracks[0]), clean.key);
+    // The window is short and real: nothing is written until it closes.
+    await waitFor(() => expect(readTrackVoiceRef(getTracks()[0])).toEqual(clean.ref));
+
+    // This picker addresses ITS OWN track, where the rail's addresses the SELECTED
+    // one — the assertion a one-track page could not make.
+    expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
+    // `'pattern'` is the argument that looks right and is wrong. Had the header
+    // passed it to the same seam, THIS is what would have moved instead.
+    expect(readVoiceRef(getEditingPattern()!)).toBeNull();
+  });
+
+  it('commits ONE write for a walk down the list, not one per option', () => {
+    // TWO tracks and an open pattern, as everywhere: the assertion below is that
+    // ONE write happened, and a page with nothing else to move could not tell one
+    // write to the right place from one write to the wrong one.
+    twoTracks();
+    openBlankPattern('Riff');
+    render(<ArrangementGrid mode="voice" />);
+
+    // A native `<select>` fires `change` once per arrow key while closed, and ten
+    // of the eleven guitar voices are sampler-sourced: unwindowed, one keyboard
+    // walk is a `Tone.Sampler` and an HTTP load per bank per option passed
+    // through. `fireEvent.change` IS that keystroke at the DOM level.
+    const walked = [voiceNamed('Clean Amp'), voiceNamed('Crunch'), voiceNamed('Clean Amp')];
+    const written: string[] = [];
+    const unsubscribe = usePatternsStore.subscribe(() => {
+      const key = JSON.stringify(readTrackVoiceRef(getTracks()[0]) ?? null);
+      if (written.at(-1) !== key) written.push(key);
+    });
+
+    vi.useFakeTimers();
+    try {
+      for (const option of walked) {
+        fireEvent.change(picker(getTracks()[0]), { target: { value: option.key } });
+      }
+      // Nothing yet: the window is what makes the walk free.
+      expect(written).toEqual([]);
+      act(() => {
+        vi.advanceTimersByTime(VOICE_COMMIT_MS);
+      });
+    } finally {
+      vi.useRealTimers();
+      unsubscribe();
+    }
+
+    // ONE write, and it is the option the walk ENDED on — the two intermediate
+    // picks were dropped rather than queued.
+    expect(written).toEqual([JSON.stringify(walked.at(-1)!.ref)]);
+    expect(readTrackVoiceRef(getTracks()[0])).toEqual(walked.at(-1)!.ref);
+    expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
+    expect(readVoiceRef(getEditingPattern()!)).toBeNull();
+  });
+
+  it('asks ONCE for a whole walk before stranding an unsaved edit, and snaps back on no', () => {
+    const tracks = twoTracks();
+    const clean = voiceNamed('Clean Amp');
+    selectVoice('track', tracks[0].id, clean.ref);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
+    render(<ArrangementGrid mode="voice" />);
+
+    const asked: string[] = [];
+    let answer = false;
+    vi.stubGlobal('confirm', (message: string) => {
+      asked.push(message);
+      return answer;
+    });
+
+    // THREE `change`s inside one window — one per arrow key, which is what a
+    // keyboard walk down a closed `<select>` is — and ONE question. A confirmation
+    // per `change` would be the fetch storm the window exists to stop, in dialogs
+    // instead of in samplers, and is the failure the ask-at-COMMIT placement is for.
+    vi.useFakeTimers();
+    try {
+      for (const key of [voiceNamed('Crunch').key, clean.key, voiceNamed('Crunch').key]) {
+        fireEvent.change(picker(getTracks()[0]), { target: { value: key } });
+      }
+      expect(asked).toEqual([]);
+      act(() => {
+        vi.advanceTimersByTime(VOICE_COMMIT_MS);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(asked).toHaveLength(1);
+    // Named for the TRACK: eight racks can ask, and a bare "Discard unsaved
+    // changes?" would not say which one is about to lose its edit.
+    expect(asked[0]).toContain(tracks[0].name);
+    // Answered NO: nothing moves, and the edit is still there to go back to.
+    expect(dirtyOf(getTracks()[0])).toBe(true);
+    expect(readTrackVoiceRef(getTracks()[0])).toEqual(clean.ref);
+    // …AND the control snaps back. A `<select>` left displaying the rejected pick
+    // is a rack showing a voice the model does not hold, which reads as a write
+    // that worked.
+    expect(picker(getTracks()[0])).toHaveValue(clean.key);
+
+    // Answered YES: the pick lands AND the draft is gone. Proved by pointing the
+    // track back at the voice the draft was tagged with — a pick only SHADOWS a
+    // draft by tag, so one that was never actually discarded matches again here and
+    // the user is silently back on an edit they threw away.
+    answer = true;
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(picker(getTracks()[0]), {
+        target: { value: voiceNamed('Crunch').key },
+      });
+      act(() => {
+        vi.advanceTimersByTime(VOICE_COMMIT_MS);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(readTrackVoiceRef(getTracks()[0])).toEqual(voiceNamed('Crunch').ref);
+    act(() => {
+      selectVoice('track', getTracks()[0].id, clean.ref);
+    });
+    expect(dirtyOf(getTracks()[0])).toBe(false);
+    expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('does not ask about an edit that was reverted inside the window', () => {
+    const tracks = twoTracks();
+    const clean = voiceNamed('Clean Amp');
+    selectVoice('track', tracks[0].id, clean.ref);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
+    render(<ArrangementGrid mode="voice" />);
+
+    const asked: string[] = [];
+    vi.stubGlobal('confirm', (message: string) => {
+      asked.push(message);
+      return false;
+    });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(picker(getTracks()[0]), {
+        target: { value: voiceNamed('Crunch').key },
+      });
+      // Inside the window, and it retires the draft. The question the timer was
+      // going to ask is about an edit that no longer exists — asked from the
+      // RENDER that scheduled it, it would be asked anyway, and answering Cancel
+      // to it drops the pick for nothing.
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: `Discard voice changes for ${tracks[0].name}`,
+        }),
+      );
+      act(() => {
+        vi.advanceTimersByTime(VOICE_COMMIT_MS);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(asked).toEqual([]);
+    expect(readTrackVoiceRef(getTracks()[0])).toEqual(voiceNamed('Crunch').ref);
+    expect(dirtyOf(getTracks()[0])).toBe(false);
+    expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('commits on leaving the field rather than waiting the window out', () => {
+    twoTracks();
+    openBlankPattern('Riff');
+    render(<ArrangementGrid mode="voice" />);
+
+    const crunch = voiceNamed('Crunch');
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(picker(getTracks()[0]), { target: { value: crunch.key } });
+      // The keyboard path this exists for: arrow to a voice, then Tab away. The
+      // clock is never advanced here — a pick that needed the timer would still be
+      // sitting uncommitted and looking committed.
+      fireEvent.blur(picker(getTracks()[0]));
+      expect(readTrackVoiceRef(getTracks()[0])).toEqual(crunch.ref);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
+    expect(readVoiceRef(getEditingPattern()!)).toBeNull();
+  });
+
+  it('commits a clean pick the unmount interrupts, and asks nothing during teardown', () => {
+    twoTracks();
+    const grid = render(<ArrangementGrid mode="voice" />);
+
+    const asked: string[] = [];
+    vi.stubGlobal('confirm', (message: string) => {
+      asked.push(message);
+      return true;
+    });
+
+    const crunch = voiceNamed('Crunch');
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(picker(getTracks()[0]), { target: { value: crunch.key } });
+      // Leaving voice mode, leaving the page, removing the track: unmount is the
+      // one end of the window with no gesture on it, so the flush is what stops a
+      // pick being silently dropped. No clock advance — the unmount is the commit.
+      grid.unmount();
+      expect(readTrackVoiceRef(getTracks()[0])).toEqual(crunch.ref);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Nothing was ASKED on the way out: this rack's commit confirms, unlike the
+    // one in `TrackControls` it is modelled on, and a `window.confirm` raised
+    // during teardown has no gesture behind it.
+    expect(asked).toEqual([]);
+    expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('drops a pick rather than interrogating an unmount about an unsaved edit', () => {
+    const tracks = twoTracks();
+    const clean = voiceNamed('Clean Amp');
+    selectVoice('track', tracks[0].id, clean.ref);
+    setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
+    const grid = render(<ArrangementGrid mode="voice" />);
+
+    const asked: string[] = [];
+    vi.stubGlobal('confirm', (message: string) => {
+      asked.push(message);
+      return true;
+    });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(picker(getTracks()[0]), {
+        target: { value: voiceNamed('Crunch').key },
+      });
+      grid.unmount();
+      act(() => {
+        vi.advanceTimersByTime(VOICE_COMMIT_MS);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The pick is one keystroke and the draft is the work: an unmount cannot ask
+    // which to keep, so it keeps the one that took longer to make. After "Remove
+    // track" the question would be about a track that is already gone.
+    expect(asked).toEqual([]);
+    expect(readTrackVoiceRef(getTracks()[0])).toEqual(clean.ref);
+    expect(dirtyOf(getTracks()[0])).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+
+  it('offers the way back to the instrument’s own voice', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    selectVoice('track', tracks[0].id, voiceNamed('Clean Amp').ref);
+    render(<ArrangementGrid mode="voice" />);
+
+    await user.selectOptions(picker(getTracks()[0]), '');
+
+    // A null ref is not a missing value — it is the lib's documented fallback to
+    // the instrument's global active variant.
+    await waitFor(() => expect(readTrackVoiceRef(getTracks()[0])).toBeNull());
+  });
+  it('writes nothing for a pick the track is already on, and clears what was said before', async () => {
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    const clean = voiceNamed('Clean Amp');
+    selectVoice('track', tracks[0].id, clean.ref);
+    render(<ArrangementGrid mode="voice" />);
+
+    // Something on the line first, so "cleared" is distinguishable from "never set".
+    await user.click(
+      rack(getTracks()[0]).getByRole('button', {
+        name: `Save ${getTracks()[0].name}’s voice as a new voice`,
+      }),
+    );
+    await user.clear(rack(getTracks()[0]).getByLabelText('New name'));
+    await user.click(rack(getTracks()[0]).getByRole('button', { name: 'Create' }));
+    expect(notice(getTracks()[0])).toHaveTextContent('Give the variant a name.');
+
+    const writes: unknown[] = [];
+    const unsubscribe = usePatternsStore.subscribe(() => writes.push(null));
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(picker(getTracks()[0]), { target: { value: clean.key } });
+      act(() => {
+        vi.advanceTimersByTime(VOICE_COMMIT_MS);
+      });
+    } finally {
+      vi.useRealTimers();
+      unsubscribe();
+    }
+
+    // Re-affirming a pick is not a write — but it IS an act, so the refusal beside
+    // it goes: left standing it reads as a refusal of the pick just made.
+    expect(writes).toEqual([]);
+    expect(readTrackVoiceRef(getTracks()[0])).toEqual(clean.ref);
+    expect(notice(getTracks()[0])).toHaveTextContent('');
+  });
+});
+
+// --------------------------------------------- the seam's own repair, by id ---
+
+describe('deleting a variant repairs what pointed at it', () => {
+  it('repairs a track pointing at a variant that is already gone', () => {
+    const tracks = twoTracks();
+    const created = saveVoiceAs('track', tracks[0].id, 'Ghost', presetOf(tracks[0]));
+    if (!created.ok) throw new Error(created.reason);
+    act(() => useVoiceStore.getState().deleteVariant(created.id));
+
+    // The seam, called by id with no pointer anywhere: the variant is already gone,
+    // so the only thing left to do is the repair — and it still has to happen, or
+    // the track keeps a dead ref and the only way out is picking another voice.
+    expect(deleteVoice('track', tracks[0].id, created.id)).toEqual({
+      ok: true,
+      id: created.id,
+    });
+    expect(readTrackVoiceRef(getTracks()[0])).toBeNull();
+  });
+
+  it('repairs the open pattern too, not only the track it was called for', () => {
+    const tracks = twoTracks();
+    openBlankPattern('Riff');
+    const created = saveVoiceAs('track', tracks[0].id, 'Shared', presetOf(tracks[0]));
+    if (!created.ok) throw new Error(created.reason);
+    // A voice is a SHARED asset, so the same variant is reachable from both
+    // documents — and a delete made from the composition page leaves the pattern
+    // dangling just as readily as the track.
+    const ref = { kind: 'user', id: created.id } as const;
+    const pointed = selectVoice('pattern', getEditingPattern()!.id, ref);
+    if (!pointed.ok) throw new Error(pointed.reason);
+    expect(readVoiceRef(getEditingPattern()!)).toEqual(ref);
+
+    expect(deleteVoice('track', tracks[0].id, created.id)).toEqual({
+      ok: true,
+      id: created.id,
+    });
+
+    // TWO repairs, and this is the arm where losing the second one is silent: the
+    // track's own ref is cleared by the arm, the EDITING PATTERN's by the shared
+    // destroy. Left dangling the pattern would resolve — quietly, by design — to
+    // the instrument's first built-in while the picker showed nothing selected.
+    expect(readTrackVoiceRef(getTracks()[0])).toBeNull();
+    expect(readVoiceRef(getEditingPattern()!)).toBeNull();
+  });
+});
 
 describe('the pedalboard in a rack', () => {
   it('draws the pedals grouped, with the track in every name', () => {

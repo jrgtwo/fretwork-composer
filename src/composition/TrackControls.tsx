@@ -27,6 +27,11 @@ import {
   useTrackVoiceStatus,
   voiceKey,
 } from '../voice/voiceService';
+// The window every `<select>` voice pick is collected in — shared with the rack
+// header's picker rather than kept private here, which is what it was until that
+// second picker existed. See its comment: two copies of one gesture's answer is a
+// drift hazard nothing would catch.
+import { VOICE_COMMIT_MS } from '../voice/voiceChrome';
 
 /**
  * How long a voice pick waits before it is written.
@@ -74,8 +79,6 @@ function panLabel(pan: number): string {
   if (percent === 0) return 'C';
   return `${pan < 0 ? 'L' : 'R'}${percent}`;
 }
-
-const VOICE_COMMIT_MS = 120;
 
 /**
  * One track's mixer strip and its structural controls: instrument, position in

@@ -428,6 +428,12 @@ export function ArrangementGrid({
    * one is owned by the gesture machinery and cleared by the next gesture, and
    * a track refusal must not be wiped by a pointer move over the lanes. Two
    * pieces of state, one place to read them.
+   *
+   * ⚠ NOT the voice racks'. `TrackVoiceRack` used to report here and now keeps its
+   * own notice line, because up to eight of them are on screen and each one has
+   * something saveable in it — a refusal about the fifth track, read at the top of
+   * the page, names none of them. What is left here is about the TRACK: its
+   * instrument, its place in the stack, a drop the arrangement refused.
    */
   const [trackNotice, setTrackNotice] = useState<string | null>(null);
   /** Why the empty state's New press did nothing. Its own state rather than
@@ -1202,7 +1208,6 @@ export function ArrangementGrid({
                   }
                   onCollapsedRackSectionsChange?.(rebuilt);
                 }}
-                onNotice={setTrackNotice}
               />
             </div>
           ))}

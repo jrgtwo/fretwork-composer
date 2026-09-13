@@ -522,7 +522,7 @@ const refuse = (reason: VoiceRefusal): VoiceWriteResult => ({ ok: false, reason 
  * The refusal as a SENTENCE.
  *
  * The codes above are for a surface that wants to render each state differently
- * (`VoicePane` and `VoiceRail` both map them with a `Record`, and get to phrase
+ * (`VoicePane` and `TrackVoiceRack` both map them with a `Record`, and get to phrase
  * them in their own voice next to the control that caused them). A caller with no
  * surface — the agent's tools, a log line — needs prose, and `'built-in'` on its
  * own is not prose. Authored HERE rather than in the tool layer so there is one

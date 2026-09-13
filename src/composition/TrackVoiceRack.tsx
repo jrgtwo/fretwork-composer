@@ -62,10 +62,39 @@
  * be a way of CALLING a capability the agent can call by kind, id and value. Every
  * write here is one seam call whose refusal is rendered rather than swallowed.
  *
- * Saving a draft to a variant is CP-15's, along with the variant list. That is
- * not an oversight in the layout: a voice is a SHARED asset, so writing one back
- * retunes every pattern and every other track pointing at it, and that belongs
- * to a deliberate control and not to the act of turning a knob.
+ * SAVING IS HERE TOO, in this rack's own header, and it did not used to be: the
+ * strip pointed at the right-hand rail, in words, for the one button that keeps
+ * what the knobs just did. A voice is still a SHARED
+ * asset — writing one back retunes every pattern and every other track pointing at
+ * it — so the consequence is SAID, in the sentence under the buttons, rather than
+ * answered by putting the button somewhere else. `VoiceRail` keeps the library
+ * list and the picking that goes with it.
+ *
+ * ── Refusals: ONE channel, and it is local ───────────────────────────────────
+ *
+ * Every refusal this rack can raise — a param write, a sample pack the registry
+ * lost, a pick, a Save — goes to the notice line under this rack's header. There
+ * is no `onNotice` prop any more and the grid's single message strip is no longer
+ * written to from here, deliberately: with up to eight racks on screen and
+ * something saveable in each, "That voice is no longer in your library" at the top
+ * of the page names none of them. The strip keeps what it is still the right home
+ * for — `TrackHeader`'s and `TrackControls`' writes, which are about the track
+ * rather than about its voice.
+ *
+ * ── Eight of everything ──────────────────────────────────────────────────────
+ *
+ * The header mints DOM ids (`domId`, track-scoped), an accessible name per
+ * control, a `window.confirm` question, a name form and a live region — all of
+ * which have only ever rendered once before. Every one of them carries the track,
+ * by the convention this file already had for its landmarks: the track comes
+ * first, because that is the axis a listener is navigating.
+ *
+ * ── Why the header's picker debounces and the rail's does not ────────────────
+ *
+ * It is a `<select>`, and a `<select>` fires `change` once per arrow key while
+ * closed — see `VOICE_COMMIT_MS` in `voiceChrome`, which is the window every such
+ * picker collects its writes in. The rail needs none because a list of buttons
+ * commits nothing on arrow.
  *
  * ── ⚠ Accessible names, and what is accepted here ────────────────────────────
  *
@@ -107,6 +136,7 @@
  * `setReverb` for the whole store. A per-track rack showing "reverb" would show
  * eight controls that are secretly one, so it shows none.
  */
+import { useEffect, useRef, useState } from 'react';
 import { getAmpModel, getSamplePack, detectSamplePack, type Track } from '@fretwork/lib';
 import {
   DEFAULT_OPEN_SECTIONS,
@@ -133,14 +163,36 @@ import {
   addVoiceSection,
   addVoiceSubBranch,
   discardVoiceDraft,
+  isVoiceDirty,
   removeVoicePedal,
   removeVoiceSection,
   removeVoiceSubBranch,
+  setVoiceName,
   setVoiceParam,
   setVoiceSubBranchKind,
   useVoiceDirty,
   useVoiceWorkingPreset,
 } from '../voice/voiceDrafts';
+import {
+  deleteVoice,
+  parseVoiceKey,
+  readTrackVoiceRef,
+  renameVoice,
+  saveVoice,
+  saveVoiceAs,
+  selectVoice,
+  useSelectableVoices,
+  useTrackVoiceStatus,
+  voiceKey,
+  type VoiceRefusal,
+} from '../voice/voiceService';
+import {
+  SHARED_VOICE_REFUSAL_TEXT,
+  useNameForm,
+  VOICE_COMMIT_MS,
+} from '../voice/voiceChrome';
+import { DirtyPill } from '../voice/DirtyPill';
+import { NameForm } from '../voice/NameForm';
 import { PowerLamp, RackFace } from '../voice/rack/RackFace';
 import { Section } from '../shell/Section';
 import { AmpHead } from '../voice/rack/AmpHead';
@@ -150,7 +202,9 @@ import { ParamEnum } from '../voice/controls/ParamEnum';
 import { ParamToggle } from '../voice/controls/ParamToggle';
 import { ParamEncoder } from '../voice/controls/ParamEncoder';
 import {
+  findTrack,
   setTrackInputGainDb,
+  trackInstrumentId,
   TRACK_INPUT_GAIN_RANGE_DB,
   type Result,
 } from './compositionService';
@@ -171,8 +225,31 @@ const CAB_URL_PATH = 'effects.cabIR.url';
 const domId = (trackId: string, path: string) =>
   `track-voice-${trackId}-${path.replaceAll('.', '-')}`;
 
+/** ONE button skin in this rack, and it is the rack's own. `voiceChrome`'s
+ *  `voiceButtonClass` — which the four saving buttons arrived wearing — is a size
+ *  up, because it was drawn for the 300 px rail they came from; two skins one row
+ *  apart in the same header is the seam showing. jsdom has no layout and cannot
+ *  fail on it, so it is written down instead. `disabled:cursor-not-allowed` came
+ *  across with them. */
 const buttonClass =
-  'pressable control flex-none rounded-md px-1.5 py-0.5 font-mono text-[8.5px] font-bold tracking-[0.06em] uppercase disabled:opacity-40';
+  'pressable control flex-none rounded-md px-1.5 py-0.5 font-mono text-[8.5px] font-bold tracking-[0.06em] uppercase disabled:cursor-not-allowed disabled:opacity-40';
+
+/**
+ * Every refusal the write seam can hand back needs a sentence, since each is a
+ * state this rack can legitimately be in. Moved here with the buttons it explains,
+ * from `VoiceRail`.
+ *
+ * The three on top of the shared set are the ones that NAME THE HOLDER, which is
+ * why they are stated here rather than shared with `VoicePane`: its versions say
+ * "this pattern". `built-in` is Sound Lab's shipped wording, kept.
+ */
+const REFUSAL_TEXT: Record<VoiceRefusal, string> = {
+  ...SHARED_VOICE_REFUSAL_TEXT,
+  'no-holder': 'That track is no longer in this composition.',
+  'no-voice':
+    'This track follows its instrument’s voice. Use Save as… to keep these tweaks as a voice of its own.',
+  'built-in': 'Presets are read-only. Use Save as… to keep your tweaks.',
+};
 
 /**
  * What a rack nobody has folded yet shows: everything except
@@ -194,7 +271,6 @@ export function TrackVoiceRack({
   onCollapsedChange,
   collapsedSections = DEFAULT_COLLAPSED_SECTIONS,
   onCollapsedSectionsChange,
-  onNotice,
 }: {
   track: Track;
   /** Whether this track will actually be heard — mute, solo and every other
@@ -222,9 +298,6 @@ export function TrackVoiceRack({
    */
   collapsedSections?: readonly SectionId[];
   onCollapsedSectionsChange?: (collapsed: readonly SectionId[]) => void;
-  /** Refusals go to the grid's one message strip, as every other track write
-   *  does — there is no room for a per-rack alert and no reason for one. */
-  onNotice: (message: string) => void;
 }) {
   // Addressed by kind and id, never by the `Track` itself — see `voiceDrafts`'
   // header. The prop stays because this file reads the track's own fields
@@ -234,6 +307,59 @@ export function TrackVoiceRack({
   // this rack draw a voice that is not the one playing.
   const preset = useVoiceWorkingPreset('track', track.id);
   const dirty = useVoiceDirty('track', track.id);
+  const instrumentId = trackInstrumentId(track);
+  const voices = useSelectableVoices(instrumentId);
+  // A ref can name a variant that has been deleted, or one belonging to another
+  // instrument; the seam refuses a Save into either rather than overwriting a voice
+  // the user cannot see from where they are standing. Asked of the seam rather than
+  // derived from `voices`, because the two failures are not the same sentence.
+  const status = useTrackVoiceStatus(track);
+
+  /** THIS rack's messages, and no other rack's. See the header: one channel, and
+   *  it is local, because a refusal about the fifth track is unattributable at the
+   *  top of the page. */
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Transient by design, and per rack: the state that must survive an unmount is
+  // the draft, and that is in `voiceDrafts`. The hook is the shared one for its
+  // focus-return, which is the half two copies would eventually disagree about.
+  const {
+    form: nameForm,
+    setForm: setNameForm,
+    open: openNameForm,
+    close: closeNameForm,
+  } = useNameForm();
+
+  /**
+   * The one mirror in this component, and it is a rate limiter rather than a
+   * mirror of state — see {@link VOICE_COMMIT_MS}. `flush` holds the write the
+   * timer is going to make, so a gesture that ends the window early (leaving the
+   * field) commits instead of racing it. Modelled on `TrackControls`' picker,
+   * which solved exactly this for exactly this control.
+   */
+  const [draftVoiceKey, setDraftVoiceKey] = useState<string | null>(null);
+  const voiceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceFlush = useRef<((ask: boolean) => void) | null>(null);
+
+  /**
+   * Unmount is the one end with no gesture on it: a track removed, or the mode
+   * switched, mid-window would otherwise drop the pick with nothing to notice.
+   *
+   * ⚠ THIS IS WHERE THIS RACK DIVERGES FROM `TrackControls`, which it is otherwise
+   * modelled on. That picker's commit is confirm-free; this one asks before it
+   * strands an unsaved edit, and a `window.confirm` raised during TEARDOWN has no
+   * gesture behind it — after "Remove track" it would ask about a track that is
+   * already gone, and then answer itself with a refusal into a notice line nobody
+   * can read. So the flush is told not to ask (`false`), and a commit that WOULD
+   * have asked drops the pick instead: the pick is one keystroke and the draft is
+   * the work.
+   */
+  useEffect(
+    () => () => {
+      voiceFlush.current?.(false);
+    },
+    [],
+  );
 
   // Unreachable: the grid only draws a rack for a track of the composition the
   // draft store resolves against. Guarded rather than asserted because the
@@ -252,12 +378,193 @@ export function TrackVoiceRack({
   // value, but some of them CARRY one (the clamped level a fader was actually
   // given, say). Narrowing to `Result<void>` would refuse those at the type
   // level for a value this surface never reads.
-  const report = (result: Result<unknown>) => {
-    if (!result.ok) onNotice(result.reason);
-  };
+  //
+  // Cleared on success as well as set on failure: one line says everything this
+  // rack has to say, so a refusal left standing beside a control that has since
+  // worked would read as a refusal of THAT write. The composition and draft seams
+  // both answer in sentences, so they are shown as they are; only the voice
+  // WRITE seam answers in codes, and those go through `REFUSAL_TEXT` below.
+  const report = (result: Result<unknown>) => setNotice(result.ok ? null : result.reason);
 
   const write = (path: string, value: unknown) =>
     report(setVoiceParam('track', track.id, path, value));
+
+  const ref = readTrackVoiceRef(track);
+  const currentKey = ref ? voiceKey(ref) : '';
+  const isBuiltIn = ref === null || ref.kind === 'default';
+
+  /** One confirmation in front of every switch that would throw the working copy
+   *  away — and a pick really does throw it away (see `discard` in `commitVoice`),
+   *  so this is the last chance to keep it. Named for the TRACK, because up to
+   *  eight racks can ask and a bare "Discard unsaved changes?" would not say which.
+   *  Routed through one function so replacing it with a real dialog is one edit. */
+  const confirmDiscard = () =>
+    // Read from the store rather than from `dirty`, which is this RENDER's answer:
+    // the question is asked up to {@link VOICE_COMMIT_MS} after the render that
+    // scheduled it, and Revert (or a Save) in between retires the draft. Asking
+    // about an edit that no longer exists is the failure, and answering Cancel to
+    // it would then drop a pick for nothing.
+    !isVoiceDirty('track', track.id) ||
+    window.confirm(`Discard unsaved changes to ${track.name}’s voice?`);
+
+  /** Retire this track's draft, and tell the engine. `discardVoiceDraft` notifies
+   *  whenever it deletes one, which is what makes the live voice go back to what
+   *  the store now holds. */
+  const discard = () => discardVoiceDraft('track', track.id);
+
+  /**
+   * Land a pick: report whatever came back, and RETIRE THE DRAFT — but only if the
+   * write actually happened, since the user agreed to lose the edit on condition of
+   * the switch and a refused switch has not earned it.
+   *
+   * ⚠ The discard is not redundant with the repoint. A new ref only makes the
+   * draft's tag STOP MATCHING, which is not the same as retiring it: `readVoiceDraft`
+   * self-clears on a mismatch, but `useVoiceDirty` / `useVoiceWorkingPreset` compare
+   * the tag WITHOUT deleting (a store write during render is a React error). Left
+   * standing, the entry resurrects the moment the track is pointed back at the voice
+   * it was taken from — and the user is then playing an edit they threw away.
+   */
+  const commitVoice = (key: string, ask = true) => {
+    if (voiceTimer.current !== null) clearTimeout(voiceTimer.current);
+    voiceTimer.current = null;
+    voiceFlush.current = null;
+    // The teardown path, which cannot ask (see the cleanup effect above). Before
+    // any `setState`, so an unmounting rack writes nothing at all.
+    if (!ask && isVoiceDirty('track', track.id)) return;
+    // Dropped whatever the seam says: on `ok` the store re-renders this rack with
+    // the value it took, and on a refusal — including a refused confirmation — the
+    // control has to snap back to what the model actually holds.
+    setDraftVoiceKey(null);
+
+    // Re-read rather than taken from the render that scheduled this: the rail, the
+    // header's own compact picker and the agent all write the same track, and
+    // `currentKey` closed over above can be a window out of date — which would
+    // write a pick the model has already taken, or skip one it has not.
+    const live = findTrack(track.id);
+    const liveRef = live ? readTrackVoiceRef(live) : null;
+    const liveKey = liveRef ? voiceKey(liveRef) : '';
+
+    // Already on it. The notice is cleared anyway: a refusal left standing beside a
+    // choice the user just re-affirmed reads as a refusal of THAT pick.
+    if (key === liveKey) {
+      setNotice(null);
+      return;
+    }
+    // Asked once per COMMIT rather than once per `change`: the window exists
+    // precisely because a keyboard walk fires one `change` per option, and a
+    // confirmation per arrow key is the same fetch storm in dialogs.
+    if (!confirmDiscard()) return;
+    setNameForm(null);
+
+    // '' is the way back to the fallback, and it is a real choice rather than an
+    // absence: a null ref puts the track on the instrument's global active voice,
+    // which is the lib's documented meaning for one.
+    if (key === '') {
+      const result = selectVoice('track', track.id, null);
+      report(result);
+      if (result.ok) discard();
+      return;
+    }
+    const next = parseVoiceKey(key);
+    // Unreachable from these options — every value came from `voiceKey` — but the
+    // seam refuses an unparseable ref and so must this, rather than writing null and
+    // silently resetting the track to the fallback.
+    if (!next) {
+      setNotice(SHARED_VOICE_REFUSAL_TEXT['unknown-variant']);
+      return;
+    }
+    const result = selectVoice('track', track.id, next);
+    report(result);
+    if (result.ok) discard();
+  };
+
+  const onVoiceChange = (key: string) => {
+    setDraftVoiceKey(key);
+    if (voiceTimer.current !== null) clearTimeout(voiceTimer.current);
+    voiceFlush.current = (ask) => commitVoice(key, ask);
+    voiceTimer.current = setTimeout(() => commitVoice(key), VOICE_COMMIT_MS);
+  };
+
+  const save = () => {
+    const result = saveVoice('track', track.id, preset);
+    if (!result.ok) {
+      setNotice(REFUSAL_TEXT[result.reason]);
+      return;
+    }
+    setNotice(null);
+    // The variant now holds what the draft held. Left standing, the draft would keep
+    // this strip reading "Unsaved" against a voice that already matches it, and would
+    // keep the engine building from a copy nothing can reach.
+    discard();
+  };
+
+  const submitName = () => {
+    if (!nameForm) return;
+    const trimmed = nameForm.value.trim();
+
+    if (nameForm.mode === 'save-as') {
+      const result = saveVoiceAs('track', track.id, trimmed, preset);
+      if (!result.ok) {
+        setNotice(REFUSAL_TEXT[result.reason]);
+        return;
+      }
+      setNotice(null);
+      closeNameForm();
+      // `saveVoiceAs` has already repointed the track, which retires the draft by tag
+      // on its own; this is what tells the engine to go and rebuild from the variant
+      // rather than from the copy it was made out of.
+      discard();
+      return;
+    }
+
+    // Near-unreachable — Rename is disabled unless the track is on a user variant —
+    // but this is the one place here that could swallow a failure, and a form that
+    // sits open saying nothing is the thing this rack would be blamed for.
+    if (ref?.kind !== 'user') {
+      setNotice(REFUSAL_TEXT['built-in']);
+      return;
+    }
+    const renamed = renameVoice(ref.id, trimmed);
+    if (!renamed.ok) {
+      setNotice(REFUSAL_TEXT[renamed.reason]);
+      return;
+    }
+    // The draft carries the OLD name and `saveVoice` writes the record's name back
+    // from `preset.name`, so without this the next Save would silently undo the
+    // rename. A no-op when there is no draft.
+    report(setVoiceName('track', track.id, trimmed));
+    closeNameForm();
+  };
+
+  const remove = () => {
+    if (ref?.kind !== 'user') return;
+    // ONE dialog, not two. Deleting the variant also strands this track's unsaved
+    // edit — a pick asks about exactly that on the same screen, and asking twice in a
+    // row is how people learn to click through confirmations — so the loss is named
+    // in the sentence that is already being read.
+    //
+    // THE TRACK IS NAMED TOO, and the variant's name is not enough on its own: two
+    // tracks can legitimately sit on one shared variant, which is exactly the case
+    // this file insists elsewhere is normal, and then the name says nothing about
+    // which of eight racks asked.
+    const consequence = dirty
+      ? 'Your unsaved edits to it go too, and any pattern or track using it falls back to a built-in voice.'
+      : 'Any pattern or track using it falls back to a built-in voice.';
+    if (!window.confirm(`Delete “${preset.name}”, ${track.name}’s voice? ${consequence}`)) return;
+
+    // ONE seam call, because it is one act: the seam destroys the variant and repairs
+    // this track's dangling ref itself, which is what `'track'` buys — under
+    // `'pattern'` the same call would fix the open pattern and leave this track
+    // resolving silently to a built-in. The button must not do more than the function.
+    const result = deleteVoice('track', track.id, ref.id);
+    if (!result.ok) {
+      setNotice(REFUSAL_TEXT[result.reason]);
+      return;
+    }
+    setNameForm(null);
+    setNotice(null);
+    discard();
+  };
 
   /**
    * The same `SliderParam`, drawn as a rotary instead of a row — `VoicePane`'s
@@ -369,10 +676,11 @@ export function TrackVoiceRack({
             //
             // NO PREFETCH HERE, unlike `VoicePane`, and it is the rack's existing
             // policy rather than an oversight: the pack picker two rows down does
-            // not warm either. The pattern page's `warmSampleBanks` is a rate
+            // not warm either, and neither does the voice picker this file's own
+            // header now draws. The pattern page's `warmSampleBanks` is a rate
             // adapter for a `<select>` that fires per arrow key
             // (`docs/FOLLOW-UPS.md`, permanent-adapter table); the composition
-            // path's equivalent is `VOICE_COMMIT_MS` in `TrackControls`, and a
+            // path's equivalent is `VOICE_COMMIT_MS` in `voiceChrome`, and a
             // source change goes through `scheduleTrackVoiceRebuild`, which is
             // where a warm would belong so both writes get one. Cost: the first
             // Play after switching a track to samples waits on the banks.
@@ -407,7 +715,7 @@ export function TrackVoiceRack({
             onChange={(packId) =>
               getSamplePack(packId)
                 ? write(param.path, packId)
-                : onNotice('That sample pack is no longer registered.')
+                : setNotice('That sample pack is no longer registered.')
             }
           />
         );
@@ -785,16 +1093,11 @@ export function TrackVoiceRack({
         <span className="min-w-0 truncate font-mono text-[8.5px] tracking-[0.06em] text-ink-mut">
           {preset.name}
         </span>
-        {/* Brass marks unsaved, the way it marks every other live state here.
-            Announced rather than only coloured — an edit that exists only as a
-            colour is one a user cannot confirm they made. */}
-        <span
-          className={`flex-none font-mono text-[8.5px] tracking-[0.1em] uppercase ${
-            dirty ? 'text-brass-hi' : 'text-ink-mut'
-          }`}
-        >
-          {dirty ? 'Unsaved' : 'Saved'}
-        </span>
+        {/* The shared pill, which is the one the pattern page also draws — brass
+            marks unsaved, the way it marks every other live state here, and it is
+            announced rather than only coloured because an edit that exists only as
+            a colour is one a user cannot confirm they made. */}
+        <DirtyPill dirty={dirty} />
         <span className="flex-1" />
         {dirty && (
           <button
@@ -807,16 +1110,199 @@ export function TrackVoiceRack({
             Revert
           </button>
         )}
-        {/* CP-15 landed the other half: Save / Save as… / Rename and the variant
-            list are in the rail, acting on the SELECTED track. Said out loud
-            here because "Unsaved" with a Revert and no Save beside it otherwise
-            reads as a missing button rather than as a division of labour — this
-            strip discards an edit where it was made, the rail is where a voice
-            is chosen and written. */}
-        <span className="flex-none font-mono text-[8px] tracking-[0.1em] text-ink-mut/70 uppercase">
-          Save in the rail
-        </span>
       </div>
+
+      {/* ---- what can be done to the voice this track is on ------------------
+          Beside the knobs, which is the whole of this step: the strip used to name
+          the right-hand rail here and send you to another part of the screen for
+          the one button that keeps what you just did. Revert stays above, where it
+          always was — the discard belongs with the edit, and so, now, does the
+          save.
+
+          NOT FOLDED WITH THE STAGES, deliberately: the disclosure hides the
+          TUNING, and which voice a track is on, whether it has an unsaved edit and
+          what saving it would overwrite are exactly what you fold eight racks down
+          to compare. The live region below also has to stay mounted to be
+          announced at all.
+
+          THE ONE EXCEPTION IS THE PARAGRAPH, which folds — it is a permanent
+          explanation rather than a state, and eight folded racks each carrying
+          "This track follows its instrument's voice" is the density folding was
+          meant to remove. It comes back for a rack with an UNSAVED EDIT whatever
+          is folded, because that is the only state in which Save can do anything
+          and the overwrite sentence has to travel with a usable button. */}
+      <div className="flex flex-none flex-wrap items-center gap-1">
+        {/* ⚠ ADDRESSES THIS TRACK, not the selected one. The rail's list picks for
+            whichever track is SELECTED and this picks for the track whose rack it
+            is in; both are on screen at once, which is why the rail's heading names
+            its track and this one's label names its own.
+
+            `'track'` at every call: under `'pattern'` the same seam would retune
+            whatever pattern is open and change no track at all — which, with one
+            track on the fallback, can even look like it worked. */}
+        <select
+          aria-label={`${track.name} voice`}
+          // Distinct from `TrackControls`' picker for the same track, whose name is
+          // "Voice for <track>": both can be on screen in voice mode, and two
+          // comboboxes with one name is a query — a user's or a test's — that
+          // cannot say which it reached.
+          value={draftVoiceKey ?? currentKey}
+          onChange={(event) => onVoiceChange(event.target.value)}
+          // Leaving the field ends the coalescing window early. Without it a pick
+          // made with the keyboard and then tabbed away from would sit for
+          // {@link VOICE_COMMIT_MS} looking committed and not being.
+          onBlur={() => voiceFlush.current?.(true)}
+          className="control min-w-0 max-w-[16rem] flex-1 rounded-md px-1 py-0.5 font-mono text-[8.5px] font-bold text-ink"
+        >
+          {/* Disabled, because it is a fact rather than a choice — and present at
+              all so the control can say WHY it is showing a voice the list below
+              does not contain. The two failures are named apart: one is a variant
+              that is gone, the other one that exists and is for another neck. */}
+          {status === 'deleted' && (
+            <option value={currentKey} disabled>
+              Voice deleted
+            </option>
+          )}
+          {status === 'wrong-instrument' && (
+            <option value={currentKey} disabled>
+              Another instrument’s voice
+            </option>
+          )}
+          {/* Not "none": a null ref plays something, it just isn't this track's
+              choice. Listed first so the way back is always in the same place. */}
+          <option value="">Auto — follows the instrument</option>
+          {/* Guarded rather than always drawn: an instrument the lib ships no
+              voices for would otherwise get an empty group with a heading. */}
+          {voices.builtIns.length > 0 && (
+            <optgroup label="Presets">
+              {voices.builtIns.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.name}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {voices.userVariants.length > 0 && (
+            <optgroup label="My tones">
+              {voices.userVariants.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.name}
+                </option>
+              ))}
+            </optgroup>
+          )}
+        </select>
+        <span className="flex-1" />
+        {/* Named for the track, because eight racks put eight buttons called
+            "Save" on one page and the visible word cannot carry the axis. */}
+        <button
+          type="button"
+          aria-label={`Save ${track.name}’s voice`}
+          onClick={save}
+          // The rail's guard, which is the stricter of the two that existed: a ref
+          // can name a deleted variant or one belonging to another instrument, and
+          // the seam refuses both rather than overwriting a voice the user cannot
+          // see from where they are standing. The seam refuses independently of
+          // this attribute, in all three cases — this is a mirror of the rule, not
+          // the rule.
+          disabled={!dirty || isBuiltIn || status !== 'ok'}
+          className={buttonClass}
+        >
+          Save
+        </button>
+        <button
+          type="button"
+          aria-label={`Save ${track.name}’s voice as a new voice`}
+          onClick={openNameForm('save-as', `${preset.name} copy`)}
+          className={buttonClass}
+        >
+          Save as…
+        </button>
+        <button
+          type="button"
+          aria-label={`Rename ${track.name}’s voice`}
+          onClick={openNameForm('rename', preset.name)}
+          // Renaming WHILE DIRTY is fine: the draft carries the old name and
+          // `saveVoice` writes the record's name back from `preset.name`, so a
+          // rename used to be silently undone by the next Save.
+          // `voiceDrafts.setVoiceName` patches the draft, which is the write that
+          // made this button safe to leave enabled.
+          disabled={isBuiltIn}
+          className={buttonClass}
+        >
+          Rename
+        </button>
+        <button
+          type="button"
+          aria-label={`Delete ${track.name}’s voice`}
+          onClick={remove}
+          // Save's guard, for Save's reason and one of its own: `preset` has already
+          // fallen back to a built-in when the ref names a variant that is gone, so
+          // a live Delete here would ask about — and name — a voice that is not the
+          // one the ref points at. The sentence under the buttons says why.
+          disabled={isBuiltIn || status !== 'ok'}
+          className={buttonClass}
+        >
+          Delete
+        </button>
+      </div>
+
+      {/* Said BEFORE the button is pressed, not after: a voice is a SHARED asset
+          and Save retunes every holder of it. That is settled behaviour rather
+          than a bug — there is deliberately no per-track fork — and it travels
+          with the button rather than being left behind in the rail, which is why
+          it can now appear eight times on one screen. Accepted: the sentence is
+          the price of the button being where the knobs are. */}
+      {(!collapsed || dirty) && (
+        <p className="flex-none font-mono text-[8.5px] leading-relaxed text-ink-mut">
+          {/* Why Save is refused, stated where the refusal is — a disabled button
+              with no reason is what this rack would be most blamed for. */}
+          {isBuiltIn
+            ? ref === null
+              ? REFUSAL_TEXT['no-voice']
+              : REFUSAL_TEXT['built-in']
+            : status === 'wrong-instrument'
+              ? // NOT the shared `unknown-variant` sentence, which the seam collapses
+                // this into and which would read as a contradiction of the `<option>`
+                // right above it ("Another instrument's voice"). The seam's code is
+                // one; what a reader has to be told is two different things.
+                'That voice belongs to another instrument.'
+              : status !== 'ok'
+                ? REFUSAL_TEXT['unknown-variant']
+                : // The one case where there IS something to save into — and where the
+                  // consequence has to be said before the button is pressed.
+                  `Saving overwrites “${preset.name}” everywhere it is used — every pattern and every other track on it.`}
+        </p>
+      )}
+
+      {nameForm && (
+        <NameForm
+          form={nameForm}
+          // Per TRACK, through the same helper every other id here goes through:
+          // eight racks would otherwise mint eight inputs with one id, and a
+          // `<label htmlFor>` resolves to whichever mounted first.
+          inputId={domId(track.id, 'name')}
+          onChange={(value) => setNameForm({ ...nameForm, value })}
+          onSubmit={submitName}
+          onCancel={closeNameForm}
+        />
+      )}
+
+      {/* Mounted always, `sr-only` when empty: a live region has to exist BEFORE
+          its content changes to be announced, and sr-only costs no layout. Named
+          for the track, because eight live regions saying "That voice is no longer
+          in your library" are eight statements about eight different voices. */}
+      <p
+        role="status"
+        aria-label={`${track.name} voice messages`}
+        className={
+          notice
+            ? 'flex-none rounded-md border border-brass/50 px-2 py-1.5 font-mono text-[9px] leading-relaxed text-ink'
+            : 'sr-only'
+        }
+      >
+        {notice}
+      </p>
 
       {!collapsed && (
         // Stacked, and nothing scrolls here: `VoicePane.tsx`'s arrangement of

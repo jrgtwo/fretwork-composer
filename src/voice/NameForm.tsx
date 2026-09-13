@@ -2,12 +2,13 @@ import { voiceButtonClass, voiceLabelClass, type NameFormState } from './voiceCh
 
 /**
  * One line: a label, a text field, and the two buttons that end it — the naming
- * step of Save as… and Rename, shared by `VoicePane` and `VoiceRail`.
+ * step of Save as… and Rename, shared by `VoicePane` and `TrackVoiceRack`.
  *
- * `inputId` is a prop rather than a constant because the two surfaces can be
- * mounted at once — the composition page's rail and a pattern pane behind a route
- * change — and two `<input id="voice-name">` on one document is a label pointing
- * at whichever came first.
+ * `inputId` is a prop rather than a constant because SEVERAL of these can be
+ * mounted at once — up to eight racks, one per track, plus the pattern pane behind
+ * a route change — and two `<input id="voice-name">` on one document is a label
+ * pointing at whichever came first, so every value typed into the second form
+ * lands in the first. The rack scopes it by track; the pane has one holder.
  *
  * The focus-return that makes Create and Cancel survivable for a keyboard user
  * lives in `useNameForm`, not here: this component deletes itself on submit, so it

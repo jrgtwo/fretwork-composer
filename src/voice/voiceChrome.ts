@@ -2,13 +2,23 @@
  * The chrome the two voice surfaces share — the half of it that is not a
  * component (those are `DirtyPill.tsx` and `NameForm.tsx`, beside this).
  *
- * `VoicePane` (the pattern page) and `VoiceRail` (the composition page) are two
- * different pickers over the same library: one addresses the editing PATTERN, the
- * other one TRACK, and that half of them is deliberately separate. The SEAM is one
- * now — the same functions under a `kind` argument — but which holder each surface
- * names, and the wording that explains a refusal to whoever is looking at it, still
- * differ. What does NOT differ is the furniture: the button skin, the unsaved
- * pill, and the name form with its focus-return.
+ * `VoicePane` (the pattern page) and `TrackVoiceRack` (one track's rack on the
+ * composition page) are the two surfaces that SAVE a voice: one addresses the
+ * editing PATTERN, the other one TRACK, and that half of them is deliberately
+ * separate. The SEAM is one now — the same functions under a `kind` argument — but
+ * which holder each surface names, and the wording that explains a refusal to
+ * whoever is looking at it, still differ. What does NOT differ is the furniture:
+ * the unsaved pill, the name form with its focus-return, and the window a
+ * `<select>`'s writes are collected in.
+ *
+ * The BUTTON SKIN is the one piece that is no longer shared by all three: the rack
+ * draws the four saving buttons in its own denser class, because `voiceButtonClass`
+ * was sized for the 300 px rail and the rack header already had a Revert beside
+ * them. It stays here for `VoicePane` and `NameForm`, which are that size.
+ *
+ * `VoiceRail` used to be the second of those and is now only a list: saving moved
+ * into the rack header, where the knobs that made the edit are, so the rail takes
+ * `SHARED_VOICE_REFUSAL_TEXT` alone.
  *
  * Kept here rather than copied because the copies were byte-identical, and the
  * failure mode of two copies is not drift in the classes — it is one of them
@@ -17,6 +27,30 @@
  */
 import { useRef, useState, type MouseEvent } from 'react';
 import type { VoiceRefusal } from './voiceService';
+
+/**
+ * How long a `<select>`'s voice pick waits before it is written.
+ *
+ * A native `<select>` fires `change` once per arrow key while closed, so a keyboard
+ * user stepping the eleven guitar voices passes through all of them. Ten of those
+ * slots are sampler-sourced, and once the page has played, every one of those
+ * writes reaches `MultiTrackPlayback.setTrackVoice` — a whole new `Voice`, one
+ * `Tone.Sampler` and an HTTP load per bank, with the outgoing one held alive on a
+ * 4 s release tail. One arrow-key walk is a fetch storm.
+ *
+ * PERMANENT ADAPTER, not a masked lib gap: the lib cannot know it is behind a
+ * `<select>`. It lives in the GESTURE and not in the seam — `voiceService.selectVoice`
+ * writes on the call, so the agent is never debounced and one command stays one undo
+ * step. A list of BUTTONS needs no such window, which is why `VoiceRail` has none:
+ * arrowing through buttons moves focus and commits nothing.
+ *
+ * THREE `<select>`s share it — this rack header's picker, `TrackControls`' compact
+ * one, and whatever comes next. It was a private const in `TrackControls` until the
+ * second one appeared; one exported const is what stops two windows drifting into
+ * two different answers to the same gesture. Rowed as permanent adapter work in
+ * `docs/FOLLOW-UPS.md`.
+ */
+export const VOICE_COMMIT_MS = 120;
 
 export const voiceButtonClass =
   'pressable control flex-none rounded-lg px-2 py-1 font-mono text-[9px] font-bold tracking-[0.06em] uppercase disabled:cursor-not-allowed disabled:opacity-40';
@@ -36,9 +70,10 @@ export const voiceLabelClass = 'font-mono text-[9px] tracking-[0.1em] text-ink-m
  * reason: the two surfaces word it differently, the pane keeping Sound Lab's
  * shipped sentence verbatim, and unifying them would silently reword shipped copy.
  *
- * Each surface declares a complete `Record` of the union on top of this, which is
- * what makes a new refusal a compile error in both places rather than a missing
- * sentence in one.
+ * Each SAVING surface declares a complete `Record` of the union on top of this,
+ * which is what makes a new refusal a compile error in both places rather than a
+ * missing sentence in one. `VoiceRail` declares none: the only refusal a list of
+ * buttons can raise is `unknown-variant`, which is here.
  */
 export const SHARED_VOICE_REFUSAL_TEXT: Readonly<
   Pick<Record<VoiceRefusal, string>, 'unknown-variant' | 'empty-name' | 'capped'>

@@ -444,8 +444,9 @@ export function setVoiceParam(
  * writes the record's name back from `preset.name`, and a draft carries the name
  * the voice had when the edit started — so renaming a variant while an edit is
  * in flight, then saving, puts the old name back. `VoicePane` used to patch its
- * own React copy; `VoiceRail` could not, and disabled Rename while dirty to say
- * so. One write here is the answer for both.
+ * own React copy; `VoiceRail`, which then held the buttons, could not, and disabled
+ * Rename while dirty to say so. One write here is the answer for both, and it is
+ * what lets `TrackVoiceRack` — which holds them now — leave Rename enabled.
  *
  * A no-op when there is no draft, and deliberately: the variant's own record is
  * the authority when nothing is unsaved, and minting a draft here would mark a
