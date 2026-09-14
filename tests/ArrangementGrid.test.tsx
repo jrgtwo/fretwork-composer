@@ -17,6 +17,7 @@ import {
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   arrangementBars,
   arrangementWidth,
+  laneHeightResolver,
   laneRects,
   lanesHeight,
   placementRect,
@@ -35,6 +36,7 @@ import {
   openBlankComposition,
   selectPlacements,
   selectTrack,
+  trackInstrumentId,
 } from '../src/composition/compositionService';
 import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/patternService';
 
@@ -71,6 +73,31 @@ import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/
  */
 
 const MODE: ArrangementMode = 'pattern';
+
+/**
+ * The lane stack this component is expected to draw for one global mode.
+ *
+ * Built through `laneHeightResolver` with the same three inputs the component
+ * hands it, rather than through the flat `DEFAULT_LANE_HEIGHTS` table: an edit
+ * lane is sized by its OWN track's string count, so a table agrees with the
+ * component only for as long as every seeded track happens to be a six-string.
+ * Mirroring the resolver means a per-track height regression fails here instead
+ * of waiting for someone to seed a bass.
+ */
+const modeLanes = (tracks: readonly Track[], mode: ArrangementMode) =>
+  laneRects(
+    tracks,
+    laneHeightResolver({
+      viewOf: () => mode,
+      instrumentOf: (trackId) => {
+        const track = tracks.find((candidate) => candidate.id === trackId);
+        return track ? trackInstrumentId(track) : '';
+      },
+      // No rack is collapsed in these tests, and voice mode draws no lanes at
+      // all before milestone 2, so this is never consulted.
+      voiceCollapsed: () => false,
+    }),
+  );
 const PX_PER_BEAT = ARRANGEMENT_ZOOM_LEVELS[DEFAULT_ARRANGEMENT_ZOOM_INDEX];
 const px = (value: number) => `${value}px`;
 
@@ -211,7 +238,7 @@ describe('lanes and headers', () => {
     seedArrangement();
     render(<ArrangementGrid mode={MODE} />);
 
-    const expected = laneRects(tracksNow(), MODE);
+    const expected = modeLanes(tracksNow(), MODE);
     const lanes = laneEls();
     expect(lanes).toHaveLength(3);
     expect(screen.getAllByRole('button', { name: /^Select track / })).toHaveLength(3);
@@ -256,10 +283,10 @@ describe('lanes and headers', () => {
     seedArrangement();
     render(<ArrangementGrid mode="edit" />);
 
-    const expected = laneRects(tracksNow(), 'edit');
+    const expected = modeLanes(tracksNow(), 'edit');
     // The modes genuinely differ, or this assertion would hold for a component
     // that ignored the prop entirely.
-    expect(expected[0].height).not.toBe(laneRects(tracksNow(), 'pattern')[0].height);
+    expect(expected[0].height).not.toBe(modeLanes(tracksNow(), 'pattern')[0].height);
     expect(laneEls()[0].style.height).toBe(px(expected[0].height));
   });
 
@@ -280,7 +307,7 @@ describe('placement blocks', () => {
     seedArrangement();
     render(<ArrangementGrid mode={MODE} />);
 
-    const lanes = laneRects(tracksNow(), MODE);
+    const lanes = modeLanes(tracksNow(), MODE);
     let drawn = 0;
     tracksNow().forEach((track, index) => {
       for (const placement of track.placements) {
@@ -308,7 +335,7 @@ describe('placement blocks', () => {
     seedArrangement();
     render(<ArrangementGrid mode={MODE} />);
     const placement = tracksNow()[0].placements[1];
-    const lanes = laneRects(tracksNow(), MODE);
+    const lanes = modeLanes(tracksNow(), MODE);
 
     await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
 
@@ -343,7 +370,7 @@ describe('placement blocks', () => {
 
     const placement = placementsNow()[0];
     expect(placement.repeat).toBe(3);
-    const laneHeight = laneRects(tracksNow(), MODE)[0].height;
+    const laneHeight = modeLanes(tracksNow(), MODE)[0].height;
     const expected = placementRepeatRects(placement, PX_PER_BEAT, 0, laneHeight);
     const segments = Array.from(
       document.querySelectorAll<HTMLElement>(`[data-repeat="${placementId}"]`),
@@ -870,7 +897,7 @@ describe('on the composition page', () => {
           placement,
           PX_PER_BEAT,
           0,
-          laneRects(tracksNow(), MODE)[0].height,
+          modeLanes(tracksNow(), MODE)[0].height,
         ).left,
       ),
     });

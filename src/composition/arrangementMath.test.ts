@@ -9,10 +9,12 @@ import {
   type PatternTimeSignature,
   type Placement,
 } from '@fretwork/lib';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_ZOOM_INDEX, ZOOM_LEVELS, snapOptions } from '../timeline/timelineMath';
 import {
+  ARRANGEMENT_MODES,
   ARRANGEMENT_ZOOM_LEVELS,
+  COLLAPSED_VOICE_LANE_HEIGHT,
   DEFAULT_ARRANGEMENT_SNAP_ID,
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   DEFAULT_LANE_HEIGHTS,
@@ -33,7 +35,7 @@ import {
   editableSpans,
   hitTest,
   laneAt,
-  laneHeightsFor,
+  laneHeightResolver,
   laneRects,
   laneStringCount,
   lanesHeight,
@@ -45,11 +47,16 @@ import {
   previewMarks,
   pxToTick,
   rulerMarks,
+  setTrackView,
   snapArrangementTick,
   tickToPx,
   trimHandleWidth,
+  viewOf,
   zoomAnchoredScrollLeft,
-  type TimedArrangementMode,
+  type ArrangementMode,
+  type CompositionTrackViews,
+  type LaneRect,
+  type LaneTrack,
   type PlacedTrack,
   type PlacementDragItem,
   type PreviewMark,
@@ -60,12 +67,15 @@ const TS_3_4: PatternTimeSignature = { numerator: 3, denominator: 4 };
 const TS_7_8: PatternTimeSignature = { numerator: 7, denominator: 8 };
 
 /**
- * Every mode `laneRects` lays out — which since CP-16 is every mode that HAS a
- * time axis, and no longer includes voice. Voice rows are normal flow and are
- * not placed by anything in this module; `TimedArrangementMode` is what stops
- * one being added back, and the type is what would fail here first.
+ * Every view a lane can draw — walked from the module's own list rather than
+ * restated here, so a fourth view cannot slip past this file.
+ *
+ * Voice is back in it. CP-16 took it out because its rows were normal flow with
+ * no height any pure function could know; COMPS-TRACK-TABS gives it a lane again
+ * because its height is now a VIEWPORT the rack scrolls inside rather than a
+ * prediction of the rack's content — see `DEFAULT_LANE_HEIGHTS`.
  */
-const MODES: TimedArrangementMode[] = ['pattern', 'edit'];
+const MODES = ARRANGEMENT_MODES;
 
 /** A placement whose snapshot has a real duration, so trimming and repeating are
  *  distinguishable from the untouched case. */
@@ -84,6 +94,12 @@ function placement(over: Partial<Placement> & { id: string }): Placement {
 function track(id: string, placements: Placement[] = []): PlacedTrack {
   return { id, placements };
 }
+
+/** The default stack: every track on pattern's lane height. `laneRects` takes a
+ *  per-track callback now, and most of this file cares about the geometry rather
+ *  than about where a height came from. */
+const patternLanes = (tracks: readonly LaneTrack[]): LaneRect[] =>
+  laneRects(tracks, () => DEFAULT_LANE_HEIGHTS.pattern);
 
 /** Deterministic pseudo-random so a failure is reproducible; property tests here
  *  are about covering the space, not about randomness. */
@@ -286,9 +302,17 @@ describe('ruler marks', () => {
 describe('lane rects', () => {
   const tracks = [track('a'), track('b'), track('c')];
 
-  it.each(MODES.map((m) => [m]))('stacks lanes with no gap and no overlap in %s mode', (mode) => {
-    const lanes = laneRects(tracks, mode);
-    expect(lanes.map((lane) => lane.trackId)).toEqual(['a', 'b', 'c']);
+  // Every view's default height walked in ONE stack rather than three identical
+  // runs of the same assertion: the mode no longer reaches `laneRects`, so an
+  // `it.each` over the modes was three copies of one constant-height column.
+  // A mixed stack exercises the stacker harder and still indexes
+  // `DEFAULT_LANE_HEIGHTS` per mode, so a fourth view fails to compile here.
+  it('stacks lanes with no gap and no overlap, at whatever heights it is given', () => {
+    const modeTracks = MODES.map((mode) => track(mode));
+    const heights = new Map(MODES.map((mode) => [mode, DEFAULT_LANE_HEIGHTS[mode]]));
+    const lanes = laneRects(modeTracks, (t) => heights.get(t.id as ArrangementMode) ?? 0);
+
+    expect(lanes.map((lane) => lane.trackId)).toEqual([...MODES]);
     expect(lanes[0].top).toBe(0);
     for (let i = 1; i < lanes.length; i++) {
       expect(lanes[i].top).toBe(lanes[i - 1].top + lanes[i - 1].height);
@@ -296,24 +320,8 @@ describe('lane rects', () => {
     expect(lanesHeight(lanes)).toBe(lanes.reduce((sum, lane) => sum + lane.height, 0));
   });
 
-  it('uses the height for the mode it was given', () => {
-    for (const mode of MODES) {
-      expect(laneRects([track('a')], mode)[0].height).toBe(DEFAULT_LANE_HEIGHTS[mode]);
-    }
-  });
-
-  it('takes per-mode overrides', () => {
-    expect(laneRects(tracks, 'pattern', { pattern: 40 }).map((lane) => lane.top)).toEqual([
-      0, 40, 80,
-    ]);
-    // An override for another mode is ignored, not applied.
-    expect(laneRects(tracks, 'pattern', { edit: 40 })[0].height).toBe(
-      DEFAULT_LANE_HEIGHTS.pattern,
-    );
-  });
-
-  it('takes a per-track resolver, because edit-mode lanes vary by string count', () => {
-    const lanes = laneRects(tracks, 'edit', (t) => (t.id === 'b' ? 100 : 50));
+  it('takes a per-track callback, because every input to a height varies per track', () => {
+    const lanes = laneRects(tracks, (t) => (t.id === 'b' ? 100 : 50));
     expect(lanes.map((lane) => ({ top: lane.top, height: lane.height }))).toEqual([
       { top: 0, height: 50 },
       { top: 50, height: 100 },
@@ -321,11 +329,27 @@ describe('lane rects', () => {
     ]);
   });
 
-  it('falls back to the mode default rather than producing a NaN lane', () => {
-    expect(laneRects([track('a')], 'pattern', () => Number.NaN)[0].height).toBe(
+  // Pattern is the fallback because pattern is the default view: a lane whose
+  // height cannot be worked out lands on the one every track starts in, rather
+  // than on a zero-height row nothing can be clicked in to fix it.
+  it('falls back to the pattern height rather than producing a NaN lane', () => {
+    expect(laneRects([track('a')], () => Number.NaN)[0].height).toBe(
       DEFAULT_LANE_HEIGHTS.pattern,
     );
-    expect(laneRects([track('a')], 'pattern', () => -10)[0].height).toBe(0);
+    expect(laneRects([track('a')], () => -10)[0].height).toBe(0);
+  });
+
+  // The clamp has to reach the CURSOR, not just the rect it is written into:
+  // advancing by the raw value would leave a stack with one bad height
+  // overlapping or running backwards, which is the exact thing half-open rects
+  // exist to rule out. Two tracks, because one never observes `top`.
+  it('advances the stack by the corrected height, not the raw one', () => {
+    expect(laneRects([track('a'), track('b')], () => -10).map((lane) => lane.top)).toEqual([
+      0, 0,
+    ]);
+    expect(
+      laneRects([track('a'), track('b')], () => Number.NaN).map((lane) => lane.top),
+    ).toEqual([0, DEFAULT_LANE_HEIGHTS.pattern]);
   });
 
   // lanesHeight is exported and callers hand-build lane arrays (the orphan-lane
@@ -340,16 +364,16 @@ describe('lane rects', () => {
   });
 
   it('handles no tracks and the eight-track cap', () => {
-    expect(laneRects([], 'pattern')).toEqual([]);
+    expect(patternLanes([])).toEqual([]);
     expect(lanesHeight([])).toBe(0);
     const eight = Array.from({ length: 8 }, (_, i) => track(`t${i}`));
-    expect(lanesHeight(laneRects(eight, 'pattern'))).toBe(8 * DEFAULT_LANE_HEIGHTS.pattern);
+    expect(lanesHeight(patternLanes(eight))).toBe(8 * DEFAULT_LANE_HEIGHTS.pattern);
   });
 
   // Half-open rects: a y on a boundary belongs to exactly one lane. Closed rects
   // hit two, and which one wins is iteration order — a coin flip, per pixel.
   it('assigns every y inside the stack to exactly one lane', () => {
-    const lanes = laneRects(tracks, 'pattern');
+    const lanes = patternLanes(tracks);
     const total = lanesHeight(lanes);
     for (let y = 0; y < total; y++) {
       const hits = lanes.filter((lane) => y >= lane.top && y < lane.top + lane.height);
@@ -582,7 +606,7 @@ describe('hit testing', () => {
   const a2 = placement({ id: 'a2', startTick: 8 * PPQ, repeat: 2 });
   const b1 = placement({ id: 'b1', startTick: 4 * PPQ, lengthTicks: 2 * PPQ, repeat: 3 });
   const tracks = [track('a', [a1, a2]), track('b', [b1]), track('c')];
-  const lanes = laneRects(tracks, 'pattern');
+  const lanes = patternLanes(tracks);
 
   const laneFor = (trackId: string) => {
     const lane = lanes.find((candidate) => candidate.trackId === trackId);
@@ -660,7 +684,7 @@ describe('hit testing', () => {
     const under = placement({ id: 'under', startTick: 0, lengthTicks: 8 * PPQ });
     const over = placement({ id: 'over', startTick: 2 * PPQ, lengthTicks: 2 * PPQ });
     const stacked = [track('a', [under, over])];
-    const stackedLanes = laneRects(stacked, 'pattern');
+    const stackedLanes = patternLanes(stacked);
     const inside = {
       x: tickToPx(3 * PPQ, pxPerBeat),
       y: stackedLanes[0].top + 5,
@@ -683,7 +707,7 @@ describe('hit testing', () => {
     const left = placement({ id: 'L', startTick: 0, lengthTicks: 4 * PPQ });
     const right = placement({ id: 'R', startTick: 4 * PPQ, lengthTicks: 4 * PPQ });
     const abutting = [track('a', [left, right])];
-    const abuttingLanes = laneRects(abutting, 'pattern');
+    const abuttingLanes = patternLanes(abutting);
     const edgeX = tickToPx(4 * PPQ, pxPerBeat);
     const y = abuttingLanes[0].top + 5;
     const before = hitTest({ x: edgeX - 0.001, y }, abuttingLanes, abutting, pxPerBeat);
@@ -713,7 +737,7 @@ describe('hit testing', () => {
   it('always leaves a draggable body, however narrow the block', () => {
     const tiny = placement({ id: 'tiny', startTick: 0, lengthTicks: PPQ / 8 });
     const tinyTracks = [track('a', [tiny])];
-    const tinyLanes = laneRects(tinyTracks, 'pattern');
+    const tinyLanes = patternLanes(tinyTracks);
     for (const zoom of ARRANGEMENT_ZOOM_LEVELS) {
       const rect = placementRect(tiny, zoom, tinyLanes[0].top, tinyLanes[0].height);
       const hit = hitTest(
@@ -758,7 +782,7 @@ describe('hit testing', () => {
 describe('drop target', () => {
   const pxPerBeat = ZOOM_LEVELS[DEFAULT_ZOOM_INDEX];
   const tracks = [track('a'), track('b')];
-  const lanes = laneRects(tracks, 'pattern');
+  const lanes = patternLanes(tracks);
   const bar = arrangementSnap(TS_4_4, DEFAULT_ARRANGEMENT_SNAP_ID);
 
   it('names the lane under the cursor', () => {
@@ -834,7 +858,7 @@ describe('trimHandleWidth', () => {
     const width = TRIM_HANDLE_PX; // one handle wide
     expect(trimHandleWidth(width)).toBeCloseTo(width / 3);
     // Which is exactly the rule `hitTest` applies: dead centre is still a body.
-    const lane = laneRects([{ id: 't' }], 'pattern')[0];
+    const lane = patternLanes([{ id: 't' }])[0];
     const tiny = placement({ id: 'p', lengthTicks: PPQ });
     // A zoom that makes the block one handle wide.
     const zoom = (TRIM_HANDLE_PX * PPQ) / PPQ;
@@ -862,7 +886,7 @@ describe('placementsInBand', () => {
   const b = placement({ id: 'b', startTick: 2 * bar });
   const c = placement({ id: 'c', startTick: 0 });
   const tracks = [track('t1', [a, b]), track('t2', [c])];
-  const lanes = laneRects(tracks, 'pattern');
+  const lanes = patternLanes(tracks);
 
   const bandOver = (
     fromTick: number,
@@ -908,7 +932,7 @@ describe('placementsInBand', () => {
     // `a` ends exactly where a block starting at 1 bar would begin.
     const abutting = placement({ id: 'd', startTick: 4 * PPQ });
     const oneTrack = [track('t1', [a, abutting])];
-    const oneLane = laneRects(oneTrack, 'pattern');
+    const oneLane = patternLanes(oneTrack);
     const seam = tickToPx(4 * PPQ, pxPerBeat);
     expect(
       placementsInBand(
@@ -1429,48 +1453,234 @@ describe('edit lane heights', () => {
     expect(laneStringCount('sitar')).toBe(6);
   });
 
-  it('sizes only edit lanes per track and leaves pattern mode alone', () => {
+  it('sizes only edit lanes per track and leaves the other views alone', () => {
     const tracks = [track('bass-track'), track('guitar-track')];
-    const heights = laneHeightsFor((id) => (id === 'bass-track' ? 'bass' : 'guitar'));
+    const resolver = (view: 'pattern' | 'edit') =>
+      laneHeightResolver({
+        viewOf: () => view,
+        instrumentOf: (id) => (id === 'bass-track' ? 'bass' : 'guitar'),
+        voiceCollapsed: () => false,
+      });
 
-    const edit = laneRects(tracks, 'edit', heights);
+    const edit = laneRects(tracks, resolver('edit'));
     expect(edit.map((lane) => lane.height)).toEqual([editLaneHeight(4), editLaneHeight(6)]);
     // Stacked, so the guitar lane starts where the bass lane ends.
     expect(edit[1].top).toBe(editLaneHeight(4));
 
-    expect(laneRects(tracks, 'pattern', heights).map((lane) => lane.height)).toEqual([
+    expect(laneRects(tracks, resolver('pattern')).map((lane) => lane.height)).toEqual([
       DEFAULT_LANE_HEIGHTS.pattern,
       DEFAULT_LANE_HEIGHTS.pattern,
     ]);
   });
 });
 
-describe('voice mode has no lane geometry, by construction', () => {
-  // NOT TESTED, deliberately: that `VOICE_HEADER_HEIGHT` is tall enough for the
-  // mute, the solo, the fader and CP-13's voice picker. jsdom has no layout, and
-  // the constant is DEFINED as `DEFAULT_LANE_HEIGHTS.pattern` — so any assertion
-  // comparing the two is a restatement of that line and cannot fail. Whether the
-  // strip fits is checked in the browser, like the rest of this ticket.
+describe('lane height resolver', () => {
+  // NOT TESTED, deliberately: that `DEFAULT_LANE_HEIGHTS.voice` is a comfortable
+  // amount of rack to see, or that `VOICE_HEADER_HEIGHT` is tall enough for the
+  // mute, the solo, the fader and CP-13's voice picker. jsdom has no layout.
+  // What CAN be stated here is that the number is a viewport rather than a
+  // measurement: nothing below derives it from a rack's content, which is the
+  // property that makes CP-14's ~40 px shortfall unreachable.
 
-  it('keeps the per-track resolver on the one mode that still needs it', () => {
-    // What `laneHeightsFor` is FOR, now that CP-14's `rackCollapsed` argument is
-    // gone with the voice branch it fed: edit mode's string count, which
-    // genuinely varies per track. That the voice branch cannot come back is the
-    // `TimedArrangementMode` type's job and `tsc`'s to enforce — an arity check
-    // here would not have caught it, since a defaulted second parameter does not
-    // count towards `Function.length`.
-    const heights = laneHeightsFor((id) => (id === 'bass-track' ? 'bass' : 'guitar'));
-    expect(laneRects([track('bass-track')], 'edit', heights)[0].height).toBe(
-      editLaneHeight(4),
-    );
+  // Rebuilt per test rather than shared across the describe: every test below
+  // happens to write every id it reads, so the suite is order-independent by
+  // luck — the next test added to it would inherit whatever the last one left.
+  let views: Record<string, ArrangementMode>;
+  beforeEach(() => {
+    views = {};
   });
 
-  // The rest of what CP-14 asserted here — an open lane taller than the cabinet,
-  // a folded lane shorter than an open one, and the tops that follow — is gone
-  // rather than moved. There is no number left to assert: a row is as tall as
-  // the sections a user has unfolded inside it, which only a browser knows. That
-  // is the CP-16 trade and it is deliberate, because the figure those tests
-  // guarded was ~40 px short of the real content and nothing here could say so.
+  const resolve = (collapsed: readonly string[] = []) =>
+    laneHeightResolver({
+      viewOf: (id) => views[id] ?? 'pattern',
+      instrumentOf: (id) => (id.startsWith('bass') ? 'bass' : 'guitar'),
+      voiceCollapsed: (id) => collapsed.includes(id),
+    });
+
+  it('gives each view its own height, and edit its own track’s string count', () => {
+    views['p'] = 'pattern';
+    views['e'] = 'edit';
+    views['bass-e'] = 'edit';
+    views['v'] = 'voice';
+    const height = resolve();
+
+    expect(height({ id: 'p' })).toBe(DEFAULT_LANE_HEIGHTS.pattern);
+    expect(height({ id: 'e' })).toBe(DEFAULT_LANE_HEIGHTS.edit);
+    // The whole point of the per-track callback: a four-string lane is four rows
+    // at the same pitch, not a six-string lane squashed.
+    expect(height({ id: 'bass-e' })).toBe(editLaneHeight(4));
+    expect(height({ id: 'bass-e' })).toBe(128);
+    expect(height({ id: 'v' })).toBe(DEFAULT_LANE_HEIGHTS.voice);
+  });
+
+  it('folds a voice lane back to the header strip when its rack is collapsed', () => {
+    views['v'] = 'voice';
+    // Pinned to the LITERAL as well as to the constant. Against the constant
+    // alone this compares the implementation to the thing the implementation
+    // returns, and re-pointing `COLLAPSED_VOICE_LANE_HEIGHT` at any other
+    // number would leave every folded rack the wrong height with the suite
+    // still green.
+    expect(resolve(['v'])({ id: 'v' })).toBe(143);
+    expect(resolve(['v'])({ id: 'v' })).toBe(COLLAPSED_VOICE_LANE_HEIGHT);
+    // And it is the HEADER STRIP's height, derived from pattern's lane rather
+    // than a second copy of the number.
+    expect(COLLAPSED_VOICE_LANE_HEIGHT).toBe(DEFAULT_LANE_HEIGHTS.pattern);
+    expect(resolve(['other'])({ id: 'v' })).toBe(DEFAULT_LANE_HEIGHTS.voice);
+  });
+
+  it('treats a track it has never heard of as pattern, like `viewOf` does', () => {
+    expect(resolve()({ id: 'never-set' })).toBe(DEFAULT_LANE_HEIGHTS.pattern);
+  });
+
+  // The two halves of this milestone joined: the resolver driven by the real
+  // view map instead of a bespoke lookup, so the default `viewOf` answers and
+  // the default the resolver falls to are checked to be the same default.
+  it('resolves heights from a map built by `setTrackView`', () => {
+    let map = setTrackView({}, 'c1', 'two', 'voice');
+    map = setTrackView(map, 'c1', 'bass-three', 'edit');
+    // Another composition's entries must not reach this one's lanes.
+    map = setTrackView(map, 'c2', 'one', 'voice');
+
+    const height = laneHeightResolver({
+      viewOf: (id) => viewOf(map, 'c1', id),
+      instrumentOf: (id) => (id.startsWith('bass') ? 'bass' : 'guitar'),
+      voiceCollapsed: () => false,
+    });
+
+    expect(height({ id: 'one' })).toBe(DEFAULT_LANE_HEIGHTS.pattern);
+    expect(height({ id: 'two' })).toBe(DEFAULT_LANE_HEIGHTS.voice);
+    expect(height({ id: 'bass-three' })).toBe(editLaneHeight(4));
+    // Back to pattern deletes the entry; the height has to follow it back.
+    map = setTrackView(map, 'c1', 'two', 'pattern');
+    expect(height({ id: 'two' })).toBe(DEFAULT_LANE_HEIGHTS.pattern);
+  });
+
+  // The assertion this whole milestone exists to make possible: three views in
+  // one column, stacked against one shared vertical origin. Until now a stack
+  // had one mode and voice had no geometry at all.
+  it('stacks a mixed-view column at the right tops', () => {
+    views['one'] = 'pattern';
+    views['two'] = 'voice';
+    views['bass-three'] = 'edit';
+    const lanes = laneRects(
+      [track('one'), track('two'), track('bass-three')],
+      resolve(),
+    );
+
+    expect(lanes).toEqual([
+      { trackId: 'one', top: 0, height: 143 },
+      { trackId: 'two', top: 143, height: 360 },
+      { trackId: 'bass-three', top: 503, height: 128 },
+    ]);
+    expect(lanesHeight(lanes)).toBe(631);
+    // Half-open still holds across the seams between views.
+    expect(laneAt(lanes, 143)?.trackId).toBe('two');
+    expect(laneAt(lanes, 502)?.trackId).toBe('two');
+    expect(laneAt(lanes, 503)?.trackId).toBe('bass-three');
+  });
+
+  it('changes one lane, and the tops below it, when one track changes view', () => {
+    views['one'] = 'pattern';
+    views['two'] = 'pattern';
+    const before = laneRects([track('one'), track('two')], resolve());
+    views['one'] = 'voice';
+    const after = laneRects([track('one'), track('two')], resolve());
+
+    expect(after[0].height).toBe(DEFAULT_LANE_HEIGHTS.voice);
+    // The lane below moves down by the difference and keeps its own height:
+    // a view is a property of one track, not of the column.
+    expect(after[1].height).toBe(before[1].height);
+    expect(after[1].top - before[1].top).toBe(
+      DEFAULT_LANE_HEIGHTS.voice - DEFAULT_LANE_HEIGHTS.pattern,
+    );
+  });
+});
+
+describe('per-track view state', () => {
+  const EMPTY: CompositionTrackViews = {};
+
+  it('answers pattern for anything it has no entry for', () => {
+    expect(viewOf(EMPTY, 'c1', 't1')).toBe('pattern');
+    expect(viewOf({ c1: { t1: 'voice' } }, 'c1', 'unknown-track')).toBe('pattern');
+    expect(viewOf({ c1: { t1: 'voice' } }, 'unknown-comp', 't1')).toBe('pattern');
+  });
+
+  it('keeps compositions apart', () => {
+    let views = setTrackView(EMPTY, 'c1', 't1', 'voice');
+    views = setTrackView(views, 'c2', 't1', 'edit');
+
+    // Same track id in two compositions is two different tracks.
+    expect(viewOf(views, 'c1', 't1')).toBe('voice');
+    expect(viewOf(views, 'c2', 't1')).toBe('edit');
+  });
+
+  it('writes a new composition key without disturbing the others', () => {
+    const before = setTrackView(EMPTY, 'c1', 't1', 'voice');
+    const after = setTrackView(before, 'c2', 't9', 'edit');
+
+    // What an import or a generated backing track does: a new key, not a reset.
+    expect(after.c1).toBe(before.c1);
+    expect(viewOf(after, 'c2', 't9')).toBe('edit');
+
+    // And the converse direction, which is the one a per-composition memo will
+    // lean on: writing into `c1` leaves `c2`'s entry referentially identical.
+    const next = setTrackView(after, 'c1', 't2', 'edit');
+    expect(next.c2).toBe(after.c2);
+    expect(next.c1).not.toBe(after.c1);
+  });
+
+  it('never mutates the map it was given', () => {
+    const before = setTrackView(EMPTY, 'c1', 't1', 'voice');
+    const snapshot = JSON.parse(JSON.stringify(before)) as CompositionTrackViews;
+    setTrackView(before, 'c1', 't2', 'edit');
+    setTrackView(before, 'c1', 't1', 'pattern');
+    expect(before).toEqual(snapshot);
+  });
+
+  // Pattern is the ABSENCE of an entry, never a stored value — two spellings of
+  // the default is how a map stops being comparable to itself.
+  it('deletes the entry when a track goes back to pattern', () => {
+    const views = setTrackView(setTrackView(EMPTY, 'c1', 't1', 'voice'), 'c1', 't2', 'edit');
+    const back = setTrackView(views, 'c1', 't1', 'pattern');
+
+    expect(back.c1).toEqual({ t2: 'edit' });
+    expect(Object.keys(back.c1 ?? {})).not.toContain('t1');
+    expect(viewOf(back, 'c1', 't1')).toBe('pattern');
+  });
+
+  it('drops the composition key when its last entry goes back to pattern', () => {
+    const views = setTrackView(EMPTY, 'c1', 't1', 'voice');
+    const back = setTrackView(views, 'c1', 't1', 'pattern');
+    expect(back).toEqual({});
+    expect(Object.keys(back)).toEqual([]);
+  });
+
+  // Identity, not equality: every view button click lands here whether or not it
+  // changes anything, and consumers of the map are identity-compared. A fresh
+  // object on a no-op re-renders every lane in the composition.
+  it('returns the same reference when nothing changes', () => {
+    const views = setTrackView(EMPTY, 'c1', 't1', 'voice');
+    expect(setTrackView(views, 'c1', 't1', 'voice')).toBe(views);
+    // Clearing a track that never had an entry is a no-op too.
+    expect(setTrackView(views, 'c1', 't2', 'pattern')).toBe(views);
+    expect(setTrackView(views, 'c2', 't1', 'pattern')).toBe(views);
+    expect(setTrackView(EMPTY, 'c1', 't1', 'pattern')).toBe(EMPTY);
+  });
+
+  // Deliberately NOT pruned. Undo restoring a deleted track restores the same
+  // track id, and an entry dropped on delete is a view silently reset by an undo.
+  // Do not add a pruning helper here to match the collapsed-rack state.
+  it('retains a deleted track’s entry so undo restores its view', () => {
+    const views = setTrackView(EMPTY, 'c1', 'doomed', 'voice');
+    // The track is gone from the composition; nothing here is told, by design.
+    expect(viewOf(views, 'c1', 'doomed')).toBe('voice');
+  });
+
+  it('round-trips every view in the union', () => {
+    for (const view of ARRANGEMENT_MODES) {
+      expect(viewOf(setTrackView(EMPTY, 'c1', 't1', view), 'c1', 't1')).toBe(view);
+    }
+  });
 });
 
 describe('editableSpans', () => {

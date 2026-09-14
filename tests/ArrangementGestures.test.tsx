@@ -15,6 +15,7 @@ import {
   ARRANGEMENT_ZOOM_LEVELS,
   DEFAULT_ARRANGEMENT_SNAP_ID,
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
+  DEFAULT_LANE_HEIGHTS,
   arrangementSnap,
   droppedByTranspose,
   laneRects,
@@ -80,7 +81,11 @@ import { installFrameClock } from './frameClock';
  */
 
 const PX = ARRANGEMENT_ZOOM_LEVELS[DEFAULT_ARRANGEMENT_ZOOM_INDEX];
-const LANE_HEIGHT = laneRects([{ id: 'probe' }], 'pattern')[0].height;
+// One global mode still, so every lane is pattern's height. `laneRects` takes a
+// per-track callback because the page is growing per-track views.
+const patternLanes = (tracks: readonly { id: string }[]) =>
+  laneRects(tracks, () => DEFAULT_LANE_HEIGHTS.pattern);
+const LANE_HEIGHT = patternLanes([{ id: 'probe' }])[0].height;
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -170,7 +175,7 @@ function Harness({ inViewport }: { inViewport?: (x: number, y: number) => boolea
   const tracks = useTracks();
   geometryRef.current = composition
     ? {
-        lanes: laneRects(tracks, 'pattern'),
+        lanes: patternLanes(tracks),
         tracks,
         pxPerBeat: PX,
         snap: arrangementSnap(composition.timeSignature, DEFAULT_ARRANGEMENT_SNAP_ID),

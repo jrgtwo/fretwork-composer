@@ -86,7 +86,11 @@ import {
  * here asserts that a rack fits its row or that two are visible at once. CP-16
  * is largely a BY-EYE ticket for that reason, and it deleted the arithmetic that
  * used to stand in for the eye (`DEFAULT_LANE_HEIGHTS.voice`), because that
- * number was ~40 px short of the real content and no test could say so. What is
+ * number was ~40 px short of the real content and no test could say so.
+ * COMPS-TRACK-TABS has since put a `voice` height back, and it is not that
+ * arithmetic returning: it is the height of the VIEWPORT a rack scrolls inside,
+ * which cannot be short of its content. The rack this file renders is still the
+ * CP-16 normal-flow subtree until milestone 2. What is
  * asserted below is the STRUCTURE that makes the layout right — the stages are
  * siblings in one column in schema order, a row holds its own header, per-section
  * folds round-trip — and, for the mode this risks regressing, that pattern mode's

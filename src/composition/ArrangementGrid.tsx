@@ -11,7 +11,7 @@ import {
   arrangementSnap,
   arrangementWidth,
   editableSpans,
-  laneHeightsFor,
+  laneHeightResolver,
   laneRects,
   laneStringCount,
   lanesHeight,
@@ -132,9 +132,11 @@ const NO_COLLAPSED_SECTIONS: Readonly<Record<string, readonly SectionId[]>> = {}
  *    in the same normal-flow row as the rack beside it and the whole
  *    two-viewport lock becomes unnecessary. That is also what lets a row be as
  *    tall as the sections a user has unfolded inside it, with no measurement and
- *    no height table to drift (see `TimedArrangementMode` in `arrangementMath`).
- *    The two layouts are two subtrees below, and pattern and edit mode's is
- *    untouched.
+ *    no height table to drift. The two layouts are two subtrees below, and
+ *    pattern and edit mode's is untouched. COMPS-TRACK-TABS milestone 2 replaces
+ *    this split with one stack in which a voice lane is a fixed-height VIEWPORT
+ *    the rack scrolls inside — see `DEFAULT_LANE_HEIGHTS` in `arrangementMath`
+ *    for why that is not the hand-maintained table CP-16 deleted.
  *
  *    The one thing voice mode still owes the timed layout is `timedScrollLeftRef`
  *    below: leaving a timed mode unmounts the scroller, so the offset has to be
@@ -726,17 +728,27 @@ export function ArrangementGrid({
     return track ? trackInstrumentId(track) : '';
   };
   // Edit lanes fit their own track's string count — a bass lane is four rows
-  // where a guitar lane is six — which is the case `LaneHeights` grew its
-  // function form for. Pattern mode is unaffected.
+  // where a guitar lane is six — which is what `laneHeightResolver` is for.
+  // Pattern mode is unaffected.
   //
   // ⚠ EMPTY IN VOICE MODE, and that is the CP-16 fix rather than a shortcut. A
   // lane rect is an absolute top against a shared time axis; voice mode has no
   // axis and its rows are normal flow, so there is nothing for `laneRects` to be
-  // right about. `mode !== 'voice'` rather than `timed` because only the literal
-  // comparison narrows the argument to `TimedArrangementMode`, which is the
-  // type that now says all of this.
+  // right about. COMPS-TRACK-TABS milestone 2 is what gives voice a lane and
+  // deletes this branch; until then the resolver is handed this page's ONE
+  // global mode for every track (`viewOf: () => mode`), which is exactly what it
+  // resolved before the signature changed.
   const lanes =
-    mode !== 'voice' ? laneRects(tracks, mode, laneHeightsFor(instrumentOfTrack)) : [];
+    mode !== 'voice'
+      ? laneRects(
+          tracks,
+          laneHeightResolver({
+            viewOf: () => mode,
+            instrumentOf: instrumentOfTrack,
+            voiceCollapsed: (trackId) => collapsedRacks.includes(trackId),
+          }),
+        )
+      : [];
   const height = lanesHeight(lanes);
   const snap = arrangementSnap(ts, snapId);
   const gridOptions = snapOptions(ts);

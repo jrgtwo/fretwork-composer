@@ -165,34 +165,106 @@ export const ARRANGEMENT_MODES = ['pattern', 'edit', 'voice'] as const;
  */
 export type ArrangementMode = (typeof ARRANGEMENT_MODES)[number];
 
-/**
- * The modes that have a TIME AXIS, and so the only ones with lane geometry.
- *
- * ⚠ THIS IS THE CP-16 DISTINCTION, and it is what the types in this section
- * exist to enforce. `laneRects` places lanes against a shared horizontal axis at
- * absolute tops so the ruler, the header column and the lane area can be three
- * separately-clipped viewports showing the same rows. Voice mode has no axis —
- * no ruler, no playhead, no zoom, no grid lines, no horizontal overflow — and a
- * rack is as tall as the sections a user has unfolded inside it, which is a
- * number no pure function here can know. So voice mode draws its tracks as
- * ordinary rows in normal flow (header and rack together, see `ArrangementGrid`)
- * and never calls any of this.
- *
- * That is a deliberate narrowing, not an omission: CP-14 DID keep a
- * `DEFAULT_LANE_HEIGHTS.voice`, and it under-measured the real content by ~40 px
- * because the derivation omitted two rendered rows — which put the cabinet
- * picker below the fold of every open rack, in a place jsdom (no layout) could
- * never fail on. A hand-maintained pixel table for content that folds is that
- * bug waiting to recur. Excluding `'voice'` here is what stops one being added
- * back by accident.
- */
-export type TimedArrangementMode = Exclude<ArrangementMode, 'voice'>;
+// ------------------------------------------------------ per-track views ---
 
 /**
- * Default lane height per timed mode. Pattern mode draws one block row and is
- * sized by what the track HEADER needs beside it — see `VOICE_HEADER_HEIGHT`,
- * which is derived from this rather than restated; edit mode has to hold a full
- * set of string rows.
+ * Which view each track of ONE composition is showing, keyed by track id.
+ *
+ * A MISSING entry means `'pattern'`. That is the only spelling of the default —
+ * `setTrackView` deletes rather than stores it — so the map names exactly the
+ * tracks a user has moved off pattern and two maps showing the same thing are
+ * the same map.
+ */
+export type TrackViews = Readonly<Record<string, ArrangementMode>>;
+
+/**
+ * Every composition's track views, keyed by composition id.
+ *
+ * Keyed by composition first because `CompositionPage` unmounts on every visit
+ * to the pattern page and composition A -> B -> A has to come back to the views
+ * A was showing, so the map outlives both. `App` owns it for the reason it owns
+ * the collapsed racks.
+ *
+ * SESSION ONLY: nothing here is persisted, and nothing here is PRUNED. A
+ * deleted track keeps its entry on purpose — undo restoring that same track id
+ * must restore the view it was showing, and an entry pruned on delete is a view
+ * silently reset by an undo. Do not copy the collapse-state pruning pattern in
+ * here. A stale entry for an id that never returns costs one key for the rest of
+ * the session; `viewOf` never reads it.
+ */
+export type CompositionTrackViews = Readonly<Record<string, TrackViews>>;
+
+/**
+ * The view a track is showing.
+ *
+ * Total and pure: an unknown composition, an unknown track and a track that has
+ * never been switched all answer `'pattern'`, because that is what the absence
+ * of an entry means.
+ */
+export function viewOf(
+  views: CompositionTrackViews,
+  compositionId: string,
+  trackId: string,
+): ArrangementMode {
+  const inner = views[compositionId];
+  // `Object.hasOwn` rather than a `??` on the lookup, so an id that collides
+  // with something on `Object.prototype` — `toString`, `constructor` — answers
+  // `'pattern'` like any other id this map has no entry for, instead of
+  // handing back an inherited member typed as a view. Lib-generated track ids
+  // never collide; the point is that the "total" above is true without relying
+  // on that.
+  if (!inner || !Object.hasOwn(inner, trackId)) return 'pattern';
+  return inner[trackId];
+}
+
+/**
+ * One track's view, set immutably.
+ *
+ * Returns the SAME REFERENCE when the call changes nothing — setting the view a
+ * track already has, or clearing one it never had. Every view button click lands
+ * here whether or not it changes anything (§2: a view click selects its track
+ * even when that view is already active), and the map is identity-compared by
+ * its consumers, so a fresh object per click would re-render every lane on a
+ * no-op.
+ *
+ * `'pattern'` DELETES the inner key instead of storing the value, and an emptied
+ * inner record drops its composition key: see {@link TrackViews}.
+ *
+ * A composition id with no entry yet gets one; every other composition's entry
+ * is carried over untouched, which is what makes an import or a generated
+ * composition a new key rather than a reset.
+ *
+ * Ids are the lib's, so `__proto__` is not among them. Handed one anyway this
+ * stores nothing (the prototype setter rejects a string) and `viewOf` keeps
+ * answering `'pattern'` — the two agree, which is what matters; it is only the
+ * same-reference no-op above that such an id would slip past.
+ */
+export function setTrackView(
+  views: CompositionTrackViews,
+  compositionId: string,
+  trackId: string,
+  view: ArrangementMode,
+): CompositionTrackViews {
+  const current = views[compositionId];
+  // Asked through `viewOf` rather than re-read here, so the no-op guard and the
+  // reader can never disagree about what counts as an entry.
+  if (viewOf(views, compositionId, trackId) === view) return views;
+
+  const inner: Record<string, ArrangementMode> = { ...current };
+  if (view === 'pattern') delete inner[trackId];
+  else inner[trackId] = view;
+
+  const next: Record<string, TrackViews> = { ...views };
+  if (Object.keys(inner).length === 0) delete next[compositionId];
+  else next[compositionId] = inner;
+  return next;
+}
+
+/**
+ * Default lane height per view. Pattern draws one block row and is sized by what
+ * the track HEADER needs beside it — see `VOICE_HEADER_HEIGHT`, which is derived
+ * from this rather than restated; edit has to hold a full set of string rows;
+ * voice is the height of the BOX a rack scrolls inside.
  *
  * Pattern mode was 88 until CP-19 added the pan row to the strip. The old figure
  * was chosen so eight tracks plus a ruler fit a laptop viewport, and this costs
@@ -207,15 +279,45 @@ export type TimedArrangementMode = Exclude<ArrangementMode, 'voice'>;
  * asked for. Put the trade to the user rather than quietly picking the compact
  * one; CP-19's pan row was settled in a single line that way.
  *
- * The EDIT figure is now a fallback rather than the number in use: CP-11 sizes
- * each edit lane to its own track's string count (`laneHeightsFor`), and this is
+ * The EDIT figure is a fallback rather than the number in use: CP-11 sizes each
+ * edit lane to its own track's string count (`laneHeightResolver`), and this is
  * what a six-string lane comes to — see `EDIT_STRING_ROW_PX`, which is derived
  * from it so the two cannot drift.
+ *
+ * ⚠ VOICE'S 360 IS A VIEWPORT, NOT A MEASUREMENT, and that distinction is the
+ * only reason this row is allowed to exist at all. CP-14 kept a `voice` height
+ * here that tried to PREDICT how tall an open rack came out, and it
+ * under-measured the real content by ~40 px because the derivation omitted two
+ * rendered rows — which put the cabinet picker below the fold of every open
+ * rack, in a place jsdom (no layout) could never fail on. CP-16 deleted it and
+ * gave voice rows normal flow instead, where a row is as tall as whatever the
+ * user has unfolded inside it and no pure function has to know.
+ *
+ * COMPS-TRACK-TABS' row is neither of those. 360 is the size of the BOX; the
+ * rack scrolls inside it (`overflow-y: auto`). A viewport cannot come up short
+ * of its content by construction — content taller than the box scrolls, it does
+ * not fall off the bottom — so CP-14's failure mode is unreachable here. The
+ * number is a layout decision about how much of a mixed stack one open rack may
+ * eat, and changing it changes only that. Do NOT re-derive it from the rack's
+ * sections or from anything a user can fold: the moment this tries to measure
+ * something, it is CP-14 again.
  */
-export const DEFAULT_LANE_HEIGHTS: Record<TimedArrangementMode, number> = {
+export const DEFAULT_LANE_HEIGHTS: Record<ArrangementMode, number> = {
   pattern: 143,
   edit: 192,
+  voice: 360,
 };
+
+/**
+ * A voice lane whose rack is FOLDED — the name strip and nothing else.
+ *
+ * Derived from pattern's lane rather than restated, because a folded rack shows
+ * exactly the header strip beside it and that is the one view whose lane is
+ * sized by what the header needs. Same reasoning as `VOICE_HEADER_HEIGHT`, which
+ * is a different question (how tall the header is DRAWN in the pre-milestone-2
+ * voice subtree) that currently has the same answer.
+ */
+export const COLLAPSED_VOICE_LANE_HEIGHT = DEFAULT_LANE_HEIGHTS.pattern;
 
 /**
  * How tall a TRACK HEADER is drawn in voice mode.
@@ -231,6 +333,14 @@ export const DEFAULT_LANE_HEIGHTS: Record<TimedArrangementMode, number> = {
  *
  * Derived from pattern mode's lane rather than restated, because it IS the same
  * strip: that is the one mode whose lane is sized by what the header needs.
+ *
+ * ⚠ NOT a duplicate of `COLLAPSED_VOICE_LANE_HEIGHT`, though they hold the same
+ * number today. This one belongs to the CP-16 normal-flow voice subtree, which
+ * has ONE live caller left (`ArrangementGrid`'s voice branch) and dies with that
+ * subtree in COMPS-TRACK-TABS milestone 2 — per-track views draw voice as a lane
+ * like any other, and a lane's header takes its height from the lane. Delete
+ * this constant when that branch goes, not before: retiring it early would mean
+ * a component change, which milestone 1 is not.
  */
 export const VOICE_HEADER_HEIGHT = DEFAULT_LANE_HEIGHTS.pattern;
 
@@ -258,27 +368,6 @@ export interface LaneRect {
 }
 
 /**
- * How tall each lane is. A per-mode table covers the common case; the function
- * form exists because edit mode's height genuinely varies per track — a bass
- * lane has four string rows where a guitar lane has six.
- */
-export type LaneHeights =
-  | Partial<Record<TimedArrangementMode, number>>
-  | ((track: LaneTrack, mode: TimedArrangementMode) => number);
-
-function resolveLaneHeight(
-  track: LaneTrack,
-  mode: TimedArrangementMode,
-  laneHeights: LaneHeights,
-): number {
-  const raw =
-    typeof laneHeights === 'function'
-      ? laneHeights(track, mode)
-      : (laneHeights[mode] ?? DEFAULT_LANE_HEIGHTS[mode]);
-  return Number.isFinite(raw) ? Math.max(0, raw) : DEFAULT_LANE_HEIGHTS[mode];
-}
-
-/**
  * Stack the lanes top to bottom. Rects are half-open (`top <= y < top + height`)
  * so a point on a boundary belongs to exactly one lane — the alternative silently
  * hits two, and the second one wins by iteration order.
@@ -286,17 +375,26 @@ function resolveLaneHeight(
  * Coordinates are lane-area content space: y = 0 is the first lane's top, the
  * ruler is not included, and the caller has already undone scroll.
  *
- * Timed modes only — see `TimedArrangementMode`.
+ * `heightOfTrack` is REQUIRED and takes the track alone. There is no mode
+ * parameter and no per-mode table any more: with per-track views the stack has
+ * no single mode to key one on — a pattern lane, an open voice lane and a
+ * four-string edit lane are three heights in one column. `laneHeightResolver`
+ * builds the usual callback; a test can pass any function.
+ *
+ * A height that is not finite falls back to pattern's, and a negative one clamps
+ * to 0. Pattern is the fallback because pattern is the default view, so a lane
+ * whose height cannot be worked out lands on the one every track starts in
+ * rather than on a zero-height row that cannot be clicked to fix itself.
  */
 export function laneRects(
   tracks: readonly LaneTrack[],
-  mode: TimedArrangementMode,
-  laneHeights: LaneHeights = DEFAULT_LANE_HEIGHTS,
+  heightOfTrack: (track: LaneTrack) => number,
 ): LaneRect[] {
   const rects: LaneRect[] = [];
   let top = 0;
   for (const track of tracks) {
-    const height = resolveLaneHeight(track, mode, laneHeights);
+    const raw = heightOfTrack(track);
+    const height = Number.isFinite(raw) ? Math.max(0, raw) : DEFAULT_LANE_HEIGHTS.pattern;
     rects.push({ trackId: track.id, top, height });
     top += height;
   }
@@ -345,23 +443,49 @@ export function laneStringCount(instrumentId: string): number {
 }
 
 /**
- * Lane heights that fit edit mode's rows to each track's own string count, and
- * leave pattern mode on its fixed figure.
+ * The `heightOfTrack` callback `laneRects` takes, built from the three things a
+ * lane's height actually depends on.
  *
- * A function rather than a table because that is the case `LaneHeights` grew its
- * function form for: edit mode's height genuinely varies per track — a bass lane
- * is four rows where a guitar lane is six — and `laneRects` is the only thing
- * that may decide where the next lane starts.
+ * A function rather than a table because every one of those inputs varies PER
+ * TRACK: the view each track is showing, the instrument whose string count an
+ * edit lane draws (a bass lane is four rows where a guitar lane is six), and
+ * whether a voice lane's rack is folded. `laneRects` remains the only thing that
+ * may decide where the next lane starts.
  *
- * CP-14's voice branch is GONE, with `DEFAULT_LANE_HEIGHTS.voice` and the folded
- * height beside it: voice rows are normal flow now and are not laid out from
- * here at all. See `TimedArrangementMode` for why that is a narrowing worth
- * enforcing in the types rather than a line to add back.
+ * Pure, and deliberately parameterised by callbacks rather than handed the
+ * stores: jsdom has no layout, so geometry is only testable while it is a plain
+ * function of plain values.
  */
-export function laneHeightsFor(instrumentOf: (trackId: string) => string): LaneHeights {
-  return (track, mode) => {
-    if (mode === 'edit') return editLaneHeight(laneStringCount(instrumentOf(track.id)));
-    return DEFAULT_LANE_HEIGHTS[mode];
+export function laneHeightResolver({
+  viewOf: viewOfTrack,
+  instrumentOf,
+  voiceCollapsed,
+}: {
+  viewOf: (trackId: string) => ArrangementMode;
+  instrumentOf: (trackId: string) => string;
+  voiceCollapsed: (trackId: string) => boolean;
+}): (track: LaneTrack) => number {
+  return (track) => {
+    const view = viewOfTrack(track.id);
+    switch (view) {
+      case 'pattern':
+        return DEFAULT_LANE_HEIGHTS.pattern;
+      case 'edit':
+        return editLaneHeight(laneStringCount(instrumentOf(track.id)));
+      case 'voice':
+        return voiceCollapsed(track.id)
+          ? COLLAPSED_VOICE_LANE_HEIGHT
+          : DEFAULT_LANE_HEIGHTS.voice;
+      default: {
+        // Every view is named above, so a fourth member of `ARRANGEMENT_MODES`
+        // fails to compile HERE rather than quietly drawing itself at pattern's
+        // height — which is a wrong lane nothing on screen announces. The
+        // `never` binding is the whole mechanism; the return keeps the arrow
+        // total.
+        const unreachable: never = view;
+        return DEFAULT_LANE_HEIGHTS[unreachable];
+      }
+    }
   };
 }
 
