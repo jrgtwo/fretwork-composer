@@ -97,10 +97,10 @@ export function TrackHeader({
    * question could never have covered it.
    *
    * MISMATCHED is the milder one (the block was authored elsewhere; the notes
-   * still have strings) and shows only when nothing is stranded. The header has
-   * 88 px for three control rows, so a second optional line would push the mixer
-   * strip out of its own lane — and jsdom has no layout, so no test here could
-   * catch that.
+   * still have strings) and shows only when nothing is stranded. The header's
+   * FLOOR is `TRACK_HEADER_HEIGHT`'s three control rows, so a second optional
+   * line would push the mixer strip out of the shortest lane — and jsdom has no
+   * layout, so no test here could catch that.
    */
   const stranded = strandedByInstrument(track, trackInstrumentId(track));
   const mismatched = mismatchedPlacements(track);
@@ -109,12 +109,16 @@ export function TrackHeader({
     <div
       data-track-header={track.id}
       style={{ height }}
-      // Tight on purpose: three control rows and a status line have to fit the
-      // lane's 88 px without the header driving lane height (`DEFAULT_LANE_HEIGHTS`
-      // in arrangementMath is the single source of that number, and CP-11 will
-      // vary it per track). jsdom has no layout, so nothing here can TEST that
-      // it fits — it is checked in the browser, and the rows are sized so the
-      // mismatch line is the only optional one.
+      // Tight on purpose: three control rows and a status line have to fit
+      // `TRACK_HEADER_HEIGHT` (arrangementMath), which is the FLOOR under every
+      // lane — so what this needs is exactly what a pattern or a folded-voice
+      // lane comes out at. `height` is the LANE's, though, not that constant,
+      // and since COMPS-TRACK-TABS milestone 2's correction it can be far
+      // taller: an open rack's lane stretches this column's `justify-between`
+      // rows apart. Compact headers at a measured height are milestone 6's work
+      // — do not chase it here. jsdom has no layout, so nothing here can TEST
+      // that any of it fits; it is checked in the browser, and the rows are
+      // sized so the mismatch line is the only optional one.
       className="flex flex-col justify-between gap-0.5 overflow-hidden border-b border-rim-dark px-1.5 py-1"
     >
       <div className="flex items-center gap-1">

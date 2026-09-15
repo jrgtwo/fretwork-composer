@@ -129,11 +129,11 @@ const NO_COLLAPSED_SECTIONS: Readonly<Record<string, readonly SectionId[]>> = {}
  *    CP-16 used to make voice mode opt OUT of all of it — a second subtree of
  *    normal-flow rows, each as tall as the rack inside it. COMPS-TRACK-TABS
  *    milestone 2 deleted that subtree: there is ONE stack now, and a voice lane
- *    is a lane like any other, sized by `laneRects` and drawn by a rack that
- *    scrolls inside a fixed-height VIEWPORT (`DEFAULT_LANE_HEIGHTS.voice` in
- *    `arrangementMath` says why a viewport is not the hand-maintained height
- *    table CP-16 deleted). Every per-lane decision below goes through
- *    `viewOfTrack`, which milestone 4 repoints at a per-composition map.
+ *    is a lane like any other, sized by `laneRects`. It is as tall as its rack
+ *    MEASURES (`measureRack` below, `laneHeightResolver` in `arrangementMath`),
+ *    so this scroller is the page's only vertical scrollbar and no rack is
+ *    clipped. Every per-lane decision below goes through `viewOfTrack`, which
+ *    milestone 4 repoints at a per-composition map.
  *
  * 1b. THE RACKS LIVE IN THEIR OWN LAYER, and its position in the DOM is the one
  *    thing in this file most likely to be broken by a well-meaning edit. It is a
@@ -227,7 +227,6 @@ function PlacementSurface({
   onFocus,
   drifted,
   pxPerBeat,
-  laneHeight,
   stringCount,
   instrumentId,
   grid,
@@ -246,7 +245,6 @@ function PlacementSurface({
   onFocus: () => boolean;
   drifted: boolean;
   pxPerBeat: number;
-  laneHeight: number;
   stringCount: number;
   instrumentId: string;
   grid: SnapOption;
@@ -319,7 +317,13 @@ function PlacementSurface({
         // under.
         timeSignature={timeSignature}
         pxPerBeat={pxPerBeat}
-        laneAreaHeight={laneHeight}
+        // The SPAN's height, not the lane's. A lane can be taller than its
+        // string rows — a four-string bass lane is 128 of content in a 143 lane
+        // — and `NoteSurface` divides whatever it is given into `stringCount`
+        // rows, so the lane's height here would stretch the bass to a 35.75 px
+        // pitch beside the guitar lane above it. `editableSpans` has already
+        // centred this box in the lane.
+        laneAreaHeight={span.rect.height}
         stringCount={stringCount}
         instrumentId={instrumentId}
         grid={grid}
@@ -498,6 +502,108 @@ export function ArrangementGrid({
    *  `trackNotice`'s: they cannot be on screen together — one belongs to a
    *  composition that exists and the other to there being none. */
   const [newNotice, setNewNotice] = useState<string | null>(null);
+  /**
+   * What each track's voice rack MEASURED, keyed by track id — the input to the
+   * voice arm of `laneHeightResolver`.
+   *
+   * ⚠ A MEASUREMENT, NOT A PREDICTION, and that is the whole reason a voice lane
+   * is allowed to be sized by its content at all. CP-14 kept a pixel table that
+   * guessed how tall an open rack came out and was ~40 px short; a
+   * `ResizeObserver` reads the box the browser has just laid out, so folding a
+   * stage fires it and the lane follows. The forbidden thing is deriving a
+   * height from the rack's sections — see `laneHeightResolver`.
+   *
+   * 0 / absent means NOT MEASURED YET, never "a zero-height lane": jsdom reports
+   * every box as 0×0 and the suite's stubbed observer never fires, and a rack
+   * that has not been observed yet must open at the header's height rather than
+   * vanish. The resolver's `max` is what turns that into the fallback.
+   */
+  const [rackHeights, setRackHeights] = useState<Readonly<Record<string, number>>>({});
+  const rackObserverRef = useRef<ResizeObserver | null>(null);
+  /**
+   * Attach/detach for one rack's measured box.
+   *
+   * A React 19 ref CLEANUP rather than a `null` call: the cleanup runs when the
+   * element goes — the track left voice view, was deleted, or the page
+   * unmounted — so nothing has to work out which id disappeared in order to
+   * unobserve it.
+   *
+   * The observer is built LAZILY — on the first rack to mount rather than on
+   * every render — and UNCONDITIONALLY, as `Timeline` and `TablatureView`
+   * already do. `ResizeObserver` is not optional here: with the row's inner
+   * scroller gone, an unmeasured open rack is clipped to the header's height
+   * with no way to reach the rest of the chain. It has been baseline in every
+   * browser since 2020, and `tests/setup.ts` installs a stub so jsdom mounts —
+   * that stub's `observe` never FIRES, which is why nothing is measured under
+   * vitest unless a test swaps in a firing one (`tests/TablatureView.test.tsx`
+   * is the precedent, and `tests/VoiceMode.test.tsx` now does it here).
+   */
+  const measureRack = useCallback((el: HTMLDivElement | null) => {
+    if (el === null) return undefined;
+    if (rackObserverRef.current === null) {
+      rackObserverRef.current = new ResizeObserver((entries) => {
+        setRackHeights((current) => {
+          let next: Record<string, number> | null = null;
+          for (const entry of entries) {
+            const trackId = entry.target.getAttribute('data-voice-rack');
+            if (trackId === null) continue;
+            // `borderBoxSize`, not `contentRect`: the rack's padding and any
+            // border are part of how tall the lane has to be, and `contentRect`
+            // reports neither.
+            const box = entry.borderBoxSize?.[0];
+            const raw = box ? box.blockSize : entry.contentRect.height;
+            // ROUNDED, and written only when the rounded value CHANGES. An
+            // observer whose callback re-renders into a measurement differing
+            // by a subpixel is an infinite loop, and what it looks like is
+            // "ResizeObserver loop completed with undelivered notifications".
+            // Returning `current` unchanged is a React bail-out, so the common
+            // case costs no render at all.
+            const height = Math.round(raw);
+            if (!(height > 0)) continue;
+            if ((next ?? current)[trackId] === height) continue;
+            next = { ...(next ?? current), [trackId]: height };
+          }
+          return next ?? current;
+        });
+      });
+    }
+    const observer = rackObserverRef.current;
+    // `box: 'border-box'` rather than the default content box, so the
+    // NOTIFICATION is gated on the same box the callback READS. The wrapper is
+    // deliberately unstyled today, which makes the two boxes equal — this is
+    // what keeps that an implementation detail rather than a dependency.
+    observer.observe(el, { box: 'border-box' });
+    return () => observer.unobserve(el);
+  }, []);
+  // One observer for the page, disconnected with it. `unobserve` above handles
+  // the per-rack case; this is the teardown for the whole thing.
+  useEffect(
+    () => () => {
+      rackObserverRef.current?.disconnect();
+      rackObserverRef.current = null;
+    },
+    [],
+  );
+  /**
+   * Forget the rack height of a track that no longer exists.
+   *
+   * The ref cleanup above unobserves the element; it does not drop the entry,
+   * and an entry for a deleted id would pin a height for the rest of the session
+   * — visible the moment an undo brings that id back, at whatever the rack
+   * happened to measure before. Keyed on the id LIST rather than on `tracks`,
+   * which is a fresh array on every store write.
+   */
+  const trackIdKey = tracks.map((track) => track.id).join('\u0000');
+  useEffect(() => {
+    const live = new Set(trackIdKey === '' ? [] : trackIdKey.split('\u0000'));
+    setRackHeights((current) => {
+      const stale = Object.keys(current).filter((id) => !live.has(id));
+      if (stale.length === 0) return current;
+      const next = { ...current };
+      for (const id of stale) delete next[id];
+      return next;
+    });
+  }, [trackIdKey]);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const rulerContentRef = useRef<HTMLDivElement>(null);
   const headerStackRef = useRef<HTMLDivElement>(null);
@@ -530,20 +636,21 @@ export function ArrangementGrid({
    * And WHICH TRACKS were in view, kept across the same stretch.
    *
    * NOT belt-and-braces, and not redundant now that the scroller survives a
-   * visit: a lane's height is a function of its VIEW (`DEFAULT_LANE_HEIGHTS` —
-   * voice 360, edit 192, pattern 143), so the stack is more than twice as tall
-   * in all-voice as in all-pattern. Coming BACK shrinks the content under a
-   * `scrollTop` the browser then clamps to the new end, and the number is gone
-   * from the one place it lives. What that costs is real: eight edit lanes are
-   * 8 × 192 = 1536 px, and a discarded `scrollTop` would put you on track 1 with
+   * visit: a lane is `max(header, content)`, so an all-voice stack of open racks
+   * is several times as tall as an all-pattern one (143 a lane) and an all-edit
+   * one is 192 a lane. Coming BACK shrinks the content under a `scrollTop` the
+   * browser then clamps to the new end, and the number is gone from the one
+   * place it lives. What that costs is real: eight edit lanes are 8 × 192 =
+   * 1536 px, and a discarded `scrollTop` would put you on track 1 with
    * `syncViewports` translating the header column to agree, which is the silent
    * discard `tests/EditMode.test.tsx` guards the pattern↔edit switch against.
    *
    * It is therefore deliberately RE-IMPOSING the last timed position rather than
-   * only rescuing a lost one: scrolling down a stack of 360 px racks and coming
-   * back lands where the timed lanes were left, not on whichever track the
-   * taller stack happened to be showing. The two stacks are different heights,
-   * so there is no offset that means the same thing in both.
+   * only rescuing a lost one: scrolling down a stack of racks and coming back
+   * lands where the timed lanes were left, not on whichever track the taller
+   * stack happened to be showing. The two stacks are different heights, so there
+   * is no offset that means the same thing in both. Racks now grow and shrink as
+   * stages are folded, which makes that more true, not less.
    */
   const timedScrollTopRef = useRef(0);
   /** For `syncViewports`, which is a stable callback and so cannot close over
@@ -792,9 +899,11 @@ export function ArrangementGrid({
     const track = tracks.find((candidate) => candidate.id === trackId);
     return track ? trackInstrumentId(track) : '';
   };
-  // Edit lanes fit their own track's string count — a bass lane is four rows
-  // where a guitar lane is six — and a voice lane is the height of the box its
-  // rack scrolls inside, folded or not. That is what `laneHeightResolver` is for.
+  // ONE RULE: a lane is `max(track header, its content)`. An edit lane fits its
+  // own track's string count — a bass lane is four rows where a guitar lane is
+  // six — and a voice lane is as tall as its rack MEASURED, so a folded rack
+  // settles back on the header's height with no special case. That is what
+  // `laneHeightResolver` is for; the numbers are all its.
   //
   // EVERY view, including all-voice. CP-16's voice rows were normal flow, so
   // there was nothing for `laneRects` to be right about and this returned an
@@ -806,7 +915,10 @@ export function ArrangementGrid({
     laneHeightResolver({
       viewOf: viewOfTrack,
       instrumentOf: instrumentOfTrack,
-      voiceCollapsed: (trackId) => collapsedRacks.includes(trackId),
+      // 0 until the observer has seen this rack — the resolver's `max` turns
+      // that into "open at the header's height", which is also where a folded
+      // rack lands. NEVER a zero-height lane.
+      voiceRackHeight: (trackId) => rackHeights[trackId] ?? 0,
     }),
   );
   // The strips a bar line or the playhead may be drawn across. One band spanning
@@ -1308,7 +1420,15 @@ export function ArrangementGrid({
             tabIndex={0}
             role="group"
             aria-label="Arrangement lanes"
-            className="well h-full overflow-auto"
+            // `scrollbar-gutter: stable` closes a loop that milestone 2's fixed
+            // 360 px voice lane did not have: a lane's height now comes from
+            // its rack, the rack's height comes from how its pedalboard wraps,
+            // that wrapping follows this scroller's client width, and the client
+            // width follows whether the vertical scrollbar is showing — which
+            // the stack height decides. Reserving the gutter takes the width out
+            // of the cycle. The rounded-value guard in `measureRack` stops an
+            // A→A subpixel loop; it cannot stop an A→B→A one.
+            className="well h-full overflow-auto [scrollbar-gutter:stable]"
           >
             {/* ── The VOICE LAYER ─────────────────────────────────────────────
                 A zero-height sheet the racks hang off, over the timed content.
@@ -1362,12 +1482,24 @@ export function ArrangementGrid({
                     // running through its faceplates.
                     className="tray pointer-events-auto absolute left-0 w-full overflow-hidden"
                   >
-                    {/* The lane is a VIEWPORT, not a measurement
-                        (`DEFAULT_LANE_HEIGHTS.voice`): content taller than the
-                        box scrolls inside it rather than falling off the bottom,
-                        which is the property that makes CP-14's shortfall
-                        unreachable. */}
-                    <div className="h-full overflow-x-hidden overflow-y-auto">
+                    {/* THE MEASURED BOX, and the ONLY reason this wrapper
+                        exists. It is deliberately unstyled — no height, no
+                        overflow — so it lays out at the rack's natural height
+                        inside a row whose height we set, which is what makes it
+                        safe to observe: the row follows the wrapper, never the
+                        other way round.
+
+                        It REPLACES an `h-full overflow-y-auto` viewport. The
+                        lane is sized to the rack now, so there is nothing left
+                        to scroll inside it and the arrangement scroller is the
+                        page's only vertical scrollbar — three open racks used to
+                        mean three nested ones, each clipped to 360 px.
+
+                        `data-voice-rack` is how the observer's entries find
+                        their track: a `ResizeObserver` callback gets elements,
+                        not ids, and a per-element closure would rebuild the
+                        observer on every render. */}
+                    <div ref={measureRack} data-voice-rack={track.id}>
                       <TrackVoiceRack
                         track={track}
                         audible={isTrackAudible(track, tracks)}
@@ -1536,7 +1668,12 @@ export function ArrangementGrid({
                       {view === 'voice'
                         ? null
                         : view === 'edit'
-                        ? editableSpans(track, pxPerBeat, lane.height).map((span) => {
+                        ? editableSpans(
+                            track,
+                            pxPerBeat,
+                            lane.height,
+                            laneStringCount(instrumentId),
+                          ).map((span) => {
                             const placement = track.placements.find(
                               (candidate) => candidate.id === span.placementId,
                             );
@@ -1555,7 +1692,6 @@ export function ArrangementGrid({
                                   libraryById.get(placement.patternSnapshot.id),
                                 )}
                                 pxPerBeat={pxPerBeat}
-                                laneHeight={lane.height}
                                 stringCount={laneStringCount(instrumentId)}
                                 instrumentId={instrumentId}
                                 grid={noteGrid}

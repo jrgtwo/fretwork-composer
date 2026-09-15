@@ -25,6 +25,7 @@ import {
   editableSpans,
   editLaneHeight,
   tickToPx,
+  TRACK_HEADER_HEIGHT,
 } from '../src/composition/arrangementMath';
 import {
   addPlacement,
@@ -223,7 +224,7 @@ describe('what an edit-mode lane draws', () => {
     const { first, second } = seedArrangement();
     render(editGrid());
 
-    const spans = editableSpans(getTracks()[0], PX_PER_BEAT, editLaneHeight(6));
+    const spans = editableSpans(getTracks()[0], PX_PER_BEAT, editLaneHeight(6), 6);
     expect(spans.map((span) => span.placementId)).toEqual([first, second]);
     for (const span of spans) {
       const el = surfaceEl(span.placementId);
@@ -234,16 +235,51 @@ describe('what an edit-mode lane draws', () => {
     }
   });
 
-  it('fits a lane to its own track’s string count', () => {
+  // ⚠ CHANGED VALUE, and deliberately: the bass LANE used to be
+  // `editLaneHeight(4)` = 128 and is now 143. Lane height is
+  // `max(track header, content)`, and 128 of string rows loses to the 143 px
+  // header — the bass lane grew by 15 px. What did NOT change is the thing the
+  // number was protecting: the bass's ROWS are still 32 px, the guitar's pitch,
+  // because the slack goes into centring the span rather than into the rows
+  // (the test below).
+  it('fits a lane to its own track’s string count, floored by the track header', () => {
     seedArrangement();
     render(editGrid());
 
     const [guitarLane, bassLane] = document.querySelectorAll<HTMLElement>('[data-lane-track]');
     expect(guitarLane.style.height).toBe(`${editLaneHeight(6)}px`);
-    expect(bassLane.style.height).toBe(`${editLaneHeight(4)}px`);
+    expect(guitarLane.style.height).toBe('192px');
+    expect(bassLane.style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
     // A lane's rows are the SURFACE's, and they come from the track's neck: six
     // for the guitar, whatever the snapshot inside was written on.
     expect(surfaceEl(placements()[0].id).querySelectorAll('[data-lane]')).toHaveLength(6);
+  });
+
+  // The other half of that change: a four-string lane's SURFACE keeps the
+  // guitar's row pitch and is centred in the taller lane, rather than stretching
+  // to fill it. Stretched, the bass would read as a different scale from the
+  // guitar lane above it and the stack would stop reading as one instrument
+  // rack. jsdom cannot see any of that; what it can see is the box.
+  it('centres a bass surface in its lane instead of stretching its rows', () => {
+    const { patternId, bassId } = seedArrangement();
+    // The seed leaves the bass track empty; an edit lane draws nothing without a
+    // block in it.
+    const onBass = addPlacement(patternId, bassId, 0);
+    if (!onBass.ok) throw new Error(onBass.reason);
+    render(editGrid());
+
+    const el = surfaceEl(onBass.value);
+
+    expect(el.style.height).toBe(`${editLaneHeight(4)}px`);
+    expect(el.style.height).toBe('128px');
+    expect(el.style.top).toBe(`${(TRACK_HEADER_HEIGHT - 128) / 2}px`);
+    // Four rows in 128 px is the guitar's 32 px pitch — what all of this is for.
+    expect(el.querySelectorAll('[data-lane]')).toHaveLength(4);
+
+    // The guitar's content IS its lane, so its surface stays flush at the top.
+    const guitarEl = surfaceEl(placements()[0].id);
+    expect(guitarEl.style.top).toBe('0px');
+    expect(guitarEl.style.height).toBe('192px');
   });
 
   it('draws no surface in empty time, so nothing can be written there', async () => {

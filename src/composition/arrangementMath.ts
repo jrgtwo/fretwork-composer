@@ -261,10 +261,9 @@ export function setTrackView(
 }
 
 /**
- * Default lane height per view. Pattern draws one block row and is sized by what
- * the track HEADER needs beside it — see `COLLAPSED_VOICE_LANE_HEIGHT`, which is
- * derived from this rather than restated; edit has to hold a full set of string
- * rows; voice is the height of the BOX a rack scrolls inside.
+ * What the track HEADER needs, and therefore the FLOOR under every lane.
+ *
+ * ── Why this number is this number (the record, carried forward) ─────────────
  *
  * Pattern mode was 88 until CP-19 added the pan row to the strip. The old figure
  * was chosen so eight tracks plus a ruler fit a laptop viewport, and this costs
@@ -279,49 +278,17 @@ export function setTrackView(
  * asked for. Put the trade to the user rather than quietly picking the compact
  * one; CP-19's pan row was settled in a single line that way.
  *
- * The EDIT figure is a fallback rather than the number in use: CP-11 sizes each
- * edit lane to its own track's string count (`laneHeightResolver`), and this is
- * what a six-string lane comes to — see `EDIT_STRING_ROW_PX`, which is derived
- * from it so the two cannot drift.
+ * ── What it is now ───────────────────────────────────────────────────────────
  *
- * ⚠ VOICE'S 360 IS A VIEWPORT, NOT A MEASUREMENT, and that distinction is the
- * only reason this row is allowed to exist at all. CP-14 kept a `voice` height
- * here that tried to PREDICT how tall an open rack came out, and it
- * under-measured the real content by ~40 px because the derivation omitted two
- * rendered rows — which put the cabinet picker below the fold of every open
- * rack, in a place jsdom (no layout) could never fail on. CP-16 deleted it and
- * gave voice rows normal flow instead, where a row is as tall as whatever the
- * user has unfolded inside it and no pure function has to know.
- *
- * COMPS-TRACK-TABS' row is neither of those. 360 is the size of the BOX; the
- * rack scrolls inside it (`overflow-y: auto`). A viewport cannot come up short
- * of its content by construction — content taller than the box scrolls, it does
- * not fall off the bottom — so CP-14's failure mode is unreachable here. The
- * number is a layout decision about how much of a mixed stack one open rack may
- * eat, and changing it changes only that. Do NOT re-derive it from the rack's
- * sections or from anything a user can fold: the moment this tries to measure
- * something, it is CP-14 again.
+ * It used to BE pattern mode's lane height, and every other view declared its
+ * own number beside it. It is now the FLOOR under every lane in every view:
+ * `laneHeightResolver` returns `max(this, content)`, so mute/solo, the fader,
+ * pan, the three meter rows and the voice picker always have room beside a lane
+ * whatever that lane is drawing. Pattern and a four-string edit lane come out at
+ * exactly this; a six-string edit lane and an open voice rack come out taller
+ * because their content does.
  */
-export const DEFAULT_LANE_HEIGHTS: Record<ArrangementMode, number> = {
-  pattern: 143,
-  edit: 192,
-  voice: 360,
-};
-
-/**
- * A voice lane whose rack is FOLDED — the name strip and nothing else.
- *
- * Derived from pattern's lane rather than restated, because a folded rack shows
- * exactly the header strip beside it and that is the one view whose lane is
- * sized by what the header needs.
- *
- * It used to have a twin — `VOICE_HEADER_HEIGHT`, answering the different
- * question of how tall a header was DRAWN inside CP-16's normal-flow voice
- * subtree. COMPS-TRACK-TABS milestone 2 deleted that subtree and the constant
- * with it: a voice lane is a lane, and its header takes `lane.height` like
- * every other.
- */
-export const COLLAPSED_VOICE_LANE_HEIGHT = DEFAULT_LANE_HEIGHTS.pattern;
+export const TRACK_HEADER_HEIGHT = 143;
 
 /** The height of the ruler strip. Lanes start below it. */
 export const RULER_HEIGHT = 28;
@@ -360,10 +327,11 @@ export interface LaneRect {
  * four-string edit lane are three heights in one column. `laneHeightResolver`
  * builds the usual callback; a test can pass any function.
  *
- * A height that is not finite falls back to pattern's, and a negative one clamps
- * to 0. Pattern is the fallback because pattern is the default view, so a lane
- * whose height cannot be worked out lands on the one every track starts in
- * rather than on a zero-height row that cannot be clicked to fix itself.
+ * A height that is not finite falls back to {@link TRACK_HEADER_HEIGHT}, and a
+ * negative one clamps to 0. The HEADER is the fallback because a lane whose
+ * height cannot be worked out still has to hold its header — mute, solo, the
+ * fader, pan, the meters, the picker — rather than collapse to a row that cannot
+ * be clicked to fix itself.
  */
 export function laneRects(
   tracks: readonly LaneTrack[],
@@ -373,7 +341,7 @@ export function laneRects(
   let top = 0;
   for (const track of tracks) {
     const raw = heightOfTrack(track);
-    const height = Number.isFinite(raw) ? Math.max(0, raw) : DEFAULT_LANE_HEIGHTS.pattern;
+    const height = Number.isFinite(raw) ? Math.max(0, raw) : TRACK_HEADER_HEIGHT;
     rects.push({ trackId: track.id, top, height });
     top += height;
   }
@@ -443,20 +411,53 @@ export function timedBands(
 }
 
 /**
- * How tall one string row is in an edit-mode lane.
+ * How tall one string row is in an edit-mode lane. THE DECLARATION — a
+ * six-string lane's 192 is now a consequence of it rather than its source.
  *
- * Chosen so a six-string lane is exactly `DEFAULT_LANE_HEIGHTS.edit`, which is
- * what CP-04 sized the mode for and what a test pins — a bass lane is then four
- * of these rather than a guitar lane squashed into fewer rows, so the string
- * pitch is the same down the whole stack and the lanes read as one instrument
- * rack instead of as several scales.
+ * It used to be `DEFAULT_LANE_HEIGHTS.edit / 6`, reading the per-view table
+ * backwards. With the table gone the direction is the one this module already
+ * prefers everywhere else (`ARRANGEMENT_MODES` declares, `ArrangementMode`
+ * derives): the ROW PITCH is what CP-04 actually chose, and `editLaneHeight`
+ * multiplies it up.
+ *
+ * ⚠ THE PITCH IS CONSTANT DOWN THE WHOLE STACK, and edit is the one view whose
+ * content is NOT stretched to fill a taller lane because of it. A four-string
+ * bass lane's content is 4 × 32 = 128 in a {@link TRACK_HEADER_HEIGHT} lane; its
+ * rows stay at 32 and the 15 px of slack becomes symmetric padding
+ * (`editableSpans`). Grown to 35.75 instead, the bass would read as a different
+ * scale from the guitar lane above it and the stack would stop reading as one
+ * instrument rack.
  */
-export const EDIT_STRING_ROW_PX = DEFAULT_LANE_HEIGHTS.edit / 6;
+export const EDIT_STRING_ROW_PX = 32;
 
-/** Edit-mode lane height for a track drawing `stringCount` strings. */
+/** Edit-mode CONTENT height for a track drawing `stringCount` strings — what the
+ *  string rows need, which is not necessarily what the lane gives them. An
+ *  unusable count falls back to the catalog's own default instrument, which is
+ *  six strings and so 192. */
 export function editLaneHeight(stringCount: number): number {
-  if (!Number.isFinite(stringCount)) return DEFAULT_LANE_HEIGHTS.edit;
+  if (!Number.isFinite(stringCount)) return FALLBACK_STRING_COUNT * EDIT_STRING_ROW_PX;
   return Math.max(1, Math.floor(stringCount)) * EDIT_STRING_ROW_PX;
+}
+
+/**
+ * Pattern-mode CONTENT height: the least a block needs to draw anything at all —
+ * room for its name, one `MIN_PREVIEW_ROW_PX` row per string, and room for its
+ * badges. A MINIMUM, not a target: the block FILLS whatever the lane gives it
+ * (`previewMarks` divides the whole band into rows), so this only decides
+ * whether pattern could ever out-vote the header. For six strings it is ~48, so
+ * it never does — which is the arithmetic behind "pattern is 143 because the
+ * header is 143", now derived instead of declared.
+ *
+ * ⚠ THE TRACK'S NECK, NOT ANY ONE BLOCK'S. `previewMarks` sizes itself from
+ * `snapshotNeck(placement)`, which can carry MORE strings than the track's
+ * instrument has, so a block can want more than this returns (a 12-string
+ * snapshot on a guitar track wants 60). Harmless only while the header wins by
+ * the width it does; if this ever became the deciding term it would have to take
+ * the max over the track's placements' snapshot necks instead.
+ */
+export function patternLaneContentHeight(stringCount: number): number {
+  const strings = Number.isFinite(stringCount) ? Math.max(1, Math.floor(stringCount)) : FALLBACK_STRING_COUNT;
+  return PREVIEW_TOP_PX + strings * MIN_PREVIEW_ROW_PX + PREVIEW_BOTTOM_PX;
 }
 
 /**
@@ -475,47 +476,101 @@ export function laneStringCount(instrumentId: string): number {
  * The `heightOfTrack` callback `laneRects` takes, built from the three things a
  * lane's height actually depends on.
  *
- * A function rather than a table because every one of those inputs varies PER
- * TRACK: the view each track is showing, the instrument whose string count an
- * edit lane draws (a bass lane is four rows where a guitar lane is six), and
- * whether a voice lane's rack is folded. `laneRects` remains the only thing that
- * may decide where the next lane starts.
+ * ── ONE RULE: `max(header, content)` ─────────────────────────────────────────
+ *
+ * There is no per-view height table any more and no number is hand-chosen for a
+ * view. A lane is as tall as the taller of the track HEADER beside it
+ * ({@link TRACK_HEADER_HEIGHT}) and the CONTENT inside it, and every figure in
+ * use falls out of that: pattern and a four-string edit lane come to 143 because
+ * the header wins, a six-string edit lane to 192 and an open voice lane to
+ * whatever the rack measures because the content does. A folded voice rack
+ * measures short and lands on 143 with no special case of its own — the old
+ * `COLLAPSED_VOICE_LANE_HEIGHT` is this rule, not an exception to it.
+ *
+ * Where the header wins, the content GROWS to fill the lane rather than leaving
+ * dead space — `previewMarks` divides the whole band into string rows. Edit is
+ * the deliberate exception: its rows keep a constant 32 px pitch and are centred
+ * in the lane instead (see `EDIT_STRING_ROW_PX` and `editableSpans`).
+ *
+ * ── ⚠ MEASURING A RACK IS NOT CP-14 RETURNING ────────────────────────────────
+ *
+ * This is worth stating, because the constant that used to stand here argued the
+ * opposite and the distinction is the whole reason the reversal is safe.
+ *
+ * CP-14 kept a hand-maintained pixel table that PREDICTED how tall an open rack
+ * would come out, and it was ~40 px short because the derivation omitted two
+ * rendered rows — which put the cabinet picker below the fold of every open
+ * rack, in a place jsdom (no layout) could never fail on. A prediction can
+ * disagree with the DOM.
+ *
+ * `voiceRackHeight` is not a prediction. It is a `ResizeObserver` reading the
+ * rack element's own BORDER BOX (`ArrangementGrid`) — the box the browser has
+ * just laid out — so it cannot be short of the content by construction, and
+ * folding a stage makes the observer fire and the lane follow within the frame.
+ *
+ * What stays forbidden is exactly what CP-14 did: deriving a voice height from
+ * the rack's SECTIONS, from `paramSchema`, or from anything else a user can
+ * fold. The moment this computes a rack's height instead of being told one, it
+ * is CP-14 again.
+ *
+ * ── Purity ───────────────────────────────────────────────────────────────────
+ *
+ * A function rather than a table because every input varies PER TRACK: the view
+ * each track is showing, the instrument whose string count an edit lane draws (a
+ * bass lane is four rows where a guitar lane is six), and what that track's rack
+ * last measured. `laneRects` remains the only thing that may decide where the
+ * next lane starts.
  *
  * Pure, and deliberately parameterised by callbacks rather than handed the
- * stores: jsdom has no layout, so geometry is only testable while it is a plain
- * function of plain values.
+ * stores or the DOM: jsdom has no layout, so geometry is only testable while it
+ * is a plain function of plain values. THIS never measures anything; it is
+ * handed the number.
  */
 export function laneHeightResolver({
   viewOf: viewOfTrack,
   instrumentOf,
-  voiceCollapsed,
+  voiceRackHeight,
 }: {
   viewOf: (trackId: string) => ArrangementMode;
   instrumentOf: (trackId: string) => string;
-  voiceCollapsed: (trackId: string) => boolean;
+  /**
+   * The last measured border-box height of this track's rack, or 0 when nothing
+   * has measured it yet.
+   *
+   * 0 is "not measured", never "a zero-height lane" — an unmeasured rack simply
+   * loses the `max` to the header and the lane opens at
+   * {@link TRACK_HEADER_HEIGHT} until the first observation arrives. That is the
+   * fallback, and it is the same number a folded rack settles at, so the first
+   * frame of an open rack is a short lane rather than a missing one.
+   */
+  voiceRackHeight: (trackId: string) => number;
 }): (track: LaneTrack) => number {
   return (track) => {
     const view = viewOfTrack(track.id);
+    return Math.max(TRACK_HEADER_HEIGHT, contentHeight(view, track));
+  };
+
+  function contentHeight(view: ArrangementMode, track: LaneTrack): number {
     switch (view) {
       case 'pattern':
-        return DEFAULT_LANE_HEIGHTS.pattern;
+        return patternLaneContentHeight(laneStringCount(instrumentOf(track.id)));
       case 'edit':
         return editLaneHeight(laneStringCount(instrumentOf(track.id)));
-      case 'voice':
-        return voiceCollapsed(track.id)
-          ? COLLAPSED_VOICE_LANE_HEIGHT
-          : DEFAULT_LANE_HEIGHTS.voice;
+      case 'voice': {
+        const measured = voiceRackHeight(track.id);
+        return Number.isFinite(measured) ? Math.max(0, measured) : 0;
+      }
       default: {
         // Every view is named above, so a fourth member of `ARRANGEMENT_MODES`
-        // fails to compile HERE rather than quietly drawing itself at pattern's
-        // height — which is a wrong lane nothing on screen announces. The
-        // `never` binding is the whole mechanism; the return keeps the arrow
-        // total.
+        // fails to compile HERE rather than quietly drawing itself at the
+        // header's height — which is a wrong lane nothing on screen announces.
+        // The `never` binding is the whole mechanism; returning it keeps the
+        // function total (`never` is assignable to `number`).
         const unreachable: never = view;
-        return DEFAULT_LANE_HEIGHTS[unreachable];
+        return unreachable;
       }
     }
-  };
+  }
 }
 
 // ------------------------------------------------------------- placements ---
@@ -969,9 +1024,19 @@ export function planGroupMove(
  */
 export interface EditableSpan {
   readonly placementId: string;
-  /** LANE-LOCAL box to draw and clip the surface into — `PlacementBlock`'s
-   *  frame, for `PlacementBlock`'s reason: the lane element is already
-   *  positioned. */
+  /**
+   * LANE-LOCAL box to draw and clip the surface into — `PlacementBlock`'s
+   * frame, for `PlacementBlock`'s reason: the lane element is already
+   * positioned.
+   *
+   * Its HEIGHT is the string rows' content height (`editLaneHeight`), NOT the
+   * lane's, and its `top` is the slack between the two, halved. The lane can be
+   * taller than its content — a four-string bass lane is 128 of content in a 143
+   * lane, because the header wins the `max` — and dividing the whole lane into
+   * four rows would put the bass at a 35.75 px pitch beside a guitar lane's 32.
+   * The rows keep their pitch and the lane's spare room becomes symmetric
+   * padding above and below them. See `EDIT_STRING_ROW_PX`.
+   */
   readonly rect: Rect;
   /**
    * How long the window is, in the SNAPSHOT's ticks — nothing may be written
@@ -1005,15 +1070,30 @@ export interface EditableSpan {
  * A zero-width span is dropped rather than mounted: a surface with no width has
  * no row to press and no note that can be told from its neighbour, and it would
  * still cost a mounted component per placement.
+ *
+ * `stringCount` is the TRACK's, and it is what decides the span's height — see
+ * {@link EditableSpan.rect}. Passing the lane's own height as the content height
+ * was correct only while `editLaneHeight` made every edit lane exactly
+ * `32 × strings`; under `max(header, content)` it no longer does.
  */
 export function editableSpans(
   track: PlacedTrack,
   pxPerBeat: number,
   laneHeight: number,
+  stringCount: number,
 ): EditableSpan[] {
+  const contentHeight = editLaneHeight(stringCount);
+  // Negative slack is impossible through `laneHeightResolver` (the lane is the
+  // max of the two), but `laneHeight` is a caller's number and a span pushed
+  // half its own height above the lane would be worse than a flush one. A
+  // non-finite one is the case `Math.max` does NOT catch — `NaN` loses every
+  // comparison, so it would come back out and become a `NaN` `rect.top`.
+  const offsetTop = Number.isFinite(laneHeight)
+    ? Math.max(0, (laneHeight - contentHeight) / 2)
+    : 0;
   const spans: EditableSpan[] = [];
   for (const placement of track.placements) {
-    const rect = placementRepeatRects(placement, pxPerBeat, 0, laneHeight)[0];
+    const rect = placementRepeatRects(placement, pxPerBeat, offsetTop, contentHeight)[0];
     if (rect === undefined || !(rect.width > 0)) continue;
     const windowTicks = placementEffectiveLength(placement);
     if (!(windowTicks > 0)) continue;
@@ -1194,9 +1274,11 @@ export function droppedByTranspose(placement: Placement): number {
  *  - `repeat` is honoured (that component drew one snapshot, always);
  *  - its six per-string guide `<line>`s are NOT drawn. That is a decision, not
  *    an oversight: they are 6 more nodes on every block on a page that can carry
- *    hundreds, and at 88 px lane height the strip is ~32 px — guides at that
- *    pitch read as a grey wash behind the name rather than as strings. A preview
- *    with notes on only two strings therefore floats, which is the accepted cost.
+ *    hundreds, and six of them behind the marks read as a grey wash behind the
+ *    name rather than as strings. A preview with notes on only two strings
+ *    therefore floats, which is the accepted cost. (The strip is no longer the
+ *    ~32 px this originally measured — it fills the block's whole band now — so
+ *    it is worth re-judging by eye rather than re-deciding from this note.)
  *
  * The two in-repo reuse candidates were checked and neither fits:
  *
@@ -1265,15 +1347,18 @@ export const MIN_PREVIEW_ROW_PX = 2;
 const PREVIEW_TOP_PX = 19;
 const PREVIEW_BOTTOM_PX = 17;
 
-/** Past this the preview starts to look like the content rather than a hint at
- *  it. A pattern lane is 88 px tall; without a cap the strip would be over half
- *  the block and compete with the name. */
-const MAX_PREVIEW_HEIGHT = 32;
-
 /** Blank space above and below each mark inside its row, so adjacent strings
  *  stay legible as separate rows. Exported because the row pitch a caller (or a
  *  test) can observe is `mark.height + 2 × this`, and restating the literal is
- *  how an assertion quietly stops testing what it names. */
+ *  how an assertion quietly stops testing what it names.
+ *
+ *  ⚠ CHOSEN AGAINST THE CAPPED STRIP and not re-judged since: 0.5 was 9% of the
+ *  5.33 px pitch a 32 px strip gave six strings, and it is 2.8% of the ~17.8 the
+ *  filled band gives them. Six sustained notes may now read as one slab rather
+ *  than six rows. A look question, so it is on milestone 2's browser checklist
+ *  (item 5) rather than guessed at here; the fix if it shows is a PROPORTIONAL
+ *  gap (`rowHeight × 0.08`, floored at this), not the cap back. `previewMarks`'
+ *  "positive by construction" argument holds either way. */
 export const PREVIEW_ROW_GAP_PX = 0.5;
 
 /** A 16th note at the coarsest zoom is under a pixel wide. Marks get a floor so
@@ -1342,10 +1427,17 @@ export function previewMarks(
   const { strings, frets } = snapshotNeck(placement);
   if (!(strings > 0)) return [];
 
-  const band = blockHeight - PREVIEW_TOP_PX - PREVIEW_BOTTOM_PX;
-  const stripHeight = Math.min(band, MAX_PREVIEW_HEIGHT);
+  // THE STRIP IS THE WHOLE BAND. It used to be capped at 32 px total — ~5.3 px
+  // per string in a 143 px lane — on the reasoning that a preview taller than
+  // that competes with the block's name; that reasoning was written when a
+  // pattern lane was 88 px tall. Under `max(header, content)` the block is given
+  // a lane the header's size and the content FILLS it rather than floating in
+  // the middle of it. The name and the badges are still not competed with: their
+  // rows are subtracted out first, which is what `PREVIEW_TOP_PX` and
+  // `PREVIEW_BOTTOM_PX` are.
+  const stripHeight = blockHeight - PREVIEW_TOP_PX - PREVIEW_BOTTOM_PX;
   if (stripHeight < strings * MIN_PREVIEW_ROW_PX) return [];
-  const stripTop = PREVIEW_TOP_PX + (band - stripHeight) / 2;
+  const stripTop = PREVIEW_TOP_PX;
   const rowHeight = stripHeight / strings;
   // Positive by construction: the row floor above is wider than both gaps, so
   // there is no clamp here and no case where one would silently fire.

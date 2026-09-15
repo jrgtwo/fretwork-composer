@@ -15,7 +15,7 @@ import {
   ARRANGEMENT_ZOOM_LEVELS,
   DEFAULT_ARRANGEMENT_SNAP_ID,
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
-  DEFAULT_LANE_HEIGHTS,
+  TRACK_HEADER_HEIGHT,
   arrangementSnap,
   droppedByTranspose,
   laneRects,
@@ -81,10 +81,12 @@ import { installFrameClock } from './frameClock';
  */
 
 const PX = ARRANGEMENT_ZOOM_LEVELS[DEFAULT_ARRANGEMENT_ZOOM_INDEX];
-// One global mode still, so every lane is pattern's height. `laneRects` takes a
-// per-track callback because the page is growing per-track views.
+// One global mode still, so every lane is a pattern lane — which under
+// `max(header, content)` is the track header's height, a block's own content
+// minimum being ~48. `laneRects` takes a per-track callback because the page is
+// growing per-track views.
 const patternLanes = (tracks: readonly { id: string }[]) =>
-  laneRects(tracks, () => DEFAULT_LANE_HEIGHTS.pattern);
+  laneRects(tracks, () => TRACK_HEADER_HEIGHT);
 const LANE_HEIGHT = patternLanes([{ id: 'probe' }])[0].height;
 
 beforeEach(() => {

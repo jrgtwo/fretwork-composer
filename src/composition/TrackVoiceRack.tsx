@@ -2,11 +2,14 @@
  * One track's voice, drawn as a rack across its lane — voice mode's answer to
  * "what does a lane draw".
  *
- * ⚠ THE LANE IS A FIXED-HEIGHT VIEWPORT since COMPS-TRACK-TABS milestone 2
- * (`DEFAULT_LANE_HEIGHTS.voice`, applied in `ArrangementGrid`'s sticky voice
- * layer): this scrolls INSIDE it rather than making the row as tall as itself.
- * Prose below that says the row is sized by this content is CP-16's and is no
- * longer true.
+ * ⚠ THIS COMPONENT'S BOX IS WHAT THE LANE IS MEASURED FROM. `ArrangementGrid`
+ * wraps the root div below in a deliberately unstyled element carrying
+ * `data-voice-rack` and hands it to a `ResizeObserver`; the row's height is that
+ * border box (floored at `TRACK_HEADER_HEIGHT`). So the root must stay
+ * HEIGHT-LESS and OVERFLOW-LESS — give it an `h-full` or an `overflow-y-auto`
+ * and it reports the row's height back to the thing that set it, which is a
+ * loop, not a lane. Milestone 2's fixed-height viewport, which this scrolled
+ * inside, is gone; the row follows this, never the other way round.
  *
  * ⚠ THE EDITOR ITSELF IS `voice/VoiceEditor`, which the pattern page renders
  * too. This file is the composition page's chrome around it: the rack's own
@@ -144,11 +147,11 @@ export function TrackVoiceRack({
   if (!preset) return null;
 
   return (
-    // Normal flow, no height of its own — but the caller's box HAS one since
-    // COMPS-TRACK-TABS milestone 2, so what this grows past is scrolled rather
-    // than shown. CP-16's arrangement, where the row was as tall as this is, is
-    // gone; a viewport cannot come up short of its content, which is what made
-    // the swap safe.
+    // THE OBSERVED BOX (through the unstyled wrapper `ArrangementGrid` puts
+    // around it). Normal flow, no height of its own and nothing clipped, so
+    // what it lays out at IS what the row is set to — folding a stage shrinks
+    // this, the observer fires, and the lane and everything under it move up.
+    // See the header: an `h-full` or an inner scroller here breaks that.
     <div className="flex flex-col gap-1 p-1">
       <div className="flex flex-none items-center gap-1.5">
         <button

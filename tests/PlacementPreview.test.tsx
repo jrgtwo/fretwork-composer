@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { PPQ, createEmptyPattern, ticksPerBar, type PatternEvent, type Placement } from '@fretwork/lib';
 import { PlacementBlock } from '../src/composition/PlacementBlock';
 import {
-  DEFAULT_LANE_HEIGHTS,
+  TRACK_HEADER_HEIGHT,
   MIN_PREVIEW_WIDTH,
   placementRect,
   previewMarks,
@@ -24,7 +24,7 @@ import {
 
 const BAR = ticksPerBar({ numerator: 4, denominator: 4 });
 const PX_PER_BEAT = 48;
-const BLOCK_H = DEFAULT_LANE_HEIGHTS.pattern;
+const BLOCK_H = TRACK_HEADER_HEIGHT;
 
 function note(over: Partial<PatternEvent> & { id: string }): PatternEvent {
   return { stringIndex: 0, fret: 5, startTick: 0, durationTicks: PPQ, ...over };

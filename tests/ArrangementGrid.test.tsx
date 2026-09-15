@@ -78,11 +78,10 @@ const MODE: ArrangementMode = 'pattern';
  * The lane stack this component is expected to draw for one global mode.
  *
  * Built through `laneHeightResolver` with the same three inputs the component
- * hands it, rather than through the flat `DEFAULT_LANE_HEIGHTS` table: an edit
- * lane is sized by its OWN track's string count, so a table agrees with the
- * component only for as long as every seeded track happens to be a six-string.
- * Mirroring the resolver means a per-track height regression fails here instead
- * of waiting for someone to seed a bass.
+ * hands it, rather than through a table of per-view heights: there is no such
+ * table any more (a lane is `max(header, content)`), and an edit lane is sized
+ * by its OWN track's string count. Mirroring the resolver means a per-track
+ * height regression fails here instead of waiting for someone to seed a bass.
  */
 const modeLanes = (tracks: readonly Track[], mode: ArrangementMode) =>
   laneRects(
@@ -93,9 +92,12 @@ const modeLanes = (tracks: readonly Track[], mode: ArrangementMode) =>
         const track = tracks.find((candidate) => candidate.id === trackId);
         return track ? trackInstrumentId(track) : '';
       },
-      // No rack is collapsed in these tests, and voice mode draws no lanes at
-      // all before milestone 2, so this is never consulted.
-      voiceCollapsed: () => false,
+      // `tests/setup.ts` installs a `ResizeObserver` stub whose `observe`
+      // never fires, and every box in jsdom is 0×0, so no rack is ever measured
+      // in this file — a voice lane falls to the header's height, which is
+      // exactly what the component computes here. `tests/VoiceMode.test.tsx`
+      // swaps in a FIRING stub where the measured path itself is pinned.
+      voiceRackHeight: () => 0,
     }),
   );
 const PX_PER_BEAT = ARRANGEMENT_ZOOM_LEVELS[DEFAULT_ARRANGEMENT_ZOOM_INDEX];

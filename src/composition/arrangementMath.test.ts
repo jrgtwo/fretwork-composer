@@ -14,15 +14,14 @@ import { DEFAULT_ZOOM_INDEX, ZOOM_LEVELS, snapOptions } from '../timeline/timeli
 import {
   ARRANGEMENT_MODES,
   ARRANGEMENT_ZOOM_LEVELS,
-  COLLAPSED_VOICE_LANE_HEIGHT,
   DEFAULT_ARRANGEMENT_SNAP_ID,
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
-  DEFAULT_LANE_HEIGHTS,
   MAJOR_DIVISION_BARS,
   EDIT_STRING_ROW_PX,
   MIN_PREVIEW_ROW_PX,
   MIN_PREVIEW_WIDTH,
   PREVIEW_ROW_GAP_PX,
+  TRACK_HEADER_HEIGHT,
   TRIM_HANDLE_PX,
   arrangementBars,
   arrangementSnap,
@@ -39,6 +38,7 @@ import {
   laneRects,
   laneStringCount,
   lanesHeight,
+  patternLaneContentHeight,
   placementDrifted,
   placementRect,
   placementRepeatRects,
@@ -73,8 +73,8 @@ const TS_7_8: PatternTimeSignature = { numerator: 7, denominator: 8 };
  *
  * Voice is back in it. CP-16 took it out because its rows were normal flow with
  * no height any pure function could know; COMPS-TRACK-TABS gives it a lane again
- * because its height is now a VIEWPORT the rack scrolls inside rather than a
- * prediction of the rack's content — see `DEFAULT_LANE_HEIGHTS`.
+ * because the rack's height is MEASURED and handed to the resolver, rather than
+ * predicted from its content — see `laneHeightResolver`.
  */
 const MODES = ARRANGEMENT_MODES;
 
@@ -96,11 +96,12 @@ function track(id: string, placements: Placement[] = []): PlacedTrack {
   return { id, placements };
 }
 
-/** The default stack: every track on pattern's lane height. `laneRects` takes a
- *  per-track callback now, and most of this file cares about the geometry rather
- *  than about where a height came from. */
+/** The default stack: every track on a pattern lane, which under
+ *  `max(header, content)` is the header's height. `laneRects` takes a per-track
+ *  callback, and most of this file cares about the geometry rather than about
+ *  where a height came from. */
 const patternLanes = (tracks: readonly LaneTrack[]): LaneRect[] =>
-  laneRects(tracks, () => DEFAULT_LANE_HEIGHTS.pattern);
+  laneRects(tracks, () => TRACK_HEADER_HEIGHT);
 
 /** Deterministic pseudo-random so a failure is reproducible; property tests here
  *  are about covering the space, not about randomness. */
@@ -303,14 +304,17 @@ describe('ruler marks', () => {
 describe('lane rects', () => {
   const tracks = [track('a'), track('b'), track('c')];
 
-  // Every view's default height walked in ONE stack rather than three identical
-  // runs of the same assertion: the mode no longer reaches `laneRects`, so an
-  // `it.each` over the modes was three copies of one constant-height column.
-  // A mixed stack exercises the stacker harder and still indexes
-  // `DEFAULT_LANE_HEIGHTS` per mode, so a fourth view fails to compile here.
+  // Three different heights walked in ONE stack rather than three identical runs
+  // of the same assertion: the mode no longer reaches `laneRects`, so an
+  // `it.each` over the modes was three copies of one constant-height column. A
+  // mixed stack exercises the stacker harder. The table is LOCAL — there is no
+  // per-view height table in the module any more — but typed
+  // `Record<ArrangementMode, number>`, so a fourth view still fails to compile
+  // here.
   it('stacks lanes with no gap and no overlap, at whatever heights it is given', () => {
     const modeTracks = MODES.map((mode) => track(mode));
-    const heights = new Map(MODES.map((mode) => [mode, DEFAULT_LANE_HEIGHTS[mode]]));
+    const table: Record<ArrangementMode, number> = { pattern: 143, edit: 192, voice: 412 };
+    const heights = new Map(MODES.map((mode) => [mode, table[mode]]));
     const lanes = laneRects(modeTracks, (t) => heights.get(t.id as ArrangementMode) ?? 0);
 
     expect(lanes.map((lane) => lane.trackId)).toEqual([...MODES]);
@@ -330,13 +334,11 @@ describe('lane rects', () => {
     ]);
   });
 
-  // Pattern is the fallback because pattern is the default view: a lane whose
-  // height cannot be worked out lands on the one every track starts in, rather
-  // than on a zero-height row nothing can be clicked in to fix it.
-  it('falls back to the pattern height rather than producing a NaN lane', () => {
-    expect(laneRects([track('a')], () => Number.NaN)[0].height).toBe(
-      DEFAULT_LANE_HEIGHTS.pattern,
-    );
+  // The HEADER is the fallback: a lane whose height cannot be worked out still
+  // has to hold its header, rather than collapse to a row nothing can be clicked
+  // in to fix it.
+  it('falls back to the track header height rather than producing a NaN lane', () => {
+    expect(laneRects([track('a')], () => Number.NaN)[0].height).toBe(TRACK_HEADER_HEIGHT);
     expect(laneRects([track('a')], () => -10)[0].height).toBe(0);
   });
 
@@ -350,7 +352,7 @@ describe('lane rects', () => {
     ]);
     expect(
       laneRects([track('a'), track('b')], () => Number.NaN).map((lane) => lane.top),
-    ).toEqual([0, DEFAULT_LANE_HEIGHTS.pattern]);
+    ).toEqual([0, TRACK_HEADER_HEIGHT]);
   });
 
   // lanesHeight is exported and callers hand-build lane arrays (the orphan-lane
@@ -368,7 +370,7 @@ describe('lane rects', () => {
     expect(patternLanes([])).toEqual([]);
     expect(lanesHeight([])).toBe(0);
     const eight = Array.from({ length: 8 }, (_, i) => track(`t${i}`));
-    expect(lanesHeight(patternLanes(eight))).toBe(8 * DEFAULT_LANE_HEIGHTS.pattern);
+    expect(lanesHeight(patternLanes(eight))).toBe(8 * TRACK_HEADER_HEIGHT);
   });
 
   // Half-open rects: a y on a boundary belongs to exactly one lane. Closed rects
@@ -1027,8 +1029,9 @@ describe('planGroupMove', () => {
 
 describe('previewMarks', () => {
   const bar = ticksPerBar(TS_4_4);
-  /** Tall enough for the pattern lane's real block (`DEFAULT_LANE_HEIGHTS.pattern`). */
-  const BLOCK_H = DEFAULT_LANE_HEIGHTS.pattern;
+  /** A real pattern lane's block: `max(header, content)` on a pattern lane is the
+   *  header, because a block's own minimum is ~48. */
+  const BLOCK_H = TRACK_HEADER_HEIGHT;
   /** 4 beats × 48 px = a 192 px block, comfortably over `MIN_PREVIEW_WIDTH`. */
   const PX = 48;
   const GUITAR_STRINGS = 6;
@@ -1346,6 +1349,39 @@ describe('previewMarks', () => {
       expect(drew).toBeGreaterThan(0);
     });
 
+    // ⚠ CHANGED BEHAVIOUR. The strip used to be capped at `MAX_PREVIEW_HEIGHT`
+    // = 32 px TOTAL — about 5.3 px per string in a 143 px lane — on the
+    // reasoning that a taller preview competes with the block's name. That
+    // reasoning was written when a pattern lane was 88 px. The block now FILLS
+    // the lane the header's height gives it, so the strip is the whole band.
+    it('fills the block’s whole band, so a taller block draws taller rows', () => {
+      const subject = riff(
+        Array.from({ length: GUITAR_STRINGS }, (_, stringIndex) =>
+          note({ id: `s${stringIndex}`, stringIndex }),
+        ),
+      );
+      const rowPitch = (height: number) => {
+        const marks = previewMarks(subject, PX, height);
+        expect(marks).toHaveLength(GUITAR_STRINGS);
+        const tops = marks.map((mark) => mark.top).sort((a, b) => a - b);
+        return tops[1] - tops[0];
+      };
+
+      // The band is the block minus the name row and the badge row, split six
+      // ways — at 143 that is well over the 32 px the whole strip used to be.
+      const band = BLOCK_H - 19 - 17;
+      expect(rowPitch(BLOCK_H)).toBeCloseTo(band / GUITAR_STRINGS, 6);
+      expect(rowPitch(BLOCK_H) * GUITAR_STRINGS).toBeGreaterThan(32);
+      // Monotonic in the block's height, which is what "fills" means.
+      expect(rowPitch(2 * BLOCK_H)).toBeGreaterThan(rowPitch(BLOCK_H));
+      // And it starts directly under the name rather than floating in the middle
+      // of the band, which is where the centred cap used to put it.
+      const [top] = previewMarks(subject, PX, BLOCK_H)
+        .map((mark) => mark.top)
+        .sort((a, b) => a - b);
+      expect(top).toBeCloseTo(19 + PREVIEW_ROW_GAP_PX, 6);
+    });
+
     it('lets a four-string bass preview in a strip a guitar cannot use', () => {
       const events = [note({ id: 'a' })];
       const guitar = riff(events);
@@ -1429,10 +1465,13 @@ function sourcePattern(fret: number): Pattern {
 
 describe('edit lane heights', () => {
   it('puts a six-string lane on the figure the mode was sized for', () => {
-    // The table CP-04 wrote and the per-string figure CP-11 derives from it are
-    // the same number by construction, not by two people agreeing.
-    expect(editLaneHeight(6)).toBe(DEFAULT_LANE_HEIGHTS.edit);
-    expect(EDIT_STRING_ROW_PX * 6).toBe(DEFAULT_LANE_HEIGHTS.edit);
+    // 192 is now a CONSEQUENCE of the 32 px row pitch rather than its source —
+    // the derivation inverted when the per-view height table was deleted — so
+    // the literal is what this pins. Against `EDIT_STRING_ROW_PX * 6` alone it
+    // would be comparing the implementation to itself.
+    expect(EDIT_STRING_ROW_PX).toBe(32);
+    expect(EDIT_STRING_ROW_PX * 6).toBe(192);
+    expect(editLaneHeight(6)).toBe(192);
   });
 
   it('gives a bass lane four rows at the same pitch, not six squeezed rows', () => {
@@ -1443,7 +1482,9 @@ describe('edit lane heights', () => {
   });
 
   it('falls back rather than producing NaN or a zero-height lane', () => {
-    expect(editLaneHeight(Number.NaN)).toBe(DEFAULT_LANE_HEIGHTS.edit);
+    // The catalog's own default instrument — six strings, so 192, the same
+    // number the old `DEFAULT_LANE_HEIGHTS.edit` fallback produced.
+    expect(editLaneHeight(Number.NaN)).toBe(6 * EDIT_STRING_ROW_PX);
     expect(editLaneHeight(0)).toBe(EDIT_STRING_ROW_PX);
     expect(editLaneHeight(-3)).toBe(EDIT_STRING_ROW_PX);
   });
@@ -1460,18 +1501,33 @@ describe('edit lane heights', () => {
       laneHeightResolver({
         viewOf: () => view,
         instrumentOf: (id) => (id === 'bass-track' ? 'bass' : 'guitar'),
-        voiceCollapsed: () => false,
+        voiceRackHeight: () => 0,
       });
 
     const edit = laneRects(tracks, resolver('edit'));
-    expect(edit.map((lane) => lane.height)).toEqual([editLaneHeight(4), editLaneHeight(6)]);
+    // The bass lane is NOT `editLaneHeight(4)` any more: 128 of content loses
+    // the `max` to the 143 px header. Its ROWS are still four 32s — that is
+    // `editableSpans`' business, and is pinned there.
+    expect(edit.map((lane) => lane.height)).toEqual([TRACK_HEADER_HEIGHT, editLaneHeight(6)]);
     // Stacked, so the guitar lane starts where the bass lane ends.
-    expect(edit[1].top).toBe(editLaneHeight(4));
+    expect(edit[1].top).toBe(TRACK_HEADER_HEIGHT);
 
     expect(laneRects(tracks, resolver('pattern')).map((lane) => lane.height)).toEqual([
-      DEFAULT_LANE_HEIGHTS.pattern,
-      DEFAULT_LANE_HEIGHTS.pattern,
+      TRACK_HEADER_HEIGHT,
+      TRACK_HEADER_HEIGHT,
     ]);
+  });
+
+  // The pattern arm of the max, stated on its own: a block's content minimum is
+  // far under the header, which is WHY a pattern lane is 143. It used to be 143
+  // because somebody typed 143.
+  it('makes a pattern block’s own minimum far shorter than the header', () => {
+    expect(patternLaneContentHeight(6)).toBe(48);
+    expect(patternLaneContentHeight(4)).toBe(44);
+    expect(patternLaneContentHeight(6)).toBeLessThan(TRACK_HEADER_HEIGHT);
+    // Unusable counts land on the catalog's default instrument rather than NaN.
+    expect(patternLaneContentHeight(Number.NaN)).toBe(patternLaneContentHeight(6));
+    expect(patternLaneContentHeight(0)).toBe(patternLaneContentHeight(1));
   });
 });
 
@@ -1550,15 +1606,13 @@ describe('timed bands', () => {
 });
 
 describe('lane height resolver', () => {
-  // NOT TESTED, deliberately: that `DEFAULT_LANE_HEIGHTS.voice` is a comfortable
-  // amount of rack to see, or that the `lane.height` a voice track's header is
-  // now drawn at leaves room for the mute, the solo, the fader and CP-13's voice
-  // picker. (That second question used to be asked of `VOICE_HEADER_HEIGHT`,
-  // which COMPS-TRACK-TABS milestone 2 deleted along with the normal-flow voice
-  // subtree that was its only consumer.) jsdom has no layout.
-  // What CAN be stated here is that the number is a viewport rather than a
-  // measurement: nothing below derives it from a rack's content, which is the
-  // property that makes CP-14's ~40 px shortfall unreachable.
+  // ⚠ WHAT jsdom CANNOT SEE, and so what is NOT tested here: that a 143 px
+  // header strip is enough room for the mute, the solo, the fader, pan, the
+  // three meter rows and CP-13's voice picker, or that any of these heights look
+  // right. Every box in jsdom is 0×0. What CAN be stated is the RULE — a lane is
+  // `max(header, content)` — and that the voice arm is handed its number rather
+  // than deriving one from a rack's sections, which is the property that keeps
+  // CP-14's ~40 px shortfall unreachable.
 
   // Rebuilt per test rather than shared across the describe: every test below
   // happens to write every id it reads, so the suite is order-independent by
@@ -1568,46 +1622,90 @@ describe('lane height resolver', () => {
     views = {};
   });
 
-  const resolve = (collapsed: readonly string[] = []) =>
+  /** `racks` is what a `ResizeObserver` would have written — an id with no entry
+   *  has never been measured, which is 0. */
+  const resolve = (racks: Readonly<Record<string, number>> = {}) =>
     laneHeightResolver({
       viewOf: (id) => views[id] ?? 'pattern',
       instrumentOf: (id) => (id.startsWith('bass') ? 'bass' : 'guitar'),
-      voiceCollapsed: (id) => collapsed.includes(id),
+      voiceRackHeight: (id) => racks[id] ?? 0,
     });
 
-  it('gives each view its own height, and edit its own track’s string count', () => {
-    views['p'] = 'pattern';
-    views['e'] = 'edit';
-    views['bass-e'] = 'edit';
-    views['v'] = 'voice';
-    const height = resolve();
+  describe('the max rule, one arm at a time', () => {
+    it('gives a pattern lane the HEADER: its block needs ~48 and the header 143', () => {
+      views['p'] = 'pattern';
+      views['bass-p'] = 'pattern';
+      expect(resolve()({ id: 'p' })).toBe(143);
+      expect(resolve()({ id: 'p' })).toBe(TRACK_HEADER_HEIGHT);
+      // Even a four-string block, whose own minimum is smaller still.
+      expect(resolve()({ id: 'bass-p' })).toBe(TRACK_HEADER_HEIGHT);
+    });
 
-    expect(height({ id: 'p' })).toBe(DEFAULT_LANE_HEIGHTS.pattern);
-    expect(height({ id: 'e' })).toBe(DEFAULT_LANE_HEIGHTS.edit);
-    // The whole point of the per-track callback: a four-string lane is four rows
-    // at the same pitch, not a six-string lane squashed.
-    expect(height({ id: 'bass-e' })).toBe(editLaneHeight(4));
-    expect(height({ id: 'bass-e' })).toBe(128);
-    expect(height({ id: 'v' })).toBe(DEFAULT_LANE_HEIGHTS.voice);
-  });
+    it('gives a six-string edit lane its CONTENT: 192 beats the header', () => {
+      views['e'] = 'edit';
+      expect(resolve()({ id: 'e' })).toBe(192);
+      expect(resolve()({ id: 'e' })).toBe(editLaneHeight(6));
+      expect(editLaneHeight(6)).toBeGreaterThan(TRACK_HEADER_HEIGHT);
+    });
 
-  it('folds a voice lane back to the header strip when its rack is collapsed', () => {
-    views['v'] = 'voice';
-    // Pinned to the LITERAL as well as to the constant. Against the constant
-    // alone this compares the implementation to the thing the implementation
-    // returns, and re-pointing `COLLAPSED_VOICE_LANE_HEIGHT` at any other
-    // number would leave every folded rack the wrong height with the suite
-    // still green.
-    expect(resolve(['v'])({ id: 'v' })).toBe(143);
-    expect(resolve(['v'])({ id: 'v' })).toBe(COLLAPSED_VOICE_LANE_HEIGHT);
-    // And it is the HEADER STRIP's height, derived from pattern's lane rather
-    // than a second copy of the number.
-    expect(COLLAPSED_VOICE_LANE_HEIGHT).toBe(DEFAULT_LANE_HEIGHTS.pattern);
-    expect(resolve(['other'])({ id: 'v' })).toBe(DEFAULT_LANE_HEIGHTS.voice);
+    it('gives a four-string edit lane the HEADER: 128 of content loses to 143', () => {
+      views['bass-e'] = 'edit';
+      expect(editLaneHeight(4)).toBe(128);
+      expect(resolve()({ id: 'bass-e' })).toBe(TRACK_HEADER_HEIGHT);
+      // The bass-vs-guitar pair in one sentence: two different views of the
+      // rule, not two hand-chosen numbers.
+      views['e'] = 'edit';
+      expect(resolve()({ id: 'e' })).toBeGreaterThan(resolve()({ id: 'bass-e' }));
+    });
+
+    it('gives an open voice lane its MEASURED rack', () => {
+      views['v'] = 'voice';
+      expect(resolve({ v: 900 })({ id: 'v' })).toBe(900);
+      // No cap, and nothing clipped: the 360 px viewport this replaced meant
+      // three open racks were three nested scrollbars.
+      expect(resolve({ v: 2400 })({ id: 'v' })).toBe(2400);
+    });
+
+    it('gives a FOLDED voice lane the header, with no special case for it', () => {
+      views['v'] = 'voice';
+      // A folded rack measures the name strip and nothing else. The old
+      // `COLLAPSED_VOICE_LANE_HEIGHT` constant is now this — the general rule
+      // reaching the same number — so a folded rack at 34 px and an unmeasured
+      // one at 0 land in the same place.
+      expect(resolve({ v: 34 })({ id: 'v' })).toBe(TRACK_HEADER_HEIGHT);
+      expect(resolve({ v: 34 })({ id: 'v' })).toBe(143);
+    });
+
+    it('treats an unmeasured or nonsense rack as the header, never as a zero lane', () => {
+      views['v'] = 'voice';
+      // The suite's world: `tests/setup.ts`'s `ResizeObserver` stub never
+      // fires and every box is 0×0, so this is the height a component test
+      // sees. A voice lane must still be clickable.
+      expect(resolve()({ id: 'v' })).toBe(TRACK_HEADER_HEIGHT);
+      expect(resolve({ v: 0 })({ id: 'v' })).toBe(TRACK_HEADER_HEIGHT);
+      expect(resolve({ v: -40 })({ id: 'v' })).toBe(TRACK_HEADER_HEIGHT);
+      expect(resolve({ v: Number.NaN })({ id: 'v' })).toBe(TRACK_HEADER_HEIGHT);
+      // An infinite measurement is nonsense rather than a very tall rack, and it
+      // is caught HERE rather than left to `laneRects`' own guard — that one
+      // would clamp the lane but `lanesHeight` would already have gone to
+      // Infinity through it.
+      expect(resolve({ v: Number.POSITIVE_INFINITY })({ id: 'v' })).toBe(
+        TRACK_HEADER_HEIGHT,
+      );
+    });
+
+    it('never returns less than the header, whatever the view', () => {
+      for (const view of MODES) {
+        views['t'] = view;
+        views['bass-t'] = view;
+        expect(resolve()({ id: 't' })).toBeGreaterThanOrEqual(TRACK_HEADER_HEIGHT);
+        expect(resolve()({ id: 'bass-t' })).toBeGreaterThanOrEqual(TRACK_HEADER_HEIGHT);
+      }
+    });
   });
 
   it('treats a track it has never heard of as pattern, like `viewOf` does', () => {
-    expect(resolve()({ id: 'never-set' })).toBe(DEFAULT_LANE_HEIGHTS.pattern);
+    expect(resolve()({ id: 'never-set' })).toBe(TRACK_HEADER_HEIGHT);
   });
 
   // The two halves of this milestone joined: the resolver driven by the real
@@ -1622,15 +1720,15 @@ describe('lane height resolver', () => {
     const height = laneHeightResolver({
       viewOf: (id) => viewOf(map, 'c1', id),
       instrumentOf: (id) => (id.startsWith('bass') ? 'bass' : 'guitar'),
-      voiceCollapsed: () => false,
+      voiceRackHeight: (id) => (id === 'two' ? 640 : 0),
     });
 
-    expect(height({ id: 'one' })).toBe(DEFAULT_LANE_HEIGHTS.pattern);
-    expect(height({ id: 'two' })).toBe(DEFAULT_LANE_HEIGHTS.voice);
-    expect(height({ id: 'bass-three' })).toBe(editLaneHeight(4));
+    expect(height({ id: 'one' })).toBe(TRACK_HEADER_HEIGHT);
+    expect(height({ id: 'two' })).toBe(640);
+    expect(height({ id: 'bass-three' })).toBe(TRACK_HEADER_HEIGHT);
     // Back to pattern deletes the entry; the height has to follow it back.
     map = setTrackView(map, 'c1', 'two', 'pattern');
-    expect(height({ id: 'two' })).toBe(DEFAULT_LANE_HEIGHTS.pattern);
+    expect(height({ id: 'two' })).toBe(TRACK_HEADER_HEIGHT);
   });
 
   // The assertion this whole milestone exists to make possible: three views in
@@ -1642,19 +1740,21 @@ describe('lane height resolver', () => {
     views['bass-three'] = 'edit';
     const lanes = laneRects(
       [track('one'), track('two'), track('bass-three')],
-      resolve(),
+      resolve({ two: 520 }),
     );
 
     expect(lanes).toEqual([
       { trackId: 'one', top: 0, height: 143 },
-      { trackId: 'two', top: 143, height: 360 },
-      { trackId: 'bass-three', top: 503, height: 128 },
+      { trackId: 'two', top: 143, height: 520 },
+      // 128 of content in a 143 lane — the header wins, and `editableSpans`
+      // centres the rows in the slack.
+      { trackId: 'bass-three', top: 663, height: 143 },
     ]);
-    expect(lanesHeight(lanes)).toBe(631);
+    expect(lanesHeight(lanes)).toBe(806);
     // Half-open still holds across the seams between views.
     expect(laneAt(lanes, 143)?.trackId).toBe('two');
-    expect(laneAt(lanes, 502)?.trackId).toBe('two');
-    expect(laneAt(lanes, 503)?.trackId).toBe('bass-three');
+    expect(laneAt(lanes, 662)?.trackId).toBe('two');
+    expect(laneAt(lanes, 663)?.trackId).toBe('bass-three');
   });
 
   it('changes one lane, and the tops below it, when one track changes view', () => {
@@ -1662,15 +1762,30 @@ describe('lane height resolver', () => {
     views['two'] = 'pattern';
     const before = laneRects([track('one'), track('two')], resolve());
     views['one'] = 'voice';
-    const after = laneRects([track('one'), track('two')], resolve());
+    const after = laneRects([track('one'), track('two')], resolve({ one: 480 }));
 
-    expect(after[0].height).toBe(DEFAULT_LANE_HEIGHTS.voice);
+    expect(after[0].height).toBe(480);
     // The lane below moves down by the difference and keeps its own height:
     // a view is a property of one track, not of the column.
     expect(after[1].height).toBe(before[1].height);
-    expect(after[1].top - before[1].top).toBe(
-      DEFAULT_LANE_HEIGHTS.voice - DEFAULT_LANE_HEIGHTS.pattern,
-    );
+    expect(after[1].top - before[1].top).toBe(480 - TRACK_HEADER_HEIGHT);
+  });
+
+  // The behaviour the ResizeObserver exists for, in the only form jsdom can
+  // observe it: a rack that shrinks because a stage was folded shortens its own
+  // lane and pulls every lane below it up. The MEASUREMENT is the browser's; the
+  // arithmetic is this.
+  it('follows a rack that grows and shrinks, and moves the lanes below it', () => {
+    views['one'] = 'voice';
+    views['two'] = 'pattern';
+    const stack = (rack: number) =>
+      laneRects([track('one'), track('two')], resolve({ one: rack }));
+
+    expect(stack(900).map((lane) => lane.top)).toEqual([0, 900]);
+    expect(stack(420).map((lane) => lane.top)).toEqual([0, 420]);
+    // Folded past the header, the lane stops shrinking rather than clipping the
+    // header beside it.
+    expect(stack(30).map((lane) => lane.top)).toEqual([0, TRACK_HEADER_HEIGHT]);
   });
 });
 
@@ -1763,25 +1878,84 @@ describe('per-track view state', () => {
 
 describe('editableSpans', () => {
   const PX = 48;
+  /** A six-string lane: content 192, and `max(header, content)` gives it 192. */
+  const GUITAR_LANE = 192;
+  /** A four-string lane: content 128, but the 143 px header wins the max — so
+   *  the lane is 15 px taller than its rows, which is the whole point below. */
+  const BASS_LANE = TRACK_HEADER_HEIGHT;
 
   it('gives one span per placement, at the block’s own left edge and width', () => {
     const first = placement({ id: 'p1', startTick: 0 });
     const second = placement({ id: 'p2', startTick: 8 * PPQ });
-    const spans = editableSpans(track('t', [first, second]), PX, 192);
+    const spans = editableSpans(track('t', [first, second]), PX, GUITAR_LANE, 6);
 
     expect(spans.map((span) => span.placementId)).toEqual(['p1', 'p2']);
     for (const [index, span] of spans.entries()) {
       const source = [first, second][index];
       // Compared against a fresh call rather than a number copied in, so a
       // changed rect policy fails here instead of splitting the two silently.
-      expect(span.rect).toEqual(placementRect(source, PX, 0, 192));
+      expect(span.rect).toEqual(placementRect(source, PX, 0, GUITAR_LANE));
       expect(span.windowTicks).toBe(placementEffectiveLength(source));
     }
   });
 
+  // ⚠ THE ONE PLACE CONTENT DOES NOT STRETCH. A lane can be taller than its
+  // string rows, and edit's rows keep a constant 32 px pitch down the whole
+  // stack instead of growing to fill — a bass stretched to 35.75 would read as a
+  // different scale from the guitar lane above it. The slack becomes symmetric
+  // padding.
+  describe('centres its rows when the lane is taller than they are', () => {
+    it('gives a four-string bass its content height and half the slack above', () => {
+      const [span] = editableSpans(track('t', [placement({ id: 'p1' })]), PX, BASS_LANE, 4);
+
+      expect(span.rect.height).toBe(editLaneHeight(4));
+      expect(span.rect.height).toBe(128);
+      expect(span.rect.top).toBe((BASS_LANE - 128) / 2);
+      expect(span.rect.top).toBe(7.5);
+      // Symmetric: the same slack under it as over it.
+      expect(BASS_LANE - (span.rect.top + span.rect.height)).toBe(span.rect.top);
+      // The pitch is what all of this protects, and it is the guitar's.
+      expect(span.rect.height / 4).toBe(EDIT_STRING_ROW_PX);
+    });
+
+    it('leaves a six-string guitar flush, because its content IS the lane', () => {
+      const [span] = editableSpans(track('t', [placement({ id: 'p1' })]), PX, GUITAR_LANE, 6);
+
+      expect(span.rect.top).toBe(0);
+      expect(span.rect.height).toBe(GUITAR_LANE);
+      expect(span.rect.height / 6).toBe(EDIT_STRING_ROW_PX);
+    });
+
+    it('never pushes a span out of the top of a lane shorter than its rows', () => {
+      // Not reachable through `laneHeightResolver` — the lane is the max of the
+      // two — but `laneHeight` is a caller's number, and half a span hanging
+      // above the lane would be worse than a flush one.
+      const [span] = editableSpans(track('t', [placement({ id: 'p1' })]), PX, 40, 6);
+      expect(span.rect.top).toBe(0);
+      expect(span.rect.height).toBe(editLaneHeight(6));
+    });
+
+    it('lands a non-finite lane flush rather than at NaN', () => {
+      // The one bad number `Math.max` does NOT catch: `NaN` loses every
+      // comparison, so it comes back out of the clamp and becomes a `NaN`
+      // `top` — a span the browser positions nowhere at all, with no error.
+      // `laneRects` guards its own arm; this is the direct caller's.
+      for (const laneHeight of [Number.NaN, Number.POSITIVE_INFINITY]) {
+        const [span] = editableSpans(
+          track('t', [placement({ id: 'p1' })]),
+          PX,
+          laneHeight,
+          6,
+        );
+        expect(span.rect.top).toBe(0);
+        expect(span.rect.height).toBe(editLaneHeight(6));
+      }
+    });
+  });
+
   it('opens the window on the effective length, so a trimmed block edits short', () => {
     const trimmed = placement({ id: 'p1', lengthTicks: PPQ });
-    const [span] = editableSpans(track('t', [trimmed]), PX, 192);
+    const [span] = editableSpans(track('t', [trimmed]), PX, GUITAR_LANE, 6);
 
     expect(span.windowTicks).toBe(PPQ);
     expect(span.windowTicks).toBe(placementEffectiveLength(trimmed));
@@ -1790,12 +1964,12 @@ describe('editableSpans', () => {
 
   it('makes only the FIRST repetition editable', () => {
     const repeated = placement({ id: 'p1', repeat: 3 });
-    const [span] = editableSpans(track('t', [repeated]), PX, 192);
+    const [span] = editableSpans(track('t', [repeated]), PX, GUITAR_LANE, 6);
 
     // The later repetitions replay the same snapshot, so editing one would be
     // editing the first at an offset — two ways to write one note.
-    expect(span.rect).toEqual(placementRepeatRects(repeated, PX, 0, 192)[0]);
-    expect(span.rect.width).toBe(placementRect(repeated, PX, 0, 192).width / 3);
+    expect(span.rect).toEqual(placementRepeatRects(repeated, PX, 0, GUITAR_LANE)[0]);
+    expect(span.rect.width).toBe(placementRect(repeated, PX, 0, GUITAR_LANE).width / 3);
   });
 
   it('mounts nothing for a placement with no width or no length', () => {
@@ -1803,8 +1977,10 @@ describe('editableSpans', () => {
       id: 'p1',
       patternSnapshot: { ...createEmptyPattern('riff'), durationTicks: 0 },
     });
-    expect(editableSpans(track('t', [empty]), PX, 192)).toEqual([]);
-    expect(editableSpans(track('t', [placement({ id: 'p2' })]), 0, 192)).toEqual([]);
+    expect(editableSpans(track('t', [empty]), PX, GUITAR_LANE, 6)).toEqual([]);
+    expect(editableSpans(track('t', [placement({ id: 'p2' })]), 0, GUITAR_LANE, 6)).toEqual(
+      [],
+    );
   });
 });
 

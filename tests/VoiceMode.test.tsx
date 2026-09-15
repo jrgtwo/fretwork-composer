@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Profiler, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -16,8 +16,7 @@ import {
 import { App } from '../src/App';
 import { ArrangementGrid } from '../src/composition/ArrangementGrid';
 import {
-  COLLAPSED_VOICE_LANE_HEIGHT,
-  DEFAULT_LANE_HEIGHTS,
+  TRACK_HEADER_HEIGHT,
 } from '../src/composition/arrangementMath';
 import {
   addPlacement,
@@ -25,10 +24,12 @@ import {
   getEditingComposition,
   getTracks,
   openBlankComposition,
+  removeTrack,
   selectPlacements,
   selectTrack,
   setTrackInstrument,
   setTrackVoiceRef,
+  undo,
 } from '../src/composition/compositionService';
 import {
   deleteVoice,
@@ -89,11 +90,24 @@ import {
  * jsdom also has no LAYOUT — every box is 0×0 and nothing scrolls — so nothing
  * here asserts that a rack fits its lane or that two are visible at once. This
  * is largely a BY-EYE area for that reason. CP-16 deleted the arithmetic that
- * used to stand in for the eye (`DEFAULT_LANE_HEIGHTS.voice`), because that
- * number was ~40 px short of the real content and no test could say so.
- * COMPS-TRACK-TABS put a `voice` height back, and it is not that arithmetic
- * returning: it is the height of the VIEWPORT a rack scrolls inside, which
- * cannot be short of its content.
+ * used to stand in for the eye, because that number was ~40 px short of the real
+ * content and no test could say so.
+ *
+ * ⚠ A VOICE LANE IS NOW AS TALL AS ITS RACK MEASURES, and that is not CP-14's
+ * arithmetic returning: the number comes from a `ResizeObserver` reading the
+ * rack's own border box, which cannot disagree with the DOM. `tests/setup.ts`
+ * installs a `ResizeObserver` stub whose `observe` never FIRES (jsdom has one
+ * only because of that stub, and lays nothing out to report), so in most of this
+ * file no rack is measured and every voice lane falls to `TRACK_HEADER_HEIGHT` —
+ * the documented unmeasured fallback. Voice heights asserted OUTSIDE the
+ * "measured by the rack" describe are therefore that fallback, and NOT evidence
+ * about an open rack's real height.
+ *
+ * That describe swaps in a FIRING stub (the pattern `tests/TablatureView.test.tsx`
+ * established) and drives the wiring end to end: everything the lane geometry is
+ * expressed in is INLINE STYLE, not layout, so a fed border box really can be
+ * read back off `style.height` and `style.top` with no layout engine. The pure
+ * max rule is pinned separately, in `src/composition/arrangementMath.test.ts`.
  *
  * ⚠ MILESTONE 2 CHANGED THE DOM UNDER THIS FILE. CP-16's separate normal-flow
  * voice subtree is gone. There is ONE lane stack now, and a voice lane is drawn
@@ -2296,7 +2310,11 @@ describe('the stages stack, and the lane holds them', () => {
     // A voice lane HAS a rect now. CP-16's voice rows were normal flow and
     // `laneRects` was handed an empty stack, which is why this could not have
     // been asserted before milestone 2.
-    const heights = tracks.map(() => DEFAULT_LANE_HEIGHTS.voice);
+    //
+    // The HEIGHT here is the unmeasured fallback — no `ResizeObserver` in jsdom
+    // — so what this pins is that the spacer, the rack and the header all agree
+    // on one rect, never what an open rack comes to.
+    const heights = tracks.map(() => TRACK_HEADER_HEIGHT);
     const tops = heights.map((_, index) =>
       heights.slice(0, index).reduce((sum, height) => sum + height, 0),
     );
@@ -2334,12 +2352,61 @@ describe('the stages stack, and the lane holds them', () => {
     }
   });
 
-  it('shortens the lane of a folded rack, and moves the one below it up', () => {
+  // ⚠ WHAT THIS CAN AND CANNOT SAY. A folded rack used to get a lane height of
+  // its own (`COLLAPSED_VOICE_LANE_HEIGHT`, deleted); it now measures short and
+  // loses `max(header, content)` to the header, which is the same 143 with no
+  // special case behind it. In jsdom nothing is measured at all, so a folded
+  // rack and an open one land on that same fallback and this CANNOT tell them
+  // apart — the rule is pinned in `arrangementMath.test.ts`, where the measured
+  // height is an argument. What is still worth pinning here is that folding a
+  // rack does not knock the stack's arithmetic out: the lanes still abut.
+  it('keeps the stack whole when a rack is folded', () => {
     const tracks = twoTracks();
     render(<ArrangementGrid mode="voice" collapsedRacks={[tracks[0].id]} />);
 
-    expect(row(tracks[0]).style.height).toBe(`${COLLAPSED_VOICE_LANE_HEIGHT}px`);
-    expect(row(tracks[1]).style.top).toBe(`${COLLAPSED_VOICE_LANE_HEIGHT}px`);
+    expect(row(tracks[0]).style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
+    expect(row(tracks[1]).style.top).toBe(`${TRACK_HEADER_HEIGHT}px`);
+  });
+
+  // The rejection this correction exists for: three open racks used to be three
+  // nested scrollbars, each clipping its rack to 360 px. The lane is sized to
+  // the rack now, so there is nothing to scroll inside it and the arrangement
+  // scroller is the page's only vertical one.
+  //
+  // jsdom applies no CSS and lays nothing out, so what is checkable is that no
+  // element between the voice row and the rack asks for scrolling, and that the
+  // wrapper that is left is the OBSERVED box rather than a viewport.
+  it('puts no scroller between a voice row and its rack', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    for (const track of tracks) {
+      const mine = row(track);
+      // `getAttribute`, not `.className`: an `<svg>`'s is an
+      // `SVGAnimatedString` and has no `.split`, and racks draw SVG icons.
+      for (const el of [mine, ...mine.querySelectorAll('*')]) {
+        const classes = (el.getAttribute('class') ?? '').split(/\s+/);
+        expect(classes).not.toContain('overflow-y-auto');
+        expect(classes).not.toContain('overflow-y-scroll');
+        expect(classes).not.toContain('overflow-auto');
+        expect(classes).not.toContain('overflow-scroll');
+        // A class list is not the only way back to a viewport: an inline
+        // `overflow` or a `max-height` on the row or the measured box would
+        // reinstate one without touching a class name at all.
+        if (el instanceof HTMLElement) {
+          expect(el.style.overflowY).toBe('');
+          expect(el.style.maxHeight).toBe('');
+        }
+      }
+      // The one child left between the row and the rack is the measured box, and
+      // it is deliberately unstyled: it must lay out at the RACK's natural
+      // height inside a row whose height we set, or the observer would be
+      // measuring our own number back.
+      const measured = mine.querySelector<HTMLElement>(`[data-voice-rack="${track.id}"]`);
+      expect(measured).not.toBeNull();
+      expect(measured!.parentElement).toBe(mine);
+      expect(measured!.getAttribute('class')).toBeNull();
+    }
   });
 
   it('draws every header in the ONE column, voice lanes included', () => {
@@ -2354,10 +2421,10 @@ describe('the stages stack, and the lane holds them', () => {
     for (const track of tracks) {
       const header = document.querySelector<HTMLElement>(`[data-track-header="${track.id}"]`);
       expect(header?.parentElement).toBe(column);
-      expect(header?.style.height).toBe(`${DEFAULT_LANE_HEIGHTS.voice}px`);
+      expect(header?.style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
       expect(row(track).querySelector(`[data-track-header="${track.id}"]`)).toBeNull();
     }
-    expect(column.style.height).toBe(`${2 * DEFAULT_LANE_HEIGHTS.voice}px`);
+    expect(column.style.height).toBe(`${2 * TRACK_HEADER_HEIGHT}px`);
   });
 
   it('keeps the scroller and the stack mounted with every lane in voice', () => {
@@ -2503,6 +2570,282 @@ describe('the stages stack, and the lane holds them', () => {
     // Level stage is untouched.
     expect(stage(getTracks()[1], 'Amp').getByRole('slider', { name: 'Drive' })).toBeInTheDocument();
     expect(knob(getTracks()[0], 'Level', 'Volume')).toBeInTheDocument();
+  });
+});
+
+// ------------------------------------------- the rack the lane is sized to ---
+
+/**
+ * THE ONE PLACE THE MEASURED PATH IS DRIVEN END TO END.
+ *
+ * Everywhere else in this file the lane heights are the unmeasured fallback,
+ * because `tests/setup.ts` installs a `ResizeObserver` whose `observe` never
+ * fires. Here it is swapped for one that DOES, which is the pattern
+ * `tests/TablatureView.test.tsx` established — and it works despite jsdom having
+ * no layout for the reason the whole two-layer scheme was built on: every number
+ * in the lane geometry is an INLINE STYLE the component wrote, not a box the
+ * browser computed. Feed a border box in and the same arithmetic the browser
+ * would drive comes back out of `style.height` and `style.top`.
+ *
+ * What this cannot say is whether the rack's real border box is the right
+ * number — that is the browser pass. What it does say is that whatever the
+ * observer reports is what the lane becomes, which is the only new machinery in
+ * this correction and was otherwise pinned nowhere.
+ */
+describe('a voice lane is as tall as its rack measures', () => {
+  class FakeResizeObserver {
+    static live: FakeResizeObserver[] = [];
+
+    readonly observed = new Set<Element>();
+    /** Every `observe` option, so the BOX the notification is gated on is
+     *  assertable — the callback reads `borderBoxSize`, and a content-box
+     *  observation would not fire for a border-only change. */
+    readonly boxes: (ResizeObserverOptions | undefined)[] = [];
+    disconnected = false;
+
+    constructor(private readonly callback: ResizeObserverCallback) {
+      FakeResizeObserver.live.push(this);
+    }
+    observe(el: Element, options?: ResizeObserverOptions) {
+      this.observed.add(el);
+      this.boxes.push(options);
+    }
+    unobserve(el: Element) {
+      this.observed.delete(el);
+    }
+    disconnect() {
+      this.disconnected = true;
+      this.observed.clear();
+    }
+    deliver(entries: ResizeObserverEntry[]) {
+      this.callback(entries, this as unknown as ResizeObserver);
+    }
+  }
+
+  beforeEach(() => {
+    FakeResizeObserver.live = [];
+    // `vi.stubGlobal` rather than an assignment: the file's `afterEach` already
+    // calls `unstubAllGlobals`, so the non-firing stub from `tests/setup.ts` is
+    // back in place for every describe after this one.
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+  });
+
+  /** The observed box for one track — the unstyled wrapper, not the rack root. */
+  const measuredBox = (track: Track) => {
+    const el = row(track).querySelector<HTMLElement>(`[data-voice-rack="${track.id}"]`);
+    if (!el) throw new Error(`no measured box for ${track.name}`);
+    return el;
+  };
+
+  /**
+   * Report a border box for one or more racks, exactly as the browser would.
+   *
+   * `contentRect` is deliberately WRONG (0) in every entry: the callback must
+   * read `borderBoxSize`, and an entry that agreed with both would not tell the
+   * two apart. Only observers still watching the element are delivered to, so a
+   * disconnected one cannot drive a later assertion.
+   */
+  const measure = (sizes: ReadonlyArray<readonly [HTMLElement, number]>) => {
+    act(() => {
+      for (const observer of FakeResizeObserver.live) {
+        if (observer.disconnected) continue;
+        const mine = sizes.filter(([el]) => observer.observed.has(el));
+        if (mine.length === 0) continue;
+        observer.deliver(
+          mine.map(
+            ([target, blockSize]) =>
+              ({
+                target,
+                borderBoxSize: [{ blockSize, inlineSize: 0 }],
+                contentRect: { height: 0, width: 0 },
+              }) as unknown as ResizeObserverEntry,
+          ),
+        );
+      }
+    });
+  };
+
+  it('grows the lane to the measured rack and moves the lanes below it down', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    // Before any measurement: the documented fallback, both lanes.
+    expect(row(tracks[0]).style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
+    expect(row(tracks[1]).style.top).toBe(`${TRACK_HEADER_HEIGHT}px`);
+
+    measure([[measuredBox(tracks[0]), 900]]);
+
+    expect(row(tracks[0]).style.height).toBe('900px');
+    // The lane BELOW follows, which is the half a per-track assertion misses:
+    // the rack layer and the spacer stack are computed from one `laneRects`.
+    expect(row(tracks[1]).style.top).toBe('900px');
+    // The spacer stack is normal flow, so only its HEIGHT is written — but it
+    // comes from the same `laneRects`, and the two stacks disagreeing is what
+    // puts a rack beside the wrong header.
+    expect(spacer(tracks[0]).style.height).toBe('900px');
+    expect(spacer(tracks[1]).style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
+    // …and the scroller's content grows with it, so the stack is reachable.
+    expect(screen.getByTestId('arrangement-lanes-content')).toHaveStyle({
+      height: `${900 + TRACK_HEADER_HEIGHT}px`,
+    });
+  });
+
+  it('reads the border box and not the content rect', () => {
+    // The entries above carry `contentRect.height: 0` with a 900 border box, so
+    // a callback reading `contentRect` would land on the fallback — the lane
+    // would come up short by exactly the rack's padding and border in the
+    // browser, which is a bug no layout-free test could otherwise see.
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    measure([[measuredBox(tracks[0]), 640]]);
+
+    expect(row(tracks[0]).style.height).toBe('640px');
+  });
+
+  it('observes the border box, so a border-only change still notifies', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    const observer = FakeResizeObserver.live.find((candidate) =>
+      candidate.observed.has(measuredBox(tracks[0])),
+    );
+    expect(observer).toBeDefined();
+    expect(observer!.boxes).not.toHaveLength(0);
+    for (const options of observer!.boxes) {
+      expect(options?.box).toBe('border-box');
+    }
+  });
+
+  it('lets the header win when the rack measures short', () => {
+    // The whole of what `COLLAPSED_VOICE_LANE_HEIGHT` used to do, with no case
+    // of its own: a folded rack is a short measurement and `max` does the rest.
+    // §E asked for this to be verified rather than assumed, and this is the only
+    // place in the suite where a fold can actually produce a number.
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" collapsedRacks={[tracks[0].id]} />);
+
+    measure([[measuredBox(tracks[0]), 34]]);
+
+    expect(row(tracks[0]).style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
+    expect(row(tracks[1]).style.top).toBe(`${TRACK_HEADER_HEIGHT}px`);
+  });
+
+  it('follows a rack that shrinks back under the header', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    measure([[measuredBox(tracks[0]), 900]]);
+    expect(row(tracks[0]).style.height).toBe('900px');
+
+    // Folding a stage is a SHRINK, and a measurement that only ever grew would
+    // leave the lane at its tallest for the rest of the session.
+    measure([[measuredBox(tracks[0]), 40]]);
+    expect(row(tracks[0]).style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
+  });
+
+  it('measures each track independently', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    measure([
+      [measuredBox(tracks[0]), 400],
+      [measuredBox(tracks[1]), 700],
+    ]);
+
+    expect(row(tracks[0]).style.height).toBe('400px');
+    expect(row(tracks[1]).style.height).toBe('700px');
+    expect(row(tracks[1]).style.top).toBe('400px');
+  });
+
+  it('commits nothing when the rounded height has not changed', () => {
+    // ⚠ THE INFINITE-LOOP GUARD, and the only symptom a browser gives it is
+    // "ResizeObserver loop completed with undelivered notifications". A callback
+    // that writes state on every delivery re-renders into another measurement;
+    // a subpixel difference between the two is then a cycle with no end. The
+    // component rounds and returns the SAME state object when nothing moved,
+    // which is a React bail-out — so what is assertable here is that a redundant
+    // delivery produces no COMMIT at all.
+    const tracks = twoTracks();
+    let commits = 0;
+    render(
+      <Profiler id="grid" onRender={() => {
+        commits += 1;
+      }}>
+        <ArrangementGrid mode="voice" />
+      </Profiler>,
+    );
+
+    measure([[measuredBox(tracks[0]), 900]]);
+    expect(row(tracks[0]).style.height).toBe('900px');
+
+    const afterFirst = commits;
+    // Ten more deliveries, alternating a subpixel either side of 900 — the
+    // browser's own shape for the loop, since each re-render remeasures. None
+    // of them is a change once rounded.
+    for (let i = 0; i < 10; i += 1) {
+      measure([[measuredBox(tracks[0]), i % 2 === 0 ? 900.4 : 899.6]]);
+    }
+
+    // ONE, not zero, and the one is React's rather than ours: a `useState`
+    // updater returning the same object bails out, but the first such update
+    // after a real one is rendered before the bail-out can be seen. From there
+    // the eager path takes over and the rest are free. What the guard buys is
+    // that the count is bounded at all — without it these are ten commits, and
+    // in a browser ten more measurements behind them.
+    expect(commits).toBeLessThanOrEqual(afterFirst + 1);
+    expect(row(tracks[0]).style.height).toBe('900px');
+  });
+
+  it('stops watching a rack whose track leaves voice view', () => {
+    const tracks = twoTracks();
+    const { rerender } = render(<ArrangementGrid mode="voice" />);
+    const box = measuredBox(tracks[0]);
+
+    rerender(<ArrangementGrid mode="pattern" />);
+
+    for (const observer of FakeResizeObserver.live) {
+      expect(observer.observed.has(box)).toBe(false);
+    }
+  });
+
+  it('disconnects the observer when the page goes', () => {
+    // `CompositionPage` unmounts on every visit to the pattern page, so a leaked
+    // observer here is one PER NAVIGATION rather than one per session.
+    twoTracks();
+    const { unmount } = render(<ArrangementGrid mode="voice" />);
+    expect(FakeResizeObserver.live.some((observer) => !observer.disconnected)).toBe(true);
+
+    unmount();
+
+    for (const observer of FakeResizeObserver.live) {
+      expect(observer.disconnected).toBe(true);
+    }
+  });
+
+  it('forgets a deleted track’s measurement, so an undo does not restore it', () => {
+    // The ref cleanup unobserves the element; it does not drop the entry. An id
+    // that came back — which is exactly what an arrangement undo does — would
+    // otherwise open at whatever its rack measured before, with nothing on
+    // screen having been measured.
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    measure([[measuredBox(tracks[1]), 700]]);
+    expect(row(tracks[1]).style.height).toBe('700px');
+
+    act(() => {
+      const removed = removeTrack(tracks[1].id);
+      if (!removed.ok) throw new Error(removed.reason);
+    });
+    expect(getTracks().map((track) => track.id)).not.toContain(tracks[1].id);
+
+    act(() => {
+      undo();
+    });
+    const restored = getTracks().find((track) => track.id === tracks[1].id);
+    expect(restored).toBeDefined();
+    expect(row(restored!).style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
   });
 });
 
