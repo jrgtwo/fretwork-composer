@@ -175,6 +175,11 @@ function barsNow(): number {
 
 const scroller = () => screen.getByTestId('arrangement-lanes-scroller');
 const rulerContent = () => screen.getByTestId('arrangement-ruler-content');
+/** The song-sized content div inside the scroller. Addressed by testid rather
+ *  than as the scroller's first child: that slot belongs to the zero-height
+ *  voice layer, which must stay first for its origin to be content y=0
+ *  (`ArrangementGrid`). */
+const lanesContent = () => screen.getByTestId('arrangement-lanes-content');
 const headerStack = () => screen.getByTestId('track-header-stack');
 const laneEls = () =>
   Array.from(document.querySelectorAll<HTMLElement>('[data-lane-track]'));
@@ -258,7 +263,7 @@ describe('lanes and headers', () => {
     // Both scrollable surfaces are exactly the lanes' total height, which is
     // what makes the vertical lock a single shared offset.
     expect(headerStack().style.height).toBe(px(lanesHeight(expected)));
-    expect(scroller().firstElementChild).toHaveStyle({ height: px(lanesHeight(expected)) });
+    expect(lanesContent()).toHaveStyle({ height: px(lanesHeight(expected)) });
   });
 
   it('marks every lane with the attribute the lane styling keys off', () => {
@@ -584,7 +589,7 @@ describe('ruler', () => {
       const zoom = ARRANGEMENT_ZOOM_LEVELS[DEFAULT_ARRANGEMENT_ZOOM_INDEX - step];
       const width = px(arrangementWidth(barsNow(), timeSignature(), zoom));
       expect(rulerContent().style.width).toBe(width);
-      expect(scroller().firstElementChild).toHaveStyle({ width });
+      expect(lanesContent()).toHaveStyle({ width });
       await userEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
     }
   });
@@ -832,6 +837,38 @@ describe('empty states', () => {
     render(<ArrangementGrid mode={MODE} />);
 
     expect(screen.queryByText(/nothing placed yet/i)).not.toBeInTheDocument();
+  });
+
+  it('hides the time axis for a trackless composition in voice view', () => {
+    // Not reachable through `compositionService` — the seam refuses to delete the
+    // last track — so it is forced here the way `tests/CommandCatalog.test.ts`
+    // forces it. A composition made elsewhere can carry zero tracks, and
+    // `timed`'s "does any lane want an axis" question has no lane to ask: `some`
+    // on nothing is `false`, which is the wrong answer for pattern and edit, so
+    // the page's own view is the fallback. An unconditional `true` there put the
+    // ruler, the zoom steps, the snap menu and "Nothing placed yet" on screen
+    // beside a rail labelled Voices.
+    openBlankComposition('Song');
+    usePatternsStore.setState((state) => ({
+      library: {
+        ...state.library,
+        compositions: state.library.compositions.map((composition) => ({
+          ...composition,
+          tracks: [],
+        })),
+      },
+    }));
+
+    const voice = render(<ArrangementGrid mode="voice" />);
+    expect(screen.queryByTestId('arrangement-ruler')).toBeNull();
+    expect(screen.queryByText(/nothing placed yet/i)).not.toBeInTheDocument();
+    voice.unmount();
+
+    // …and the same empty stack in pattern view still has one, which is what
+    // makes the line above about the VIEW and not about the track count.
+    render(<ArrangementGrid mode={MODE} />);
+    expect(screen.getByTestId('arrangement-ruler')).toBeInTheDocument();
+    expect(screen.getByText(/nothing placed yet/i)).toBeInTheDocument();
   });
 
   it('says so, rather than rendering an empty grid, when no composition is open', () => {

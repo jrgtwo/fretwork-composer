@@ -16,6 +16,10 @@ import {
 import { App } from '../src/App';
 import { ArrangementGrid } from '../src/composition/ArrangementGrid';
 import {
+  COLLAPSED_VOICE_LANE_HEIGHT,
+  DEFAULT_LANE_HEIGHTS,
+} from '../src/composition/arrangementMath';
+import {
   addPlacement,
   addTrack,
   getEditingComposition,
@@ -83,18 +87,30 @@ import {
  * from "built from its stored ref".
  *
  * jsdom also has no LAYOUT — every box is 0×0 and nothing scrolls — so nothing
- * here asserts that a rack fits its row or that two are visible at once. CP-16
- * is largely a BY-EYE ticket for that reason, and it deleted the arithmetic that
+ * here asserts that a rack fits its lane or that two are visible at once. This
+ * is largely a BY-EYE area for that reason. CP-16 deleted the arithmetic that
  * used to stand in for the eye (`DEFAULT_LANE_HEIGHTS.voice`), because that
  * number was ~40 px short of the real content and no test could say so.
- * COMPS-TRACK-TABS has since put a `voice` height back, and it is not that
- * arithmetic returning: it is the height of the VIEWPORT a rack scrolls inside,
- * which cannot be short of its content. The rack this file renders is still the
- * CP-16 normal-flow subtree until milestone 2. What is
- * asserted below is the STRUCTURE that makes the layout right — the stages are
- * siblings in one column in schema order, a row holds its own header, per-section
- * folds round-trip — and, for the mode this risks regressing, that pattern mode's
- * two clipped viewports still come back in step.
+ * COMPS-TRACK-TABS put a `voice` height back, and it is not that arithmetic
+ * returning: it is the height of the VIEWPORT a rack scrolls inside, which
+ * cannot be short of its content.
+ *
+ * ⚠ MILESTONE 2 CHANGED THE DOM UNDER THIS FILE. CP-16's separate normal-flow
+ * voice subtree is gone. There is ONE lane stack now, and a voice lane is drawn
+ * in TWO places: an empty SPACER in `.lanes` carrying the lane's height (so the
+ * dividers and the zebra's `:nth-child` counting stay whole), and the rack
+ * itself in a zero-height `position: sticky` LAYER that must be the scroller's
+ * first child. The track's header is in neither — it is in the one header
+ * column, at `lane.height`, like every other lane's. `row()` and `spacer()`
+ * below are the two halves, and the structural assertions are in "the stages
+ * stack, and the lane holds them".
+ *
+ * What is asserted below is the STRUCTURE that makes the layout right — the
+ * stages are siblings in one column in schema order, a voice lane has a rect and
+ * its rack sits at that rect's top, the layer is first, per-section folds
+ * round-trip — and, for the view this risks regressing, that pattern mode's two
+ * clipped viewports still come back in step. Where the racks actually LAND on
+ * screen is the required browser pass, not this file.
  */
 const lib = vi.hoisted(() => {
   const startAudio = vi.fn(async () => {});
@@ -1360,14 +1376,29 @@ describe('the rack in a lane', () => {
   });
 });
 
-// ------------------------------------------------------------ CP-16 layout ---
+// ------------------------------------------------ COMPS-TRACK-TABS layout ---
 
-/** The row a track occupies in voice mode — its header AND its rack. The one
- *  thing CP-16 changed structurally: these used to be in two separately-clipped
- *  columns locked together by `style.transform`. */
+/**
+ * A track's VOICE ROW — the box its rack is drawn in, in the sticky layer over
+ * the lanes.
+ *
+ * Its own attribute, not `data-lane-track`: milestone 2 gave a voice lane a row
+ * in `.lanes` too, an empty SPACER carrying the lane's height so the dividers
+ * and the zebra's `:nth-child` counting stay whole. Two elements answering to
+ * one attribute would make this pick whichever came first, which is the spacer.
+ * The track's HEADER is in neither — it is in the one header column, like every
+ * other lane's.
+ */
 const row = (track: Track) => {
-  const el = document.querySelector<HTMLElement>(`[data-lane-track="${track.id}"]`);
-  if (!el) throw new Error(`no row rendered for ${track.name}`);
+  const el = document.querySelector<HTMLElement>(`[data-voice-lane-track="${track.id}"]`);
+  if (!el) throw new Error(`no voice row rendered for ${track.name}`);
+  return el;
+};
+
+/** The empty spacer the same track keeps down in `.lanes`. */
+const spacer = (track: Track) => {
+  const el = document.querySelector<HTMLElement>(`.lanes > [data-lane-track="${track.id}"]`);
+  if (!el) throw new Error(`no lane spacer rendered for ${track.name}`);
   return el;
 };
 
@@ -2184,7 +2215,7 @@ describe('the pedalboard in a rack', () => {
   });
 });
 
-describe('the stages stack, and the row fits them', () => {
+describe('the stages stack, and the lane holds them', () => {
   it('draws the four stages as siblings in one column, in schema order', () => {
     const tracks = twoTracks();
     render(<ArrangementGrid mode="voice" />);
@@ -2211,37 +2242,150 @@ describe('the stages stack, and the row fits them', () => {
     expect(column!.className).not.toContain('overflow-auto');
   });
 
-  it('puts a track’s header in the same row as its rack, with no computed height', () => {
+  it('draws every rack in the sticky layer, which is the scroller’s FIRST child', () => {
     const tracks = twoTracks();
     render(<ArrangementGrid mode="voice" />);
 
+    const scroller = screen.getByTestId('arrangement-lanes-scroller');
+    const layer = screen.getByTestId('arrangement-voice-layer');
+
+    // ⚠ THE ASSERTION THIS FILE EXISTS TO MAKE about milestone 2's DOM. The
+    // layer has zero height and no `top`, so its normal-flow origin is whatever
+    // the previous sibling leaves it — as the FIRST child that is content y = 0,
+    // the origin `lane.top` is measured from. Placed after the song-sized div it
+    // would start at the bottom of the stack and every rack would be drawn one
+    // whole stack-height too low. jsdom computes no layout, so this ORDER is the
+    // only part of that a test can see; the offset itself is a by-eye check.
+    expect(scroller.firstElementChild).toBe(layer);
+    expect(layer.nextElementSibling).toBe(screen.getByTestId('arrangement-lanes-content'));
+
+    // …and the four classes that make that ORDER mean anything. Being the first
+    // child fixes the origin only while the layer is IN FLOW: turn `sticky` into
+    // `absolute` and the rows re-parent their containing block to the wrapper
+    // outside the scroller — racks then stop scrolling with the lanes at all —
+    // and first-child order becomes irrelevant, with no test the wiser, because
+    // jsdom computes no layout. Same blind spot for `left-0` (racks scroll away
+    // horizontally), `h-0` (the layer joins the scroll height) and `z-20` (racks
+    // paint under the timed content). Asserted as class strings for the reason
+    // the stage column above is: it is the only part of a layout decision this
+    // environment can see at all.
+    for (const token of ['sticky', 'left-0', 'h-0', 'w-full', 'z-20', 'pointer-events-none']) {
+      expect(layer.className.split(/\s+/)).toContain(token);
+    }
+
+    // One row per voice lane, in lane order, and each of them takes its own
+    // presses back — the layer is transparent to the pattern and edit lanes
+    // underneath, and only the opaque racks are not.
+    expect(screen.getAllByTestId('arrangement-voice-lane')).toEqual(
+      tracks.map((track) => row(track)),
+    );
     for (const track of tracks) {
       const mine = row(track);
-      // The header is INSIDE the row, not in a separate viewport translated to
-      // match it — which is what lets the row be as tall as its content without
-      // anything measuring the content.
-      expect(mine.querySelector(`[data-track-header="${track.id}"]`)).not.toBeNull();
+      expect(mine.parentElement).toBe(layer);
+      expect(mine.className.split(/\s+/)).toContain('pointer-events-auto');
       expect(
         within(mine).getByRole('button', { name: `Voice rack for ${track.name}` }),
       ).toBeInTheDocument();
-      // Normal flow: nothing writes a height, so nothing can disagree with the
-      // height the browser gives it.
-      expect(mine.style.height).toBe('');
     }
+  });
 
-    // The timed layout's machinery is ABSENT rather than hidden: no ruler, no
-    // second header column, and no horizontally scrolling lane area — there is
-    // no time axis to scroll along.
+  it('gives a voice lane a rect, and puts its rack at that rect’s top', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    // A voice lane HAS a rect now. CP-16's voice rows were normal flow and
+    // `laneRects` was handed an empty stack, which is why this could not have
+    // been asserted before milestone 2.
+    const heights = tracks.map(() => DEFAULT_LANE_HEIGHTS.voice);
+    const tops = heights.map((_, index) =>
+      heights.slice(0, index).reduce((sum, height) => sum + height, 0),
+    );
+
+    tracks.forEach((track, index) => {
+      // The spacer down in `.lanes` carries the height…
+      expect(spacer(track).style.height).toBe(`${heights[index]}px`);
+      // …and the class that stops `.lanes > [data-lane]` carving a recessed
+      // channel and lifting a zebra stripe BEHIND an opaque faceplate
+      // (src/styles/index.css). jsdom applies no CSS, so the class name is the
+      // whole of what is checkable — and a rename on either side is invisible
+      // to tsc and to eslint, which is exactly why it is pinned here.
+      expect(spacer(track).className.split(/\s+/)).toContain('voice-lane');
+      // …and the rack in the layer above is drawn at the SAME rect, which is
+      // what keeps it over its own lane and beside its own header.
+      expect(row(track).style.top).toBe(`${tops[index]}px`);
+      expect(row(track).style.height).toBe(`${heights[index]}px`);
+    });
+
+    // The scroll height is the whole stack, in this view like any other.
+    expect(screen.getByTestId('arrangement-lanes-content')).toHaveStyle({
+      height: `${heights.reduce((sum, height) => sum + height, 0)}px`,
+    });
+  });
+
+  it('leaves the channel and the zebra ON for a lane that is not a rack', () => {
+    // The other half of the class above: `voice-lane` has to be the VIEW's
+    // doing and not something every lane carries, or the recessed timeline
+    // channel is off everywhere and the flattening is silent.
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="pattern" />);
+
+    for (const track of tracks) {
+      expect(spacer(track).className.split(/\s+/)).not.toContain('voice-lane');
+    }
+  });
+
+  it('shortens the lane of a folded rack, and moves the one below it up', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" collapsedRacks={[tracks[0].id]} />);
+
+    expect(row(tracks[0]).style.height).toBe(`${COLLAPSED_VOICE_LANE_HEIGHT}px`);
+    expect(row(tracks[1]).style.top).toBe(`${COLLAPSED_VOICE_LANE_HEIGHT}px`);
+  });
+
+  it('draws every header in the ONE column, voice lanes included', () => {
+    const tracks = twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    // The point of voice becoming a lane: its header is not inside its row any
+    // more, drawn at a constant of its own (`VOICE_HEADER_HEIGHT`, deleted with
+    // the subtree). It is in the same translated column every other view uses,
+    // at the LANE's height.
+    const column = screen.getByTestId('track-header-stack');
+    for (const track of tracks) {
+      const header = document.querySelector<HTMLElement>(`[data-track-header="${track.id}"]`);
+      expect(header?.parentElement).toBe(column);
+      expect(header?.style.height).toBe(`${DEFAULT_LANE_HEIGHTS.voice}px`);
+      expect(row(track).querySelector(`[data-track-header="${track.id}"]`)).toBeNull();
+    }
+    expect(column.style.height).toBe(`${2 * DEFAULT_LANE_HEIGHTS.voice}px`);
+  });
+
+  it('keeps the scroller and the stack mounted with every lane in voice', () => {
+    twoTracks();
+    render(<ArrangementGrid mode="voice" />);
+
+    // MOUNTED, unlike CP-16's subtree: it is what preserves `scrollTop` and what
+    // gives the voice layer a real origin. What goes is the RULER, and with it
+    // every other statement about time.
+    expect(screen.getByTestId('arrangement-lanes-scroller')).toBeInTheDocument();
+    expect(screen.getByTestId('track-header-column')).toBeInTheDocument();
     expect(screen.queryByTestId('arrangement-ruler')).toBeNull();
-    expect(screen.queryByTestId('track-header-column')).toBeNull();
-    expect(screen.queryByTestId('arrangement-lanes-scroller')).toBeNull();
-    // …and the stack that replaces it answers to the same name, so the lane area
-    // is still reachable without a pointer.
-    const stack = screen.getByRole('group', { name: 'Arrangement lanes' });
-    expect(stack).toBe(screen.getByTestId('arrangement-voice-stack'));
-    expect(stack.className).toContain('overflow-x-hidden');
-    stack.focus();
-    expect(stack).toHaveFocus();
+
+    // Viewport width rather than song width, so there is no horizontal overflow
+    // to scroll along — the one thing that is not a rack on screen.
+    expect(screen.getByTestId('arrangement-lanes-content').style.width).toBe('100%');
+
+    // No time layer at all: `timedBands` returns no band when every lane is
+    // voice, so there is nothing to draw a bar line or a playhead inside.
+    expect(document.querySelectorAll('[data-grid-line]')).toHaveLength(0);
+
+    // The named region consolidates onto the scroller, which is now the one
+    // element always mounted — it used to be the voice stack's name.
+    const lanes = screen.getByRole('group', { name: 'Arrangement lanes' });
+    expect(lanes).toBe(screen.getByTestId('arrangement-lanes-scroller'));
+    expect(screen.queryByTestId('arrangement-voice-stack')).toBeNull();
+    lanes.focus();
+    expect(lanes).toHaveFocus();
   });
 
   it('folds one stage of one rack, and says which fold is which', async () => {
@@ -2472,24 +2616,35 @@ describe('unsaved tone survives the things that unmount it', () => {
   });
 
   /**
-   * ⚠ THE REGRESSION CP-16 RISKS. Voice mode used to share the timed layout's
-   * scroller; now it replaces it, so a visit UNMOUNTS the element the scroll
-   * position lives on and a new one is mounted on the way back — and a new
-   * element starts at 0 on BOTH axes.
+   * ⚠ THE REGRESSION THE TIME AXIS RISKS, restated for milestone 2.
    *
-   * `timedScrollLeftRef` carries the time axis across; without it, tuning a rack
-   * at bar 40 returns you to bar 1. `timedScrollTopRef` carries WHICH TRACKS were
-   * in view; without it, eight edit lanes (8 × 192 px) means tuning track 8's amp
-   * returns you to track 1 — and `syncViewports` then translates the header
-   * column to agree with it, which is the silent discard `EditMode.test.tsx`
-   * guards the pattern↔edit switch against.
+   * CP-16 replaced the scroller in voice mode, so a visit UNMOUNTED the element
+   * the scroll position lives on and a new one started at 0 on both axes.
+   * Milestone 2 keeps the SAME element mounted in every view, which is a
+   * strictly better position — but it does not make the memory redundant on the
+   * horizontal axis: an all-voice stack is viewport-wide, so the browser clamps
+   * `scrollLeft` to 0 and the offset is gone from the one place it lives unless
+   * `timedScrollLeftRef` recorded it first. Without it, tuning a rack at bar 40
+   * returns you to bar 1.
    *
-   * jsdom neither scrolls nor clamps, so the offsets here are written onto the
-   * element by hand and the scroll event raised explicitly — which is exactly
-   * what the app's own writes do, and the two viewport transforms are the
-   * observable that proves they came back in step.
+   * `timedScrollTopRef` is the vertical twin and is NOT redundant either: a
+   * voice lane is 360 px where a pattern lane is 143, so an all-voice stack is
+   * two and a half times as tall, and coming back SHRINKS it under a `scrollTop`
+   * the browser clamps to the new end. It also deliberately re-imposes the last
+   * timed position over any vertical scrolling done among the racks, because the
+   * two stacks are different heights and no offset means the same thing in both.
+   *
+   * jsdom neither scrolls nor clamps, so BOTH are SIMULATED here — `scrollLeft`
+   * written to 0 (the horizontal clamp) and `scrollTop` moved to a third value
+   * (a scroll among the racks, which the following shrink would clamp) — and the
+   * scroll event raised, which is exactly the event the browser's own clamp
+   * raises and the one `syncViewports` must not mistake for the axis. Perturbing
+   * both axes is what makes the assertions below discriminate: with either the
+   * `if (timedRef.current)` guard or either restore removed, the numbers that
+   * come back are the ones written during the voice render. The two viewport
+   * transforms are the observable that proves the view came back in step.
    */
-  it('comes back to the bar AND the track it left, with both viewports on it', () => {
+  it('comes back to the bar it left after an all-voice stack clamps it away', () => {
     twoTracks();
     const rulerContent = () => screen.getByTestId('arrangement-ruler-content');
     const headerStack = () => screen.getByTestId('track-header-stack');
@@ -2503,14 +2658,26 @@ describe('unsaved tone survives the things that unmount it', () => {
     expect(headerStack().style.transform).toBe('translateY(-176px)');
 
     view.rerender(<ArrangementGrid mode="voice" />);
-    expect(screen.queryByTestId('arrangement-lanes-scroller')).toBeNull();
+    // The SAME element, which is the milestone-2 change: it is no longer
+    // replaced. That does not make either axis safe — see the docblock.
+    const during = screen.getByTestId('arrangement-lanes-scroller');
+    expect(during).toBe(before);
+    // The browser's clamp, by hand: viewport-wide content has nowhere to scroll
+    // horizontally. And a scroll DOWN the taller rack stack, which the shrink on
+    // the way back would clamp. Neither event may be recorded as the axis.
+    during.scrollLeft = 0;
+    during.scrollTop = 612;
+    fireEvent.scroll(during);
+    // The header column's transform follows the ELEMENT unconditionally, so it
+    // moves with it — stated here so the values below are read as a return TO
+    // the axis and not as something that never left. (There is no ruler to check
+    // against: an all-voice stack has no time axis, so it is not on screen.)
+    expect(headerStack().style.transform).toBe('translateY(-612px)');
 
     view.rerender(<ArrangementGrid mode="pattern" />);
 
     const after = screen.getByTestId('arrangement-lanes-scroller');
-    // A genuinely new element, or this test would pass on an offset that was
-    // never lost — which is the whole thing it exists to check.
-    expect(after).not.toBe(before);
+    expect(after).toBe(before);
     expect(after.scrollLeft).toBe(480);
     expect(after.scrollTop).toBe(176);
     expect(rulerContent().style.transform).toBe('translateX(-480px)');
@@ -2660,6 +2827,14 @@ describe('a rack edit reaches the engine', () => {
 
     render(<ArrangementGrid mode="voice" />);
     expect(screen.queryByTestId('arrangement-playhead')).toBeNull();
+    // And no BLOCK either. A voice lane's spacer draws nothing: both tracks
+    // carry a placement here, and drawing them would put a `PlacementBlock`
+    // inside the 360 px spacer with only the opaque rack above it to hide it —
+    // the "a background is not the only protection" rule the band layers exist
+    // for, one level down. The fixtures most voice tests use have no placement
+    // at all, so this is the one render that can tell the branch from a
+    // coincidence.
+    expect(document.querySelectorAll('[data-placement]')).toHaveLength(0);
   });
 
   it('puts the track back on its stored voice when the edit is discarded', async () => {

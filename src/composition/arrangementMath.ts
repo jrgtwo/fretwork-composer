@@ -262,9 +262,9 @@ export function setTrackView(
 
 /**
  * Default lane height per view. Pattern draws one block row and is sized by what
- * the track HEADER needs beside it — see `VOICE_HEADER_HEIGHT`, which is derived
- * from this rather than restated; edit has to hold a full set of string rows;
- * voice is the height of the BOX a rack scrolls inside.
+ * the track HEADER needs beside it — see `COLLAPSED_VOICE_LANE_HEIGHT`, which is
+ * derived from this rather than restated; edit has to hold a full set of string
+ * rows; voice is the height of the BOX a rack scrolls inside.
  *
  * Pattern mode was 88 until CP-19 added the pan row to the strip. The old figure
  * was chosen so eight tracks plus a ruler fit a laptop viewport, and this costs
@@ -313,36 +313,15 @@ export const DEFAULT_LANE_HEIGHTS: Record<ArrangementMode, number> = {
  *
  * Derived from pattern's lane rather than restated, because a folded rack shows
  * exactly the header strip beside it and that is the one view whose lane is
- * sized by what the header needs. Same reasoning as `VOICE_HEADER_HEIGHT`, which
- * is a different question (how tall the header is DRAWN in the pre-milestone-2
- * voice subtree) that currently has the same answer.
+ * sized by what the header needs.
+ *
+ * It used to have a twin — `VOICE_HEADER_HEIGHT`, answering the different
+ * question of how tall a header was DRAWN inside CP-16's normal-flow voice
+ * subtree. COMPS-TRACK-TABS milestone 2 deleted that subtree and the constant
+ * with it: a voice lane is a lane, and its header takes `lane.height` like
+ * every other.
  */
 export const COLLAPSED_VOICE_LANE_HEIGHT = DEFAULT_LANE_HEIGHTS.pattern;
-
-/**
- * How tall a TRACK HEADER is drawn in voice mode.
- *
- * Voice rows are normal flow and grow with their rack, so nothing sizes the row
- * — but the header inside it still needs a number, because `TrackHeader` is an
- * `overflow-hidden` column that takes an explicit height (its own comment says
- * so). This is the figure it was drawn for: three control rows, a status line,
- * CP-13's voice picker and CP-19's pan row. Anything smaller clips the mute, the
- * solo, the fader, the pan and the picker out of sight while leaving them in the
- * DOM and tabbable — a silently disabled mixer strip, which jsdom has no layout
- * to catch.
- *
- * Derived from pattern mode's lane rather than restated, because it IS the same
- * strip: that is the one mode whose lane is sized by what the header needs.
- *
- * ⚠ NOT a duplicate of `COLLAPSED_VOICE_LANE_HEIGHT`, though they hold the same
- * number today. This one belongs to the CP-16 normal-flow voice subtree, which
- * has ONE live caller left (`ArrangementGrid`'s voice branch) and dies with that
- * subtree in COMPS-TRACK-TABS milestone 2 — per-track views draw voice as a lane
- * like any other, and a lane's header takes its height from the lane. Delete
- * this constant when that branch goes, not before: retiring it early would mean
- * a component change, which milestone 1 is not.
- */
-export const VOICE_HEADER_HEIGHT = DEFAULT_LANE_HEIGHTS.pattern;
 
 /** The height of the ruler strip. Lanes start below it. */
 export const RULER_HEIGHT = 28;
@@ -411,6 +390,56 @@ export function lanesHeight(lanes: readonly LaneRect[]): number {
 /** The lane containing `y`, or null above the first / below the last. */
 export function laneAt(lanes: readonly LaneRect[], y: number): LaneRect | null {
   return lanes.find((lane) => y >= lane.top && y < lane.top + lane.height) ?? null;
+}
+
+/** A horizontal strip of the lane area that HAS a time axis. Content
+ *  coordinates, like `LaneRect` — `top` is measured from the first lane's top. */
+export interface TimedBand {
+  readonly top: number;
+  readonly height: number;
+}
+
+/**
+ * The strips of the stack a bar line, a beat line or the playhead may be drawn
+ * across: every run of adjacent lanes that is not a voice lane, merged.
+ *
+ * A voice lane draws a rack — knobs, switches, a mic dot — and a line swept over
+ * one points at nothing and lands on top of controls. The rack's own opaque
+ * background already hides whatever is behind it, but a background is not a
+ * reason to DRAW something wrong: bands are what make the time layer say only
+ * what is true, so that stacking order stays a second line of defence rather
+ * than the only one.
+ *
+ * BANDS, not one rectangle per lane. With every track timed there is exactly one
+ * band spanning the whole stack, which is the element count — and the DOM — the
+ * page had before voice became a lane, so the common case costs nothing.
+ *
+ * Runs are measured from the first lane's `top` to the last one's bottom rather
+ * than by summing heights, so a hand-built stack with a gap in it yields one
+ * band covering the gap instead of silently splitting. Zero-height runs are
+ * dropped: there is nothing to draw in them and an empty layer would still take
+ * a key.
+ */
+export function timedBands(
+  lanes: readonly LaneRect[],
+  viewOf: (trackId: string) => ArrangementMode,
+): TimedBand[] {
+  const bands: TimedBand[] = [];
+  let open: { top: number; bottom: number } | null = null;
+  const close = () => {
+    if (open && open.bottom > open.top) bands.push({ top: open.top, height: open.bottom - open.top });
+    open = null;
+  };
+  for (const lane of lanes) {
+    if (viewOf(lane.trackId) === 'voice') {
+      close();
+      continue;
+    }
+    if (!open) open = { top: lane.top, bottom: lane.top + lane.height };
+    else open.bottom = Math.max(open.bottom, lane.top + lane.height);
+  }
+  close();
+  return bands;
 }
 
 /**

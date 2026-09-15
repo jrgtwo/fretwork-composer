@@ -378,6 +378,23 @@
     background-color: transparent;
   }
 
+  /* A VOICE lane's row in the stack is a SPACER: it carries the lane's height so
+     the dividers and the zebra's `:nth-child` counting stay whole, and draws
+     nothing — the rack the user sees is in the sticky layer above it
+     (`ArrangementGrid`). A recessed timeline channel behind an opaque faceplate
+     is two conflicting statements about which surface is on top, so the recess
+     and the zebra come off here exactly as they do for `edit-lane`. The divider
+     between tracks is deliberately kept.
+
+     Scoped `.lanes > [data-lane]` like its neighbours, so it can only ever match
+     an ARRANGEMENT track row. `NoteSurface`'s string rows are `[data-lane]`
+     children of their own `.lanes` on both pages and never carry this class —
+     nothing about their striping changes. */
+  .lanes > [data-lane].voice-lane {
+    box-shadow: none;
+    background-color: transparent;
+  }
+
   /* The same, in brass — primary actions, root notes, the playhead. */
   .control-accent {
     background-image: linear-gradient(180deg, var(--color-brass-hi), var(--color-brass));

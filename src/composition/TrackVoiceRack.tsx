@@ -1,6 +1,12 @@
 /**
- * One track's voice, drawn as a rack down its whole row — voice mode's answer to
+ * One track's voice, drawn as a rack across its lane — voice mode's answer to
  * "what does a lane draw".
+ *
+ * ⚠ THE LANE IS A FIXED-HEIGHT VIEWPORT since COMPS-TRACK-TABS milestone 2
+ * (`DEFAULT_LANE_HEIGHTS.voice`, applied in `ArrangementGrid`'s sticky voice
+ * layer): this scrolls INSIDE it rather than making the row as tall as itself.
+ * Prose below that says the row is sized by this content is CP-16's and is no
+ * longer true.
  *
  * ⚠ THE EDITOR ITSELF IS `voice/VoiceEditor`, which the pattern page renders
  * too. This file is the composition page's chrome around it: the rack's own
@@ -138,8 +144,11 @@ export function TrackVoiceRack({
   if (!preset) return null;
 
   return (
-    // Normal flow, no height of its own: the ROW is as tall as this is (CP-16),
-    // rather than this being clipped or scrolled inside a computed lane.
+    // Normal flow, no height of its own — but the caller's box HAS one since
+    // COMPS-TRACK-TABS milestone 2, so what this grows past is scrolled rather
+    // than shown. CP-16's arrangement, where the row was as tall as this is, is
+    // gone; a viewport cannot come up short of its content, which is what made
+    // the swap safe.
     <div className="flex flex-col gap-1 p-1">
       <div className="flex flex-none items-center gap-1.5">
         <button

@@ -50,6 +50,7 @@ import {
   setTrackView,
   snapArrangementTick,
   tickToPx,
+  timedBands,
   trimHandleWidth,
   viewOf,
   zoomAnchoredScrollLeft,
@@ -1474,10 +1475,87 @@ describe('edit lane heights', () => {
   });
 });
 
+describe('timed bands', () => {
+  // The strips a bar line or the playhead may be drawn in. Pure, and the only
+  // part of milestone 2's layout jsdom can see anything of — where the racks
+  // actually land is a by-eye check.
+  const stack = (views: readonly ArrangementMode[]): LaneRect[] =>
+    views.map((_, index) => ({
+      trackId: `t${index}`,
+      top: index * 100,
+      height: 100,
+    }));
+  const bandsOf = (views: readonly ArrangementMode[]) =>
+    timedBands(stack(views), (trackId) => views[Number(trackId.slice(1))]);
+
+  it('merges every timed lane into ONE band when nothing is in voice', () => {
+    // The case the page has always drawn: one layer spanning the stack, which is
+    // the element count the DOM had before voice became a lane.
+    expect(bandsOf(['pattern', 'edit', 'pattern'])).toEqual([{ top: 0, height: 300 }]);
+  });
+
+  it('draws no band at all when every lane is in voice', () => {
+    // No time axis on screen, so no line and no playhead — which is what voice
+    // mode did before it was a lane, arrived at from the lanes rather than from
+    // the mode.
+    expect(bandsOf(['voice', 'voice'])).toEqual([]);
+  });
+
+  it('starts below a leading voice lane, and stops above a trailing one', () => {
+    expect(bandsOf(['voice', 'pattern', 'edit'])).toEqual([{ top: 100, height: 200 }]);
+    expect(bandsOf(['pattern', 'edit', 'voice'])).toEqual([{ top: 0, height: 200 }]);
+  });
+
+  it('splits the stack in two around a voice lane in the middle', () => {
+    expect(bandsOf(['pattern', 'voice', 'edit'])).toEqual([
+      { top: 0, height: 100 },
+      { top: 200, height: 100 },
+    ]);
+  });
+
+  it('splits into two bands for two voice lanes, and does not count the gap', () => {
+    // Four tracks, voice at 1 and 3: the run before, the single lane between,
+    // and nothing after. Two voice lanes must not merge the lanes either side of
+    // them into one band that draws lines across both racks.
+    expect(bandsOf(['pattern', 'voice', 'pattern', 'voice'])).toEqual([
+      { top: 0, height: 100 },
+      { top: 200, height: 100 },
+    ]);
+  });
+
+  it('has no band for an empty stack', () => {
+    expect(timedBands([], () => 'pattern')).toEqual([]);
+  });
+
+  it('drops a zero-height run rather than returning an empty rectangle', () => {
+    // A lane can be zero-high — `laneRects` clamps a negative height to 0 — and
+    // a band with nothing in it is a layer with a key and no purpose.
+    const lanes: LaneRect[] = [
+      { trackId: 'a', top: 0, height: 0 },
+      { trackId: 'b', top: 0, height: 120 },
+    ];
+    expect(timedBands(lanes, (id) => (id === 'b' ? 'voice' : 'pattern'))).toEqual([]);
+  });
+
+  it('spans a gap inside one run rather than splitting on it', () => {
+    // Hand-built stacks exist (`lanesHeight`'s comment says so), and a run is
+    // measured from its first lane's top to its last one's bottom. Splitting on
+    // a gap would draw two layers where the lanes themselves say one region.
+    const lanes: LaneRect[] = [
+      { trackId: 'a', top: 0, height: 40 },
+      { trackId: 'b', top: 100, height: 40 },
+    ];
+    expect(timedBands(lanes, () => 'pattern')).toEqual([{ top: 0, height: 140 }]);
+  });
+});
+
 describe('lane height resolver', () => {
   // NOT TESTED, deliberately: that `DEFAULT_LANE_HEIGHTS.voice` is a comfortable
-  // amount of rack to see, or that `VOICE_HEADER_HEIGHT` is tall enough for the
-  // mute, the solo, the fader and CP-13's voice picker. jsdom has no layout.
+  // amount of rack to see, or that the `lane.height` a voice track's header is
+  // now drawn at leaves room for the mute, the solo, the fader and CP-13's voice
+  // picker. (That second question used to be asked of `VOICE_HEADER_HEIGHT`,
+  // which COMPS-TRACK-TABS milestone 2 deleted along with the normal-flow voice
+  // subtree that was its only consumer.) jsdom has no layout.
   // What CAN be stated here is that the number is a viewport rather than a
   // measurement: nothing below derives it from a rack's content, which is the
   // property that makes CP-14's ~40 px shortfall unreachable.
