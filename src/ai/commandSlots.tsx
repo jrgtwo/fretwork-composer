@@ -55,10 +55,24 @@ export function SlotFields({
   command,
   values,
   onChange,
+  bound,
 }: {
   command: Command;
   values: Readonly<Record<string, SlotValue>>;
   onChange: (slotId: string, value: SlotValue) => void;
+  /**
+   * Slots the CALLER has already decided, by slot id, carrying the name to show
+   * — the composition rail's track commands bind their target slot to the
+   * selected track (COMPS-TRACK-TABS milestone 5).
+   *
+   * ⚠ A READOUT, NOT A DISABLED PICKER. A disabled `<select>` is skipped by the
+   * keyboard and reads as a control that is temporarily broken; this is not a
+   * choice the user is being denied, it is a choice that has already been made
+   * somewhere else — the track they selected — so it is shown as the fact it is.
+   * The VALUE still travels in `values` and is still checked by `fillCommand`,
+   * so nothing here is load-bearing beyond what it draws.
+   */
+  bound?: Readonly<Record<string, string>>;
 }) {
   return (
     <>
@@ -67,6 +81,7 @@ export function SlotFields({
           key={resolved.slot.id}
           resolved={resolved}
           value={values[resolved.slot.id]}
+          bound={bound?.[resolved.slot.id]}
           onChange={(next) => onChange(resolved.slot.id, next)}
         />
       ))}
@@ -87,10 +102,14 @@ export function SlotFields({
 function SlotControl({
   resolved,
   value,
+  bound,
   onChange,
 }: {
   resolved: ResolvedSlot;
   value: SlotValue | undefined;
+  /** What to show instead of a picker, when the caller owns this slot — see
+   *  `SlotFields`. */
+  bound?: string;
   onChange: (value: SlotValue) => void;
 }) {
   const controlId = useId();
@@ -107,7 +126,8 @@ function SlotControl({
    * renders a sentence and no control at all. Those two name themselves through
    * `aria-labelledby` on a group instead.
    */
-  const labelable = slot.kind !== 'number' && resolved.unavailable === null;
+  const labelable =
+    slot.kind !== 'number' && resolved.unavailable === null && bound === undefined;
 
   return (
     <div className="flex flex-col gap-1">
@@ -121,7 +141,14 @@ function SlotControl({
         </span>
       )}
 
-      {slot.kind === 'number' ? (
+      {bound !== undefined ? (
+        // The bound value as text. Named by the `<span>` above through
+        // `aria-labelledby`, for the reason `labelable` gives: there is no
+        // labelable control here to point a `<label>` at.
+        <p aria-labelledby={labelId} className="font-mono text-[10px] font-bold text-ink">
+          {bound}
+        </p>
+      ) : slot.kind === 'number' ? (
         <NumberStepper
           labelId={labelId}
           label={slot.label}

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { commandsForPage } from './commandCatalog';
+import { compositionCommands, trackCommands } from './commandCatalog';
 import { COMMAND_BUTTON, SlotFields } from './commandSlots';
-import { defaultValues, fillForNow } from './slotSources';
-import type { Command, SlotValue } from './commandTypes';
+import { defaultValues, fillForNow, resolveCommand } from './slotSources';
+import { targetTrackSlotId, type Command, type SlotValue } from './commandTypes';
 import { COMPOSITION_AGENT, COMPOSITION_WRITE_TOOLS } from './compositionAgent';
 import { PATTERN_AGENT, PATTERN_WRITE_TOOLS } from './patternAgent';
 import { runAgentTask, type AgentEvent, type AgentSpec } from './agentService';
@@ -22,8 +22,13 @@ import {
   selectTrack,
   beginEditGesture as beginCompositionGesture,
   endEditGesture as endCompositionGesture,
+  getEditingPlacementId,
+  getSelectedTrackId,
+  getTracks,
   useEditingComposition,
   useEditingPlacementId,
+  useSelectedTrackId,
+  useTracks,
 } from '../composition/compositionService';
 import {
   beginEditGesture as beginPatternGesture,
@@ -44,31 +49,63 @@ import type { ImportedDocuments } from '../patterns/patternService';
  * brackets, whether the document is LOCKED for the duration, whether a failure
  * ROLLS BACK, and how long it is allowed to take. See `commandSlots`' header.
  *
- * ── ONE PANEL, THREE MODES, AND THE RUN READS NONE OF THEM ──────────────────
+ * ── ONE PANEL, TWO GROUPS, ONE RUNNER ───────────────────────────────────────
  *
- * `mode` decides the LIST — pattern and voice mode offer the composition page's
- * rows, edit mode offers the pattern page's six, because
- * `openPlacementForEditing` aims the lib's single pattern-editing pointer at the
- * block and `patternService` routes writes to that placement's snapshot (see
- * `Command.mode`). Nothing else here looks at it.
+ * COMPS-TRACK-TABS milestone 5. The rail's Commands section holds two labelled
+ * lists and they answer different questions:
+ *
+ *   - **Composition commands** — every `scope: 'composition'` row, offered in
+ *     EVERY view and with no track selected at all. `view` is not consulted.
+ *   - **Track commands — [name]** — what the SELECTED track's view offers,
+ *     aimed at that track: the catalog's `trackCommands(view)`, which for the
+ *     Edit view is the pattern page's rows acting on the open block (see
+ *     `Command.mode`).
+ *
+ * ⚠ THE SPLIT IS A BUG FIX, NOT A TIDY-UP. Milestone 4 pointed the rail at the
+ * selected track's view and this panel filtered its whole list by it, so five
+ * composition-wide rows tagged `mode: 'pattern'` — the backing track above all,
+ * whose product is a NEW composition and which needs no track at all —
+ * disappeared the moment a Voice or Edit track was selected. Gating now applies
+ * per GROUP and per ROW: no track selected, or an Edit track with no block open,
+ * withholds the TRACK list and never the composition one.
+ *
+ * ⚠ AND THERE IS STILL EXACTLY ONE RUNNER. One `start`, one in-flight ref, one
+ * job lock, one Cancel — the two groups are two lists over one execution owner.
+ * Two mounted panels with their own locks and cancellation lifecycles is the
+ * thing the milestone explicitly forbids.
  *
  * The run's progress, its tool trace, its Cancel button and its outcome
- * therefore live OUTSIDE the selected-command block, and survive a mode change
- * untouched — rendering them inside the form would take them with the list,
- * since `selected` is looked up in the mode's own array. The run also names the
- * command it is running, because after a mode switch the form that started it
- * may not be on screen.
+ * therefore live OUTSIDE the selected-command block, and survive a change of
+ * either list untouched — rendering them inside the form would take them with
+ * the list, since `selected` is looked up in the currently offered arrays. The
+ * run also names the command it is running, because by the time it ends the form
+ * that started it may not be on screen.
  *
- * ⚠ MID-RUN, THAT IS DEFENCE AND NOT THE LIVE PATH, and an earlier draft of this
- * note overstated it. `CompositionPage` disables the mode bar for the duration
- * of a job (`useIsJobRunning`) and `mode` reaches this panel from nowhere else,
- * so a mode change WHILE a run is in flight is currently unreachable in the app;
- * the disable is what protects edit mode's pointer, and it is the stronger of
- * the two guards. What is reachable, and what this structure buys today, is the
- * FINISHED run: its outcome, its refusals and its tool trace stay on screen
- * after the lock is released and the user goes to look at what was built. The
- * hazard the ticket names — a control vanishing out from under the user — is
- * covered by `select` below, which is the reachable version of it: choosing
+ * ⚠ AND MID-RUN THAT IS NOW A LIVE PATH, WHICH IT WAS NOT. An earlier draft of
+ * this note argued that `CompositionPage` disabled the mode bar for the duration
+ * of a job and `mode` reached the panel from nowhere else, so a mode change
+ * during a run was unreachable. THE BAR IS GONE (milestone 4), so that argument
+ * no longer holds on its own terms. Two things replace it, and they cover
+ * different halves:
+ *
+ *   - THE USER'S OWN ROUTE IS STILL SHUT, by a different mechanism:
+ *     `TrackHeader` renders the view buttons `disabled={locked}` while
+ *     `useIsJobRunning`, and `ArrangementGrid`'s activation coordinator refuses
+ *     every activation path — header press, view press, lane press, a surface
+ *     taking focus — under `isJobRunning()`. So neither a view change nor a
+ *     selection change can be made by hand while a run is in flight.
+ *   - ⚠ AN AGENT'S ROUTE IS OPEN, and this is a real change rather than a
+ *     hypothetical. `view` here is `selectedTrackView(...)`, which depends on
+ *     the SELECTION as well as the view map — and `compositionService`'s
+ *     `pruneTrackSelection` nulls the selected track when the track it names
+ *     stops existing. A run that calls `composition_remove_track` on the
+ *     selected track, or opens a different composition, therefore changes this
+ *     panel's `view` prop mid-run, from inside the lock. The structure below is
+ *     what makes that harmless: the composition group does not depend on `view`
+ *     at all, and the run's report and Cancel are not rendered inside either
+ *     list. It is not defence any more; it is the path.
+ *
+ * The other reachable version of the same hazard is `select` below: choosing
  * another command mid-run must not take Cancel with it.
  *
  * ── THE JOB LOCK, AND WHY IT WRAPS EVERY RUN ────────────────────────────────
@@ -79,12 +116,18 @@ import type { ImportedDocuments } from '../patterns/patternService';
  * composition, so anything the user edited while they waited would be rolled
  * back WITH it.
  *
- * It is taken for EDIT-MODE runs too, which act on the pattern seam and would
- * not otherwise need it. The reason is the mode bar: `CompositionPage` closes an
- * open placement on every mode change, and a switch mid-run would repoint the
- * lib's one pattern pointer out from under the agent and land its next notes in
- * the user's LIBRARY pattern — which no rollback here restores. The lock is what
- * disables that bar (`useIsJobRunning`), so an edit-mode run needs it most.
+ * It is taken for EDIT-VIEW runs too, which act on the pattern seam and would
+ * not otherwise need it. The reason used to be the mode bar — `CompositionPage`
+ * closed an open placement on every mode change, and a switch mid-run would
+ * repoint the lib's one pattern pointer out from under the agent and land its
+ * next notes in the user's LIBRARY pattern, which no rollback here restores. The
+ * bar is gone (milestone 4) and the hazard is not: a track's view buttons close
+ * that track's open block just as the bar did. What the lock buys is the same
+ * thing by a different route — `TrackHeader` disables those buttons on
+ * `useIsJobRunning`, `ArrangementGrid`'s coordinator refuses every activation
+ * under `isJobRunning()`, and the grid's own reconciler goes deliberately silent
+ * about the pointer while the lock is held rather than closing the block the
+ * agent is inside. An edit-view run still needs it most.
  *
  * ⚠ BOTH BRACKETS CLOSE IN A `finally`, ON EVERY PATH. A leaked gesture wedges
  * undo for the session — a defect that has shipped in this project before — and
@@ -123,8 +166,11 @@ import type { ImportedDocuments } from '../patterns/patternService';
  *     promises no restore on this route, and the sentence under the Run button
  *     says which route the user is on.
  *   - **BUT THE LOCK IS STILL TAKEN.** Not for a rollback it does not perform:
- *     for the minutes the job runs, the mode bar has to be dead (`useIsJobRunning`
- *     is what disables it) and a second job must not start.
+ *     for the minutes the job runs, every track's view buttons have to be dead
+ *     (`TrackHeader` disables them on `useIsJobRunning`, and the grid's
+ *     activation coordinator refuses under `isJobRunning()` — the mode bar this
+ *     sentence used to name was deleted in milestone 4) and a second job must
+ *     not start.
  *
  *     ⚠ WITH ONE KNOWN WART, and it is the lock's sentence rather than this
  *     route's: `beginJob` refuses with "No composition is open", and this panel
@@ -133,7 +179,9 @@ import type { ImportedDocuments } from '../patterns/patternService';
  *     and which needs no open one, is refused for the want of a document it was
  *     never going to touch. Known and accepted for now — the alternative is a
  *     second gate with a sentence of its own, kept in step with the seam's by
- *     hand — but it is a misleading refusal and not a correct one.
+ *     hand — but it is a misleading refusal and not a correct one. The
+ *     milestone-5 split makes the row DISCOVERABLE from every view and from an
+ *     empty composition; this is the remaining edge and it is the seam's.
  *
  * ⚠ AND THE PANEL CLEANS UP AFTER THE SEAM. `importIR` repoints the store at
  * what it created but "cannot clean up after the composition seam" — its own
@@ -411,42 +459,104 @@ function partsMissing(chart: ArrangementChart | null, documents: ImportedDocumen
   return Math.max(0, chart.tracks.length - documents.patternIds.length);
 }
 
+/** The empty track list, as a module constant so a gated render does not hand a
+ *  new array identity down on every pass. */
+const NO_COMMANDS: readonly Command[] = [];
+
 /**
- * Edit mode's rows: the pattern page's, less the ones that open a DIFFERENT
- * document.
+ * As much of a track as this panel reads: its name for the group heading and the
+ * bound target, and its placements to check that the open block is really its.
  *
- * `pattern-generate` reads "Open a blank pattern, set its instrument, then stamp
- * the notes", and `openPatternForEditing` nulls `editingPlacementId` — so run
- * against a block it repoints the lib's one pattern pointer out of the block and
- * every later stamp lands in a library pattern nobody is looking at. Dropped
- * here so it is not OFFERED; `pattern_open_blank` refuses for itself while a
- * block is open, because `Command.tools` is not enforcement and a model is free
- * to reach for it from any of the other five.
- *
- * A module constant, not a filter per render: `commandsForPage` returns frozen
- * per-page arrays precisely so the list keeps its identity, and a fresh array
- * here would throw that away again.
+ * STRUCTURAL, not the lib's `Track`, and that is the house rule rather than
+ * fussiness — `src/ai` reaches the app through the four seams and nothing else,
+ * and `Track` is a lib type `compositionService` passes through without
+ * re-exporting. A `readonly Track[]` assigns to this on its own.
  */
-const EDIT_MODE_COMMANDS: readonly Command[] = commandsForPage('pattern').filter(
-  (command) => !command.tools.includes('pattern_open_blank'),
-);
+interface TrackTarget {
+  readonly id: string;
+  readonly name: string;
+  readonly placements: readonly { readonly id: string }[];
+}
 
-export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
-  // Edit mode is served by the PATTERN page's rows, acting on the placement the
-  // lib's editing pointer is aimed at. `page` picks the agent, the tools and the
-  // history; `mode` only picks what is offered — see `Command.mode`.
-  const commands = mode === 'edit' ? EDIT_MODE_COMMANDS : commandsForPage('composition', mode);
+/**
+ * Why the TRACK group has nothing to offer, as the sentence to show in its
+ * place — or null when it has.
+ *
+ * ⚠ IT GATES THE TRACK GROUP AND NOTHING ELSE. That is the milestone's whole
+ * point: "no track selected" and "no block open" are facts about the selected
+ * track, and a row that makes a whole composition is not about the selected
+ * track. Returning a reason here must never be allowed to reach the composition
+ * list — see the render.
+ *
+ * ⚠ AND A VIEW IS NOT THE SAME AS A BLOCK BEING OPEN. Putting a track in Edit
+ * only ever CLOSES a placement (`ArrangementGrid.changeTrackView`); one opens
+ * when a block is pressed. With none open, `patternService.writePatternBack`
+ * falls through to its LIBRARY branch — so the Edit rows would rewrite whatever
+ * pattern the pattern page left open, off-screen, covered by neither the
+ * composition rollback nor the job lock. Ownership is checked as well as
+ * openness: the active placement has to belong to the SELECTED track, which is
+ * §2's rule and which the grid's reconciler maintains.
+ *
+ * ⚠ THE RAW EDITING POINTER IS THE RIGHT INPUT HERE, and deliberately not the
+ * grid's `uiEditingPlacementId`, which is the same rule plus `!jobRunning`. The
+ * two answer different questions: the grid's is about UI OWNERSHIP — whether a
+ * surface may take focus and the shortcuts may fire — while this is about where
+ * a write WOULD LAND, and `writePatternBack` routes on the store's pointer
+ * whatever the lock is doing. A job does not close the block; it only stops the
+ * grid owning it. (A press mid-run is refused by `inFlightRef` regardless, so
+ * this cannot launch a competing run.)
+ *
+ * ⚠ AND "no track" HAS TWO CAUSES WORTH TELLING APART. With no composition open
+ * there are no track headers to press, so the sentence that tells the user to
+ * press one is a dead end. A composition with no tracks at all is not a third
+ * case: a blank one is created with a track and `removeTrack` refuses the last.
+ */
+function trackGroupRefusal(
+  view: ArrangementMode,
+  track: TrackTarget | null,
+  editingPlacementId: string | null,
+  hasComposition: boolean,
+): string | null {
+  if (track === null) {
+    return hasComposition
+      ? 'No track is selected. Press a track header — these commands act on the track you pick.'
+      : 'No composition is open — these commands act on a track of the composition you are working in.';
+  }
+  if (view !== 'edit') return null;
+  const owns =
+    editingPlacementId !== null &&
+    track.placements.some((placement) => placement.id === editingPlacementId);
+  return owns
+    ? null
+    : 'Press a block in this track to open it — these commands act on the block you are editing.';
+}
 
+export function CompositionCommandPanel({ view }: { view: ArrangementMode }) {
   /**
-   * ⚠ EDIT MODE IS NOT THE SAME AS A BLOCK BEING OPEN. Entering the mode only
-   * ever CLOSES a placement (`CompositionPage`'s mode effect); one opens when a
-   * lane is pressed. With none open, `patternService.writePatternBack` falls
-   * through to its LIBRARY branch — so the six rows would run against whatever
-   * pattern the pattern page left open, off-screen, covered by neither the
-   * composition rollback nor the job lock. So they are not offered at all.
+   * The two lists.
+   *
+   * ⚠ `compositionCommands()` TAKES NO VIEW, AND MUST NOT. It is the whole fix:
+   * every composition-wide row is discoverable from Pattern, Voice and Edit
+   * alike, and with nothing selected. `trackCommands(view)` is the other
+   * question — what the SELECTED track's view offers about that track.
    */
+  const globalCommands = compositionCommands();
   const editingPlacementId = useEditingPlacementId();
-  const noBlockOpen = mode === 'edit' && editingPlacementId === null;
+  const tracks = useTracks();
+  const selectedTrackId = useSelectedTrackId();
+  // Looked up rather than trusted: `selectedTrackView` already falls back to
+  // Pattern for a selection that is not a member of the open composition, and
+  // this is the same membership question one layer down. A name is about to be
+  // shown to the user and a target is about to be bound to it.
+  const selectedTrack = tracks.find((track) => track.id === selectedTrackId) ?? null;
+  const editingComposition = useEditingComposition();
+  const trackRefusal = trackGroupRefusal(
+    view,
+    selectedTrack,
+    editingPlacementId,
+    editingComposition !== null,
+  );
+  const trackGroupCommands = trackRefusal === null ? trackCommands(view) : NO_COMMANDS;
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [values, setValues] = useState<Readonly<Record<string, SlotValue>>>({});
@@ -457,9 +567,11 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
   const [job, setJob] = useState<JobView>({ kind: 'idle' });
 
   /** The run in flight, if any. Doubles as the re-entrancy guard, so the Run
-   *  button never has to be `disabled` — disabling it under the pointer drops
+   *  button is never disabled BY THE RUN — disabling it under the pointer drops
    *  focus to `<body>`, which is the trap the connector dialog goes out of its
-   *  way to avoid. */
+   *  way to avoid. (It is disabled for a row whose required input does not
+   *  exist, which is a fact about the document and cannot flip mid-press; see
+   *  `unfillable`.) */
   const inFlightRef = useRef<AbortController | null>(null);
   /** The live run's deadline, so an unmount can disarm it. Both routes set it;
    *  each clears it in the same `finally` that clears {@link inFlightRef}. */
@@ -468,13 +580,13 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
 
   const configured = isConfigured(useConnectorSettings());
 
-  // Both subscriptions are deliberately unused values. Every choice slot's
-  // DEFAULT is read off live state — the composition's key, tempo and length and
-  // its track list for the composition rows, the open pattern's key and groove
-  // for the edit-mode ones — so a panel that did not re-render when either
-  // changed would open a command on a track that has since been renamed, or on
-  // the last pattern's key.
-  useEditingComposition();
+  // Subscribed for the RE-RENDER as much as for the value. Every choice slot's
+  // DEFAULT is read off live state — the composition's key, tempo and length for
+  // the composition rows, the open pattern's key and groove for the Edit view's
+  // — so a panel that did not re-render when either changed would open a command
+  // on the last pattern's key. (`useTracks` and `useEditingComposition` above are
+  // used values too, because the group heading, the bound target and the track
+  // group's refusal are drawn from them.)
   useEditingPattern();
 
   useEffect(() => {
@@ -490,7 +602,8 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
       // And the deadline with it. An abort normally settles the run, whose
       // `finally` clears this — but a promise that never settles is precisely
       // the case the deadline exists for, and one left armed holds a timer for
-      // up to eighteen minutes against a controller nothing is listening to.
+      // as long as whichever route set it is given — fifteen minutes for a run,
+      // thirty-four for a job — against a controller nothing is listening to.
       if (deadlineRef.current !== null) window.clearTimeout(deadlineRef.current);
       deadlineRef.current = null;
       // The belt to that brace, and the ONE bracket worth a second release: the
@@ -504,7 +617,64 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
     };
   }, []);
 
-  const selected = commands.find((command) => command.id === selectedId) ?? null;
+  /**
+   * The open command, looked up across BOTH offered lists.
+   *
+   * One `selectedId` for two groups, because there is one form and one runner.
+   * A row that stops being offered — the selection moved, the track's view
+   * changed, its block closed — takes the form with it, which is the same
+   * behaviour a withheld list always had. The RUN is not looked up here and does
+   * not go with it; see the header.
+   */
+  const selected =
+    globalCommands.find((command) => command.id === selectedId) ??
+    trackGroupCommands.find((command) => command.id === selectedId) ??
+    null;
+
+  /**
+   * THE TARGET, for a track command: the slot bound to the selected track rather
+   * than picked independently (§2).
+   *
+   * Null for every composition-scoped row, which is what keeps their explicit
+   * source/featured-track pickers explicit — `targetTrackSlotId` answers only for
+   * a row that DECLARES it acts on the selected track.
+   */
+  const targetSlotId = selected === null ? null : targetTrackSlotId(selected);
+
+  /**
+   * REBIND THE TARGET WHEN THE SELECTION MOVES, before Run.
+   *
+   * ⚠ THE FAILURE THIS EXISTS FOR is a hidden stale target: a track command
+   * opened on track A, the user selects track B, presses Run, and the form's
+   * untouched `track` value still says A — a write to a track that is not on
+   * screen. The form shows the NAME and the name follows the selection, so the
+   * value has to as well.
+   *
+   * ⚠ AND IT IS THE TARGET ONLY. Non-target preferences — how many copies, which
+   * pattern, which tone — are the user's and survive; they are re-checked against
+   * live state at Run by `fillForNow`, which refuses a value the app no longer
+   * offers rather than spending a run on a dead id. A COMPOSITION row's track
+   * inputs are untouched here on purpose: `selected-track` seeds them once, at
+   * `select`, and a later selection change must not silently replace a choice the
+   * user made (§2).
+   */
+  useEffect(() => {
+    if (targetSlotId === null || selectedTrackId === null) return;
+    setValues((was) =>
+      was[targetSlotId] === selectedTrackId ? was : { ...was, [targetSlotId]: selectedTrackId },
+    );
+  }, [targetSlotId, selectedTrackId]);
+
+  /**
+   * Why THIS command cannot run — a required source or featured track that does
+   * not exist yet — or null.
+   *
+   * ⚠ ONE ROW, NEVER THE GROUP. A composition with no tracks has nothing for
+   * "Add a harmony track" to double and nothing for "Balance the mix" to
+   * feature, and both say so on their own Run. "Create a backing track" beside
+   * them is unaffected, because it needs neither.
+   */
+  const unfillable = selected === null ? null : resolveCommand(selected).unavailable;
 
   const select = (command: Command) => {
     setSelectedId(command.id);
@@ -513,14 +683,15 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
     setValues(defaultValues(command));
     // ⚠ ONLY WHEN NOTHING IS IN FLIGHT. Clearing this unconditionally is the
     // reachable version of the failure the header names: `running` is derived
-    // from `run.kind`, so one click on another row would disable Cancel while
-    // the job still held the document — the mode bar dead, undo inert, every
-    // user write refused, and nothing on screen saying why or offering a way
-    // out. Reading the ref rather than `run.kind` because it is the run itself,
-    // not the report about it, that decides.
+    // from `run.kind`, so one click on another row — in EITHER group — would
+    // disable Cancel while the job still held the document: every view button
+    // dead, undo inert, every user write refused, and nothing on screen saying
+    // why or offering a way out. Reading the ref rather than `run.kind` because
+    // it is the run itself, not the report about it, that decides.
     //
-    // Deliberately NOT reset by a mode change either — only by choosing another
-    // command. See the header: the run outlives the list it was started from.
+    // Deliberately NOT reset by a view or selection change either — only by
+    // choosing another command. See the header: the run outlives the lists it
+    // was started from.
     if (!inFlightRef.current) {
       setRun({ kind: 'idle' });
       setJob({ kind: 'idle' });
@@ -546,7 +717,7 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
     // version is that this route writes nothing until the import and then is
     // over, so there is nothing to snapshot and `abortEditGesture` would restore
     // the OLD composition over the new one. What the lock buys is the minutes in
-    // between: the mode bar dead, and no second job.
+    // between: every track's view buttons dead, and no second job.
     const held = beginJob();
     if (!held.ok) {
       setJob(jobRefusal(label, held.reason));
@@ -748,13 +919,75 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
     setRun({ kind: 'idle' });
     setJob({ kind: 'idle' });
 
+    /** One refusal, onto whichever route's report is live. */
+    const refuse = (reason: string): void => {
+      if (irJob) setJob(jobRefusal(label, reason));
+      else setRun(refusal(label, reason));
+    };
+
+    /**
+     * ── RE-VALIDATE THE TARGET AT EXECUTION, AGAINST LIVE STATE ─────────────
+     *
+     * The form is a snapshot — command id, the values, and for a track command
+     * the track those values were bound to — and everything under it can have
+     * moved since the render that drew it: an undo retracting the track, the
+     * grid closing a block, another pane changing the selection. §2 asks for the
+     * snapshot to be taken AND checked again here, so every one of them is
+     * checked against the seams rather than against this render's props.
+     *
+     * `resolveCommand`/`getTracks`/`getSelectedTrackId`/`getEditingPlacementId`,
+     * not the hooks and not `unfillable`, for that reason: those are what this
+     * render saw, and a press lands after it.
+     *
+     * ⚠ AND THE TARGET IS RE-BOUND, NOT MERELY CHECKED. The render-time effect
+     * that follows the selection is an effect, and it does not run at all when
+     * nothing is selected — so trusting the value in the form would leave the
+     * "hidden stale target" guarantee resting on effect ordering. Overriding it
+     * from the live selection here makes a write to an off-screen track
+     * structurally impossible instead.
+     */
+    const unavailableNow = resolveCommand(command).unavailable;
+    if (unavailableNow !== null) {
+      refuse(unavailableNow);
+      return;
+    }
+    let args = values;
+    if (command.scope === 'track' || command.page === 'pattern') {
+      // Both kinds of track command: the composition-page rows aimed at the
+      // selected track, and the pattern-page rows the Edit view borrows. Neither
+      // has a target without a live, member track.
+      const liveTrackId = getSelectedTrackId();
+      const liveTrack = getTracks().find((track) => track.id === liveTrackId) ?? null;
+      if (liveTrack === null) {
+        refuse('No track is selected any more, so there is nothing to run this on.');
+        return;
+      }
+      const target = targetTrackSlotId(command);
+      if (target !== null) args = { ...values, [target]: liveTrack.id };
+      // ⚠ AND THE EDIT ROWS NEED THE BLOCK AS WELL. Without one,
+      // `writePatternBack` falls through to its library branch and the run would
+      // rewrite a pattern nobody is looking at. The list is withheld in that
+      // state, so this is the belt: the document can move between the render
+      // that offered the row and the press.
+      if (command.page === 'pattern') {
+        const open = getEditingPlacementId();
+        const owns =
+          open !== null && liveTrack.placements.some((placement) => placement.id === open);
+        if (!owns) {
+          refuse(
+            'No block on the selected track is open for editing, so there is nothing to act on.',
+          );
+          return;
+        }
+      }
+    }
+
     // `fillForNow`, never `fillCommand`: the one-argument form has the live
     // allow-list composed in, so a slot holding something the app no longer
     // offers is refused here instead of being spent on a dead id by the model.
-    const filled = fillForNow(command, values);
+    const filled = fillForNow(command, args);
     if (!filled.ok) {
-      if (irJob) setJob(jobRefusal(label, filled.reason));
-      else setRun(refusal(label, filled.reason));
+      refuse(filled.reason);
       return;
     }
 
@@ -764,10 +997,9 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
     // existed — which is a page that flickers read-only for the app's own
     // default state. Same sentence the seam would have answered with.
     if (!configured) {
-      const reason =
-        'No provider is configured. Open Connector and set the base URL of an OpenAI-compatible endpoint.';
-      if (irJob) setJob(jobRefusal(label, reason));
-      else setRun(refusal(label, reason));
+      refuse(
+        'No provider is configured. Open Connector and set the base URL of an OpenAI-compatible endpoint.',
+      );
       return;
     }
 
@@ -787,6 +1019,55 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
     const onComposition = command.page === 'composition';
     const agent: AgentSpec = onComposition ? COMPOSITION_AGENT : PATTERN_AGENT;
     const writeTools = onComposition ? COMPOSITION_WRITE_TOOLS : PATTERN_WRITE_TOOLS;
+
+    /**
+     * ── RESTORE THE PATTERN POINTER BEFORE THE AGENT TAKES THE DOCUMENT ─────
+     *
+     * ⚠ A NEWLY REACHABLE PATH, and it is the reason this is here rather than
+     * being left to the grid. Before milestone 5 the offered list was filtered by
+     * the page mode, so a composition row could not be launched while a block was
+     * open — the Edit list was the pattern page's six and nothing else. Now the
+     * composition group is offered in EVERY view, so "Create a bass line" can be
+     * pressed with the selected track in Edit and one of its blocks open. What
+     * happens then, with the pointer left where it is:
+     *
+     *   - `pattern_open_blank` REFUSES while a placement is open (it says so
+     *     itself, and it must), so the row cannot author the part it exists to
+     *     author; and
+     *   - `pattern_stamp_notes` does not refuse. `writePatternBack` routes to the
+     *     open placement's snapshot, so the agent's bass line would be stamped
+     *     into the block the user was editing — a write the composition rollback
+     *     restores but that nothing warns about.
+     *
+     * So: close it, then take the lock. The gesture half of the order is already
+     * owned elsewhere rather than written twice — `ArrangementGrid`'s reconciler
+     * runs `endOutgoingWork()` the moment `useIsJobRunning` goes true, which is
+     * the same React commit as `beginJob` below, and every focused `NoteSurface`
+     * closes its own key runs when the pointer it was drawing goes away. Both
+     * land before any awaited tool call, so nothing of the user's is still
+     * writing when the agent's first write arrives. (Milestone 3 landed
+     * `endOutgoingWork` INSIDE the grid and it is not exported; the sweep on the
+     * lock transition is the seam between the two components, and adding a
+     * second teardown here is what the milestone says not to do.)
+     *
+     * ⚠ THAT PUTS THE SWEEP AFTER THE CLOSE, WHICH §2 WRITES THE OTHER WAY
+     * ROUND, AND IT IS SAFE ONLY FOR A REASON WORTH WRITING DOWN: every teardown
+     * on that path — `closeKeyRuns`, the block drag's `finish`, `endTransposeRun`
+     * — ends by calling `patternService.endEditGesture`, which closes a history
+     * BRACKET and writes no notes. So there is no note that can land in the
+     * library pattern in the window between the two, and the worst case is an
+     * empty undo step. A teardown that ever grows a write of its own breaks that
+     * and has to move the close after it; `tests/EditMode.test.tsx` drives the
+     * two steps in this order with a drag in flight for exactly that reason.
+     *
+     * Restricted to a run driving the COMPOSITION agent. A pattern-page row is
+     * the Edit view's own, and its whole target is that block. And the `'ir-job'`
+     * route never reaches this line: it is offered no tool at all and writes
+     * nothing into the open document until an import that replaces it, after
+     * which `startIrJob` closes the pointer along with the rest of the state
+     * naming the document that was open.
+     */
+    if (onComposition && getEditingPlacementId() !== null) closePlacementEditing();
 
     // THE LOCK IS TAKEN FIRST, before the gesture, so a refused job leaves no
     // bracket open. The seam documents the opposite order; both work, because
@@ -1018,7 +1299,7 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
         });
 
         if (!onComposition) {
-          // AG-06's behaviour, kept deliberately for edit-mode rows: NO
+          // AG-06's behaviour, kept deliberately for the Edit view's rows: NO
           // ROLLBACK. A pattern command is a handful of calls over seconds and
           // its partial work is one undo press, which the panel says out loud;
           // `patternService` has no `abortEditGesture` and does not need one.
@@ -1077,50 +1358,76 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
         </p>
       )}
 
-      {noBlockOpen ? (
-        // The list and the form are BOTH withheld, not merely disabled: a
-        // selected command survives a mode change, so leaving the form up would
-        // leave a Run button that writes into a document off-screen. Withholding
-        // it is also what makes the `start` guard unnecessary — there is no
-        // button to press. The run report below stays mounted regardless.
-        <p className="tray px-2 py-1.5 text-[10px] leading-relaxed text-ink-mut">
-          Press a block in the arrangement to open it — these commands act on the block you
-          are editing.
-        </p>
-      ) : (
-        <ul className="flex flex-col gap-[3px]">
-          {commands.map((command) => (
-            <li key={command.id}>
-              <button
-                type="button"
-                aria-pressed={command.id === selectedId}
-                onClick={() => select(command)}
-                className={`w-full rounded-md px-2 py-1 text-left font-mono text-[10px] font-semibold ${
-                  command.id === selectedId
-                    ? 'control-accent pressable text-ink-hi'
-                    : 'text-ink-mut hover:text-brass-hi'
-                }`}
-              >
-                {command.label}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+      {/* ── THE COMPOSITION GROUP ─────────────────────────────────────────────
+          Unconditional, and never gated by the view or by the selection. That
+          is the milestone: "Create a backing track" is reachable from a Voice
+          track, from an Edit track with a block open, and from an empty
+          composition with nothing selected at all. */}
+      <CommandGroup
+        label="Composition commands"
+        commands={globalCommands}
+        selectedId={selectedId}
+        onSelect={select}
+      />
 
-      {selected && !noBlockOpen && (
+      {/* ── THE TRACK GROUP ───────────────────────────────────────────────────
+          Named after the track, because the target IS the track and a group
+          heading is where that can be said once instead of on every row. Its
+          refusal replaces its own list and nothing else. */}
+      <CommandGroup
+        label={
+          selectedTrack === null ? 'Track commands' : `Track commands — ${selectedTrack.name}`
+        }
+        commands={trackGroupCommands}
+        selectedId={selectedId}
+        onSelect={select}
+        refusal={trackRefusal}
+      />
+
+      {selected && (
         <div className="flex flex-col gap-2 border-t border-rim-dark pt-2">
           <p className="text-[10.5px] leading-relaxed text-ink-mut">{selected.summary}</p>
 
-          <SlotFields command={selected} values={values} onChange={setValue} />
+          <SlotFields
+            command={selected}
+            values={values}
+            onChange={setValue}
+            // The target, shown as the track's NAME instead of a picker the user
+            // would have to keep in step with what they selected. Only ever set
+            // for a track-scoped row — see `targetSlotId`.
+            bound={
+              targetSlotId !== null && selectedTrack !== null
+                ? { [targetSlotId]: selectedTrack.name }
+                : undefined
+            }
+          />
 
           <button
             type="button"
             onClick={start}
-            className={`${COMMAND_BUTTON} self-start ${running ? 'opacity-60' : 'control-accent'}`}
+            // ⚠ THE ONE THING THAT DISABLES RUN, and it is not the run itself:
+            // re-entrancy is guarded by `inFlightRef` precisely so the button
+            // never goes dead under the pointer that just pressed it. This is a
+            // fact about the DOCUMENT — a required source or featured track that
+            // does not exist — and it belongs to THIS row alone, so the rest of
+            // its group stays live. It CAN flip between the paint and the press
+            // (an agent write, an undo), which is why `start` resolves the
+            // command again against live state rather than trusting this: the
+            // disabled state is the signpost, not the guard.
+            disabled={unfillable !== null}
+            className={`${COMMAND_BUTTON} self-start disabled:opacity-40 ${
+              running ? 'opacity-60' : 'control-accent'
+            }`}
           >
             {running ? 'Running…' : 'Run'}
           </button>
+
+          {unfillable !== null && (
+            // The seam's own sentence, verbatim, as everything else the panel
+            // reports is: `slotSources` words these for a user rather than for a
+            // log ("This composition has no tracks.").
+            <p className="text-[10.5px] leading-relaxed text-ink">{unfillable}</p>
+          )}
 
           {/* Stated where the button is, and unconditionally: a user who does not
               know what a run costs them will not risk one. The three sentences
@@ -1177,6 +1484,71 @@ export function CompositionCommandPanel({ mode }: { mode: ArrangementMode }) {
           <JobReport job={job} />
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * ONE LABELLED LIST OF COMMANDS.
+ *
+ * Two of these, one runner. The component exists so the two groups cannot drift
+ * apart in how a row looks or how it is pressed — the only thing they differ in
+ * is their heading and whether they have a refusal to show instead of rows.
+ *
+ * `role="group"` with `aria-label` rather than a bare heading: the rail's
+ * `Section` already owns the "Commands" disclosure, so these are two regions
+ * inside one section and a screen reader user moving by group is how they are
+ * told apart. It is also the only handle a test has for asserting that a row is
+ * in the RIGHT list rather than merely on screen.
+ *
+ * ⚠ THE REFUSAL REPLACES THIS GROUP'S ROWS AND NOTHING ELSE. Withholding the
+ * list rather than disabling it is deliberate and unchanged from the mode-bar
+ * era: a selected command survives a list change, so leaving pressable rows up
+ * would leave a Run button aimed at a document off-screen.
+ */
+function CommandGroup({
+  label,
+  commands,
+  selectedId,
+  onSelect,
+  // Renamed on the way in: `refusal` at module scope is the RunView shortcut,
+  // and one identifier meaning two things in one file is a trap.
+  refusal: unavailable,
+}: {
+  label: string;
+  commands: readonly Command[];
+  selectedId: string | null;
+  onSelect: (command: Command) => void;
+  /** Shown instead of the rows when this group has nothing to offer. */
+  refusal?: string | null;
+}) {
+  return (
+    <div role="group" aria-label={label} className="flex flex-col gap-1">
+      <p className="font-mono text-[9px] font-bold tracking-[0.12em] text-ink-mut uppercase">
+        {label}
+      </p>
+      {unavailable ? (
+        <p className="tray px-2 py-1.5 text-[10px] leading-relaxed text-ink-mut">{unavailable}</p>
+      ) : (
+        <ul className="flex flex-col gap-[3px]">
+          {commands.map((command) => (
+            <li key={command.id}>
+              <button
+                type="button"
+                aria-pressed={command.id === selectedId}
+                onClick={() => onSelect(command)}
+                className={`w-full rounded-md px-2 py-1 text-left font-mono text-[10px] font-semibold ${
+                  command.id === selectedId
+                    ? 'control-accent pressable text-ink-hi'
+                    : 'text-ink-mut hover:text-brass-hi'
+                }`}
+              >
+                {command.label}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

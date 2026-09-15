@@ -342,8 +342,10 @@ export function CompositionPage({
               purpose: a generation job runs for minutes across view and
               selection changes, and its progress and its Cancel button cannot
               live in a region that is replaced when the user goes to look at
-              what the agent just built. Splitting its contents into composition
-              commands and selected-track commands is milestone 5's.
+              what the agent just built. Its contents ARE split, into a
+              composition group and a track group named after the selected track
+              (milestone 5) — two lists over one runner, which is why the split
+              did not become two panels.
               No `grow`: it is as tall as its content, so opening it costs the
               rail below it rows rather than half the column (see `PatternRail`
               in `App.tsx` for the whole argument). */}
@@ -365,12 +367,13 @@ export function CompositionPage({
             // Not assertable in jsdom, which has no layout.
             bodyClassName="max-h-[50vh] overflow-y-auto"
           >
-            {/* The SELECTED TRACK'S view, which is what `mode` means here now:
-                the panel uses it to pick which rows it offers, and the rows are
-                about the surface the user is looking at. Its own prop keeps its
-                name until milestone 5 splits the offering into composition
-                commands and track commands. */}
-            <CompositionCommandPanel mode={railView} />
+            {/* The SELECTED TRACK'S view — and since milestone 5 the panel uses
+                it for ONE of its two lists. Its composition group does not read
+                it at all and is offered here in every view and with nothing
+                selected, which is what stops "Create a backing track" vanishing
+                behind a Voice track. The prop is `view` and not `mode` because
+                that is what it is: there is no page mode to pass. */}
+            <CompositionCommandPanel view={railView} />
           </Section>
 
           {railView === 'pattern' ? (

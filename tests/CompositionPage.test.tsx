@@ -133,6 +133,98 @@ describe('the rail (CP-17)', () => {
   });
 });
 
+/**
+ * ⚠ THE RAIL-LEVEL HALF OF ACCEPTANCE 13 (COMPS-TRACK-TABS milestone 5).
+ *
+ * The panel's own suite drives the groups in detail; what this file can say that
+ * that one cannot is that the PAGE is what wires the selected track's view into
+ * them — and that the wiring reaches only the track group. The Commands section
+ * itself is persistent and sits above the swapped region, so a job's progress
+ * and its Cancel survive a user going to look at what the agent just built.
+ */
+describe('the Commands section (milestone 5)', () => {
+  const groupNames = () =>
+    screen
+      .getAllByRole('group')
+      .map((group) => group.getAttribute('aria-label'))
+      .filter((label): label is string => label !== null);
+
+  it('shows the composition group whatever the selected track is showing', () => {
+    openBlankComposition('Song');
+    const track = getTracks()[0];
+    selectTrack(track.id);
+    const { rerender } = render(
+      <CompositionPage views={viewsOf('pattern')} openRailSections={['commands']} />,
+    );
+
+    const backingTrack = () =>
+      screen.queryByRole('button', { name: 'Create a backing track' });
+    expect(backingTrack()).toBeInTheDocument();
+    expect(groupNames()).toContain(`Track commands — ${track.name}`);
+
+    rerender(<CompositionPage views={viewsOf('voice')} openRailSections={['commands']} />);
+    // The row that used to vanish here. The track group followed the view; the
+    // composition group did not, because it does not read it.
+    expect(backingTrack()).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Dial in a tone' })).toBeInTheDocument();
+
+    rerender(<CompositionPage views={viewsOf('edit')} openRailSections={['commands']} />);
+    expect(backingTrack()).toBeInTheDocument();
+    // Edit with nothing open has no track rows, and that gates ITS group alone.
+    expect(screen.getByText(/Press a block in this track/)).toBeInTheDocument();
+  });
+
+  it('keeps the composition group with no track selected at all', () => {
+    openBlankComposition('Song');
+    render(<CompositionPage views={viewsOf('voice')} openRailSections={['commands']} />);
+
+    expect(
+      screen.getByRole('button', { name: 'Create a backing track' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/No track is selected/)).toBeInTheDocument();
+  });
+
+  /**
+   * ⚠ ACCEPTANCE 15'S FOLDING CASE, AND IT HOLDS BY A STRUCTURAL PROPERTY THAT
+   * NOTHING ELSE PINS: `Section` keeps its body MOUNTED when closed (`hidden`),
+   * where `PaneStack` unmounts a folded pane's outright. A job runs for minutes
+   * and the user folds the rail to look at what it built; an unmounting section
+   * would take the run's progress and its Cancel button with it, leaving the
+   * document locked with nothing on screen offering a way out.
+   *
+   * Asserted on the NODE rather than on its presence: a section that unmounted
+   * and remounted would put a second, fresh button in the same place — and a
+   * fresh one belongs to a panel that has forgotten the run. No run is needed to
+   * show that, which is the point; the panel's own suite owns what Cancel does.
+   */
+  it('keeps the run’s Cancel mounted across folding the section', async () => {
+    openBlankComposition('Song');
+    // Uncontrolled, so the disclosure actually folds: with `openRailSections`
+    // passed the page defers to its owner and leaves itself open (see the rail
+    // sections suite below).
+    render(<CompositionPage />);
+    await userEvent.click(screen.getByRole('button', { name: 'Commands' }));
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Commands' }));
+
+    // Out of the accessibility tree, as a folded disclosure must be: the region
+    // carries `hidden`, so a screen reader and the keyboard both skip it.
+    expect(screen.getByRole('button', { name: 'Commands' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    // ⚠ AND STILL THE SAME ELEMENT, which is the claim: hidden, not unmounted.
+    // A remount would put a fresh button here — one belonging to a panel that
+    // has forgotten the run.
+    expect(screen.getByRole('button', { name: 'Cancel', hidden: true })).toBe(cancel);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Commands' }));
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBe(cancel);
+  });
+});
+
 describe('the mode bar is gone (COMPS-TRACK-TABS milestone 4)', () => {
   it('offers no page-wide mode control at all', () => {
     openBlankComposition('Song');

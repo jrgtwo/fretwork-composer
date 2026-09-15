@@ -1628,6 +1628,56 @@ describe('the activation coordinator — while a generation job holds the docume
     });
   });
 
+  /**
+   * ⚠ THE PANEL'S OWN ORDER, WITH A DRAG STILL DOWN — and it is the order §2
+   * writes the other way round.
+   *
+   * A composition command launched from the Edit view CLOSES the open placement
+   * and then takes the lock (`CompositionCommandPanel`), so the window between
+   * the two is the one in which `writePatternBack` has already fallen through to
+   * its LIBRARY branch while the user's drag is still live. What makes that
+   * window safe is that every teardown on the path writes no notes — but what
+   * makes it CLOSE is this sweep, and the two steps are driven here in the
+   * panel's order rather than the coordinator's to say so.
+   *
+   * The test above drives the lock alone, which is the agent-side entry. This is
+   * the rail-side one.
+   */
+  it('ends an in-flight note drag when a command closes the block and locks it', async () => {
+    const { patternId, first } = seedTwoEditTracks();
+    usePatternsStore.setState({ editingPatternId: patternId });
+    const user = userEvent.setup();
+    render(editGrid());
+    const libraryStarts = () =>
+      findLibraryPattern(patternId)!.events.map((event) => event.startTick);
+
+    await user.pointer([
+      { target: noteIn(first), keys: '[MouseLeft>]', coords: { clientX: 0, clientY: 0 } },
+      { coords: { clientX: PX_PER_BEAT, clientY: 0 } },
+    ]);
+    const libraryBefore = libraryStarts();
+
+    // One commit, both steps, in the panel's order.
+    await act(async () => {
+      closePlacementEditing();
+      const job = beginJob();
+      if (!job.ok) throw new Error(job.reason);
+    });
+
+    // Still down, still moving — and now pointed at the library pattern if
+    // anything of it is still alive.
+    await user.pointer([
+      { coords: { clientX: PX_PER_BEAT * 5, clientY: 0 } },
+      { keys: '[/MouseLeft]' },
+    ]);
+
+    expect(libraryStarts()).toEqual(libraryBefore);
+
+    await act(async () => {
+      endJob();
+    });
+  });
+
   it('reconciles against live state when the job completes, and activates normally after', async () => {
     const { first, bassId, onBass } = seedTwoEditTracks();
     render(editGrid());

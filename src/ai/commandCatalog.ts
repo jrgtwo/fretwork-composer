@@ -49,20 +49,29 @@
  *     nothing;
  *   - transposition drops notes that fall off the neck.
  *
- * ── Two axes, not one ──────────────────────────────────────────────────────
+ * ── Three axes, not one ────────────────────────────────────────────────────
  *
- * A row carries a `page` AND, on the composition page, a `mode`. They are not
- * the same knob: `page` picks the agent, the tool set and the history a run
- * brackets against; `mode` only picks which rows are OFFERED. The full argument
- * is on `Command.mode` in `commandTypes`, and it is the reason edit mode adds
- * no rows here.
+ * A composition row carries a `page`, a `scope`, and — if it is track-scoped —
+ * a `mode`. They are not the same knob:
+ *
+ *   - `page` picks the agent, the tool set and the history a run brackets
+ *     against;
+ *   - `scope` picks which of the rail's two GROUPS the row is in, and what its
+ *     form binds its target to;
+ *   - `mode` picks which of the selected track's VIEWS offers it, and is read
+ *     for a track-scoped row only.
+ *
+ * The full arguments are on `Command.mode` and `CommandScope` in `commandTypes`.
+ * Between them they are the reason the Edit view adds no rows here: it borrows
+ * the pattern page's, which act on the block the lib's editing pointer is aimed
+ * at.
  *
  * A slot's VALUE goes into the template, never its label — see `commandTypes`.
  * Numbers that belong to the lib (the tick grid, the track cap) are never
  * written out in prose here; they arrive through a slot or through the tool's
  * own description, so this file cannot drift from the lib by being edited.
  */
-import type { Command, CommandMode, CommandPage } from './commandTypes';
+import type { Command, CommandMode, CommandPage, CommandScope } from './commandTypes';
 
 // ---------------------------------------------------------- pattern page ---
 
@@ -499,7 +508,22 @@ Then read the pattern back and say in one sentence whether the note lengths stil
 
 // ------------------------------------------------------ composition page ---
 
-const COMPOSITION_COMMANDS: readonly Command[] = [
+/**
+ * A composition-page row, which MUST say which group it is in.
+ *
+ * The narrowing exists for the compile error: `scope` is optional on
+ * {@link Command} because the pattern page's rows have no groups, and an
+ * optional field is one a new composition row can simply forget — landing it in
+ * neither of the rail's two lists and making it unreachable with no test
+ * failing. Declared here instead of widening `Command`, so the requirement lands
+ * exactly where it is true.
+ */
+type CompositionCommand = Command & {
+  readonly page: 'composition';
+  readonly scope: CommandScope;
+};
+
+const COMPOSITION_COMMANDS: readonly CompositionCommand[] = [
   /**
    * ⚠ THE ONE ROW ON THE `'ir-job'` ROUTE, and the only one in this file whose
    * template is not read by a tool-using agent. See `CommandRoute` in
@@ -534,7 +558,12 @@ const COMPOSITION_COMMANDS: readonly Command[] = [
   {
     id: 'composition-backing-track',
     page: 'composition',
-    mode: 'pattern',
+    // Composition-scoped in the strongest sense available: it does not merely
+    // act on a composition, it MAKES one. There is no selection it could be
+    // about, and it is the row the milestone-5 split exists for — tagged
+    // `mode: 'pattern'` it disappeared the moment a Voice or Edit track was
+    // selected, and from an empty composition with nothing selected at all.
+    scope: 'composition',
     route: 'ir-job',
     label: 'Create a backing track',
     summary:
@@ -606,7 +635,10 @@ Give it the parts a {genre} backing track is made of, each with a job the others
   {
     id: 'composition-bass-line',
     page: 'composition',
-    mode: 'pattern',
+    // Finds or adds a bass track and writes a part across the whole
+    // arrangement. The track it lands on is one it chooses, not one the user
+    // selected — nothing about it is about the selection.
+    scope: 'composition',
     label: 'Create a bass line',
     summary: 'Write a bass part that follows what the arrangement is already doing.',
     slots: [
@@ -655,7 +687,12 @@ Say which bars you covered and what the line is following.`,
   {
     id: 'composition-harmony-track',
     page: 'composition',
-    mode: 'pattern',
+    // ⚠ COMPOSITION-SCOPED DESPITE THE TRACK SLOT, which is the case
+    // `CommandScope` names: the slot is the track to DOUBLE — an explicit choice
+    // the user makes and that a later selection change must not overwrite — and
+    // the row's product is a NEW track. `selected-track` still seeds it, because
+    // the track you are looking at is the likeliest one to want doubled.
+    scope: 'composition',
     label: 'Add a harmony track',
     summary: 'Double an existing track at an interval, on a track of its own.',
     slots: [
@@ -709,7 +746,9 @@ Transposition is applied at playback and silently drops any note that lands off 
   {
     id: 'composition-extend',
     page: 'composition',
-    mode: 'pattern',
+    // Carries EVERY track on together; a section that extended one track and
+    // left the rest where they were is the thing its own template forbids.
+    scope: 'composition',
     label: 'Extend the arrangement',
     summary: 'Carry the arrangement on past where it currently stops.',
     slots: [
@@ -758,6 +797,14 @@ Do not move, shorten or delete anything that is already there. Say what the new 
   {
     id: 'composition-lay-down-pattern',
     page: 'composition',
+    // ⚠ TRACK-SCOPED, and the other half of `CommandScope`'s worked example: it
+    // carries the same `mode: 'pattern'` the four composition-scoped rows above
+    // used to, and it places blocks on ONE track. Mode does not predict scope.
+    // The `track` slot is therefore the TARGET rather than an input — the panel
+    // binds it to the selected track and shows the name (`targetTrackSlotId`).
+    scope: 'track',
+    // Which view: placing blocks along a timeline is what the Pattern view of a
+    // track is for.
     mode: 'pattern',
     label: 'Lay a pattern down the timeline',
     summary: 'Repeat one library pattern along a track, back to back.',
@@ -791,13 +838,29 @@ Nothing moves blocks out of each other's way, so "back to back" is yours to spac
   {
     id: 'composition-balance-mix',
     page: 'composition',
-    // Voice mode, and the one placement here that is a judgement rather than a
-    // reading of the row. A mix is not a voice: this sets track levels and the
-    // master, and touches no voice at all. It sits here because voice mode is
-    // the mode that puts the racks and the mixer side by side, so "balance the
-    // mix" is offered where a person is already thinking about how it sounds.
-    // If the mixer ever gets a mode of its own, this row moves with it.
-    mode: 'voice',
+    /**
+     * ⚠ THE `mode: 'voice'` TAG IS GONE, AND THE ARGUMENT FOR IT WITH IT.
+     *
+     * It used to read: a mix is not a voice, but voice mode is the mode that
+     * puts the racks and the mixer side by side, so this is offered where a
+     * person is already thinking about how it sounds. That reasoning assumed a
+     * PAGE mode — one mode at a time, chosen deliberately, describing what the
+     * whole page was for. There is no page mode any more (COMPS-TRACK-TABS
+     * milestone 4): a view belongs to a track, three tracks can be in three
+     * views at once, and the rail follows whichever track is selected. "Offered
+     * where the mixer is on screen" is not a thing a per-track view can say.
+     *
+     * What the row actually does settles it instead: it sets SEVERAL tracks'
+     * levels and the master, against each other. That is a whole-composition
+     * judgement — balancing one track is a fader, and the catalog deliberately
+     * ships no command for a gesture. So it is composition-scoped and offered in
+     * every view, which is also where it was always wanted: a person balancing a
+     * mix is listening, not looking at one track's rack.
+     *
+     * The featured-track slot stays an explicit choice for
+     * `composition-harmony-track`'s reason — it is an INPUT, not the target.
+     */
+    scope: 'composition',
     label: 'Balance the mix',
     summary: 'Set the track levels so one part leads and nothing is buried.',
     slots: [
@@ -820,6 +883,10 @@ Leave the mutes and solos exactly as you found them. A mix balanced with somethi
   {
     id: 'composition-track-tone',
     page: 'composition',
+    // Track-scoped: it sets the voice of ONE track, so the `track` slot is the
+    // target and the panel binds it to the selection.
+    scope: 'track',
+    // Which view: a track's Voice view is the one showing the rack this changes.
     mode: 'voice',
     label: 'Dial in a tone',
     summary: 'Pick the voice for a track that suits the part it is playing.',
@@ -862,81 +929,125 @@ export const COMMAND_CATALOG: readonly Command[] = [
 ];
 
 /**
- * One (page, mode) slice, frozen. `mode: undefined` means the whole page.
- *
- * A row with no `mode` shows in EVERY mode — the pattern page's rows are all
- * like that, and the property is what keeps a new row from being invisible
- * because whoever added it did not know modes existed.
- */
-function offered(page: CommandPage, mode?: CommandMode): readonly Command[] {
-  return Object.freeze(
-    COMMAND_CATALOG.filter(
-      (command) =>
-        command.page === page &&
-        (mode === undefined || command.mode === undefined || command.mode === mode),
-    ),
-  );
-}
-
-/**
- * The commands a page offers.
+ * The commands a page offers, whole.
  *
  * Partitioned once at module load rather than filtered per call: the result is
- * a render-time value in the panel, and a fresh array every call is a new
+ * a render-time value in the panels, and a fresh array every call is a new
  * identity every render — a `useMemo` dependency that never matches and a list
- * that rebuilds its children for nothing. Adding the mode axis did not weaken
- * that; it added a dimension to the SAME precomputed table, so every slice is
- * still one stable array.
+ * that rebuilds its children for nothing.
+ *
+ * ⚠ THE `mode` PARAMETER IS GONE (COMPS-TRACK-TABS milestone 5), and its absence
+ * is the point. There is no page mode to slice by any more: the composition
+ * rail asks {@link compositionCommands} and {@link trackCommands} instead,
+ * because those are the two questions the rail actually has. A mode slice that
+ * folded the composition-wide rows in with the selected track's is precisely
+ * what hid five of them behind a Voice track.
  *
  * Still derived from the single `COMMAND_CATALOG` rather than declared as
  * separate exported arrays, so there is ONE list to add a row to and no command
  * can be reached from both pages by being listed twice.
  */
 const BY_PAGE: Readonly<Record<CommandPage, readonly Command[]>> = {
-  pattern: offered('pattern'),
-  composition: offered('composition'),
+  pattern: Object.freeze(COMMAND_CATALOG.filter((command) => command.page === 'pattern')),
+  composition: Object.freeze(COMMAND_CATALOG.filter((command) => command.page === 'composition')),
 };
 
+export function commandsForPage(page: CommandPage): readonly Command[] {
+  return BY_PAGE[page];
+}
+
+// -------------------------------------------------- the composition groups ---
+
 /**
- * The same table with the mode axis added.
+ * THE COMPOSITION GROUP — every row that acts on, or makes, a whole composition.
  *
- * The type annotation is load-bearing: a fourth `CommandMode` is a compile
- * error here until someone says what that mode offers, rather than a mode that
- * silently shows an empty rail.
+ * ⚠ NO VIEW ARGUMENT, AND THAT IS THE WHOLE FIX. Milestone 4 pointed the rail at
+ * the selected track's view and passed it straight into the panel's offering
+ * filter, so five rows tagged `mode: 'pattern'` — the backing track, the bass
+ * line, the harmony track, extend, and the mix once it lost its `'voice'` tag —
+ * were hidden the moment the selected track was showing Voice or Edit, and with
+ * no track selected at all. Nothing about "create a backing track" depends on
+ * what one lane happens to be drawing. So this list takes no view and cannot be
+ * filtered by one.
+ *
+ * Availability is still real: a row whose required source or featured track is
+ * missing has its own Run refused with the reason (`slotSources.resolveCommand`),
+ * the connector gate is the panel's, and the job lock refuses a second launch.
+ * Those gate ONE row or ONE launch — never the group.
  */
-const BY_PAGE_AND_MODE: Readonly<
-  Record<CommandPage, Readonly<Record<CommandMode, readonly Command[]>>>
-> = {
-  // Every mode gets the SAME array the mode-less call gets, not an equal copy.
-  // Correct because no pattern row carries a `mode` — `CommandCatalog.test.ts`
-  // ("leaves the pattern page untouched by modes") is what holds that — and it
-  // matters because a caller that normalises to always pass a mode would
-  // otherwise get a different identity for an identical list, which is the
-  // render churn this table exists to prevent.
-  pattern: {
-    pattern: BY_PAGE.pattern,
-    edit: BY_PAGE.pattern,
-    voice: BY_PAGE.pattern,
-  },
-  composition: {
-    pattern: offered('composition', 'pattern'),
-    // Empty, and correct. Edit mode is served by the pattern page's six rows —
-    // `openPlacementForEditing` aims the lib's pattern-editing pointer at the
-    // block and `patternService.writePatternBack` routes to that placement's
-    // snapshot — so the panel asks for `commandsForPage('pattern')` there. See
-    // the note on `Command.mode`: `page` picks the agent, the tools and the
-    // history; `mode` only picks what is offered.
-    edit: offered('composition', 'edit'),
-    voice: offered('composition', 'voice'),
-  },
+const COMPOSITION_SCOPED: readonly Command[] = Object.freeze(
+  COMPOSITION_COMMANDS.filter((command) => command.scope === 'composition'),
+);
+
+export function compositionCommands(): readonly Command[] {
+  return COMPOSITION_SCOPED;
+}
+
+/**
+ * The Edit view's track commands: the PATTERN page's rows, less the ones that
+ * open a DIFFERENT document.
+ *
+ * ⚠ THEY STAY `page: 'pattern'`, which is the load-bearing half.
+ * `openPlacementForEditing` aims the lib's one pattern-editing pointer at the
+ * block and `patternService.writePatternBack` routes writes to that placement's
+ * snapshot, so these act on the block being edited unchanged — while `page`
+ * keeps pointing them at the pattern agent, the pattern tools and the pattern
+ * history. They are track commands here by POSITION, not by a `scope` tag; see
+ * {@link Command.scope}.
+ *
+ * `pattern-generate` reads "Open a blank pattern, set its instrument, then stamp
+ * the notes", and `openPatternForEditing` nulls `editingPlacementId` — so run
+ * against a block it repoints that pointer out of the block and every later
+ * stamp lands in a library pattern nobody is looking at. Dropped here so it is
+ * not OFFERED; `pattern_open_blank` refuses for itself while a block is open,
+ * because `Command.tools` is not enforcement and a model is free to reach for it
+ * from any of the other five.
+ */
+const EDIT_VIEW_COMMANDS: readonly Command[] = Object.freeze(
+  BY_PAGE.pattern.filter((command) => !command.tools.includes('pattern_open_blank')),
+);
+
+/**
+ * THE TRACK GROUP — what the SELECTED track's view offers, aimed at that track.
+ *
+ * Precomputed per view for `BY_PAGE`'s identity reason, and the type annotation
+ * is load-bearing exactly as the deleted mode table's was: a fourth
+ * {@link CommandMode} is a compile error here until someone says what that view
+ * offers, rather than a view whose track group is silently empty.
+ *
+ * A track-scoped row with no `mode` would appear under every view — the same
+ * "no mode means every mode" rule the pattern page relies on, kept so a new row
+ * is over-offered rather than invisible.
+ */
+const TRACK_COMMANDS_BY_VIEW: Readonly<Record<CommandMode, readonly Command[]>> = {
+  pattern: Object.freeze(
+    COMPOSITION_COMMANDS.filter(
+      (command) =>
+        command.scope === 'track' && (command.mode === undefined || command.mode === 'pattern'),
+    ),
+  ),
+  voice: Object.freeze(
+    COMPOSITION_COMMANDS.filter(
+      (command) =>
+        command.scope === 'track' && (command.mode === undefined || command.mode === 'voice'),
+    ),
+  ),
+  // The pattern page's rows, not this page's — see `EDIT_VIEW_COMMANDS`. No
+  // composition row is tagged `mode: 'edit'` and none should be: a row that
+  // edits notes drives `patternService`, and re-tagging one `page: 'composition'`
+  // to get it here would point it at the wrong agent, tools and history.
+  edit: EDIT_VIEW_COMMANDS,
 };
 
 /**
- * `mode` is optional so the pattern page — which has no modes — is unaffected,
- * and so a caller that wants everything a page has can still ask for it.
+ * `view` is the SELECTED TRACK'S view (`arrangementMath.selectedTrackView`), not
+ * a page mode — there is no page mode. Whether there IS a selected track, and
+ * whether an Edit one has a block open, is the panel's gate rather than this
+ * function's: the catalog answers what a view offers, and the panel answers
+ * whether there is anything to offer it about.
  */
-export function commandsForPage(page: CommandPage, mode?: CommandMode): readonly Command[] {
-  return mode === undefined ? BY_PAGE[page] : BY_PAGE_AND_MODE[page][mode];
+export function trackCommands(view: CommandMode): readonly Command[] {
+  return TRACK_COMMANDS_BY_VIEW[view];
 }
 
 export function findCommand(id: string): Command | undefined {

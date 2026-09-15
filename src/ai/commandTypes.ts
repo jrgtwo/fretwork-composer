@@ -108,6 +108,51 @@ export type CommandMode = 'pattern' | 'edit' | 'voice';
 export type CommandRoute = 'single-run' | 'ir-job';
 
 /**
+ * WHICH GROUP THE ROW APPEARS IN, AND WHAT IT IS AIMED AT — a THIRD question
+ * again, and not a third `page` or a second `mode`.
+ *
+ * The composition page's rail shows the commands in two labelled groups
+ * (COMPS-TRACK-TABS milestone 5), and this says which:
+ *
+ *   - `'composition'` — the row acts on, or creates, a WHOLE COMPOSITION. It is
+ *     offered in every view and with no track selected at all, because which
+ *     track happens to be selected has nothing to do with whether it applies.
+ *   - `'track'` — the row acts on the SELECTED track (or, for the pattern page's
+ *     rows borrowed by the Edit view, on the block that track has open). It is
+ *     offered only when there is a selected track, and only in the views its
+ *     {@link Command.mode} names.
+ *
+ * ── WHY IT IS NOT DERIVED FROM SOMETHING ALREADY HERE ───────────────────────
+ *
+ * Both available derivations are WRONG, and each is wrong on a real row:
+ *
+ *   - NOT FROM `mode`. `composition-balance-mix` carried no mode and is
+ *     composition-scoped; `composition-lay-down-pattern` carries
+ *     `mode: 'pattern'` and is TRACK-scoped. Mode does not predict scope in
+ *     either direction.
+ *   - NOT FROM "does it have a track slot". `composition-harmony-track` and
+ *     `composition-balance-mix` both take a track and are both
+ *     composition-scoped: the track is an INPUT the user chooses explicitly (the
+ *     one to double, the one to feature), not the thing the command is aimed at.
+ *
+ * ── WHAT IT CHANGED ABOUT `mode` ───────────────────────────────────────────
+ *
+ * `mode` is now read for TRACK-scoped rows only — see {@link Command.mode}. A
+ * composition-scoped row declares none, because consulting the view to decide
+ * whether to offer it is precisely the regression this field exists to fix:
+ * with the rail following the selected track's view, five composition-wide rows
+ * tagged `mode: 'pattern'` vanished the moment a Voice or Edit track was
+ * selected.
+ *
+ * ⚠ IT IS OFFERING AND TARGETING METADATA, NOT A PERMISSION BOUNDARY. A
+ * tool-using run is handed its PAGE's whole tool set whichever group its row sat
+ * in; scope decides which list the row appears in, what the form binds its
+ * target to and what the template names. `page` still decides the agent, the
+ * tools and the history.
+ */
+export type CommandScope = 'composition' | 'track';
+
+/**
  * Where a {@link ChoiceSlot}'s values come from. Every one of these is resolved
  * by `slotSources` through a seam — `compositionService.getTracks`,
  * `patternService.listGrooves`, and so on. The union exists so a source with no
@@ -219,30 +264,56 @@ export interface Command {
    *  pattern command has no composition to act on and vice versa. */
   readonly page: CommandPage;
   /**
-   * Which arrangement mode offers it — the composition page's `ArrangementMode`,
-   * spelled locally as {@link CommandMode} for the reason given there. Omitted
-   * means every mode.
+   * WHICH OF THE SELECTED TRACK'S VIEWS OFFERS IT — the composition page's
+   * `ArrangementMode`, spelled locally as {@link CommandMode} for the reason
+   * given there.
+   *
+   * ⚠ READ FOR A TRACK-SCOPED ROW AND FOR NOTHING ELSE (COMPS-TRACK-TABS
+   * milestone 5). There is no page mode any more: each track carries its own
+   * view, and the rail follows the SELECTED track's. So this is no longer "which
+   * mode is the page in" — it is "which view must the selected track be showing
+   * for this row to be about it", which is a question only a
+   * {@link CommandScope} `'track'` row has. A composition-scoped row declares
+   * none and is offered in every view, including with nothing selected.
    *
    * ⚠ THE STANDING RULE, and the whole reason this is a second field rather
    * than a third `page`: **`page` picks the agent, the tool set and which
    * history the run brackets against; `mode` only picks which commands are
    * OFFERED.** They answer different questions and collapsing them loses one.
+   * {@link CommandScope} is a third question again — which GROUP the row is in
+   * and what it is aimed at — and collapsing THAT into this one is what hid five
+   * composition-wide rows behind a Voice track.
    *
-   * The case that forces the split is edit mode, which has no rows of its own
-   * and needs none. `openPlacementForEditing` aims the lib's single
-   * pattern-editing pointer at the block (`compositionService.ts`) and
-   * `patternService.writePatternBack` routes writes to that placement's
-   * `patternSnapshot` while `editingPlacementId` is set, so the six
-   * `page: 'pattern'` rows act on the block being edited, unchanged. They drive
-   * `patternService`, so they stay `page: 'pattern'` — and the composition
-   * page's panel renders them in edit mode by asking for the PATTERN page's
-   * list. Re-tagging them `page: 'composition'` would point them at the wrong
-   * agent, the wrong tools and the wrong history to undo.
+   * The case that forces the page/mode split is the Edit view, which has no
+   * composition rows of its own and needs none. `openPlacementForEditing` aims
+   * the lib's single pattern-editing pointer at the block
+   * (`compositionService.ts`) and `patternService.writePatternBack` routes
+   * writes to that placement's `patternSnapshot` while `editingPlacementId` is
+   * set, so the six `page: 'pattern'` rows act on the block being edited,
+   * unchanged. They drive `patternService`, so they stay `page: 'pattern'` — and
+   * the composition page's panel puts them in the TRACK group of an Edit track
+   * by asking the catalog for that view's track commands. Re-tagging them
+   * `page: 'composition'` would point them at the wrong agent, the wrong tools
+   * and the wrong history to undo.
    *
-   * Only the composition page has modes; the pattern page passes none, and a
-   * caller that passes none gets everything that page offers.
+   * Only the composition page has views; the pattern page's rows carry none, and
+   * a caller asking that page for its list gets everything it offers.
    */
   readonly mode?: CommandMode;
+  /**
+   * Which GROUP the composition page's rail puts it in, and what it targets —
+   * see {@link CommandScope}, which carries the whole of why this is a field of
+   * its own rather than a reading of `mode` or of the slots.
+   *
+   * ⚠ REQUIRED ON A `page: 'composition'` ROW, and the catalog's own
+   * `CompositionCommand` type is what makes a missing one a compile error rather
+   * than a row that quietly lands in neither group. Absent on the pattern page's
+   * rows: that page has one list and no groups, and the composition page's Edit
+   * view borrows those rows as its track commands by POSITION — they are aimed
+   * at the open block, not at a track slot, so a tag here would be a
+   * composition-page fact written onto a pattern-page row.
+   */
+  readonly scope?: CommandScope;
   /**
    * Which pipeline runs it — see {@link CommandRoute}, which carries the whole
    * of why this is a field of its own. Omitted means `'single-run'`, so a row
@@ -290,6 +361,30 @@ export function templateSlotIds(template: string): readonly string[] {
  *  has to know which slot a validation failure belongs to. */
 export function findSlot(command: Command, slotId: string): Slot | undefined {
   return command.slots.find((slot) => slot.id === slotId);
+}
+
+/**
+ * The slot a TRACK-scoped row aims at — the one the panel binds to the selected
+ * track and shows the name of instead of a picker.
+ *
+ * Derived rather than declared, and the derivation is only sound BECAUSE scope
+ * is explicit: on a row that says it acts on the selected track, a
+ * `source: 'track'` choice slot IS that track, by definition of the scope. The
+ * converse inference — "it has a track slot, so it must be about a track" — is
+ * the one {@link CommandScope} forbids, and this function is careful not to make
+ * it: it answers null for anything that is not already declared track-scoped, so
+ * `composition-harmony-track`'s "track to double" and `composition-balance-mix`'s
+ * "track to feature" stay the explicit user choices they are.
+ *
+ * Null also for a track-scoped row with no track slot at all — the Edit view's
+ * borrowed pattern rows, which target the open BLOCK and take no track.
+ */
+export function targetTrackSlotId(command: Command): string | null {
+  if (command.scope !== 'track') return null;
+  const slot = command.slots.find(
+    (candidate) => candidate.kind === 'choice' && candidate.source === 'track',
+  );
+  return slot?.id ?? null;
 }
 
 function checkNumber(slot: NumberSlot, value: SlotValue): string | null {

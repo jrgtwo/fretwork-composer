@@ -55,6 +55,10 @@ const harness = vi.hoisted(() => {
   return {
     /** Every registry the seam built, in order — the last one is the live run's. */
     registries: [] as { name: string; handler: (args: unknown) => unknown }[][],
+    /** Every filled template the seam was handed, in order. What a run is
+     *  actually AIMED at is in this string and nowhere else — `fillCommand`
+     *  substitutes a track's id, never its name. */
+    inputs: [] as string[],
     /** The live run's handles, set by `runAgent` when the panel starts one. */
     live: null as null | {
       onEvent: (event: unknown) => void;
@@ -84,13 +88,14 @@ vi.mock('agent-harness/browser', () => {
     OpenAICompatibleClient,
     runAgent: (
       _agent: unknown,
-      _input: string,
+      input: string,
       options: {
         onEvent?: (event: unknown) => void;
         signal?: AbortSignal;
         maxIters?: number;
       },
     ) => {
+      harness.inputs.push(input);
       if (harness.throwWith !== null) throw new Error(harness.throwWith);
       return new Promise<{ stoppedReason: string; content: string }>((resolve) => {
         harness.live = {
@@ -169,6 +174,37 @@ vi.mock('../src/ai/irCompositionJob', () => ({
   },
 }));
 
+/**
+ * ── THE SEAM, WRAPPED TO RECORD THE ORDER OF TWO CALLS ──────────────────────
+ *
+ * §2's order — restore the pattern pointer BEFORE the agent takes the document —
+ * is not observable from the outside: both writes land in one React commit, so
+ * the intermediate state (locked, still pointed at the user's block) is never
+ * rendered and `getEditingPlacementId() === null` after the fact is equally true
+ * of the wrong order. This is the smallest thing that can see it: the real
+ * module, with the two functions in question wrapped to note that they ran.
+ *
+ * Everything else is `actual` and every wrapper delegates, so no behaviour in
+ * this file changes — the mock exists to answer "in which order", nothing more.
+ */
+const order = vi.hoisted(() => ({ calls: [] as string[] }));
+
+vi.mock('../src/composition/compositionService', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../src/composition/compositionService')>();
+  return {
+    ...actual,
+    closePlacementEditing: () => {
+      order.calls.push('close');
+      return actual.closePlacementEditing();
+    },
+    beginJob: () => {
+      order.calls.push('beginJob');
+      return actual.beginJob();
+    },
+  };
+});
+
 import { CompositionCommandPanel } from '../src/ai/CompositionCommandPanel';
 import { commandsForPage } from '../src/ai/commandCatalog';
 import { setConnectorSettings } from '../src/ai/connectorSettings';
@@ -187,6 +223,7 @@ import {
   isJobRunning,
   openBlankComposition,
   openPlacementForEditing,
+  removeTrack,
   selectPlacements,
   selectTrack,
   undo,
@@ -219,12 +256,16 @@ beforeEach(() => {
   selectPlacements([], 'replace');
   clearTranscripts();
   harness.registries.length = 0;
+  harness.inputs.length = 0;
   harness.live = null;
   harness.throwWith = null;
   irJob.live = null;
   irJob.throwWith = null;
   selectTrack(null);
   setConnectorSettings({ baseUrl: 'http://localhost:8080/v1', token: '' });
+  // Last, because the reset above goes through the wrapped seam and would
+  // otherwise leave its own calls in the log.
+  order.calls.length = 0;
 });
 
 // ------------------------------------------------------------------ helpers ---
@@ -242,6 +283,10 @@ const BACKING_TRACK = 'Create a backing track';
  * assertions below name.
  */
 const SINGLE_RUN = 'Create a bass line';
+
+/** What the last run was actually handed — the filled template, which carries
+ *  the ids the command was aimed at. */
+const lastInput = (): string => harness.inputs.at(-1) ?? '';
 
 /** Pick a command and press Run. Returns once the run is in flight. */
 async function startRun(label = SINGLE_RUN) {
@@ -290,13 +335,19 @@ const report = () => screen.getByRole('button', { name: 'Cancel' }).parentElemen
  * one opens when a lane is pressed. Built through the seams because the panel is
  * rendered on its own here, with no grid to press.
  */
-function openBlock(): { placementId: string; patternId: string } {
+function openBlock(): { placementId: string; trackId: string; patternId: string } {
   // Idempotent, as the `ensureComposition` this replaced was: a helper that
   // CREATES unconditionally would switch away from a composition the test had
   // already opened, and the switch is silent.
   if (!getEditingComposition()) openBlankComposition('Song');
   const track = addTrack('Riff track');
   if (!track.ok) throw new Error(track.reason);
+  // ⚠ SELECTED AS WELL AS OPEN, since COMPS-TRACK-TABS milestone 5. The panel's
+  // TRACK group is about the SELECTED track and an Edit row acts on the block
+  // that track has open, so a block open on a track nobody selected offers
+  // nothing — which is the app's own order too: `ArrangementGrid`'s activation
+  // coordinator selects the track and only then opens the placement.
+  selectTrack(track.value.id);
   const pattern = openBlankPattern('Riff');
   if (!pattern.ok) throw new Error(pattern.reason);
   // A note of the user's already in it — an empty block cannot tell "the run's
@@ -309,45 +360,108 @@ function openBlock(): { placementId: string; patternId: string } {
   if (!opened.ok) throw new Error(opened.reason);
   clearHistory();
   clearPatternHistory();
-  return { placementId: placement.value, patternId: pattern.value.id };
+  return { placementId: placement.value, trackId: track.value.id, patternId: pattern.value.id };
 }
 
 // -------------------------------------------------------------- the catalog ---
 
-describe('which commands the panel offers', () => {
-  it('offers the composition rows in pattern mode', () => {
-    openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+describe('the two groups', () => {
+  /** The rows in one group, by label — the only way to assert a row is in the
+   *  RIGHT list rather than merely somewhere on screen. */
+  const groupLabels = (name: string | RegExp): string[] =>
+    within(screen.getByRole('group', { name }))
+      .queryAllByRole('button')
+      .map((button) => button.textContent ?? '');
 
-    expect(screen.getByRole('button', { name: BACKING_TRACK })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Create a bass line' })).toBeInTheDocument();
-    // A voice-mode row is not on offer here — by its REAL label, which is the
-    // only kind of negative assertion worth having. A name no command carries
-    // passes whether or not the modes are honoured at all.
-    expect(screen.queryByRole('button', { name: 'Dial in a tone' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Balance the mix' })).not.toBeInTheDocument();
+  const COMPOSITION_GROUP = 'Composition commands';
+
+  /**
+   * ⚠ THE REGRESSION, AS THE PANEL SHOWS IT.
+   *
+   * Milestone 4 passed the selected track's view straight into the offering
+   * filter, and five composition-wide rows were tagged `mode: 'pattern'` — so
+   * selecting a Voice track hid "Create a backing track", whose entire product
+   * is a NEW composition and which needs no track at all. This is that test, one
+   * view at a time.
+   */
+  it('offers every composition command from every view, and with no track selected', () => {
+    openBlankComposition('Song');
+    const { rerender } = render(<CompositionCommandPanel view="pattern" />);
+    const expected = [
+      BACKING_TRACK,
+      'Create a bass line',
+      'Add a harmony track',
+      'Extend the arrangement',
+      'Balance the mix',
+    ];
+    expect(groupLabels(COMPOSITION_GROUP)).toEqual(expected);
+
+    rerender(<CompositionCommandPanel view="voice" />);
+    expect(groupLabels(COMPOSITION_GROUP)).toEqual(expected);
+
+    rerender(<CompositionCommandPanel view="edit" />);
+    expect(groupLabels(COMPOSITION_GROUP)).toEqual(expected);
+    // And nothing is selected in any of the three — `selectTrack(null)` is the
+    // beforeEach — so this is also the no-selection case.
+    expect(getSelectedTrackId()).toBeNull();
   });
 
-  it('offers the voice rows in voice mode, and not the pattern-mode ones', () => {
-    openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="voice" />);
+  it('offers the backing track with no composition open at all', () => {
+    // ⚠ THE PANEL DOES RENDER IN THIS STATE — `CompositionPage` shows its
+    // open-failure alert and keeps the rail — and the backing track is the one
+    // row whose whole product is a NEW composition, so it is exactly the row
+    // that must survive having nothing to point at.
+    expect(getEditingComposition()).toBeNull();
+    render(<CompositionCommandPanel view="pattern" />);
 
-    expect(screen.getByRole('button', { name: 'Dial in a tone' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: BACKING_TRACK })).not.toBeInTheDocument();
+    expect(groupLabels(COMPOSITION_GROUP)).toContain(BACKING_TRACK);
+    // ⚠ AND THE TRACK GROUP SAYS THE RIGHT THING ABOUT IT. "Press a track
+    // header" is a dead end when there are no headers to press, so the refusal
+    // names the cause the user can actually act on.
+    expect(screen.getByText(/No composition is open/)).toBeInTheDocument();
+  });
+
+  it('puts the selected track’s rows in a group named after it', () => {
+    openBlankComposition('Song');
+    const track = addTrack('Rhythm');
+    if (!track.ok) throw new Error(track.reason);
+    selectTrack(track.value.id);
+    const { rerender } = render(<CompositionCommandPanel view="pattern" />);
+
+    expect(groupLabels('Track commands — Rhythm')).toEqual(['Lay a pattern down the timeline']);
+    // A track row is in the TRACK group and not the composition one — the
+    // negative half, which is what makes the split a split.
+    expect(groupLabels(COMPOSITION_GROUP)).not.toContain('Lay a pattern down the timeline');
+
+    rerender(<CompositionCommandPanel view="voice" />);
+    expect(groupLabels('Track commands — Rhythm')).toEqual(['Dial in a tone']);
+  });
+
+  it('asks for a selection instead of track rows when there is none', () => {
+    openBlankComposition('Song');
+    const track = addTrack('Rhythm');
+    if (!track.ok) throw new Error(track.reason);
+    render(<CompositionCommandPanel view="pattern" />);
+
+    expect(groupLabels('Track commands')).toEqual([]);
+    expect(screen.getByText(/No track is selected/)).toBeInTheDocument();
+    // ⚠ AND THE COMPOSITION GROUP IS UNTOUCHED BY IT. "No track selected" gates
+    // the track group and never the other one.
+    expect(groupLabels(COMPOSITION_GROUP)).toContain(BACKING_TRACK);
   });
 
   /**
-   * Edit mode has no rows of its own and needs none: `openPlacementForEditing`
+   * The Edit view is served by the PATTERN page's rows: `openPlacementForEditing`
    * aims the lib's single pattern-editing pointer at the block and
-   * `patternService` routes writes to that placement's snapshot, so the PATTERN
-   * page's rows act on the block being edited unchanged.
+   * `patternService` routes writes to that placement's snapshot, so they act on
+   * the block being edited unchanged.
    */
-  it('offers the pattern page’s rows in edit mode, with a block open', () => {
+  it('offers the pattern page’s rows as the track group of an Edit track', () => {
     openBlock();
-    render(<CompositionCommandPanel mode="edit" />);
+    render(<CompositionCommandPanel view="edit" />);
 
-    expect(screen.getByRole('button', { name: 'Fix the timing' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: BACKING_TRACK })).not.toBeInTheDocument();
+    expect(groupLabels('Track commands — Riff track')).toContain('Fix the timing');
+    expect(groupLabels(COMPOSITION_GROUP)).not.toContain('Fix the timing');
   });
 
   /**
@@ -358,37 +472,331 @@ describe('which commands the panel offers', () => {
    * the tool refuses for itself as well, because `Command.tools` is not
    * enforcement (tests/AgentTools).
    */
-  it('withholds the row that opens a different document from edit mode', () => {
+  it('withholds the row that opens a different document from the Edit group', () => {
     openBlock();
-    render(<CompositionCommandPanel mode="edit" />);
+    render(<CompositionCommandPanel view="edit" />);
 
-    expect(screen.queryByRole('button', { name: 'Fix the timing' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Generate a pattern' })).not.toBeInTheDocument();
-    // Dropped by the PANEL, not deleted from the catalog: the pattern page still
-    // offers it, and this is the line that fails if someone "fixes" this by
-    // removing the row instead.
+    expect(groupLabels('Track commands — Riff track')).not.toContain('Generate a pattern');
+    // Dropped by the CATALOG's Edit slice, not deleted from the page: the
+    // pattern page still offers it, and this is the line that fails if someone
+    // "fixes" this by removing the row instead.
     expect(commandsForPage('pattern').map((command) => command.label)).toContain(
       'Generate a pattern',
     );
   });
 
   /**
-   * EDIT MODE IS NOT THE SAME AS A BLOCK BEING OPEN. With none open,
+   * A VIEW IS NOT THE SAME AS A BLOCK BEING OPEN. With none open,
    * `writePatternBack` falls through to its LIBRARY branch, so these rows would
    * rewrite whatever pattern the pattern page left open — off-screen, and
    * covered by neither the rollback nor the lock.
    */
-  it('offers nothing in edit mode until a block is actually open', () => {
+  it('asks for a block instead of Edit rows until one is open', () => {
     openBlankComposition('Song');
+    const track = addTrack('Rhythm');
+    if (!track.ok) throw new Error(track.reason);
+    selectTrack(track.value.id);
     openBlankPattern('The user’s own pattern');
-    render(<CompositionCommandPanel mode="edit" />);
+    render(<CompositionCommandPanel view="edit" />);
 
-    expect(screen.queryByRole('button', { name: 'Fix the timing' })).not.toBeInTheDocument();
-    expect(screen.getByText(/Press a block in the arrangement/)).toBeInTheDocument();
-    // And no Run button to reach, which is what makes a guard inside `start`
-    // unnecessary rather than merely unreached.
+    expect(groupLabels('Track commands — Rhythm')).toEqual([]);
+    expect(screen.getByText(/Press a block in this track/)).toBeInTheDocument();
+    // And no Run button to reach, because nothing is selected yet.
     expect(screen.queryByRole('button', { name: 'Run' })).not.toBeInTheDocument();
     expect(isJobRunning()).toBe(false);
+    // ⚠ THE WHOLE POINT OF THE SPLIT: the composition group is still there, and
+    // still launchable, over an Edit track with nothing open.
+    expect(groupLabels(COMPOSITION_GROUP)).toContain(BACKING_TRACK);
+  });
+
+  it('withholds Edit rows for a block that belongs to another track', () => {
+    // §2: the active placement has to be owned by the SELECTED track. The grid's
+    // reconciler maintains that; this is the panel refusing to assume it.
+    openBlock();
+    const other = addTrack('Somebody else');
+    if (!other.ok) throw new Error(other.reason);
+    selectTrack(other.value.id);
+    render(<CompositionCommandPanel view="edit" />);
+
+    expect(screen.getByText(/Press a block in this track/)).toBeInTheDocument();
+    expect(groupLabels('Track commands — Somebody else')).toEqual([]);
+  });
+});
+
+describe('what a track command is aimed at', () => {
+  it('shows the selected track’s name instead of a picker', async () => {
+    openBlankComposition('Song');
+    const first = addTrack('Rhythm');
+    if (!first.ok) throw new Error(first.reason);
+    selectTrack(first.value.id);
+    render(<CompositionCommandPanel view="voice" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Dial in a tone' }));
+    // The target is bound, so there is no Track picker to get out of step with
+    // the selection — the name is shown as the fact it is.
+    expect(screen.queryByRole('combobox', { name: 'Track' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Track')).toHaveTextContent('Rhythm');
+  });
+
+  /**
+   * ⚠ THE HIDDEN STALE TARGET, which is the failure §2 names by hand: a form
+   * opened on track A, the selection moved to track B, Run pressed — and the
+   * untouched `track` value still saying A would write to a track that is not on
+   * screen.
+   */
+  it('rebinds to the new track when the selection moves before Run', async () => {
+    openBlankComposition('Song');
+    const first = addTrack('Rhythm');
+    const second = addTrack('Lead');
+    if (!first.ok) throw new Error(first.reason);
+    if (!second.ok) throw new Error(second.reason);
+    selectTrack(first.value.id);
+    render(<CompositionCommandPanel view="voice" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Dial in a tone' }));
+    expect(screen.getByLabelText('Track')).toHaveTextContent('Rhythm');
+
+    act(() => selectTrack(second.value.id));
+    expect(screen.getByLabelText('Track')).toHaveTextContent('Lead');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Run' }));
+    // What actually reached the agent. `fillCommand` substitutes the slot's
+    // VALUE — the track id — so this is the assertion that the run is aimed at
+    // the track on screen and not at the one the form opened on.
+    expect(harness.live).not.toBeNull();
+    expect(lastInput()).toContain(second.value.id);
+    expect(lastInput()).not.toContain(first.value.id);
+  });
+
+  /**
+   * The other half, and it is the opposite rule: a COMPOSITION row's track slot
+   * is an explicit input the selection may SEED and must never silently replace.
+   */
+  it('keeps a user’s own choice on a composition command when the selection moves', async () => {
+    openBlankComposition('Song');
+    const first = addTrack('Rhythm');
+    const second = addTrack('Lead');
+    if (!first.ok) throw new Error(first.reason);
+    if (!second.ok) throw new Error(second.reason);
+    selectTrack(first.value.id);
+    render(<CompositionCommandPanel view="pattern" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add a harmony track' }));
+    // Seeded from the selection, then chosen explicitly — a real picker, not a
+    // readout.
+    const picker = screen.getByRole('combobox', { name: 'Track to double' });
+    expect(picker).toHaveValue(first.value.id);
+    await userEvent.selectOptions(picker, second.value.id);
+
+    act(() => selectTrack(first.value.id));
+    expect(screen.getByRole('combobox', { name: 'Track to double' })).toHaveValue(
+      second.value.id,
+    );
+  });
+
+  it('refuses a track command whose target has gone, without disabling the group', async () => {
+    openBlankComposition('Song');
+    const track = addTrack('Rhythm');
+    if (!track.ok) throw new Error(track.reason);
+    selectTrack(track.value.id);
+    render(<CompositionCommandPanel view="voice" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Dial in a tone' }));
+    // The document moves under the open form, exactly as an undo or an agent
+    // could move it. `removeTrack` prunes the selection with it.
+    act(() => {
+      const removed = removeTrack(track.value.id);
+      if (!removed.ok) throw new Error(removed.reason);
+    });
+
+    expect(screen.getByText(/No track is selected/)).toBeInTheDocument();
+    // The form went with the row, and nothing was launched.
+    expect(screen.queryByRole('button', { name: 'Run' })).not.toBeInTheDocument();
+    expect(isJobRunning()).toBe(false);
+    // ⚠ AND THE COMPOSITION GROUP IS STILL LIVE. Gating one group must never
+    // gate the other.
+    expect(
+      within(screen.getByRole('group', { name: 'Composition commands' })).getByRole('button', {
+        name: BACKING_TRACK,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * With no composition open there is no track for "Add a harmony track" to
+   * double. §2: that disables THAT command's Run with a useful explanation, and
+   * never the whole global group.
+   *
+   * A composition with ZERO tracks is not reachable — `removeTrack` refuses the
+   * last one — so "no composition" is the live version of a missing track
+   * input, and it is a state this panel genuinely renders in.
+   */
+  it('disables one command’s Run for a missing input, and leaves the rest of its group alone', async () => {
+    render(<CompositionCommandPanel view="pattern" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add a harmony track' }));
+    expect(screen.getByRole('button', { name: 'Run' })).toBeDisabled();
+    // The seam's own sentence, which says what to do about it.
+    expect(screen.getAllByText('No composition is open.').length).toBeGreaterThan(0);
+
+    // ⚠ AND THE ROW BESIDE IT IS UNAFFECTED — the one whose product is a new
+    // composition. A gate on one row's inputs may not reach the group.
+    await userEvent.click(screen.getByRole('button', { name: BACKING_TRACK }));
+    expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled();
+  });
+
+  /**
+   * ⚠ THE OTHER HALF OF THE REBIND, AND THE ONE THAT IS EASY TO BREAK: the
+   * target follows the selection and NOTHING ELSE DOES. §2 asks for
+   * target-dependent fields to be rebound and the user's own preferences to be
+   * left alone while they are still valid, and the row that can tell the two
+   * apart is this one — it is the only track-scoped command with slots besides
+   * its target.
+   *
+   * Re-seeding the whole form on a selection change (`setValues(defaultValues)`)
+   * passes every other test in this file and fails this one.
+   */
+  it('rebinds only the target, keeping the fields the user chose', async () => {
+    openBlankComposition('Song');
+    const first = addTrack('Rhythm');
+    const second = addTrack('Lead');
+    if (!first.ok) throw new Error(first.reason);
+    if (!second.ok) throw new Error(second.reason);
+    const riff = openBlankPattern('Riff');
+    const chorus = openBlankPattern('Chorus');
+    if (!riff.ok) throw new Error(riff.reason);
+    if (!chorus.ok) throw new Error(chorus.reason);
+    selectTrack(first.value.id);
+    render(<CompositionCommandPanel view="pattern" />);
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Lay a pattern down the timeline' }),
+    );
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Pattern' }),
+      riff.value.id,
+    );
+    // 4 → 5, so the assertion below is about the user's number and not about the
+    // catalog's fallback.
+    await userEvent.click(screen.getByRole('button', { name: 'Increase Copies' }));
+
+    act(() => selectTrack(second.value.id));
+    expect(screen.getByLabelText('Track')).toHaveTextContent('Lead');
+    // Untouched by the selection moving — a stepper that snapped back to 4 here
+    // is the user being overruled.
+    expect(within(screen.getByRole('group', { name: 'Copies' })).getByText('5')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Run' }));
+    expect(lastInput()).toContain(second.value.id);
+    expect(lastInput()).not.toContain(first.value.id);
+    expect(lastInput()).toContain(riff.value.id);
+    expect(lastInput()).toContain('5 times');
+
+    await finishRun();
+  });
+});
+
+/**
+ * ── THE SNAPSHOT IS CHECKED AGAIN AT THE PRESS, NOT ONLY AT THE RENDER ──────
+ *
+ * §2 asks for the launch to snapshot the command, the composition, the track and
+ * the form — and to RE-VALIDATE all of it against live state when Run is pressed.
+ * The render-time rebind effect is not that: it is an effect, it does not run
+ * with nothing selected, and a press lands after the render it was drawn in.
+ *
+ * ⚠ HOW THESE REACH THE GAP. Every one moves a seam and presses Run inside ONE
+ * `act`, so the commit that would have re-rendered the panel — and flushed the
+ * rebind effect — has not happened when the handler runs. That is the shape of
+ * the real hazard (state moving under a form between paint and press) and it is
+ * the only way to drive the execution-time checks at all: `userEvent.click`
+ * flushes first, which is what made these lines dead code before.
+ */
+describe('what a launch re-checks at the press', () => {
+  /** The panel, with one selected track and one track command open on it. */
+  async function openTrackCommand(): Promise<{ first: string; second: string }> {
+    openBlankComposition('Song');
+    const first = addTrack('Rhythm');
+    const second = addTrack('Lead');
+    if (!first.ok) throw new Error(first.reason);
+    if (!second.ok) throw new Error(second.reason);
+    selectTrack(first.value.id);
+    render(<CompositionCommandPanel view="voice" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Dial in a tone' }));
+    return { first: first.value.id, second: second.value.id };
+  }
+
+  it('binds the target from the live selection, not from the last render', async () => {
+    const { first, second } = await openTrackCommand();
+    const run = screen.getByRole('button', { name: 'Run' });
+
+    await act(async () => {
+      selectTrack(second);
+      fireEvent.click(run);
+    });
+
+    // Without the execution-time rebind this carries `first` — the form's own
+    // untouched value — and the run writes to a track that is not on screen.
+    expect(lastInput()).toContain(second);
+    expect(lastInput()).not.toContain(first);
+
+    await finishRun();
+  });
+
+  it('refuses when the selected track has gone since the render', async () => {
+    await openTrackCommand();
+    const run = screen.getByRole('button', { name: 'Run' });
+
+    await act(async () => {
+      selectTrack(null);
+      fireEvent.click(run);
+    });
+
+    expect(harness.inputs).toHaveLength(0);
+    expect(isJobRunning()).toBe(false);
+    expect(within(report()).getByText(/No track is selected any more/)).toBeInTheDocument();
+  });
+
+  /**
+   * The composition id is part of the snapshot too. Nothing checks it by name —
+   * the track lookup is what makes it hold, because a track of the composition
+   * that was open is not a member of the one that is.
+   */
+  it('refuses when a different composition has been opened under the form', async () => {
+    await openTrackCommand();
+    const run = screen.getByRole('button', { name: 'Run' });
+
+    await act(async () => {
+      const other = openBlankComposition('Another song');
+      if (!other.ok) throw new Error(other.reason);
+      fireEvent.click(run);
+    });
+
+    expect(harness.inputs).toHaveLength(0);
+    expect(isJobRunning()).toBe(false);
+    expect(within(report()).getByText(/No track is selected any more/)).toBeInTheDocument();
+  });
+
+  /**
+   * ⚠ THE DATA-LOSS ONE. With no block open `writePatternBack` falls through to
+   * its LIBRARY branch, so an Edit row launched here would rewrite whatever
+   * pattern the pattern page left open — off-screen, outside the rollback.
+   */
+  it('refuses an Edit row when the block has closed since the render', async () => {
+    openBlock();
+    render(<CompositionCommandPanel view="edit" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Fix the timing' }));
+    const run = screen.getByRole('button', { name: 'Run' });
+
+    await act(async () => {
+      closePlacementEditing();
+      fireEvent.click(run);
+    });
+
+    expect(harness.inputs).toHaveLength(0);
+    expect(isJobRunning()).toBe(false);
+    expect(
+      within(report()).getByText(/No block on the selected track is open for editing/),
+    ).toBeInTheDocument();
   });
 });
 
@@ -397,7 +805,7 @@ describe('which commands the panel offers', () => {
 describe('a run in flight', () => {
   it('reports the tools as they run, and marks the one in flight', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('read_composition');
@@ -432,7 +840,7 @@ describe('a run in flight', () => {
    */
   it('keeps the run — and Cancel — when another command is picked mid-run', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('read_composition');
@@ -457,44 +865,76 @@ describe('a run in flight', () => {
    * user goes to look at what was built while the outcome and its refusals stay
    * on screen.
    */
-  it('keeps a finished run’s report across a mode change', async () => {
+  it('keeps a finished run’s report across a view change', async () => {
     openBlankComposition('Song');
-    const { rerender } = render(<CompositionCommandPanel mode="pattern" />);
+    const track = addTrack('Rhythm');
+    if (!track.ok) throw new Error(track.reason);
+    selectTrack(track.value.id);
+    const { rerender } = render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('read_composition');
     await finishRun('answered', 'Added a drum track.');
 
-    rerender(<CompositionCommandPanel mode="voice" />);
+    rerender(<CompositionCommandPanel view="voice" />);
 
-    expect(screen.queryByRole('button', { name: SINGLE_RUN })).not.toBeInTheDocument();
+    // The TRACK group swapped…
+    expect(
+      screen.queryByRole('button', { name: 'Lay a pattern down the timeline' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Dial in a tone' })).toBeInTheDocument();
+    // …the composition group did NOT, which is milestone 5's own claim…
+    expect(screen.getByRole('button', { name: SINGLE_RUN })).toBeInTheDocument();
+    // …and neither did the report.
     const done = report();
     expect(within(done).getByText(new RegExp(SINGLE_RUN))).toBeInTheDocument();
     expect(within(done).getByText(/Added a drum track\./)).toBeInTheDocument();
   });
 
   /**
-   * ⚠ DEFENCE, NOT A LIVE PATH, and the test says so rather than implying the
-   * app produces this transition: `CompositionPage` disables the mode bar while
-   * a job holds the document, so nothing in the app changes `mode` mid-run
-   * today. What this pins is the STRUCTURE that makes the disable unnecessary
-   * for correctness — the run is rendered outside the selected-command block, so
-   * it does not travel with the list. Move it inside `{selected && …}` and this
-   * fails.
+   * ⚠ A LIVE PATH SINCE MILESTONE 4, AND THE TEST SAYS WHICH ONE.
+   *
+   * An earlier version of this note called the transition defence: the mode bar
+   * was disabled while a job held the document, so nothing changed `mode`
+   * mid-run. THE BAR IS GONE. The user's own routes are still shut — the view
+   * buttons are `disabled={locked}` in `TrackHeader` and `ArrangementGrid`'s
+   * activation coordinator refuses under `isJobRunning()` — but `view` here is
+   * `selectedTrackView(...)`, which depends on the SELECTION, and
+   * `pruneTrackSelection` nulls the selection when the track it names stops
+   * existing. So a run that calls `composition_remove_track` on the selected
+   * track changes this panel's `view` prop from inside its own lock.
+   *
+   * That is the transition driven here, through the run's own tool rather than
+   * through a bare `rerender`, so the test is about the app and not about a
+   * hypothesis. What it pins is the structure that makes it harmless: the run is
+   * rendered outside the selected-command block, so it does not travel with the
+   * list. Move it inside `{selected && …}` and this fails.
    */
-  it('would survive a mode change mid-run: the run is not rendered inside the form', async () => {
+  it('survives the run changing the selected track out from under the rail', async () => {
     openBlankComposition('Song');
-    const { rerender } = render(<CompositionCommandPanel mode="pattern" />);
+    const track = addTrack('Rhythm');
+    if (!track.ok) throw new Error(track.reason);
+    selectTrack(track.value.id);
+    const { rerender } = render(<CompositionCommandPanel view="voice" />);
 
     await startRun();
     callTool('read_composition');
+    expect(screen.getByRole('button', { name: 'Dial in a tone' })).toBeInTheDocument();
 
-    rerender(<CompositionCommandPanel mode="voice" />);
+    // The agent's own write, through the run's registry — so it goes through
+    // `jobWrite` and the lock lets it past, exactly as a real run's would.
+    callTool('composition_remove_track', { trackId: track.value.id });
+    expect(getSelectedTrackId()).toBeNull();
+    // Which is what the page would now compute for the rail: no valid selection
+    // falls back to Pattern (`arrangementMath.selectedTrackView`).
+    rerender(<CompositionCommandPanel view="pattern" />);
 
-    // The list swapped…
-    expect(screen.queryByRole('button', { name: SINGLE_RUN })).not.toBeInTheDocument();
-    // …and the run did not. Including which command is running, because the form
-    // that started it is no longer on screen to say so.
+    // The track group went…
+    expect(screen.queryByRole('button', { name: 'Dial in a tone' })).not.toBeInTheDocument();
+    expect(screen.getByText(/No track is selected/)).toBeInTheDocument();
+    // …and neither the composition group nor the run went with it. Including
+    // which command is running, because the form that started it may not be.
+    expect(screen.getByRole('button', { name: SINGLE_RUN })).toBeInTheDocument();
     const running = report();
     expect(within(running).getByText(new RegExp(SINGLE_RUN))).toBeInTheDocument();
     expect(within(running).getByText(/1\. read_composition/)).toBeInTheDocument();
@@ -517,7 +957,7 @@ describe('a run in flight', () => {
    */
   it('gives the run sixty round trips and an abort signal', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
 
@@ -533,7 +973,7 @@ describe('a run in flight', () => {
 describe('the document lock', () => {
   it('is held for the duration of a run and released when it answers', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     expect(isJobRunning()).toBe(true);
@@ -544,7 +984,7 @@ describe('the document lock', () => {
 
   it('is released when the run is cancelled', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -555,7 +995,7 @@ describe('the document lock', () => {
   it('is released when the run comes back refused', async () => {
     openBlankComposition('Song');
     harness.throwWith = 'Failed to fetch';
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
 
@@ -565,7 +1005,7 @@ describe('the document lock', () => {
 
   it('is released when the panel is unmounted mid-run', async () => {
     openBlankComposition('Song');
-    const { unmount } = render(<CompositionCommandPanel mode="pattern" />);
+    const { unmount } = render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     expect(isJobRunning()).toBe(true);
@@ -581,7 +1021,7 @@ describe('the document lock', () => {
   });
 
   it('refuses to start when there is no composition to work on', async () => {
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
 
@@ -595,14 +1035,28 @@ describe('the document lock', () => {
    * patterns in the library — cannot be spent on a dead id.
    */
   it('is never taken when the command no longer fills', async () => {
+    // A value that went STALE between opening the form and pressing Run, which
+    // is the case `fillForNow` is for — as opposed to a slot with nothing to
+    // offer at all, which disables Run up front (see "disables one command's
+    // Run…"). Two tracks so removing one leaves the slot fillable and only the
+    // chosen VALUE dead.
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    const lead = addTrack('Lead');
+    if (!lead.ok) throw new Error(lead.reason);
+    const tracks = getTracks();
+    selectTrack(tracks[0]!.id);
+    render(<CompositionCommandPanel view="pattern" />);
 
-    await startRun('Lay a pattern down the timeline');
+    await userEvent.click(screen.getByRole('button', { name: 'Add a harmony track' }));
+    act(() => {
+      const removed = removeTrack(tracks[0]!.id);
+      if (!removed.ok) throw new Error(removed.reason);
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Run' }));
 
     expect(harness.live).toBeNull();
     expect(isJobRunning()).toBe(false);
-    expect(within(report()).getByText(/Pattern has no value/)).toBeInTheDocument();
+    expect(within(report()).getByText(/no longer offers/)).toBeInTheDocument();
   });
 
   /**
@@ -614,7 +1068,7 @@ describe('the document lock', () => {
   it('is never taken when no provider is configured', async () => {
     openBlankComposition('Song');
     setConnectorSettings({ baseUrl: '', token: '' });
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
 
@@ -630,7 +1084,7 @@ describe('a cancelled job', () => {
   it('puts the arrangement back exactly as it was', async () => {
     openBlankComposition('Song');
     const before = getTracks().length;
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('composition_add_track', { name: 'Drums' });
@@ -649,7 +1103,7 @@ describe('a cancelled job', () => {
   it('rolls back when the panel is unmounted mid-run, rather than leaving half an arrangement', async () => {
     openBlankComposition('Song');
     const before = getTracks().length;
-    const { unmount } = render(<CompositionCommandPanel mode="pattern" />);
+    const { unmount } = render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('composition_add_track', { name: 'Drums' });
@@ -677,7 +1131,7 @@ describe('a cancelled job', () => {
     expect(addTrack('Mine').ok).toBe(true);
     expect(getTracks()).toHaveLength(before + 1);
 
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('composition_add_track', { name: 'Drums' });
@@ -700,7 +1154,7 @@ describe('a cancelled job', () => {
    */
   it('says the patterns it wrote are still in the library', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('pattern_open_blank', { name: 'Bass line' });
@@ -712,7 +1166,7 @@ describe('a cancelled job', () => {
 
   it('does not say it when the run wrote no patterns', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('composition_add_track', { name: 'Drums' });
@@ -732,7 +1186,7 @@ describe('a cancelled job', () => {
     try {
       openBlankComposition('Song');
       const before = getTracks().length;
-      render(<CompositionCommandPanel mode="pattern" />);
+      render(<CompositionCommandPanel view="pattern" />);
 
       // `fireEvent`, not `userEvent`: the deadline is a `setTimeout` taken when
       // the run starts, so the clock has to already be fake by then — and
@@ -763,7 +1217,7 @@ describe('a finished job', () => {
   it('keeps its work, as ONE undo step', async () => {
     openBlankComposition('Song');
     const before = getTracks().length;
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('composition_add_track', { name: 'Drums' });
@@ -779,7 +1233,7 @@ describe('a finished job', () => {
 
   it('shows what the model said, under what it actually called', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     callTool('read_composition');
@@ -801,7 +1255,7 @@ describe('refusals the run met along the way', () => {
    */
   it('states the track cap rather than letting the model paper over it', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     // Bounded: an unbounded `while` here would HANG the suite rather than fail
@@ -822,7 +1276,7 @@ describe('refusals the run met along the way', () => {
    *  refused. */
   it('says each refusal once, however many times the run met it', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun();
     for (let i = getTracks().length; i < MAX_COMPOSITION_TRACKS; i++) {
@@ -850,7 +1304,7 @@ describe('a run started from edit mode', () => {
   it('keeps its partial work as one undo step, and does not touch the arrangement', async () => {
     openBlock();
     const tracksBefore = getTracks().length;
-    render(<CompositionCommandPanel mode="edit" />);
+    render(<CompositionCommandPanel view="edit" />);
 
     await startRun('Fix the timing');
     callTool('pattern_stamp_notes', {
@@ -871,18 +1325,158 @@ describe('a run started from edit mode', () => {
     expect(isJobRunning()).toBe(false);
   });
 
-  /** The lock is taken for edit-mode runs too — not because the pattern seam
-   *  needs it, but because it is what disables the mode bar, and a mode change
-   *  mid-run would close the placement out from under the agent. */
+  /**
+   * The lock is taken for Edit-view runs too — not because the pattern seam
+   * needs it, but because it is what kills every route to closing the placement
+   * out from under the agent: `TrackHeader` disables the view buttons on
+   * `useIsJobRunning`, `ArrangementGrid`'s activation coordinator refuses under
+   * `isJobRunning()`, and the grid's reconciler stays silent about the pointer
+   * while the lock is held. (The mode bar this used to name was deleted in
+   * milestone 4.)
+   */
   it('still holds the document lock for the duration', async () => {
     openBlock();
-    render(<CompositionCommandPanel mode="edit" />);
+    render(<CompositionCommandPanel view="edit" />);
 
     await startRun('Fix the timing');
     expect(isJobRunning()).toBe(true);
 
     await finishRun();
     expect(isJobRunning()).toBe(false);
+  });
+
+  /**
+   * The Edit rows cannot be reached without a block, and the withdrawal is what
+   * enforces it rather than a guard nobody can trip.
+   *
+   * ⚠ WITHOUT THIS, `writePatternBack` falls through to its LIBRARY branch and
+   * the run rewrites whatever pattern the pattern page left open — off-screen,
+   * outside the rollback and outside the lock. `start` carries the same check as
+   * defence in depth (the document can move between the render that offered the
+   * row and the press) but no route through the UI reaches it, which is the
+   * point: the form goes with the row.
+   */
+  it('withdraws the Edit form when the block closes under it', async () => {
+    openBlock();
+    render(<CompositionCommandPanel view="edit" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Fix the timing' }));
+    expect(screen.getByRole('button', { name: 'Run' })).toBeInTheDocument();
+
+    act(() => closePlacementEditing());
+
+    expect(screen.queryByRole('button', { name: 'Fix the timing' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Run' })).not.toBeInTheDocument();
+    expect(screen.getByText(/Press a block in this track/)).toBeInTheDocument();
+    expect(isJobRunning()).toBe(false);
+  });
+});
+
+// ------------------------------------------ a global command, from the Edit view ---
+
+/**
+ * ⚠ A NEWLY REACHABLE ENTRY PATH, and the reason it has a describe of its own.
+ *
+ * Before milestone 5 the panel offered ONE list, filtered by the page mode, so
+ * in Edit it was the pattern page's rows and nothing else — a composition
+ * command could not be launched with a block open. The composition group is now
+ * offered in every view, so it can be: the selected track in Edit, one of its
+ * blocks open, and "Create a bass line" one press away.
+ *
+ * What that costs if the pointer is left where it is, and what these tests pin:
+ *
+ *   - `pattern_open_blank` REFUSES while a placement is open (deliberately — it
+ *     is the one place that rule can live), so the row cannot author the part it
+ *     exists to author; and
+ *   - `pattern_stamp_notes` does NOT refuse. `writePatternBack` routes to the
+ *     open placement's snapshot, so the agent's bass line lands in the block the
+ *     user was editing.
+ *
+ * So the panel restores the pointer BEFORE it takes the lock. The gesture half
+ * of the order is `ArrangementGrid`'s — its reconciler sweeps `endOutgoingWork()`
+ * on the lock transition — and is not repeated here; jsdom has no pointer
+ * gestures to end in this file anyway, since the panel is rendered without a
+ * grid.
+ */
+describe('a composition command launched from the Edit view', () => {
+  it('restores the pattern pointer before the agent takes the document', async () => {
+    const { placementId } = openBlock();
+    expect(getEditingPlacementId()).toBe(placementId);
+    render(<CompositionCommandPanel view="edit" />);
+
+    await startRun();
+
+    // Closed, and the lock taken.
+    expect(getEditingPlacementId()).toBeNull();
+    expect(isJobRunning()).toBe(true);
+    // ⚠ AND IN THAT ORDER, which is the half the two assertions above cannot
+    // see: both writes land in one commit, so a panel that locked first and
+    // closed second would satisfy them exactly. See the seam wrapper at the head
+    // of this file.
+    expect(order.calls).toEqual(['close', 'beginJob']);
+
+    await finishRun();
+  });
+
+  it('lets the run author its own pattern, which an open block would have refused', async () => {
+    openBlock();
+    const userPattern = getEditingPattern();
+    render(<CompositionCommandPanel view="edit" />);
+
+    await startRun();
+    const opened = callTool('pattern_open_blank', { name: 'Bass', instrumentId: 'bass' }) as {
+      ok: boolean;
+    };
+
+    // ⚠ THE ASSERTION THE WHOLE ORDER IS FOR. With the placement still open this
+    // comes back `{ok: false}` with "A composition block is open for editing",
+    // and the row cannot do its job at all.
+    expect(opened.ok).toBe(true);
+    // And the user's block is not what the run is writing into.
+    expect(getEditingPattern()?.id).not.toBe(userPattern?.id);
+
+    await finishRun();
+  });
+
+  it('still rolls the arrangement back when it is cancelled', async () => {
+    openBlock();
+    const before = getTracks().length;
+    render(<CompositionCommandPanel view="edit" />);
+
+    await startRun();
+    callTool('composition_add_track', { name: 'Bass' });
+    expect(getTracks()).toHaveLength(before + 1);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(getTracks()).toHaveLength(before);
+    expect(isJobRunning()).toBe(false);
+    expect(within(report()).getByText(/put back the way it was/)).toBeInTheDocument();
+  });
+
+  it('refuses a second launch while the first is still in flight', async () => {
+    openBlankComposition('Song');
+    render(<CompositionCommandPanel view="pattern" />);
+
+    await startRun();
+    const first = harness.live;
+    expect(first).not.toBeNull();
+
+    // Another row, another press — one runner, one lock, and the second is
+    // refused rather than starting a competing job. The button reads "Running…"
+    // rather than being `disabled`, deliberately: disabling it under the pointer
+    // that just pressed it drops focus to `<body>`. So it IS pressable, and
+    // `inFlightRef` is what makes the press do nothing.
+    await userEvent.click(screen.getByRole('button', { name: 'Extend the arrangement' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Running…' }));
+
+    expect(harness.live).toBe(first);
+    expect(harness.inputs).toHaveLength(1);
+    // And Cancel still belongs to the run that is actually going.
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    expect(within(report()).getByText(new RegExp(SINGLE_RUN))).toBeInTheDocument();
+
+    await finishRun();
   });
 });
 
@@ -968,9 +1562,42 @@ describe('a command on the IR route', () => {
     warnings,
   });
 
+  /**
+   * ⚠ ACCEPTANCE 13, AND THE ROW THE MILESTONE IS NAMED AFTER. Tagged
+   * `mode: 'pattern'`, this vanished the moment the selected track showed Voice
+   * or Edit — which is absurd for a row that creates a NEW composition and reads
+   * nothing about the selection. Driven from all three views, and from Edit with
+   * a block open, because those are the states that used to hide it.
+   */
+  it('launches from Voice, from Edit with a block open, and still builds a NEW composition', async () => {
+    openBlock();
+    const openBefore = getEditingComposition()?.id;
+    const { rerender } = render(<CompositionCommandPanel view="voice" />);
+    expect(screen.getByRole('button', { name: BACKING_TRACK })).toBeInTheDocument();
+
+    rerender(<CompositionCommandPanel view="edit" />);
+    await startRun(BACKING_TRACK);
+    expect(irJob.live?.label).toBe(BACKING_TRACK);
+    // Still the route's own pipeline, not an agent loop with tools.
+    expect(harness.live).toBeNull();
+
+    runThroughParts();
+    progress({ type: 'import.started' });
+    await settle({ ok: true, value: { documents: documents(['p1', 'p2', 'p3']), chart: CHART } }, () =>
+      repointTo('comp-1'),
+    );
+
+    expect(within(report()).getByText(/A new composition was created from 3 parts/)).toBeInTheDocument();
+    // ⚠ AND THE ONE THE USER HAD OPEN IS NOT THE ONE IT MADE. The route's whole
+    // contract, asserted from the state rather than from the sentence.
+    expect(openBefore).not.toBe('comp-1');
+    expect(getEditingPlacementId()).toBeNull();
+    expect(getSelectedTrackId()).toBeNull();
+  });
+
   it('starts the job rather than an agent run, and the other rows still do not', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     // The job got the FILLED template — the chart run's whole input.
@@ -992,7 +1619,7 @@ describe('a command on the IR route', () => {
 
   it('shows the phases the job emits — chart, then part N of M, then import', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     progress({ type: 'job.started', transcriptId: 'run-1' });
@@ -1047,7 +1674,7 @@ describe('a command on the IR route', () => {
     expect(getSelectedPlacementIds()).toHaveLength(1);
     const minesTracks = getTracks().length;
 
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
     await startRun(BACKING_TRACK);
     runThroughParts();
     progress({ type: 'import.started', trackCount: 3 });
@@ -1101,7 +1728,7 @@ describe('a command on the IR route', () => {
 
   it('drops the undo history, so a press cannot stamp the old composition back', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
     const added = addTrack('The user’s own track');
     if (!added.ok) throw new Error(added.reason);
     const tracksBefore = getTracks().length;
@@ -1141,7 +1768,7 @@ describe('a command on the IR route', () => {
    */
   it('says what the route costs, and says something else for the other route', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await userEvent.click(screen.getByRole('button', { name: BACKING_TRACK }));
     expect(screen.getByText(/builds a NEW composition and opens it/)).toBeInTheDocument();
@@ -1157,7 +1784,7 @@ describe('a command on the IR route', () => {
 
   it('does not read as a clean success when a part is missing from the piece', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     runThroughParts();
@@ -1198,7 +1825,7 @@ describe('a command on the IR route', () => {
       agent: 'ir-composition-job',
       input: 'a blues backing track',
     });
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     await settle({
@@ -1218,7 +1845,7 @@ describe('a command on the IR route', () => {
 
   it('puts the import’s warnings on the screen', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     runThroughParts();
@@ -1259,7 +1886,7 @@ describe('a command on the IR route', () => {
     // where the assertion has to look. Restored in a `finally`: a swallowed
     // `console.error` left behind would hide the next test's own warnings.
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     const twice = 'Dropped 2 events with a fractional tick.';
     await startRun(BACKING_TRACK);
@@ -1284,7 +1911,7 @@ describe('a command on the IR route', () => {
 
   it('marks the part that failed where the part is, and says nothing was imported', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     runThroughParts(1);
@@ -1324,7 +1951,7 @@ describe('a command on the IR route', () => {
    */
   it('says the chart was not written when the chart run is what failed', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     // ⚠ `job.started` FIRST — it is what says a job was ever handed the request,
@@ -1347,7 +1974,7 @@ describe('a command on the IR route', () => {
 
   it('says the import was refused when every part was written and the document was not', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     runThroughParts();
@@ -1369,7 +1996,7 @@ describe('a command on the IR route', () => {
 
   it('leaves the part a cancel interrupted marked stopped, not failed', async () => {
     openBlankComposition('Song');
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     runThroughParts(1);
@@ -1407,7 +2034,7 @@ describe('a command on the IR route', () => {
       agent: 'ir-composition-job',
       input: 'a blues backing track',
     });
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     progress({ type: 'job.started', transcriptId: transcript.id });
@@ -1429,7 +2056,7 @@ describe('a command on the IR route', () => {
     openBlankComposition('Song');
     const tracksBefore = getTracks().length;
     const patternsBefore = usePatternsStore.getState().library.patterns.length;
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     progress({ type: 'job.started', transcriptId: 'run-1' });
@@ -1481,7 +2108,7 @@ describe('a command on the IR route', () => {
     vi.useFakeTimers();
     try {
       openBlankComposition('Song');
-      render(<CompositionCommandPanel mode="pattern" />);
+      render(<CompositionCommandPanel view="pattern" />);
 
       // `fireEvent`, not `userEvent`: the deadline is a `setTimeout` taken when
       // the job starts, so the clock has to already be fake by then.
@@ -1509,7 +2136,7 @@ describe('a command on the IR route', () => {
   it('refuses without a provider, and reports no phase the job never reached', async () => {
     openBlankComposition('Song');
     setConnectorSettings({ baseUrl: '', token: '' });
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
 
@@ -1527,7 +2154,7 @@ describe('a command on the IR route', () => {
   it('gives the lock back when the job runner itself throws', async () => {
     openBlankComposition('Song');
     irJob.throwWith = 'the job runner is broken';
-    render(<CompositionCommandPanel mode="pattern" />);
+    render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     await act(async () => {
@@ -1547,7 +2174,7 @@ describe('a command on the IR route', () => {
 
   it('cancels the job when the panel is unmounted mid-job', async () => {
     openBlankComposition('Song');
-    const { unmount } = render(<CompositionCommandPanel mode="pattern" />);
+    const { unmount } = render(<CompositionCommandPanel view="pattern" />);
 
     await startRun(BACKING_TRACK);
     runThroughParts(1);

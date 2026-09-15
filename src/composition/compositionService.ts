@@ -162,17 +162,21 @@ const NO_IDS: readonly string[] = [];
  *     page would keep drawing a placement's snapshot — and that is a worse
  *     failure than the one the lock prevents.
  *
- *     ⚠ THE COST, and it is not only "navigating away": `CompositionPage` wires
- *     that cleanup to a `mode` effect, so ANY mode switch closes an open
- *     placement too — and `mode` lives in `App`, which reaches no seam and so
- *     cannot be refused from here. Either exit, taken while the agent is inside a
+ *     ⚠ THE COST, and it is not only "navigating away": a track's VIEW change
+ *     closes that track's open placement too (`ArrangementGrid.changeTrackView`)
+ *     — and the view map lives in `App`, which reaches no seam and so cannot be
+ *     refused from here. Either exit, taken while the agent is inside a
  *     placement, leaves its later `pattern_*` writes pointed at the LIBRARY
  *     pattern — the user's own document, which {@link abortEditGesture} does not
  *     restore. `openPlacementForEditing` being locked stops the user repointing
- *     the editor INTO a block, but not out of one. The mode bar is therefore
- *     disabled from {@link useIsJobRunning} (`CompositionPage`), which is the
- *     only one of the two exits worth a control; leaving the page entirely is
- *     rare enough, and destructive enough to interrupt, that it stays open.
+ *     the editor INTO a block, but not out of one. The view buttons are
+ *     therefore disabled from {@link useIsJobRunning} (`TrackHeader`), and the
+ *     grid's activation coordinator refuses every other activation path under
+ *     `isJobRunning()`; that is the only one of the two exits worth a control,
+ *     and leaving the page entirely is rare enough, and destructive enough to
+ *     interrupt, that it stays open. (This paragraph named the page-wide MODE
+ *     BAR until COMPS-TRACK-TABS milestone 4 deleted it; the hazard did not go
+ *     with it, only the control that used to hold it shut.)
  *
  * ── The pattern seam is a SEPARATE lock, and there isn't one ────────────────
  *
@@ -278,7 +282,9 @@ export function isJobRunning(): boolean {
  * The lock refuses through `Result`, and the two writes that cannot — `undo` and
  * `redo` — are silently inert instead (see their comment). A control that would
  * be dead needs to LOOK dead, which is what this is for: `useHistoryState` folds
- * it in for those two, and `CompositionPage` disables the mode bar with it.
+ * it in for those two, and `TrackHeader` disables every track's view buttons
+ * with it. (It used to say the page's MODE BAR; COMPS-TRACK-TABS milestone 4
+ * deleted that bar, and the per-track buttons are the control it became.)
  */
 export function useIsJobRunning(): boolean {
   return useSyncExternalStore(subscribeJob, isJobRunning, isJobRunning);

@@ -13,11 +13,14 @@ import { AGENT_TOOLS } from '../src/ai/tools';
 import {
   COMMAND_CATALOG,
   commandsForPage,
+  compositionCommands,
   findCommand,
+  trackCommands,
 } from '../src/ai/commandCatalog';
 import {
   fillCommand,
   findSlot,
+  targetTrackSlotId,
   templateSlotIds,
   type ChoiceSource,
   type Command,
@@ -436,41 +439,97 @@ const MODE_UNIONS_MATCH: MutuallyAssignable<ArrangementMode, CommandMode> = true
  */
 const MODES: readonly ArrangementMode[] = ARRANGEMENT_MODES;
 
-describe('mode scoping', () => {
-  it('names the same modes the arrangement grid does', () => {
+describe('scope and view scoping', () => {
+  it('names the same views the arrangement grid does', () => {
     expect(MODE_UNIONS_MATCH).toBe(true);
-    // Every mode the grid has resolves to a real (frozen) slice rather than
+    // Every view the grid has resolves to a real (frozen) track list rather than
     // `undefined` — the runtime half of the equivalence, and the assertion that
-    // catches a mode the catalog was never told about.
+    // catches a view the catalog was never told about.
     for (const mode of MODES) {
-      for (const page of ['pattern', 'composition'] as const) {
-        expect(`${page}/${mode}: ${Array.isArray(commandsForPage(page, mode))}`).toBe(
-          `${page}/${mode}: true`,
-        );
-      }
+      expect(`${mode}: ${Array.isArray(trackCommands(mode))}`).toBe(`${mode}: true`);
     }
     expect(MODES.length).toBe(3);
   });
 
-  it('gives every composition command a mode', () => {
-    // The composition rail shows ONE mode at a time. An untagged row would show
-    // in all three, which is how "the commands match what the mode is for"
-    // quietly stops being true — so the tag is required rather than optional
-    // for this page, and the failure names the row.
+  it('gives every composition command a scope', () => {
+    // The rail shows two groups. An untagged row would be in neither — offered
+    // nowhere at all — which is the silent version of the regression this whole
+    // split exists to fix. `CompositionCommand` in the catalog makes it a
+    // compile error; this is the half that survives `vitest run`, which
+    // transpiles without typechecking.
     //
     // Guarded against passing vacuously: an empty composition page would satisfy
     // "every row is tagged" without offering anything.
     expect(commandsForPage('composition').length).toBeGreaterThan(0);
     for (const command of commandsForPage('composition')) {
-      expect(`${command.id}: ${command.mode ?? 'untagged'}`).not.toBe(`${command.id}: untagged`);
+      expect(`${command.id}: ${command.scope ?? 'untagged'}`).not.toBe(`${command.id}: untagged`);
     }
   });
 
-  it('leaves the pattern page untouched by modes', () => {
-    // Two claims. The pattern page passes no mode, and its list is pinned
-    // LITERALLY rather than by re-running `offered`'s own predicate, which would
-    // move with any edit and could never fail. These are also what edit mode is
-    // served by, so losing one is a hole in the composition page too.
+  /**
+   * ⚠ THE REGRESSION THIS MILESTONE FIXED, stated as the property that was
+   * false.
+   *
+   * Milestone 4 pointed the rail at the SELECTED TRACK'S view and the panel
+   * filtered its one list by it. Five composition-wide rows were tagged
+   * `mode: 'pattern'`, so selecting a Voice or an Edit track — or nothing —
+   * hid "Create a backing track", "Create a bass line", "Add a harmony track"
+   * and "Extend the arrangement". A row whose product is a NEW composition
+   * cannot depend on what one lane happens to be drawing.
+   */
+  it('offers every composition-scoped row whatever the selected track is showing', () => {
+    const ids = compositionCommands().map((command) => command.id);
+    expect(ids).toEqual([
+      'composition-backing-track',
+      'composition-bass-line',
+      'composition-harmony-track',
+      'composition-extend',
+      'composition-balance-mix',
+    ]);
+    // The list takes no view — there is no argument to pass one through — so
+    // this is the assertion that it cannot grow one: the same identity answers
+    // every time, whatever the app is showing.
+    for (const mode of MODES) {
+      expect(trackCommands(mode).map((command) => command.id)).not.toContain(
+        'composition-backing-track',
+      );
+    }
+    expect(compositionCommands()).toBe(compositionCommands());
+  });
+
+  it('gives a composition-scoped row no view tag to be filtered by', () => {
+    // Belt to the braces above: a `mode` left on one of these is dead metadata
+    // that the next reader will take for a live filter.
+    for (const command of compositionCommands()) {
+      expect(`${command.id}: ${command.mode ?? 'none'}`).toBe(`${command.id}: none`);
+    }
+  });
+
+  it('offers each view exactly the track rows tagged for it', () => {
+    expect(trackCommands('pattern').map((command) => command.id)).toEqual([
+      'composition-lay-down-pattern',
+    ]);
+    expect(trackCommands('voice').map((command) => command.id)).toEqual([
+      'composition-track-tone',
+    ]);
+    // ⚠ THE PATTERN PAGE'S ROWS, and this is the assertion most likely to be
+    // "fixed" by re-tagging them `page: 'composition'`. Do not: they drive
+    // `patternService`, and the Edit view points the lib's pattern-editing
+    // pointer at the block so they already act on it. `page` picks the agent,
+    // the tools and the history; `scope` picks the group; `mode` picks the view.
+    const edit = trackCommands('edit');
+    expect(edit.every((command) => command.page === 'pattern')).toBe(true);
+    // "Generate a pattern" opens a DIFFERENT document — `openPatternForEditing`
+    // nulls the placement pointer — so it is withheld from a block.
+    expect(edit.map((command) => command.id)).not.toContain('pattern-generate');
+    expect(commandsForPage('pattern').map((command) => command.id)).toContain('pattern-generate');
+  });
+
+  it('leaves the pattern page untouched by scope and by views', () => {
+    // The pattern page has one list and no groups. Pinned LITERALLY rather than
+    // by re-running the catalog's own predicate, which would move with any edit
+    // and could never fail. This list is also what the Edit view is served by,
+    // so losing one is a hole in the composition page too.
     const pattern = commandsForPage('pattern');
     expect(pattern.map((c) => c.id)).toEqual([
       'pattern-fix-timing',
@@ -482,64 +541,36 @@ describe('mode scoping', () => {
       'pattern-feel',
     ]);
     for (const command of pattern) expect(command.mode).toBeUndefined();
-    // …and because none of them is tagged, asking for one anyway returns all of
-    // them. That is the "no mode means every mode" rule, and it is what stops a
-    // new untagged row from being invisible.
-    for (const mode of MODES) {
-      expect(commandsForPage('pattern', mode).map((c) => c.id)).toEqual(pattern.map((c) => c.id));
-    }
+    // And no `scope`: the tag is a composition-page fact, and writing one onto a
+    // pattern row would claim these belong to a group the pattern page does not
+    // have.
+    for (const command of pattern) expect(command.scope).toBeUndefined();
   });
 
-  it('offers each composition mode exactly the rows tagged for it', () => {
-    expect(commandsForPage('composition', 'pattern').map((command) => command.id)).toEqual([
-      'composition-backing-track',
-      'composition-bass-line',
-      'composition-harmony-track',
-      'composition-extend',
-      'composition-lay-down-pattern',
-    ]);
-    expect(commandsForPage('composition', 'voice').map((command) => command.id)).toEqual([
-      'composition-balance-mix',
-      'composition-track-tone',
-    ]);
-    // Empty ON PURPOSE, and this is the assertion most likely to be "fixed" by
-    // someone re-tagging the six pattern rows as composition ones. Do not: they
-    // drive `patternService`, and edit mode points the lib's pattern-editing
-    // pointer at the block so they already act on it. `page` picks the agent,
-    // the tools and the history; `mode` only picks what is offered.
-    expect(commandsForPage('composition', 'edit')).toEqual([]);
-  });
-
-  it('accounts for every composition row across the modes, with no row in two', () => {
-    const seen = MODES.flatMap((mode) => commandsForPage('composition', mode).map((c) => c.id));
+  it('accounts for every composition row across the two groups, with no row in both', () => {
+    const seen = [
+      ...compositionCommands().map((c) => c.id),
+      ...MODES.flatMap((mode) =>
+        trackCommands(mode)
+          .filter((command) => command.page === 'composition')
+          .map((c) => c.id),
+      ),
+    ];
     expect(new Set(seen).size).toBe(seen.length);
     expect(new Set(seen)).toEqual(new Set(commandsForPage('composition').map((c) => c.id)));
   });
 
-  it('returns the same array identity for a given page and mode', () => {
-    // The reason `BY_PAGE` exists at all — a fresh array per call is a new
+  it('returns the same array identity for a given page and view', () => {
+    // The reason the tables exist at all — a fresh array per call is a new
     // identity every render, a `useMemo` dependency that never matches and a
-    // list that rebuilds its children for nothing. Adding the mode axis had to
-    // keep that, so identity is asserted per SLICE, not just per page.
+    // list that rebuilds its children for nothing.
     expect(commandsForPage('pattern')).toBe(commandsForPage('pattern'));
     expect(commandsForPage('composition')).toBe(commandsForPage('composition'));
-    for (const page of ['pattern', 'composition'] as const) {
-      for (const mode of MODES) {
-        expect(commandsForPage(page, mode)).toBe(commandsForPage(page, mode));
-      }
-    }
+    for (const mode of MODES) expect(trackCommands(mode)).toBe(trackCommands(mode));
     // And the slices are distinct objects, so identity is not passing by every
     // call returning one shared array.
-    expect(commandsForPage('composition', 'pattern')).not.toBe(
-      commandsForPage('composition', 'voice'),
-    );
-    // The pattern page is the deliberate exception: no row there is tagged, so
-    // every mode is handed back the SAME array as the mode-less call rather than
-    // an equal copy. A panel that normalises to always pass a mode must not see
-    // a new identity for an identical list.
-    for (const mode of MODES) {
-      expect(commandsForPage('pattern', mode)).toBe(commandsForPage('pattern'));
-    }
+    expect(trackCommands('pattern')).not.toBe(trackCommands('voice'));
+    expect(compositionCommands()).not.toBe(trackCommands('pattern'));
   });
 
   it('hands out frozen lists, so a caller cannot sort one in place', () => {
@@ -547,10 +578,53 @@ describe('mode scoping', () => {
     // their `slots`/`tools` are still mutable through the list. The list is a
     // render-time value handed to a component, and reordering it is the mishap
     // this stops.
-    for (const mode of MODES) {
-      expect(Object.isFrozen(commandsForPage('composition', mode))).toBe(true);
-    }
+    for (const mode of MODES) expect(Object.isFrozen(trackCommands(mode))).toBe(true);
+    expect(Object.isFrozen(compositionCommands())).toBe(true);
     expect(Object.isFrozen(commandsForPage('composition'))).toBe(true);
+    expect(Object.isFrozen(commandsForPage('pattern'))).toBe(true);
+  });
+});
+
+describe('what a command targets', () => {
+  /**
+   * `targetTrackSlotId` is what the panel binds to the selected track, and it is
+   * derivable ONLY because scope is explicit. The inference the other way — "it
+   * has a track slot, so it is about a track" — is wrong on two live rows.
+   */
+  it('names the target slot of a track-scoped row', () => {
+    expect(targetTrackSlotId(findCommand('composition-lay-down-pattern')!)).toBe('track');
+    expect(targetTrackSlotId(findCommand('composition-track-tone')!)).toBe('track');
+  });
+
+  it('names nothing on a composition-scoped row that takes a track', () => {
+    // ⚠ BOTH OF THESE HAVE A TRACK SLOT AND NEITHER IS AIMED AT ONE. The slot is
+    // an explicit input — the track to double, the track to feature — which the
+    // selection may SEED and must never silently replace.
+    const harmony = findCommand('composition-harmony-track')!;
+    const mix = findCommand('composition-balance-mix')!;
+    expect(harmony.slots.some((slot) => slot.kind === 'choice' && slot.source === 'track')).toBe(
+      true,
+    );
+    expect(mix.slots.some((slot) => slot.kind === 'choice' && slot.source === 'track')).toBe(true);
+    expect(targetTrackSlotId(harmony)).toBeNull();
+    expect(targetTrackSlotId(mix)).toBeNull();
+  });
+
+  it('names nothing on the Edit view\u2019s borrowed rows, which target a block', () => {
+    for (const command of trackCommands('edit')) {
+      expect(`${command.id}: ${targetTrackSlotId(command)}`).toBe(`${command.id}: null`);
+    }
+  });
+
+  it('keeps the seeded default on a composition-scoped track input', () => {
+    // The seed is what makes the picker open on something sensible; it is not a
+    // binding. Both rows still declare it.
+    const trackSlot = (id: string) =>
+      findCommand(id)!.slots.find((slot) => slot.kind === 'choice' && slot.source === 'track');
+    expect(trackSlot('composition-harmony-track')).toMatchObject({
+      defaultFrom: 'selected-track',
+    });
+    expect(trackSlot('composition-balance-mix')).toMatchObject({ defaultFrom: 'selected-track' });
   });
 });
 
