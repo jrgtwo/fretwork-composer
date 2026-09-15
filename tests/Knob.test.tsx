@@ -10,8 +10,11 @@ import { PARAM_SECTIONS, type SliderParam } from '../src/voice/paramSchema';
  * So the drag maths IS assertable — only the rendered geometry isn't, and the SVG
  * is decorative (`aria-hidden`) precisely so that nothing depends on measuring it.
  *
- * The one genuinely untestable piece is `preventDefault` on the wheel listener:
- * jsdom has no scrolling for it to suppress. Whether `dblclick` still fires after the
+ * What is untestable about `preventDefault` on the wheel listener is its EFFECT:
+ * jsdom has no scrolling for it to suppress. The CALL is visible, because a
+ * cancelled dispatch is what `fireEvent` returns false for — which is how the
+ * wheel-policy cases below tell "adjusts and swallows the scroll" from "leaves
+ * the event to whatever is underneath". Whether `dblclick` still fires after the
  * pointerdown handler calls `preventDefault` is also unanswerable here — jsdom models
  * none of the pointer→mouse compatibility-event suppression that decides it (per spec
  * it does fire, because that suppression is scoped to the mouse events, not dblclick).
@@ -42,6 +45,35 @@ function setup(overrides: Partial<Parameters<typeof Knob>[0]> = {}) {
     unmount,
     dial: screen.getByRole('slider', { name: props.label }),
   };
+}
+
+/**
+ * Which elements had a `wheel` listener attached while `mount` ran.
+ *
+ * React registers its own delegated `wheel` listener on the root container, so
+ * counting registrations proves nothing — the TARGET is the question, and
+ * `addEventListener`'s target is its `this`. Patched on the prototype rather than
+ * spied with `vi.spyOn`, because what this needs is the receiver of each call and
+ * a hand-written wrapper says so without depending on how the mock records it.
+ */
+function wheelTargetsDuring(mount: () => void): readonly EventTarget[] {
+  const targets: EventTarget[] = [];
+  const original = HTMLElement.prototype.addEventListener;
+  HTMLElement.prototype.addEventListener = function patched(
+    this: HTMLElement,
+    ...args: Parameters<typeof original>
+  ) {
+    if (args[0] === 'wheel') targets.push(this);
+    return original.apply(this, args);
+  };
+  try {
+    // RTL's `render` flushes effects inside `act`, so every listener the mount
+    // installs is registered before this returns.
+    mount();
+  } finally {
+    HTMLElement.prototype.addEventListener = original;
+  }
+  return targets;
 }
 
 /**
@@ -292,6 +324,55 @@ describe('Knob', () => {
       const { onChange, dial } = setup({ value: 0.5, step: 0.01 });
       fireEvent.wheel(dial, { deltaX: -100, deltaY: 0 });
       expect(onChange).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * COMPS-TRACK-TABS §6. A rack on the composition page is drawn INSIDE the
+   * arrangement's scroller, so a wheel over a knob there is someone reaching for
+   * track five — and adjusting instead is an audio edit nobody asked for.
+   *
+   * ⚠ THE MECHANISM IS THE LISTENER'S ABSENCE, not an early return inside one, so
+   * that is what these assert. A no-op handler would still be a non-passive
+   * `wheel` listener on the element, and the point is to leave the event entirely
+   * alone. The positive case is here for the same reason: a probe that cannot see
+   * the listener when it IS installed would pass the negative case vacuously.
+   */
+  describe('wheel policy', () => {
+    it('installs the value-changing listener by default', () => {
+      let dial: HTMLElement | undefined;
+      const targets = wheelTargetsDuring(() => {
+        dial = setup({ value: 0.5, step: 0.01 }).dial;
+      });
+      // Both assertions, and the first is not ceremony: `dial` is assigned inside
+      // the closure, so a query that stops matching would make the NEGATIVE case
+      // below pass on `undefined` while only this one failed.
+      expect(dial).toBeDefined();
+      expect(targets).toContain(dial);
+    });
+
+    it('installs no wheel listener at all under the scrolling policy', () => {
+      let dial: HTMLElement | undefined;
+      const targets = wheelTargetsDuring(() => {
+        dial = setup({ value: 0.5, step: 0.01, wheel: 'scroll' }).dial;
+      });
+      expect(dial).toBeDefined();
+      expect(targets).not.toContain(dial);
+    });
+
+    it('leaves the event uncancelled and the value alone under the scrolling policy', () => {
+      const { onChange, dial } = setup({ value: 0.5, step: 0.01, wheel: 'scroll' });
+      // `fireEvent` returns false for a cancelled dispatch, so this is the
+      // `preventDefault` assertion — not the scroll that would follow it, which
+      // jsdom has no layout to perform.
+      expect(fireEvent.wheel(dial, { deltaY: -100 })).toBe(true);
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it('cancels it under the default policy, which is what the pattern page keeps', () => {
+      const { onChange, dial } = setup({ value: 0.5, step: 0.01 });
+      expect(fireEvent.wheel(dial, { deltaY: -100 })).toBe(false);
+      expect(onlyCall(onChange)).toBe(0.51);
     });
   });
 

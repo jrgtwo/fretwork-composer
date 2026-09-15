@@ -74,6 +74,34 @@ export const LANE_KNOB_SCALE: KnobScale = { amp: 42, small: 38 };
 /** A whole pane column, with one holder on the page. */
 export const PANE_KNOB_SCALE: KnobScale = { amp: 56, small: 56 };
 
+/**
+ * What the wheel does over a dial — `Knob`'s and `ParamEncoder`'s shared answer
+ * to one question.
+ *
+ * ⚠ DECLARED HERE, beside {@link KnobScale}, AND NOT IN EITHER CONTROL. It
+ * travels the identical path (a wrapper decides it, `VoiceEditor` passes it, the
+ * control obeys it), and the two controls are deliberately NOT shared — their
+ * headers say so at length. A union declared in one of them would make the other
+ * import it and quietly contradict that, and would give the tracked
+ * `usePointerSpin` extraction (`docs/FOLLOW-UPS.md` §5) a pre-existing edge to
+ * unpick. One union either way, so neither control can answer this differently.
+ *
+ * `'adjust'` is the dial's own gesture and the DEFAULT: a wheel notch is a step,
+ * and the listener calls `preventDefault` so the page does not scroll out from
+ * under the cursor mid-turn.
+ *
+ * `'scroll'` is for a dial that sits INSIDE a scroller the wheel belongs to — a
+ * voice rack drawn in a track's lane of the arrangement, where the wheel is how
+ * the user reaches track five. There the adjusting gesture is not merely
+ * unwanted, it is a silent audio edit made by someone trying to scroll, so the
+ * listener is NOT INSTALLED AT ALL rather than installed and made inert. Two
+ * consequences, and both are the point: nothing calls `preventDefault`, and
+ * there is no handler to get the ordering wrong — the event reaches the scroller
+ * exactly as it would if this control were a `<div>`. Drag, arrows, Page keys
+ * and double-click are untouched, so no capability is lost with the wheel.
+ */
+export type WheelPolicy = 'adjust' | 'scroll';
+
 export const voiceButtonClass =
   'pressable control flex-none rounded-lg px-2 py-1 font-mono text-[9px] font-bold tracking-[0.06em] uppercase disabled:cursor-not-allowed disabled:opacity-40';
 

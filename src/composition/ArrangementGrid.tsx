@@ -105,6 +105,22 @@ const NO_VIEWS: CompositionTrackViews = {};
 const NO_COLLAPSED_SECTIONS: Readonly<Record<string, readonly SectionId[]>> = {};
 
 /**
+ * How the active view is SPOKEN — the live region's half of the view controls.
+ *
+ * Deliberately NOT `TrackHeader`'s `VIEWS` table, and not imported from it. That
+ * one names three BUTTONS in a 200 px column ("Pattern view, Bass"), including
+ * the track because eight identical letters are on screen at once; this one
+ * completes a sentence whose subject has already been said. Sharing the strings
+ * would tie a label's wording to an announcement's grammar, and the day one of
+ * them has to change the other would come along uninvited.
+ */
+const VIEW_ANNOUNCEMENT: Readonly<Record<ArrangementMode, string>> = {
+  pattern: 'Pattern view',
+  edit: 'Edit view',
+  voice: 'Voice view',
+};
+
+/**
  * The arrangement: a time ruler across the top, a fixed track-header column down
  * the left, and the lane area between them.
  *
@@ -271,8 +287,8 @@ function ArrangementPlayhead({ pxPerBeat, band }: { pxPerBeat: number; band: Tim
 }
 
 /**
- * One placement's editable notes, in edit mode — the surface positioned and
- * clipped to that placement's own block.
+ * One placement's editable notes, on a track showing Edit — the surface
+ * positioned and clipped to that placement's own block.
  *
  * ONE SURFACE PER PLACEMENT, not one per lane. The reasoning, and the cost it
  * accepts, is on `arrangementMath.EditableSpan`; what matters here is the
@@ -521,6 +537,67 @@ export function ArrangementGrid({
     [trackViews, compositionId],
   );
   /**
+   * ── THE ACTIVE VIEW, SAID OUT LOUD (§8, milestone 6 §A) ─────────────────────
+   *
+   * "The active view" is the SELECTED track's view — the one the rail follows,
+   * the one the command groups are built from, the one ⌘Z asks. It changes on
+   * two unrelated paths: a view button press, and the selection moving to a
+   * track that was already showing something else. Both have to be audible, so
+   * this is derived from the pair rather than fired from the button — a
+   * setter on the button would be silent for half the ways the answer changes.
+   *
+   * Nothing on screen says it. The `aria-pressed` on the view buttons is the
+   * visual answer and a screen reader only meets it when focus is ON one of
+   * them; selecting a track through its name plate, through a lane press or
+   * through the rail moves the active view with no button involved at all.
+   *
+   * The name-plate `selected` state stays the identity channel; this one is the
+   * VIEW, and it names the track because eight tracks are on screen.
+   */
+  const selectedTrack = tracks.find((track) => track.id === selectedTrackId) ?? null;
+  const activeView = selectedTrack === null ? null : viewOfTrack(selectedTrack.id);
+  const activeViewSentence =
+    selectedTrack === null || activeView === null
+      ? ''
+      : `${selectedTrack.name} — ${VIEW_ANNOUNCEMENT[activeView]}`;
+  /** ⚠ A COUNTER RIDES ALONG, for `setTrackNotice`'s reason one screen down: a
+   *  live region set to the string it is already showing is a React bail-out and
+   *  announces nothing, and A → B → A between two tracks NAMED THE SAME is
+   *  exactly that (the seam does not enforce unique names). Keyed on the
+   *  counter, so the node is replaced and the region fires again. */
+  const [viewAnnouncement, setViewAnnouncement] = useState<{
+    text: string;
+    seq: number;
+  } | null>(null);
+  /**
+   * What was last announced — `undefined` until the first commit.
+   *
+   * THE FIRST RUN RECORDS AND SAYS NOTHING. A live region whose content arrives
+   * in a mount effect IS announced, so without this every arrival on the
+   * composition page would read the selected track's view at the user
+   * unprompted — an answer to a question nobody asked. It is CHANGES that are
+   * the news here.
+   *
+   * Compared on the track id and the view rather than on the sentence, so
+   * RENAMING the selected track re-renders and says nothing: a rename is not a
+   * view change, and it already has the name plate to speak for it.
+   */
+  const announcedViewRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const key = activeView === null ? '' : `${selectedTrackId ?? ''}:${activeView}`;
+    if (announcedViewRef.current === undefined) {
+      announcedViewRef.current = key;
+      return;
+    }
+    if (announcedViewRef.current === key) return;
+    announcedViewRef.current = key;
+    setViewAnnouncement((previous) =>
+      activeViewSentence === ''
+        ? null
+        : { text: activeViewSentence, seq: (previous?.seq ?? 0) + 1 },
+    );
+  }, [activeView, selectedTrackId, activeViewSentence]);
+  /**
    * Is there a Pattern lane on screen at all.
    *
    * A PER-LANE question asked of the whole stack, and the page-level half of the
@@ -560,7 +637,7 @@ export function ArrangementGrid({
   const timed =
     tracks.length === 0 || tracks.some((track) => viewOfTrack(track.id) !== 'voice');
   /**
-   * Undo is per-DOCUMENT, and edit mode edits a different one.
+   * Undo is per-DOCUMENT, and an Edit lane edits a different one.
    *
    * The two histories are separate stacks — `compositionService`'s holds whole
    * `Composition` snapshots, `patternService`'s holds `Pattern`s — and ⌘Z is
@@ -589,7 +666,8 @@ export function ArrangementGrid({
   const [zoomIndex, setZoomIndex] = useState(DEFAULT_ARRANGEMENT_ZOOM_INDEX);
   const [snapId, setSnapId] = useState<string>(DEFAULT_ARRANGEMENT_SNAP_ID);
   /**
-   * Edit mode's note grid, held SEPARATELY from the arrangement's block snap.
+   * The Edit lanes' note grid, held SEPARATELY from the arrangement's block
+   * snap.
    *
    * One control on screen, two settings behind it, because they are two
    * different quantities that happen to share a menu: dropping a four-bar riff a
@@ -1663,10 +1741,12 @@ export function ArrangementGrid({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="mb-1.5 flex flex-none items-center gap-1.5">
-        {/* Zoom is a property of the TIME AXIS, so it goes with the ruler in
-            voice mode rather than sitting there scaling nothing. The zoom itself
-            is remembered, not reset — coming back to pattern mode finds the view
-            where it was left. */}
+        {/* Zoom is a property of the TIME AXIS, so it goes with the ruler when
+            the stack has none — every lane in Voice — rather than sitting there
+            scaling nothing. Gated on `timed` and not on any page state: there is
+            no page mode, and ONE timed lane anywhere in a mixed stack is enough
+            to keep the axis and this control. The zoom itself is remembered, not
+            reset, so a timed lane returning finds the view where it was left. */}
         {timed && (
           <>
             <span className="font-mono text-[9px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
@@ -1803,10 +1883,13 @@ export function ArrangementGrid({
             lib's own note says the new arranger hides it. Repeated placements
             still DRAW their restart divisions (PlacementBlock).
 
-            Gated on `timed` for the same reason undo is: a selection made in
-            pattern mode survives the switch, and every one of these acts on
-            blocks that voice mode does not draw while their keyboard twins are
-            switched off with the rest of the gesture layer. */}
+            Gated on `timed` for the same reason undo is: a selection made on a
+            Pattern lane survives every view change (it is the store's), and each
+            of these acts on blocks that an all-Voice stack does not draw, while
+            their keyboard twins are switched off with the rest of the gesture
+            layer. The SELECTED track's view gates them a second time — see
+            `hasSelection` — because a mixed stack can have Pattern lanes drawing
+            blocks while the selected track is showing something else. */}
         {timed && hasSelection && (
           <>
             <span className="mx-1 h-4 w-px bg-line" />
@@ -1932,7 +2015,7 @@ export function ArrangementGrid({
           {/* A bar count is the last statement about time in this toolbar, and
               it goes with the ruler, the playhead, the zoom and the snap for
               the same reason they do. The track count is not about time and
-              stays — voice mode has exactly as many tracks. */}
+              stays — an all-Voice stack has exactly as many tracks. */}
           {timed ? ` · ${bars} ${bars === 1 ? 'bar' : 'bars'}` : ''}
         </span>
       </div>
@@ -1992,6 +2075,26 @@ export function ArrangementGrid({
           </button>
         </div>
       )}
+
+      {/* THE ACTIVE VIEW, for anything not looking at the `aria-pressed` states.
+          Mounted ALWAYS and `sr-only` rather than conditionally rendered: a live
+          region has to exist before its content changes to be announced at all,
+          and this one costs no layout either way. `role="status"` NAMED, because
+          three other regions on this page carry the same role and an unnamed
+          one is a query nothing can tell apart.
+
+          Never an `alert`. The two strips above are alerts because something was
+          REFUSED; this is the page answering a question the user asked, and an
+          assertive region would cut across whatever the refusal was saying. */}
+      <div
+        role="status"
+        aria-label="Active view"
+        aria-live="polite"
+        data-testid="arrangement-active-view"
+        className="sr-only"
+      >
+        {viewAnnouncement && <span key={viewAnnouncement.seq}>{viewAnnouncement.text}</span>}
+      </div>
 
       <div
         className="grid min-h-0 flex-1"
@@ -2130,7 +2233,7 @@ export function ArrangementGrid({
             data-testid="arrangement-lanes-scroller"
             onScroll={syncViewports}
             // Focusable because it is the only way to reach bar 40 without a
-            // pointer: in pattern and edit mode nothing inside is focusable
+            // pointer: a Pattern or Edit lane holds nothing focusable at all
             // (blocks are inert DOM — the lane area hit-tests presses instead),
             // so without this a keyboard user cannot scroll the arrangement at
             // all. The editing keys are window-level and work wherever focus is;
@@ -2138,7 +2241,24 @@ export function ArrangementGrid({
             // above is full of controls and this is one extra tab stop ahead of
             // the first rack — harmless, and cheaper than a view-dependent tab
             // order, but it is the reason the sentence above is qualified.
-            // Focus ORDER across the two layers is milestone 6.
+            //
+            // ── THE WHOLE TAB ORDER, since this element is its hinge (§8) ─────
+            //
+            //   the toolbar → the header column, top to bottom, every track →
+            //   THIS → every open rack, in track order → the page past the grid
+            //
+            // It is NOT the visual order, and it cannot be made so: the racks
+            // live in the sticky layer, which must be this scroller's first
+            // child for its vertical origin, so all of them precede all of the
+            // timed lanes whatever positions their tracks hold. What was done
+            // instead (milestone 6 §A) is to make landing anywhere in that run
+            // legible — every header and every voice row is a `role="group"`
+            // named with its track's position in the stack, so "Voice rack,
+            // track 2 of 3: Bass" says where you are — and to make focus
+            // entering a rack SELECT its track, as focus entering a header
+            // already did. A `tabindex` order over the two layers was rejected:
+            // it would put every rack and every header into one manual sequence
+            // that a track add, remove or reorder silently invalidates.
             tabIndex={0}
             role="group"
             aria-label="Arrangement lanes"
@@ -2185,12 +2305,92 @@ export function ArrangementGrid({
             >
               {lanes.map((lane) => {
                 if (viewOfTrack(lane.trackId) !== 'voice') return null;
-                const track = laneTrack(lane)?.track;
-                if (!track) return null;
+                const entry = laneTrack(lane);
+                if (!entry) return null;
+                const { track, index: trackIndex } = entry;
                 return (
                   <div
                     key={lane.trackId}
                     data-testid="arrangement-voice-lane"
+                    /**
+                     * ── WHICH TRACK'S RACK YOU HAVE LANDED IN (milestone 6 §A) ──
+                     *
+                     * A NAMED GROUP CARRYING THE STACK POSITION, in the same
+                     * shape `TrackHeader`'s column uses — and here it is not a
+                     * nicety, it is the only thing that makes the tab order
+                     * readable. THIS LAYER IS THE SCROLLER'S FIRST CHILD, so
+                     * EVERY rack precedes EVERY timed lane in the DOM whatever
+                     * position its track holds: tabbing a Pattern / Voice / Edit
+                     * stack reaches track 2's rack after the lane area and
+                     * before nothing at all (a Pattern or Edit lane has no
+                     * focusable content — blocks are inert and the note surfaces
+                     * take no tab stop). Reordering the DOM to match the eye is
+                     * not available: the layer's position is what gives the
+                     * racks their vertical origin, and a `tabindex` order is a
+                     * worse bug than the one it fixes. So the run of racks is
+                     * ANNOUNCED instead — "Voice rack, track 2 of 3: Bass" is
+                     * where you are, said in the words the header column already
+                     * uses for the same track.
+                     */
+                    role="group"
+                    aria-label={`Voice rack, track ${trackIndex + 1} of ${tracks.length}: ${track.name}`}
+                    /**
+                     * AND IT SELECTS ITS TRACK WHEN IT IS TOUCHED, exactly as
+                     * the header column does (§2, acceptance 2) — the rack is
+                     * the rest of this track's controls, and the two halves of a
+                     * track's UI must not disagree about what reaching for one
+                     * of them means. Without it a keyboard user turns track 3's
+                     * Drive while the rail, the note keyboard and every
+                     * direct-editing command still point at track 1.
+                     *
+                     * AND BY POINTER TOO, both halves, exactly as the header
+                     * has them — a rack is not only dials. Its collapse toggle,
+                     * every stage disclosure, Save / Save As / Delete and the
+                     * variant `<select>` are `<button>`s and form controls, and
+                     * `TrackHeader` states the governing fact for this codebase:
+                     * clicking a `<button>` focuses it on Chrome and does NOT on
+                     * Safari or Firefox, so focus alone is a selection model that
+                     * differs per browser. Focus-only here would leave a Safari
+                     * user pressing Save in track 3's rack with the rail, the
+                     * note keyboard and every track command still on track 1.
+                     *
+                     * ⚠ THE PAIR COSTS NOTHING EXTRA, and the earlier note here
+                     * claiming otherwise was wrong on the facts. It argued that a
+                     * pointer half would put `activateTrack`'s teardown between a
+                     * dial's press and its drag — but `Knob.handlePointerDown`
+                     * calls `dialRef.current?.focus()` BEFORE it attaches the
+                     * drag's window listeners (`ParamEncoder` likewise), so that
+                     * teardown already ran on every dial press, through the focus
+                     * path. Adding the pointer half only moves it a few lines
+                     * EARLIER — ahead of the listeners rather than between them —
+                     * which is strictly the safer order. A dial press now reaches
+                     * the coordinator twice; the second call is a no-op, because
+                     * step 2 reads `getSelectedTrackId()` live and the first call
+                     * already set it.
+                     *
+                     * CAPTURE on both, because `focus` does not bubble (React's
+                     * `onFocusCapture` is `focusin` in the capture phase
+                     * underneath) and the dial's own handlers must not get there
+                     * first.
+                     *
+                     * Guarded the same two ways as the header: already selected
+                     * is a no-op (and must be, or a focus move WITHIN a rack
+                     * would sweep every surface's teardown), and a job holding
+                     * the document must not spend the track strip's one alert
+                     * line on a refusal nobody asked for. §2's "programmatic
+                     * focus after an action must not reactivate a stale track"
+                     * holds for the same reason it does in the header: the id is
+                     * this lane's own, taken from the live stack, and the
+                     * coordinator re-validates it against `getTracks()` anyway.
+                     */
+                    onPointerDownCapture={() => {
+                      if (selectedTrackId === lane.trackId || jobRunning) return;
+                      activateTrack(lane.trackId, SELECT_TRACK);
+                    }}
+                    onFocusCapture={() => {
+                      if (selectedTrackId === lane.trackId || jobRunning) return;
+                      activateTrack(lane.trackId, SELECT_TRACK);
+                    }}
                     // Its OWN attribute rather than `data-lane-track`: the
                     // spacer down in `.lanes` carries that one, and two elements
                     // answering to it would make every walk of the DOM pick
@@ -2368,14 +2568,14 @@ export function ArrangementGrid({
                       data-lane-track={lane.trackId}
                       style={{ height: lane.height }}
                       // `edit-lane` turns this lane's own recess and zebra OFF
-                      // (src/styles/index.css). Edit mode nests one `.lanes`
+                      // (src/styles/index.css). An Edit lane nests one `.lanes`
                       // inside another — the track lanes, and each placement's
                       // string rows — and `.lanes > [data-lane]` matches both,
                       // so a track lane and every row inside it would each take
                       // the channel shadow and the zebra lift. Compounded, the
                       // stack stops reading as one instrument rack. The INNER
-                      // set wins, because in edit mode the rows ARE the lanes;
-                      // the divider between tracks is kept.
+                      // set wins, because inside an Edit lane the rows ARE the
+                      // lanes; the divider between tracks is kept.
                       //
                       // `voice-lane` turns the same two off for the same reason
                       // one level out: this row is a SPACER under an opaque rack,

@@ -34,7 +34,12 @@ import { stringLabels } from '../reference/tabLayout';
 
 /**
  * The selected note's properties, in the composition page's right rail — the
- * edit-mode counterpart of the pattern page's `NotePopup`.
+ * Edit view's counterpart of the pattern page's `NotePopup`.
+ *
+ * ⚠ IT IS THE SELECTED TRACK'S VIEW THAT PUTS IT THERE, not a page mode. There
+ * is no page-wide mode any more (COMPS-TRACK-TABS milestone 4): `CompositionPage`
+ * asks `selectedTrackView` and draws this rail for a selected track showing Edit,
+ * while every other track in the stack goes on drawing whatever it is showing.
  *
  * SAME CONTROLS, NOT A COPY OF THEM. Everything below the header comes from
  * `src/timeline/NoteControls.tsx` over `src/timeline/noteModel.ts`, which the
@@ -44,11 +49,13 @@ import { stringLabels } from '../reference/tabLayout';
  * over the same note.
  *
  * ⚠ WHICH SELECTION. This follows `patternService.useSelectedIds()` — the NOTE
- * selection. Edit mode has two live at once and they are different things:
+ * selection. Two are live at once and they are different things:
  * `compositionService.useSelectedPlacementIds()` is the PLACEMENT selection,
- * which is what pattern mode's blocks answer to and what arrangement gestures
- * move. The rail is a note inspector, so it follows notes; the placement that
- * happens to be open is not its business.
+ * which is what the blocks on a Pattern lane answer to and what arrangement
+ * gestures move. Both exist whatever the stack is showing — a mixed stack has
+ * Pattern lanes drawing blocks while this rail is up — so "which one is live"
+ * was never a question about a mode. The rail is a note inspector, so it follows
+ * notes; the placement that happens to be open is not its business.
  *
  * NO WRITE ROUTING. Every write goes through the pattern seam untouched.
  * CP-11's `openPlacementForEditing` already points the lib's edit target at the
@@ -63,7 +70,8 @@ export function NoteInspectorRail() {
   const selected = events.filter((event) => selectedIds.includes(event.id));
 
   if (!pattern || selected.length === 0) {
-    // The rail is ALWAYS mounted in edit mode, so an empty one has to say which
+    // The rail is mounted for the WHOLE time the selected track is showing Edit,
+    // with or without a note under the cursor, so an empty one has to say which
     // kind of empty it is. Silence here reads as broken — the same reason the
     // page states a failed composition open instead of drawing nothing.
     return (

@@ -8,6 +8,7 @@ import {
   beginJob,
   endJob,
   getEditingComposition,
+  getSelectedTrackId,
   getTracks,
   JOB_LOCK_REASON,
   openBlankComposition,
@@ -303,6 +304,32 @@ describe('the rail follows the SELECTED track (§1, §2)', () => {
     // the selected track.
     act(() => selectTrack(null));
     expect(railName()).toBe('Pattern library');
+  });
+
+  /**
+   * ── AND IT FOLLOWS FOCUS, NOT ONLY A PRESS (§8, acceptance 2) ──────────────
+   *
+   * A track's controls are split across the two layers: its header in the fixed
+   * column, its rack hanging off the sticky voice layer. Milestone 3 made focus
+   * entering the HEADER select its track; milestone 6 made a rack do the same,
+   * and THIS is what the rule is for — the rail is the visible consequence, and
+   * a keyboard user who lands in track 3's rack while the rail still offers
+   * track 1's voices has been handed the wrong document to edit.
+   *
+   * jsdom cannot tab (no layout, so no sequential focus navigation), so the
+   * focus is placed where a tab would arrive.
+   */
+  it('follows focus landing inside a track’s rack, with no press anywhere', () => {
+    const { pattern, voice, views } = threeViews();
+    render(<CompositionPage views={views} openRailSections={[]} />);
+
+    act(() => selectTrack(pattern.id));
+    expect(railName()).toBe('Pattern library');
+
+    act(() => screen.getByRole('button', { name: `Voice rack for ${voice.name}` }).focus());
+
+    expect(getSelectedTrackId()).toBe(voice.id);
+    expect(railName()).toBe('Voices');
   });
 
   /**

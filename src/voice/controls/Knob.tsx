@@ -25,6 +25,11 @@
  * A caller that needs one pre-transforms in `value` and reverses in `onChange`.
  */
 import { useCallback, useEffect, useId, useRef } from 'react';
+// The wheel policy lives with `KnobScale` rather than here, because it travels
+// the identical wrapper → `VoiceEditor` → control path and because `Knob` and
+// `ParamEncoder` are deliberately not shared: a union declared in one of them
+// would make the other depend on its module.
+import type { WheelPolicy } from '../voiceChrome';
 
 const DEFAULT_SIZE = 56; // px — outer SVG dimension
 const DRAG_RANGE_PX = 100; // px of vertical drag = full min→max sweep
@@ -57,6 +62,9 @@ interface KnobProps {
   formatValue?(v: number): string;
   /** Outer SVG dimension in px. */
   size?: number;
+  /** See {@link WheelPolicy}. Defaults to the dial's own gesture, so every
+   *  caller that has not been told otherwise keeps today's behaviour. */
+  wheel?: WheelPolicy;
   disabled?: boolean;
 }
 
@@ -71,6 +79,7 @@ export function Knob({
   ariaLabel,
   formatValue,
   size = DEFAULT_SIZE,
+  wheel = 'adjust',
   disabled = false,
 }: KnobProps) {
   // Defensive sanitisation: the id is interpolated into unquoted `url(#…)` fragments
@@ -165,9 +174,14 @@ export function Knob({
   // React attaches `wheel` at the root as passive, so `onWheel` cannot preventDefault
   // and the page would scroll under the cursor while the knob turned. Hence a native
   // non-passive listener.
+  //
+  // ⚠ UNDER `'scroll'` THERE IS NO LISTENER, which is the whole mechanism and not an
+  // optimisation of one: a handler that returned early would still be a non-passive
+  // `wheel` listener on the element, and the absence is what leaves the scroller this
+  // dial sits in — a track's lane of the arrangement — the event untouched.
   useEffect(() => {
     const el = dialRef.current;
-    if (!el || disabled) return;
+    if (!el || disabled || wheel === 'scroll') return;
     const onWheel = (e: WheelEvent) => {
       // A two-finger horizontal trackpad swipe is deltaY 0 / deltaX ±n, and is not ours
       // to consume — without this it reads as a downward step.
@@ -179,7 +193,7 @@ export function Knob({
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [disabled, onChange, snap, step, value]);
+  }, [disabled, onChange, snap, step, value, wheel]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {

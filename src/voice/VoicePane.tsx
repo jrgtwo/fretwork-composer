@@ -171,6 +171,11 @@ export function VoicePane({
         scope={null}
         // A whole pane column's worth of width, against a rack lane's.
         scale={PANE_KNOB_SCALE}
+        // The dials' own gesture, unchanged: this pane is not inside a scroller
+        // the wheel belongs to, so a notch over a knob is a step and the dial
+        // keeps its `preventDefault`. A rack passes `'scroll'` — see its comment
+        // there for what that costs and why the arrangement needs it.
+        wheel="adjust"
         refusals={REFUSAL_TEXT}
         follow={FOLLOW_OPTION}
         // A ref can outlive the voice it named, or name a variant for another

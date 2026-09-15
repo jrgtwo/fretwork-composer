@@ -10,7 +10,8 @@
  * Genuinely unanswerable here, and therefore not asserted: whether the wheel's
  * `preventDefault` actually suppresses anything (jsdom has no scrolling), and whether the
  * encoder *feels* like a detented shaft, which is the only test that finally matters and
- * is a QA-by-ear one.
+ * is a QA-by-ear one. That the CALL happens at all is answerable — a cancelled dispatch is
+ * what `fireEvent` returns false for — and the wheel-policy block below leans on it.
  *
  * The centre of gravity is `never clamps`. Those cases were mutation-checked — see the
  * comment on that block for exactly how.
@@ -54,6 +55,36 @@ function setup(overrides: Partial<ParamEncoderProps> = {}) {
     // role query would report an ambiguity instead of the behaviour under test.
     dial: within(container).getByRole('spinbutton', { name: props.label }),
   };
+}
+
+/**
+ * Which elements had a `wheel` listener attached while `mount` ran.
+ *
+ * React registers its own delegated `wheel` listener on the root container, so counting
+ * registrations proves nothing — the TARGET is the question, and `addEventListener`'s
+ * target is its `this`. Patched on the prototype rather than spied, because what this
+ * needs is the receiver of each call and a hand-written wrapper says so without
+ * depending on how the mock records it. `tests/Knob.test.tsx` has the twin: the two
+ * controls answer this question the same way and are deliberately not otherwise shared.
+ */
+function wheelTargetsDuring(mount: () => void): readonly EventTarget[] {
+  const targets: EventTarget[] = [];
+  const original = HTMLElement.prototype.addEventListener;
+  HTMLElement.prototype.addEventListener = function patched(
+    this: HTMLElement,
+    ...args: Parameters<typeof original>
+  ) {
+    if (args[0] === 'wheel') targets.push(this);
+    return original.apply(this, args);
+  };
+  try {
+    // RTL's `render` flushes effects inside `act`, so every listener the mount installs
+    // is registered before this returns.
+    mount();
+  } finally {
+    HTMLElement.prototype.addEventListener = original;
+  }
+  return targets;
 }
 
 /**
@@ -400,6 +431,51 @@ describe('ParamEncoder', () => {
       fireEvent.wheel(dial, { deltaY: -100 });
       fireEvent.wheel(dial, { deltaY: -100 });
       expect(onChange.mock.calls.map((c) => c[0])).toEqual([3.1, 3.2, 3.3]);
+    });
+  });
+
+  /**
+   * COMPS-TRACK-TABS §6. A rack on the composition page is drawn INSIDE the
+   * arrangement's scroller, so a wheel over an encoder there is someone reaching for
+   * track five — and spinning instead is an audio edit nobody asked for.
+   *
+   * ⚠ THE MECHANISM IS THE LISTENER'S ABSENCE, not an early return inside one. A no-op
+   * handler would still be a non-passive `wheel` listener on the element; the point is
+   * to leave the event entirely alone so the scroller underneath gets it. The positive
+   * case is here so the probe cannot pass the negative one vacuously.
+   */
+  describe('wheel policy', () => {
+    it('installs the value-changing listener by default', () => {
+      let dial: HTMLElement | undefined;
+      const targets = wheelTargetsDuring(() => {
+        dial = setup({ value: 3, step: 0.1 }).dial;
+      });
+      // Both assertions, and the first is not ceremony: `dial` is assigned inside
+      // the closure, so a query that stops matching would make the NEGATIVE case
+      // below pass on `undefined` while only this one failed.
+      expect(dial).toBeDefined();
+      expect(targets).toContain(dial);
+    });
+
+    it('installs no wheel listener at all under the scrolling policy', () => {
+      let dial: HTMLElement | undefined;
+      const targets = wheelTargetsDuring(() => {
+        dial = setup({ value: 3, step: 0.1, wheel: 'scroll' }).dial;
+      });
+      expect(dial).toBeDefined();
+      expect(targets).not.toContain(dial);
+    });
+
+    it('leaves the event uncancelled and the value alone under the scrolling policy', () => {
+      const { onChange, dial } = setup({ value: 3, step: 0.1, wheel: 'scroll' });
+      expect(fireEvent.wheel(dial, { deltaY: -100 })).toBe(true);
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it('cancels it under the default policy, which is what the pattern page keeps', () => {
+      const { onChange, dial } = setup({ value: 3, step: 0.1 });
+      expect(fireEvent.wheel(dial, { deltaY: -100 })).toBe(false);
+      expect(onlyCall(onChange)).toBe(3.1);
     });
   });
 

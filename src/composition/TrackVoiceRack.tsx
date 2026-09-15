@@ -1,6 +1,7 @@
 /**
- * One track's voice, drawn as a rack across its lane — voice mode's answer to
- * "what does a lane draw".
+ * One track's voice, drawn as a rack across its lane — what a lane draws for a
+ * track whose view is Voice. Per TRACK, not per page: since COMPS-TRACK-TABS
+ * milestone 4 one of these can sit between two Pattern lanes.
  *
  * ⚠ THIS COMPONENT'S BOX IS WHAT THE LANE IS MEASURED FROM. `ArrangementGrid`
  * wraps the root div below in a deliberately unstyled element carrying
@@ -55,6 +56,11 @@
  *   - `onRepointed: null` — `playbackService` picks a track's ref change up from
  *     the composition store and swaps that one track's voice. `refreshVoice`
  *     would rebuild the EDITING PATTERN's, which a track write never touched.
+ *   - `wheel: 'scroll'` — this rack is drawn INSIDE the arrangement's scroller,
+ *     so a wheel over it is someone reaching for track five. The dials install
+ *     no wheel listener at all and prevent no default, and the event chains to
+ *     the scroller. The pane passes `'adjust'`: its page does not scroll under
+ *     the cursor, so there a notch is a step.
  *
  * ── Refusals: ONE channel, and it is local ───────────────────────────────────
  *
@@ -191,6 +197,14 @@ export function TrackVoiceRack({
         }}
         scope={track.name}
         scale={LANE_KNOB_SCALE}
+        // ⚠ THIS RACK IS INSIDE THE ARRANGEMENT'S SCROLLER, so a wheel over it
+        // is someone reaching for track five — not someone turning Drive. The
+        // dials therefore install no wheel listener at all and prevent no
+        // default, and the event chains to the scroller exactly as it would over
+        // a block. Every other gesture is unchanged: drag, arrows, Page keys and
+        // double-click still edit. jsdom has no scrolling, so what a test here
+        // can see is the listener's ABSENCE, not the scroll that follows.
+        wheel="scroll"
         refusals={REFUSAL_TEXT}
         follow={FOLLOW_OPTION}
         // A ref can name a variant that has been deleted, or one belonging to

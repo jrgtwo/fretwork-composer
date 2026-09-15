@@ -130,10 +130,13 @@ const refuse = (reason: string): Result<never> => ({ ok: false, reason });
  * module's job, not this one's. What this default buys is that view state never
  * leaks INTO a capability by being its only spelling.
  *
- * What the view passes is "this track's lane is a Pattern lane". Under the one
- * global mode this page still has, that is the identity function whenever the
- * arrangement is on screen at all; it starts to bite when tracks can choose
- * their own view, and a filter written then would be a filter written late.
+ * What the view passes is "this track's lane is a Pattern lane". Since
+ * COMPS-TRACK-TABS milestone 4 that is a REAL filter on every stack with a
+ * mixed set of views: each track carries its own, so a hit test, a drop or a
+ * marquee has to ask lane by lane rather than once for the page. (It was
+ * written one milestone ahead of that, while the page still had a single mode
+ * and this was the identity function — deliberately, so the per-track step
+ * replaced a body and not a signature.)
  */
 export type TrackFilter = (trackId: string) => boolean;
 
@@ -536,9 +539,10 @@ export interface ArrangementGesturesOptions {
    * hit-tests, drops onto, marquees over, or lets a block command touch.
    *
    * Read LIVE, through a ref, because window handlers outlive the render that
-   * installed them. Under the page's one global mode this is the identity
-   * whenever the arrangement is on screen; per-track views are what make it a
-   * real filter.
+   * installed them. Each track carries its own view since COMPS-TRACK-TABS
+   * milestone 4, so this genuinely excludes lanes today — a Voice or Edit lane
+   * sitting between two Pattern ones is not a surface the arrangement's
+   * pointer work may touch.
    */
   isPatternLane?: TrackFilter;
   /**

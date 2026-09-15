@@ -1225,6 +1225,70 @@ describe('a track’s view controls', () => {
     act(() => endJob());
   });
 
+  /**
+   * ── WHERE THE TRACK SITS, AND WHY THE COLUMN IS A GROUP (milestone 6 §A) ────
+   *
+   * The seam does not enforce unique track names — the agent can call two tracks
+   * Bass, and so can the user — and every control in this column is named after
+   * the track: `Select track Bass`, `Rename track Bass`, `Pattern view, Bass`.
+   * Two such headers put duplicate names on the page with nothing to tell them
+   * apart.
+   *
+   * Answered ONE LEVEL OUT rather than by renaming any of them: the header is a
+   * `role="group"` carrying the track's PLACE IN THE STACK, so a control is
+   * disambiguated by the group it is entered through. Renaming the controls was
+   * the alternative and was rejected — those names are how the rail, the racks
+   * and four suites address them, and a position baked into a control's own name
+   * goes stale on every reorder.
+   *
+   * It is also what makes the two-layer tab order readable: the racks in the
+   * voice layer carry the same "track N of M" (see `tests/VoiceMode.test.tsx`),
+   * and they are the run a tab sweep meets detached from the visual stack.
+   */
+  it('groups each header under the track’s place in the stack', () => {
+    addTrack('Bass');
+    render(<ArrangementGrid />);
+    const tracks = tracksNow();
+
+    tracks.forEach((track, index) => {
+      const group = screen.getByRole('group', {
+        name: `Track ${index + 1} of ${tracks.length}: ${track.name}`,
+      });
+      expect(group).toBe(headerFor(track));
+      // The control names are UNCHANGED — the position is context, not a rename.
+      expect(
+        within(group).getByRole('button', { name: `Select track ${track.name}` }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('tells two tracks with the same name apart by where they sit', () => {
+    addTrack('Bass');
+    const [lead, bass] = tracksNow();
+    act(() => {
+      const renamed = setTrackName(lead.id, 'Bass');
+      if (!renamed.ok) throw new Error(renamed.reason);
+    });
+    render(<ArrangementGrid />);
+
+    // Two `Select track Bass` buttons on the page — the collision itself, which
+    // is real and is NOT what was fixed…
+    expect(screen.getAllByRole('button', { name: 'Select track Bass' })).toHaveLength(2);
+    // …and the two groups that tell them apart.
+    const first = screen.getByRole('group', { name: 'Track 1 of 2: Bass' });
+    const second = screen.getByRole('group', { name: 'Track 2 of 2: Bass' });
+    expect(first).toBe(headerFor(lead));
+    expect(second).toBe(headerFor(bass));
+    // …and reaching a control THROUGH one of them reaches that track's, which is
+    // the whole point of the group and the part a reader can act on. (Asserting
+    // the two buttons are merely different elements would be true by
+    // construction the moment both `getByRole('group')` queries succeeded.)
+    fireEvent.click(within(second).getByRole('button', { name: 'Select track Bass' }));
+    expect(getSelectedTrackId()).toBe(bass.id);
+    fireEvent.click(within(first).getByRole('button', { name: 'Select track Bass' }));
+    expect(getSelectedTrackId()).toBe(lead.id);
+  });
+
   it('a new track arrives on Pattern, whatever its neighbours are showing', async () => {
     const user = userEvent.setup();
     render(<ArrangementGrid />);

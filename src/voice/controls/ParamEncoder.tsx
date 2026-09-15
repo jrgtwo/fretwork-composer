@@ -52,14 +52,23 @@
  * NOT SHARED WITH `Knob` — deliberately, and this is a debt not a design. The drag
  * transport (window listeners filtered on `pointerId`, the abort-on-unmount ref, the
  * non-passive wheel listener) is the same plumbing solved the same way, and it wants to
- * be one `usePointerSpin` hook. Extracting it means editing `Knob.tsx`, which is outside
- * this change's remit; the seam to lift is `handlePointerDown` + the two effects, and the
- * only real difference is that this one converts pixels to DETENTS while `Knob` converts
- * pixels to a FRACTION of its span. Tracked in `docs/FOLLOW-UPS.md` §5, with the third
+ * be one `usePointerSpin` hook. Extracting it is a rewrite of two working controls at
+ * once and stays tracked rather than done; the seam to lift is `handlePointerDown` + the
+ * two effects, and the only real difference is that this one converts pixels to DETENTS
+ * while `Knob` converts pixels to a FRACTION of its span. The one thing the two DO share
+ * is the {@link WheelPolicy} union — and it is declared in neither of them, precisely so
+ * this separation stays literally true. Tracked in `docs/FOLLOW-UPS.md` §5, with the third
  * copy in `rack/CabinetGraphic.tsx` and with `Knob`'s stale-closure defect, which this
  * file fixes for itself (see `latest`) and therefore now differs on.
  */
 import { useCallback, useEffect, useId, useRef } from 'react';
+// The ONE thing shared with `Knob`, and deliberately the only one: a two-value
+// union describing what the wheel means, so the two controls cannot answer the
+// same question differently. It comes from `voiceChrome` — the module the two
+// wrappers already share — rather than from `Knob`, so neither control depends
+// on the other. The drag transport and the wheel plumbing below are still this
+// file's own, for the reasons the header gives.
+import type { WheelPolicy } from '../voiceChrome';
 import { DETENTS, detentIndexOf, tidy } from './encoderMath';
 
 const DEFAULT_SIZE = 56; // px — matches `Knob`, so mixed racks line up
@@ -105,6 +114,9 @@ export interface ParamEncoderProps {
   onChange(next: number): void;
   /** Outer SVG dimension in px. */
   size?: number;
+  /** See {@link WheelPolicy}. Defaults to the dial's own gesture, so every
+   *  caller that has not been told otherwise keeps today's behaviour. */
+  wheel?: WheelPolicy;
   disabled?: boolean;
 }
 
@@ -118,6 +130,7 @@ export function ParamEncoder({
   fallback,
   onChange,
   size = DEFAULT_SIZE,
+  wheel = 'adjust',
   disabled = false,
 }: ParamEncoderProps) {
   // Sanitised for the same reason `Knob` sanitises: interpolated into unquoted
@@ -235,9 +248,14 @@ export function ParamEncoder({
   // React attaches `wheel` at the root as passive, so `onWheel` cannot preventDefault
   // and the page would scroll under the cursor while the encoder turned. Hence a native
   // non-passive listener.
+  //
+  // ⚠ UNDER `'scroll'` THERE IS NO LISTENER, which is the whole mechanism and not an
+  // optimisation of one: a handler that returned early would still be a non-passive
+  // `wheel` listener on the element, and the absence is what leaves the scroller this
+  // dial sits in — a track's lane of the arrangement — the event untouched.
   useEffect(() => {
     const el = dialRef.current;
-    if (!el || disabled) return;
+    if (!el || disabled || wheel === 'scroll') return;
     const onWheel = (e: WheelEvent) => {
       // A two-finger horizontal trackpad swipe is deltaY 0 / deltaX ±n, and is not ours
       // to consume — without this it reads as a downward step.
@@ -252,7 +270,7 @@ export function ParamEncoder({
     // Not keyed on `value`, and `emit` is stable (see `onChangeRef`), so the listener is
     // not torn down and re-added on every step of a spin — nor on every render of the
     // pane around it, which is what a fresh `onChange` in the deps used to cost.
-  }, [disabled, emit, spin]);
+  }, [disabled, emit, spin, wheel]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {

@@ -1291,4 +1291,157 @@ describe('three views at once', () => {
     expect(new Set(bands).size).toBe(1);
     expect(trackIds).toHaveLength(3);
   });
+
+  /**
+   * ── THE ACTIVE VIEW, ANNOUNCED (§8, milestone 6 §A) ────────────────────────
+   *
+   * The selected track's view is what the rail follows, what the command groups
+   * are built from and which history ⌘Z pops, and NOTHING ON SCREEN SAYS IT. The
+   * `aria-pressed` states on the view buttons are the visual answer, and a
+   * screen reader only meets them when focus is on one of the three — which the
+   * two other ways the answer changes (a lane press, a selection from the rail)
+   * never involve.
+   *
+   * jsdom does not announce anything, so what these assert is the MECHANISM: a
+   * named polite live region exists before its content changes, and the content
+   * lands in it exactly when the active view moves and at no other time.
+   */
+  describe('the active view is announced', () => {
+    const region = () => screen.getByRole('status', { name: 'Active view' });
+
+    it('mounts its region empty, so arriving on the page says nothing', () => {
+      const { views } = mixed();
+      render(<OwnedGrid initial={views} />);
+
+      // MOUNTED, because a live region has to exist before its content changes
+      // to be announced at all…
+      expect(region()).toBeInTheDocument();
+      // …and EMPTY, because an announcement made on arrival answers a question
+      // nobody asked. The first commit records the view and says nothing.
+      expect(region()).toHaveTextContent('');
+    });
+
+    it('names the track and its new view when a view button changes one', async () => {
+      const user = userEvent.setup();
+      const { trackIds, views } = mixed();
+      render(<OwnedGrid initial={views} />);
+      const tracks = tracksNow();
+
+      await user.click(
+        within(headerFor(trackIds[0])).getByRole('button', {
+          name: `Voice view, ${tracks[0].name}`,
+        }),
+      );
+
+      expect(region()).toHaveTextContent(`${tracks[0].name} — Voice view`);
+    });
+
+    /**
+     * THE OTHER HALF, and the reason this is derived from the selected track
+     * rather than fired from the button: selecting a track that was already
+     * showing something else changes the active view with no view button
+     * pressed anywhere.
+     */
+    it('announces the view of a track the selection moves to, with no button pressed', async () => {
+      const user = userEvent.setup();
+      const { trackIds, views } = mixed();
+      render(<OwnedGrid initial={views} />);
+      const tracks = tracksNow();
+
+      // The Pattern track first, then the Voice one — two selections, so the
+      // second is a change and not the suppressed first commit.
+      await user.click(screen.getByRole('button', { name: `Select track ${tracks[0].name}` }));
+      expect(region()).toHaveTextContent(`${tracks[0].name} — Pattern view`);
+
+      await user.click(screen.getByRole('button', { name: `Select track ${tracks[2].name}` }));
+      expect(region()).toHaveTextContent(`${tracks[2].name} — Voice view`);
+      expect(getSelectedTrackId()).toBe(trackIds[2]);
+    });
+
+    /**
+     * A RENAME IS NOT A VIEW CHANGE. The sentence names the track, so a rename
+     * moves the text this region WOULD say; the change detector compares the
+     * track and the view instead, and the region stays where it was. The name
+     * plate is what speaks for a rename.
+     */
+    it('says nothing when the selected track is merely renamed', async () => {
+      const user = userEvent.setup();
+      const { trackIds, views } = mixed();
+      render(<OwnedGrid initial={views} />);
+      const before = tracksNow()[2].name;
+
+      await user.click(screen.getByRole('button', { name: `Select track ${before}` }));
+      expect(region()).toHaveTextContent(`${before} — Voice view`);
+
+      await user.click(screen.getByRole('button', { name: `Rename track ${before}` }));
+      await user.clear(screen.getByRole('textbox', { name: `Rename ${before}` }));
+      await user.type(screen.getByRole('textbox', { name: `Rename ${before}` }), 'Renamed{Enter}');
+
+      expect(tracksNow()[2].name).toBe('Renamed');
+      expect(tracksNow()[2].id).toBe(trackIds[2]);
+      // Still the sentence it said when the view actually changed.
+      expect(region()).toHaveTextContent(`${before} — Voice view`);
+    });
+  });
+
+  /**
+   * ── WHERE A TAB STOP IS IN THE STACK (§8, milestone 6 §A) ──────────────────
+   *
+   * The tab order is NOT the visual order and cannot be made so: the racks hang
+   * off the sticky layer, which must be the scroller's first child for its
+   * vertical origin, so every rack precedes every timed lane whatever position
+   * its track holds. What makes landing in that run legible is that every header
+   * and every voice row is a group named with its track's PLACE IN THE STACK.
+   */
+  describe('traversal across the two layers', () => {
+    it('names every header and every rack by where its track sits', () => {
+      const { trackIds, views } = mixed();
+      render(<ArrangementGrid views={views} />);
+      const tracks = tracksNow();
+
+      tracks.forEach((track, index) => {
+        const group = screen.getByRole('group', {
+          name: `Track ${index + 1} of ${tracks.length}: ${track.name}`,
+        });
+        expect(group).toBe(headerFor(track.id));
+      });
+
+      // The rack's row says the same thing in the same shape — it is the third
+      // track's, reached after the whole header column and the lane area.
+      const rackRow = screen.getByRole('group', {
+        name: `Voice rack, track 3 of 3: ${tracks[2].name}`,
+      });
+      expect(rackRow).toHaveAttribute('data-voice-lane-track', trackIds[2]);
+      expect(rackRow.querySelector('[data-voice-rack]')).not.toBeNull();
+    });
+
+    /**
+     * THE ORDER ITSELF, as the DOM gives it — this is the fact the names exist
+     * to explain, so it is pinned rather than described: the header column, then
+     * the lane area, then the racks. `compareDocumentPosition` is the only way
+     * to ask jsdom about order; a real tab sweep needs layout it has not got.
+     */
+    it('puts the whole header column, then the lane area, then every rack', () => {
+      const { trackIds, views } = mixed();
+      render(<ArrangementGrid views={views} />);
+      const scrollerEl = screen.getByTestId('arrangement-lanes-scroller');
+      const rack = document.querySelector<HTMLElement>('[data-voice-rack]')!;
+
+      for (const trackId of trackIds) {
+        expect(
+          headerFor(trackId).compareDocumentPosition(scrollerEl) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
+      }
+      expect(
+        scrollerEl.compareDocumentPosition(rack) & Node.DOCUMENT_POSITION_CONTAINED_BY,
+      ).toBeTruthy();
+      // …and the first track's LANE comes after the third track's rack, which is
+      // the inversion the names answer for.
+      expect(
+        rack.compareDocumentPosition(laneFor(trackIds[0])) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+  });
+
 });

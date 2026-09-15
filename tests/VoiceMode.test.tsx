@@ -24,7 +24,10 @@ import {
 import {
   addPlacement,
   addTrack,
+  beginJob,
+  endJob,
   getEditingComposition,
+  getSelectedTrackId,
   getTracks,
   openBlankComposition,
   removeTrack,
@@ -404,10 +407,11 @@ const DEFAULT_FOLDED = PARAM_SECTIONS.filter(
  * this is a plain button and one click is the whole gesture.
  */
 /**
- * Voice mode with the per-stage folds actually WIRED.
+ * An all-Voice stack with the per-stage folds actually WIRED.
  *
  * `TrackVoiceRack` is controlled all the way up — `App` holds the folds, because
- * the rack unmounts on every mode switch and every visit to the pattern page —
+ * the rack unmounts whenever its track's view changes and on every visit to the
+ * pattern page —
  * so a bare `<ArrangementGrid views={viewsOf('voice')} />` has disclosure buttons that
  * report and do nothing. This is the smallest stand-in for `App`, for the tests
  * that need to open a stage before turning something inside it.
@@ -3614,5 +3618,265 @@ describe('the keyboard boundary covers the rack and the header', () => {
     // never fire at all.
     expect(insideKeyboardControl(screen.getByTestId('arrangement-lanes-scroller'))).toBe(false);
     expect(insideKeyboardControl(null)).toBe(false);
+  });
+});
+
+/**
+ * COMPS-TRACK-TABS §6 — the wheel policy, asked of the two REAL surfaces rather
+ * than of the controls in isolation (`tests/Knob.test.tsx` and
+ * `ParamEncoder.test.tsx` hold that half, including the listener's absence,
+ * which is the mechanism).
+ *
+ * ⚠ THE REGRESSION THIS EXISTS FOR IS THE PATTERN PAGE. One `VoiceEditor` draws
+ * both surfaces, so a policy wired anywhere but through a prop takes the pattern
+ * page's wheel with it — and that page has no scroller under the cursor to hand
+ * the event to, so the dial would simply stop answering. Both halves are asserted
+ * here, in one file, for that reason.
+ *
+ * jsdom has no scrolling, so what "the arrangement gets it instead" reduces to is
+ * that the event is not cancelled: `fireEvent` returns false for a cancelled
+ * dispatch, and an uncancelled `wheel` is what a scroller acts on.
+ */
+describe('the wheel belongs to the arrangement, not to a rack dial', () => {
+  it('leaves a rack’s knob and encoder alone and cancels nothing', () => {
+    const tracks = twoTracks();
+    // Puts a real `ParamEncoder` in the Source stage — the built-in guitar voice
+    // is a sampler, whose rows are all bounded.
+    setVoiceParam('track', tracks[0].id, 'source.kind', 'pluck-synth');
+    render(<VoiceGrid />);
+    openStage(getTracks()[0], 'Level');
+    openStage(getTracks()[0], 'Source');
+
+    const volume = knob(getTracks()[0], 'Level', 'Volume');
+    const volumeBefore = volumeOf(getTracks()[0]);
+    expect(fireEvent.wheel(volume, { deltaY: -100 })).toBe(true);
+    expect(volumeOf(getTracks()[0])).toBe(volumeBefore);
+
+    const resonance = stage(getTracks()[0], 'Source').getByRole('spinbutton', {
+      name: 'Resonance',
+    });
+    const resonanceBefore = resonance.getAttribute('aria-valuenow');
+    expect(fireEvent.wheel(resonance, { deltaY: -100 })).toBe(true);
+    expect(
+      stage(getTracks()[0], 'Source')
+        .getByRole('spinbutton', { name: 'Resonance' })
+        .getAttribute('aria-valuenow'),
+    ).toBe(resonanceBefore);
+
+    // ⚠ AND THE ONE DIAL THAT EXISTS ONLY HERE. `renderLevel`'s "Input" is the
+    // single `Knob` in `VoiceEditor` not drawn through `renderKnob`, so it takes
+    // the policy by hand and nothing above catches it being dropped — and it is
+    // on the composition surface BY CONSTRUCTION, which is exactly where this
+    // milestone's bug lives. It also proves more than the preset rows do: it
+    // writes through `setTrackInputGainDb`, so an unmoved value is the
+    // COMPOSITION seam not being reached, not merely a draft not being made.
+    const input = stage(getTracks()[0], 'Level').getByRole('slider', { name: 'Input' });
+    // Undefined means "the preset decides"; any wheel that landed would make it
+    // a number.
+    expect(getTracks()[0].inputGainDb).toBeUndefined();
+    expect(fireEvent.wheel(input, { deltaY: -100 })).toBe(true);
+    expect(getTracks()[0].inputGainDb).toBeUndefined();
+  });
+
+  it('still turns the pattern page’s, which sit in no scroller', async () => {
+    const user = userEvent.setup();
+    twoTracks();
+    render(<App />);
+    const patternId = getEditingPattern()!.id;
+    // Inside `act`: this is a store write against a mounted tree, which is what
+    // the rack case above gets for free by writing before its render.
+    act(() => {
+      setVoiceParam('pattern', patternId, 'source.kind', 'pluck-synth');
+    });
+
+    await user.click(screen.getByRole('button', { name: /Level/ }));
+    const volume = screen.getByRole('slider', { name: 'Volume' });
+    const volumeBefore = Number(volume.getAttribute('aria-valuenow'));
+    // False: the dial cancelled it, which is the half of today's behaviour that
+    // stops the page scrolling out from under a turn.
+    expect(fireEvent.wheel(volume, { deltaY: -100 })).toBe(false);
+    expect(
+      Number(screen.getByRole('slider', { name: 'Volume' }).getAttribute('aria-valuenow')),
+    ).toBeGreaterThan(volumeBefore);
+
+    await user.click(screen.getByRole('button', { name: /Source/ }));
+    const resonance = screen.getByRole('spinbutton', { name: 'Resonance' });
+    const resonanceBefore = Number(resonance.getAttribute('aria-valuenow'));
+    expect(fireEvent.wheel(resonance, { deltaY: -100 })).toBe(false);
+    expect(
+      Number(
+        screen.getByRole('spinbutton', { name: 'Resonance' }).getAttribute('aria-valuenow'),
+      ),
+    ).toBeGreaterThan(resonanceBefore);
+  });
+});
+
+/**
+ * ── A RACK IS THE REST OF ITS TRACK'S CONTROLS (§8, milestone 6 §A) ───────────
+ *
+ * The composition surface is two stacked layers, and a track's UI is split
+ * across both: its header sits in the fixed column, its rack hangs off the
+ * sticky voice layer. Milestone 3 made focus entering the HEADER select its
+ * track; a rack that did not do the same would let a keyboard user turn track
+ * 3's Drive while the rail, the note keyboard and every direct-editing command
+ * still pointed at track 1 — the exact failure the header rule exists to stop,
+ * reached through the other half of the same track.
+ *
+ * jsdom cannot tab (no layout, so no sequential focus navigation to measure).
+ * What it CAN do is put focus on a rack dial, which is the state a tab arrives
+ * in, and that is what these drive.
+ */
+describe('focus entering a rack belongs to its track', () => {
+  // A PREDICATE, not a `new RegExp` on the track name: the seam does not
+  // constrain names, so interpolating one into a pattern is a metacharacter
+  // away from matching something else (or throwing) on the day a fixture is
+  // renamed. The position is what varies, so it is the part left loose.
+  const rackRow = (track: Track) =>
+    screen.getByRole('group', {
+      name: (accessibleName: string) =>
+        /^Voice rack, track \d+ of \d+: /.test(accessibleName) &&
+        accessibleName.endsWith(`: ${track.name}`),
+    });
+
+  it('names every rack row by where its track sits in the stack', () => {
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+
+    // The NAME IS THE ORDER. Every rack precedes every timed lane in the DOM —
+    // the sticky layer is the scroller's first child, which is what gives the
+    // racks their vertical origin — so a tab sweep meets this run detached from
+    // the visual stack. "track 2 of 2" is what makes landing in it legible.
+    expect(rackRow(tracks[0])).toHaveAttribute('data-voice-lane-track', tracks[0].id);
+    expect(
+      screen.getByRole('group', {
+        name: `Voice rack, track 2 of 2: ${tracks[1].name}`,
+      }),
+    ).toHaveAttribute('data-voice-lane-track', tracks[1].id);
+  });
+
+  it('selects the track whose dial takes focus', () => {
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+    openStage(getTracks()[1], 'Level');
+    expect(getSelectedTrackId()).toBeNull();
+
+    act(() => knob(getTracks()[1], 'Level', 'Volume').focus());
+
+    expect(getSelectedTrackId()).toBe(tracks[1].id);
+  });
+
+  it('moves the selection between two racks, and does not re-take one it already has', () => {
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+    openStage(getTracks()[0], 'Level');
+    openStage(getTracks()[1], 'Level');
+
+    act(() => knob(getTracks()[0], 'Level', 'Volume').focus());
+    expect(getSelectedTrackId()).toBe(tracks[0].id);
+    act(() => knob(getTracks()[1], 'Level', 'Volume').focus());
+    expect(getSelectedTrackId()).toBe(tracks[1].id);
+
+    // A second control INSIDE the rack that already owns the selection leaves
+    // the selection where it is.
+    //
+    // ⚠ WHAT THIS DOES NOT PIN, said rather than implied. The guard in front of
+    // the handler exists so that move does not re-enter the coordinator and
+    // sweep every surface's teardown — but that saving has NO observable here:
+    // delete the guard and `activateTrack` runs, finds `getSelectedTrackId()`
+    // already equal to the target, computes `willClose`/`willOpen` false, tears
+    // nothing down and re-selects the track it is on. The assertion below is
+    // idempotence across controls of one rack, which is real; the teardown
+    // saving is a BROWSER-side property of a live pointer gesture and is item 25
+    // of the final pass.
+    act(() =>
+      stage(getTracks()[1], 'Level').getByRole('slider', { name: 'Input' }).focus(),
+    );
+    expect(getSelectedTrackId()).toBe(tracks[1].id);
+  });
+
+  /**
+   * ── AND BY PRESS, WHICH IS NOT THE SAME TEST (§8 acceptance 2) ─────────────
+   *
+   * The rack's buttons are the case focus alone does not cover: clicking a
+   * `<button>` focuses it on Chrome and does NOT on Safari or Firefox, so a
+   * focus-only rack is a selection model that differs per engine — `TrackHeader`
+   * carries both halves for exactly this reason and states it there. jsdom does
+   * not implement the click-focus rule at all, which is what makes this
+   * assertable here: `fireEvent.pointerDown` moves no focus, so the ONLY thing
+   * that can select the track is the pointer handler.
+   */
+  it('selects the track whose rack BUTTON is pressed, with no focus involved', () => {
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+    act(() => selectTrack(tracks[0].id));
+
+    const collapse = screen.getByRole('button', {
+      name: `Voice rack for ${tracks[1].name}`,
+    });
+    fireEvent.pointerDown(collapse);
+
+    expect(document.activeElement).not.toBe(collapse); // the premise, spelled out
+    expect(getSelectedTrackId()).toBe(tracks[1].id);
+  });
+
+  /**
+   * …and it must not SPEND THE ALERT LINE while a job owns the document, for the
+   * reason the header's focus guard states: a tab stop going past is not a
+   * request, and a refusal nobody asked for would put an `role="alert"` on
+   * screen mid-run.
+   */
+  it('says nothing and selects nothing while a job holds the document', () => {
+    twoTracks();
+    render(<VoiceGrid />);
+    openStage(getTracks()[1], 'Level');
+    act(() => {
+      const started = beginJob();
+      if (!started.ok) throw new Error('job refused');
+    });
+
+    act(() => knob(getTracks()[1], 'Level', 'Volume').focus());
+    // Both halves of the guard, because both handlers carry it.
+    fireEvent.pointerDown(
+      screen.getByRole('button', { name: `Voice rack for ${getTracks()[1].name}` }),
+    );
+
+    expect(getSelectedTrackId()).toBeNull();
+    expect(screen.queryByRole('alert', { name: 'Track message' })).toBeNull();
+    act(() => endJob());
+  });
+
+  /**
+   * TRAVERSAL IS NOT SELECTION (§8, acceptance 2). A wheel over a rack is
+   * someone scrolling towards track five; it must move neither the dial (the
+   * wheel policy, asserted above) nor the selection.
+   */
+  it('lets a wheel over a rack through to the scroller, taking neither the dial nor the selection', () => {
+    const tracks = twoTracks();
+    render(<VoiceGrid />);
+    openStage(getTracks()[1], 'Level');
+    act(() => selectTrack(tracks[0].id));
+    const dial = knob(getTracks()[1], 'Level', 'Volume');
+    const before = dial.getAttribute('aria-valuenow');
+
+    // UNCANCELLED is the load-bearing half, and it is the half a mutation can
+    // break: `fireEvent` returns false the moment any listener calls
+    // `preventDefault`, and a `wheel` the rack consumed is a wheel the
+    // arrangement scroller never sees. Drop `wheel="scroll"` from
+    // `TrackVoiceRack` and this goes false on the dial — which is exactly the
+    // regression the policy prop exists to stop.
+    expect(fireEvent.wheel(dial, { deltaY: -100 })).toBe(true);
+    expect(
+      fireEvent.wheel(
+        screen.getByRole('button', { name: `Voice rack for ${tracks[1].name}` }),
+        { deltaY: -100 },
+      ),
+    ).toBe(true);
+
+    expect(knob(getTracks()[1], 'Level', 'Volume').getAttribute('aria-valuenow')).toBe(
+      before,
+    );
+    // And scrolling PAST a track is not reaching for it — the selection is
+    // moved by focus and by press, and a wheel is neither.
+    expect(getSelectedTrackId()).toBe(tracks[0].id);
   });
 });

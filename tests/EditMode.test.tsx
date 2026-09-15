@@ -348,6 +348,51 @@ describe('what an edit-mode lane draws', () => {
     expect(guitarEl.style.height).toBe('192px');
   });
 
+  /**
+   * ── EVERY HEADER CONTROL, AT THE SHORTEST LANE THERE IS (acceptance 12) ─────
+   *
+   * `TRACK_HEADER_HEIGHT` is the FLOOR under every lane, and a four-string Edit
+   * lane sits exactly on it (128 of content losing to 143) — so this is the
+   * shortest header the stack can produce. §6 is explicit that controls are
+   * PRESERVED rather than hidden there: the lower strip is a bounded scroller,
+   * not an `overflow: hidden`.
+   *
+   * ⚠ WHAT THIS CANNOT SAY IS THAT THEY FIT. jsdom has no layout — every box is
+   * 0×0 — so nothing here can see a clipped fader or a resting scrollbar, and a
+   * test claiming to is a test that passes whatever the CSS does. That half is
+   * the browser checklist's (milestone 4's pass found it clean at this exact
+   * height). What is asserted is the half that CAN rot silently: a control
+   * dropped from the markup to make the column shorter.
+   */
+  it('keeps every header control at the header-floor lane', () => {
+    const { bassId } = seedArrangement();
+    render(editGrid());
+
+    const bassLane = document.querySelector<HTMLElement>(`[data-lane-track="${bassId}"]`)!;
+    expect(bassLane.style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
+
+    const bass = getTracks().find((track) => track.id === bassId)!;
+    const header = within(
+      document.querySelector<HTMLElement>(`[data-track-header="${bassId}"]`)!,
+    );
+    // Identity and view, on the row that must never be squeezed…
+    expect(header.getByRole('button', { name: `Select track ${bass.name}` })).toBeInTheDocument();
+    expect(header.getByRole('button', { name: `Rename track ${bass.name}` })).toBeInTheDocument();
+    for (const label of ['Pattern', 'Edit', 'Voice']) {
+      expect(
+        header.getByRole('button', { name: `${label} view, ${bass.name}` }),
+      ).toBeInTheDocument();
+    }
+    // …and the whole mixer strip below it, which is what a shorter column would
+    // lose first.
+    expect(header.getByRole('button', { name: `Mute ${bass.name}` })).toBeInTheDocument();
+    expect(header.getByRole('button', { name: `Solo ${bass.name}` })).toBeInTheDocument();
+    expect(
+      header.getByRole('slider', { name: `Volume for ${bass.name} in decibels` }),
+    ).toBeInTheDocument();
+    expect(header.getByRole('slider', { name: `Pan for ${bass.name}` })).toBeInTheDocument();
+  });
+
   it('draws no surface in empty time, so nothing can be written there', async () => {
     const { guitarId, bassId } = seedArrangement();
     render(editGrid());
@@ -1240,6 +1285,60 @@ describe('the activation coordinator — two Edit tracks in sequence', () => {
     expect(fretsIn(onBass)).toEqual([9]);
     await userEvent.click(screen.getByLabelText('Undo'));
     expect(fretsIn(onBass)).toEqual([SOURCE_FRET]);
+    expect(fretsIn(first)).toEqual([7]);
+  });
+
+  /**
+   * ── AND THE SAME THING REACHED THROUGH A RACK (milestone 6 §A) ─────────────
+   *
+   * The voice layer is the ONE surface that could reach `activateTrack`'s
+   * closing branch without a header press, and it only started to on this
+   * milestone: a track's rack now selects its track when it is touched, so a
+   * MIXED stack — one track on Edit with a block open, another on Voice — has a
+   * path from a dial to `closePlacementEditing` that nothing drove before. That
+   * is where an unclosed undo bracket would show, so it gets the same three
+   * assertions the header path gets: the block closed, the edits survived, the
+   * steps did not.
+   *
+   * MIXED on purpose, and built by hand rather than through `viewsOf`: a
+   * uniform stack cannot have a rack and an open block on screen at once, which
+   * is exactly why this case had no coverage.
+   */
+  it('closes another track’s open block when its own rack is touched', async () => {
+    const { first, guitarId, bassId } = seedTwoEditTracks();
+    const composition = getEditingComposition();
+    if (!composition) throw new Error('no composition');
+    const mixed: CompositionTrackViews = setTrackView(
+      setTrackView({}, composition.id, guitarId, 'edit'),
+      composition.id,
+      bassId,
+      'voice',
+    );
+    render(<ArrangementGrid views={mixed} />);
+
+    await pressNote(first);
+    await userEvent.keyboard('07');
+    expect(getEditingPlacementId()).toBe(first);
+    expect(fretsIn(first)).toEqual([7]);
+    expect(screen.getByLabelText('Undo')).toBeEnabled();
+
+    const bassName = getTracks().find((track) => track.id === bassId)?.name;
+    act(() =>
+      screen.getByRole('button', { name: `Voice rack for ${bassName}` }).focus(),
+    );
+
+    expect(getSelectedTrackId()).toBe(bassId);
+    expect(getEditingPlacementId()).toBeNull();
+    // The edits are written through and survive; the STEPS do not — the same
+    // documented cost the header path pays, now payable from the voice layer.
+    expect(fretsIn(first)).toEqual([7]);
+    // No block is live, so the caveat line is gone with it — and ⌘Z finds
+    // nothing to pop, which is the step loss observed from the keyboard. (The
+    // toolbar's Undo is NOT asserted here the way the header-path test asserts
+    // it: the selected track is showing Voice, and a rack has no history, so
+    // which control the toolbar offers is a different question from this one.)
+    expect(screen.queryByLabelText('Undo scope')).toBeNull();
+    await userEvent.keyboard('{Meta>}z{/Meta}');
     expect(fretsIn(first)).toEqual([7]);
   });
 

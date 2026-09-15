@@ -46,6 +46,13 @@
  *                  it (`voiceService`'s header, point 3). A prop rather than a
  *                  branch, and required rather than optional, so a third holder
  *                  kind has to answer the question rather than inherit silence.
+ *   `wheel`        what a wheel notch over a dial MEANS here — see
+ *                  {@link WheelPolicy}. Decided by what the editor is mounted
+ *                  INSIDE, which is why it cannot be read off `kind`: the pane
+ *                  sits in a page that does not scroll under the cursor, a rack
+ *                  sits in the arrangement's own scroller, and a wheel there is
+ *                  someone reaching for track five. Required for `onRepointed`'s
+ *                  reason — a third surface has to answer it.
  *
  * ⚠ THE ONE BRANCH ON `kind` IS THE LEVEL STAGE, and it is in `renderLevel`
  * alone — see the comment there. It is irreducible: it reads `track.inputGainDb`
@@ -143,6 +150,7 @@ import {
   voiceLabelClass,
   VOICE_COMMIT_MS,
   type KnobScale,
+  type WheelPolicy,
 } from './voiceChrome';
 import { DirtyPill } from './DirtyPill';
 import { NameForm } from './NameForm';
@@ -205,6 +213,7 @@ export function VoiceEditor({
   readVoiceRef,
   scope,
   scale,
+  wheel,
   refusals,
   follow,
   unavailable,
@@ -237,6 +246,11 @@ export function VoiceEditor({
    *  the visible engraving is name enough. */
   scope: string | null;
   scale: KnobScale;
+  /** What a wheel notch over a dial means on this surface — see
+   *  {@link WheelPolicy}. Decided by what this editor is mounted INSIDE rather
+   *  than by the holder kind, and passed to every `Knob` and `ParamEncoder`
+   *  below. */
+  wheel: WheelPolicy;
   /** A complete sentence per refusal, in this surface's own wording. */
   refusals: Record<VoiceRefusal, string>;
   /** The option standing for "no voice of its own". `selectable` is what says
@@ -606,6 +620,7 @@ export function VoiceEditor({
         // primary's, and the group around them does not name them.
         ariaLabel={nameScope ? `${nameScope} ${param.label}` : undefined}
         size={size}
+        wheel={wheel}
         value={typeof raw === 'number' ? raw : param.fallback}
         min={param.min}
         max={param.max}
@@ -673,6 +688,7 @@ export function VoiceEditor({
             label={param.label}
             ariaLabel={branchName(param.label)}
             size={scale.small}
+            wheel={wheel}
             value={typeof raw === 'number' ? raw : param.fallback}
             step={param.step}
             precision={param.precision}
@@ -788,6 +804,9 @@ export function VoiceEditor({
           // landmark named for the track — which is the disambiguation the rest
           // of this file's names defer to as well.
           size={scale.small}
+          // The one `Knob` in this file that does NOT go through `renderKnob`,
+          // so it needs the policy passed by hand — see `wheel`.
+          wheel={wheel}
           // `?? 0` reads an untouched track as unity. Note the STORED value stays
           // undefined until the knob is turned — see `Track.inputGainDb`, where
           // undefined means "the preset decides" and 0 means "unity regardless".

@@ -35,8 +35,8 @@ const VIEWS: readonly {
  *
  * Exactly as tall as its lane — the height comes from the same `laneRects` entry
  * the lane is drawn from, rather than from a constant repeated here, because the
- * two are only "obviously the same" until edit mode makes lane height depend on
- * the track's string count (CP-11).
+ * two are only "obviously the same" while every lane is the same height, and an
+ * Edit lane's depends on the track's string count (CP-11).
  *
  * This component is the track's IDENTITY: its name, whether it is the focused
  * track, and whether it is going to be heard. Everything that writes to the mix
@@ -150,6 +150,29 @@ export function TrackHeader({
       data-track-header={track.id}
       style={{ height }}
       /**
+       * ── WHERE IN THE STACK THIS TRACK IS (COMPS-TRACK-TABS milestone 6) ─────
+       *
+       * A NAMED GROUP AROUND THE WHOLE COLUMN, and the name carries the track's
+       * POSITION. Two things wanted it:
+       *
+       *  1. The seam does not enforce unique track names, so `Select track Bass`
+       *     and `Rename track Bass` collide outright on two tracks both called
+       *     Bass. A group entered by name disambiguates them by context without
+       *     renaming a single control — which matters, because the racks in the
+       *     voice layer, the rail and four test suites all address those
+       *     controls by the names they have.
+       *  2. A mixed stack's tab order is not its visual order: every rack in the
+       *     voice layer comes after this whole column, whatever position its
+       *     track sits at. "Track 2 of 3" is what makes landing in the middle of
+       *     that run legible — the voice rows say the same thing in the same
+       *     shape (`ArrangementGrid`'s voice layer).
+       *
+       * Position is 1-BASED and spoken, not the array index: this is read out,
+       * not indexed into.
+       */
+      role="group"
+      aria-label={`Track ${index + 1} of ${trackCount}: ${track.name}`}
+      /**
        * ⚠ TOUCHING ANYTHING IN THIS HEADER SELECTS ITS TRACK (§2) — by pointer
        * and by keyboard focus alike. Tabbing into this track's fader, its
        * instrument picker or its view buttons makes it the selected one, and so
@@ -204,8 +227,17 @@ export function TrackHeader({
       // `justify-between` threw the name plate, the status line and the mixer
       // strip into three corners of it. The rows stack from the top and the
       // slack falls at the bottom, so a header reads the same beside a 143 px
-      // pattern lane and a 900 px voice one. MEASURED compact headers are still
-      // milestone 6's; this is the alignment only.
+      // pattern lane and a 900 px voice one.
+      //
+      // ⚠ AND IT ALL FITS THE 143 px FLOOR — checked in the BROWSER at milestone
+      // 4's pass: every control present, nothing clipped, no resting scrollbar.
+      // That is the standing measurement this column is designed against, and it
+      // is the reason milestone 6's header work is sizing rather than culling:
+      // the only thing left to spend was the slack inside the name row, which is
+      // where the enlarged view buttons came from. That slack is bounded by the
+      // name plate's own height (~26 px — the arithmetic is beside the view
+      // buttons), and the buttons now sit just under it, so there is no more of
+      // it to spend without a second row.
       //
       // jsdom has no layout, so nothing here can TEST that any of it fits; it is
       // checked in the browser, and the rows are sized so the mismatch line is
@@ -284,7 +316,11 @@ export function TrackHeader({
             aria-label={`Rename track ${track.name}`}
             title="Rename"
             onClick={() => setDraftName(track.name)}
-            className="pressable control rounded-md px-1 py-0.5 font-mono text-[8.5px] font-bold leading-none"
+            // Height matched to the view buttons and the plate so the row reads
+            // as one strip; width deliberately NOT — this is the row's secondary
+            // gesture and every px it takes comes out of the track name. The
+            // 24 px ceiling is the view buttons' (see there for the arithmetic).
+            className="pressable control flex h-6 items-center justify-center rounded-md px-1 font-mono text-[9px] font-bold leading-none"
           >
             ✎
           </button>
@@ -306,11 +342,11 @@ export function TrackHeader({
             The group is named with the TRACK, because eight of these are on
             screen and "View" alone would be eight identical groups. It does not
             close the case of two tracks NAMED THE SAME — the seam does not
-            enforce unique names, and `Select track X` and `Rename track X` have
-            always collided the same way. Disambiguating by stack position is
-            milestone 6's, with the rest of the header's naming, because doing it
-            here alone would leave one control in the row named differently from
-            its neighbours. */}
+            enforce unique names, and `Select track X` and `Rename track X`
+            collide the same way. That is answered one level OUT rather than
+            here: the header's own `role="group"` carries the stack position, so
+            every control in the column is disambiguated by the group it is
+            entered through and not one of them had to be renamed. */}
         <div
           className="flex flex-none gap-px"
           role="group"
@@ -335,7 +371,45 @@ export function TrackHeader({
               // track EVEN IF that view is already active, which is the whole
               // reason this is not `disabled` when pressed.
               onClick={() => onViewChange?.(option.id)}
-              className={`pressable rounded-md px-1 py-0.5 font-mono text-[8.5px] font-bold leading-none disabled:opacity-40 ${
+              // ⚠ A FIXED 24 px SQUARE, and the number is load-bearing in both
+              // directions. It is the user's milestone 4 note ("the p/e/v are
+              // too small") answered where the answer is free, and FREE HAS AN
+              // ARITHMETIC — get it wrong and you either grow the header or
+              // leave hit-area unspent. The row is `items-center`, so its height
+              // is whatever the tallest item in it needs, and that is the name
+              // plate:
+              //
+              //   line box   10.5 × 1.55  = 16.275  (`text-[10.5px]` sets only
+              //                                      font-size; NOTHING on the
+              //                                      span or above it declares a
+              //                                      `leading-*`, so it inherits
+              //                                      `body { line-height: 1.55 }`
+              //                                      from `styles/index.css`)
+              //   `py-1`                  =  8
+              //   `.control` border       =  2      (1 px each side)
+              //   plate                   = 26.275 px
+              //
+              // So anything up to ~26 px is free, and 24 px is the largest whole
+              // step of the scale under it. Go past the plate and the header
+              // grows, and `TRACK_HEADER_HEIGHT` is the FLOOR under every lane in
+              // the stack: a header that needs 150 px makes every pattern lane
+              // 150 px. The letter goes to 12 px with it, which is the legibility
+              // half — a centred glyph rather than a padded one, so the box is
+              // the hit area and the type size is free to change inside it.
+              //
+              // THE COST, which is width and not height. The old button was
+              // `px-1 py-0.5 text-[8.5px]` with a 1 px `.control` border: 8 px of
+              // padding + 2 px of border + one ~5.1 px monospace advance ≈ 15 px,
+              // so the group was 3 × 15 + 2 px of `gap-px` ≈ 47 px. It is now
+              // 3 × 24 + 2 = 74 px, so ~27 px of the 200 px column has moved
+              // from the name plate to this group since milestone 4. The rename
+              // button beside it is unchanged in width (same `px-1`, 8.5 → 9 px
+              // glyph), so the plate lands near 200 − 12 (`px-1.5`) − 8 (two
+              // `gap-1`) − 74 − 15 ≈ 90 px, about eleven monospace characters
+              // inside its own `px-2`. jsdom has no layout, so whether that
+              // truncation is acceptable is a BROWSER observation (checklist
+              // item 9), not something asserted here.
+              className={`pressable flex h-6 w-6 items-center justify-center rounded-md font-mono text-[12px] font-bold leading-none disabled:opacity-40 ${
                 viewShown === option.id ? 'control-accent' : 'control'
               }`}
             >
@@ -361,11 +435,14 @@ export function TrackHeader({
           lane stack, so a wheel over a header that actually overflows scrolls
           this box first and chains to the stack only once it bottoms out, and a
           resting scrollbar eats ~15 px of a 200 px column. Both are the SYMPTOM
-          of the header not fitting, and the cure is the measured compact header
-          milestone 6 owns — `scrollbar-gutter` would spend that 15 px in every
-          header to hide it. The browser checklist carries it as a blocking
-          observation: if one rests at the 143 px floor, milestone 6 is needed
-          before this ships rather than after. */}
+          of the header not fitting, and NEITHER WAS OBSERVED at milestone 4's
+          browser pass: nothing rests at the 143 px floor, so the scroller is the
+          safety net it was meant to be rather than the standing state. It stays
+          for the cases layout still cannot promise — a wrapped row in a narrow
+          window, the optional status line — and `scrollbar-gutter` is still the
+          wrong cure, because it would spend that 15 px in every header to hide a
+          bar that does not appear. Milestone 6 spent the name row's slack on the
+          view buttons and nothing else, precisely so this stays true. */}
       <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto">
         {/* A standing fact rather than an event, and never a claim about what will
             be heard (LIB-GAP(15)): a track's instrument selects its voice, not its
