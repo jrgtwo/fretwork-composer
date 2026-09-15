@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   DEFAULT_PATTERNS_STATE,
@@ -17,6 +18,32 @@ vi.mock('../src/timeline/timelineMath', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/timeline/timelineMath')>();
   return { ...actual, laneGridImage: vi.fn(actual.laneGridImage) };
 });
+
+/**
+ * WHICH BLOCK WAS THE TARGET when an undo bracket closed.
+ *
+ * The only way to see the ORDER milestone 3 §B is about. A bracket closed
+ * against the outgoing block records that block's id; one closed by a React
+ * effect cleanup — which runs after the commit, and so after the editor has
+ * already been closed or repointed — records whatever the target is by then.
+ * Both leave the same history behind (`openPlacementForEditing` and
+ * `closePlacementEditing` each clear it), so nothing downstream can tell them
+ * apart: this is the seam where the difference is visible.
+ */
+const closes = vi.hoisted(() => ({ at: [] as (string | null)[] }));
+vi.mock('../src/patterns/patternService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/patterns/patternService')>();
+  // Imported HERE rather than closed over from the module body: a mock factory
+  // runs during the import phase, before this file's own bindings exist.
+  const { usePatternsStore: store } = await import('@fretwork/lib');
+  return {
+    ...actual,
+    endEditGesture(changed?: boolean) {
+      closes.at.push(store.getState().editingPlacementId);
+      actual.endEditGesture(changed);
+    },
+  };
+});
 import { CompositionPage } from '../src/composition/CompositionPage';
 import {
   ARRANGEMENT_ZOOM_LEVELS,
@@ -28,20 +55,27 @@ import {
   TRACK_HEADER_HEIGHT,
 } from '../src/composition/arrangementMath';
 import {
+  JOB_LOCK_REASON,
   addPlacement,
   addTrack,
+  beginJob,
   clearHistory,
   closePlacementEditing,
+  endJob,
   getEditingComposition,
   getEditingPlacementId,
+  getSelectedPlacementIds,
+  getSelectedTrackId,
   getTracks,
   movePlacement,
   openBlankComposition,
   openPlacementForEditing,
   removePlacement,
+  removeTrack,
   selectPlacements,
   selectTrack,
   setCompositionTimeSignature,
+  setTrackMuted,
 } from '../src/composition/compositionService';
 import {
   clearHistory as clearPatternHistory,
@@ -51,9 +85,12 @@ import {
   getSelectedIds,
   openBlankPattern,
   redo,
+  selectNotes,
   stampNote,
   undo,
 } from '../src/patterns/patternService';
+import { Knob } from '../src/voice/controls/Knob';
+import { ParamEncoder } from '../src/voice/controls/ParamEncoder';
 
 /**
  * CP-11 — edit mode.
@@ -113,6 +150,11 @@ const SOURCE_FRET = 5;
 const BAR_TICKS = 4 * PPQ;
 
 beforeEach(() => {
+  // A leaked job bracket would lock every later test out of the document, and
+  // the lock is module state `setState` cannot reach. Unconditional and
+  // idempotent, exactly as the placement close below is.
+  endJob();
+  closes.at.length = 0;
   sessionStorage.clear();
   window.history.replaceState({}, '', '/');
   // `compositionService` remembers the pattern that was open when placement
@@ -850,5 +892,843 @@ describe('what does NOT change between modes', () => {
 
     rerender(<ArrangementGrid mode="pattern" />);
     expect(screen.getByLabelText('Arrangement snap')).toHaveValue('bar');
+  });
+});
+
+/**
+ * COMPS-TRACK-TABS milestone 3 — the activation coordinator.
+ *
+ * ⚠ THIS STEP CHANGES BEHAVIOUR, deliberately, and under the SAME single global
+ * mode the page has always had. Before it, a track header press was a bare
+ * `selectTrack` and an edit surface's press was a bare `openPlacementForEditing`;
+ * the two knew nothing about each other, and neither ended anything. Now every
+ * one of them goes through one function that validates the target and the job
+ * lock, ends the outgoing surface's work synchronously, closes the outgoing
+ * block, selects, and only then starts what was asked for. So:
+ *
+ *   - selecting another track CLOSES the open block (and loses its note undo
+ *     history, which is the cost §4 chose to keep and to state on screen),
+ *   - a block open on a track that is NOT selected is drawn but is not live,
+ *   - a job holding the document refuses every activation and suppresses the
+ *     note keyboard WITHOUT closing the pointer the job is using.
+ *
+ * None of that is "unchanged", and nothing below asserts that it is.
+ */
+
+/** The bass track's own pattern, so its event ids differ from the guitar's —
+ *  copies of ONE pattern share their ids, and half of what these tests check is
+ *  that a selection did not cross a track. */
+function seedTwoEditTracks() {
+  const base = seedArrangement();
+  const bassPatternId = seedPattern('Bassline');
+  const placed = addPlacement(bassPatternId, base.bassId, 0);
+  if (!placed.ok) throw new Error(placed.reason);
+  selectPlacements([]);
+  selectTrack(null);
+  clearHistory();
+  clearPatternHistory();
+  return { ...base, bassPatternId, onBass: placed.value };
+}
+
+const headerSelect = (trackId: string) => {
+  const track = getTracks().find((candidate) => candidate.id === trackId);
+  if (!track) throw new Error(`no track ${trackId}`);
+  return screen.getByRole('button', { name: `Select track ${track.name}` });
+};
+/** The strip the coordinator reports a refusal on. */
+const trackAlert = () => screen.queryByRole('alert', { name: 'Track message' });
+const pressNote = (placementId: string) =>
+  userEvent.pointer({ target: noteIn(placementId), keys: '[MouseLeft]' });
+
+describe('the activation coordinator — ending the outgoing run', () => {
+  /**
+   * A held arrow opens an undo bracket that only a keyup closes, and a track
+   * switch is not a keyup. Left open, `patternService`'s gesture DEPTH never
+   * returns to zero — so the next run's `beginEditGesture` is a nested no-op,
+   * its writes each push a step of their own, and one ⌘Z undoes half an edit
+   * for the rest of the page's life.
+   *
+   * Dispatched on `window` rather than through `userEvent.keyboard`, because
+   * `repeat: true` is the whole condition being tested and user-event does not
+   * set it.
+   */
+  it('closes a held arrow’s undo bracket against the block it was held over', async () => {
+    const { first, bassId, onBass } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    // On an ELEMENT, not on `window`: the handler asks its target whether it is
+    // a form field, and `window` has no `matches`. It bubbles to the window
+    // listener either way.
+    fireEvent.keyDown(document.body, { key: 'ArrowUp' });
+    fireEvent.keyDown(document.body, { key: 'ArrowUp', repeat: true });
+    expect(fretsIn(first)).toEqual([SOURCE_FRET + 2]);
+
+    // No keyup: the switch is what has to end it.
+    closes.at.length = 0;
+    await userEvent.click(headerSelect(bassId));
+
+    // THE ORDER: the bracket closed while `first` was still the target, not
+    // after the editor had moved on.
+    //
+    // ⚠ Honest about what covers it. `NoteSurface` already ends its key runs
+    // from a capture-phase `pointerdown` listener, so for a PRESS this holds
+    // with or without the coordinator's own call — the audit §B asked for found
+    // the key-run paths already synchronous, and the gap was the POINTER
+    // gesture (the drag test below) and the programmatic path (the reconciler
+    // test further down). This pins the invariant; it does not claim to be what
+    // enforces it.
+    expect(closes.at).toEqual([first]);
+    // The EDITS survive — only the history goes. That is the model §4 keeps.
+    expect(fretsIn(first)).toEqual([SOURCE_FRET + 2]);
+
+    // The proof the bracket closed: a whole typed number on the NEXT block is
+    // still exactly one undo step. With the bracket leaked it is two, and this
+    // undo lands on fret 1.
+    await pressNote(onBass);
+    await userEvent.keyboard('12');
+    expect(fretsIn(onBass)).toEqual([12]);
+    undo();
+    expect(fretsIn(onBass)).toEqual([SOURCE_FRET]);
+  });
+
+  /**
+   * The same hazard from the other side: a half-typed fret holds the bracket
+   * open until its timer fires, and the timer is 800ms away.
+   *
+   * ⚠ HONEST ABOUT WHAT COVERS IT, like the arrow test above and for a second
+   * reason as well. A click is a `pointerdown`, which `NoteSurface`'s own
+   * capture-phase listener treats as the end of a run — and on the PROGRAMMATIC
+   * route the surface's focus-loss effect closes it, a child effect that runs
+   * before the reconciler's. So a KEY RUN is covered on every route with or
+   * without the coordinator's call. The gap `endOutgoingWork` closes is the
+   * POINTER GESTURE, which `focused` going false does not end; the two drag
+   * tests below are the ones that fail without it. This pins the invariant and
+   * the ORDER — the bracket closed while `first` was still the target.
+   */
+  it('closes a pending fret-entry run against the block it was typed into', async () => {
+    const { first, bassId, onBass } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    // One digit: the run stays open, waiting for a second.
+    await userEvent.keyboard('1');
+    expect(fretsIn(first)).toEqual([1]);
+
+    closes.at.length = 0;
+    await userEvent.click(headerSelect(bassId));
+
+    // Against the block it was typed into — see the header comment.
+    expect(closes.at).toEqual([first]);
+    expect(fretsIn(first)).toEqual([1]);
+
+    await pressNote(onBass);
+    await userEvent.keyboard('12');
+    undo();
+    expect(fretsIn(onBass)).toEqual([SOURCE_FRET]);
+  });
+
+  /**
+   * A pointer gesture parks its listeners on `window`, so removing the surface
+   * from the tree removes nothing — the drag keeps writing into the outgoing
+   * block after the page has moved on. Pressed and moved with `fireEvent` so the
+   * pointer stays DOWN across the switch, which is the only way the gesture is
+   * still in flight when it happens.
+   */
+  it('takes an in-flight note drag off window before the selection moves', async () => {
+    const { patternId, first, bassId } = seedTwoEditTracks();
+    // The pattern the seam falls BACK to when the block closes, pinned to the
+    // riff on purpose: a snapshot copies its events VERBATIM, ids included, so a
+    // drag still listening on `window` after the switch is seen to move the
+    // library riff. Left on the bass pattern the leak would be silent — the
+    // drag's snapshot names ids that pattern has not got.
+    usePatternsStore.setState({ editingPatternId: patternId });
+    const user = userEvent.setup();
+    render(editGrid());
+    const libraryStarts = () =>
+      findLibraryPattern(patternId)!.events.map((event) => event.startTick);
+    const libraryBefore = libraryStarts();
+
+    // The button stays DOWN across the switch — there is no other way to have a
+    // gesture still in flight when it happens. Nothing after the first entry
+    // names a target: the listeners are on `window`, which is the point.
+    await user.pointer([
+      { target: noteIn(first), keys: '[MouseLeft>]', coords: { clientX: 0, clientY: 0 } },
+      // ONE BEAT along, deliberately short of the block's boundary: a drag that
+      // had already clamped could not move again afterwards, and the assertion
+      // below would hold whether or not the listeners came off.
+      { coords: { clientX: PX_PER_BEAT, clientY: 0 } },
+    ]);
+    const draggedTo = placementById(first).patternSnapshot.events[0].startTick;
+    expect(draggedTo).toBeGreaterThan(0);
+
+    // `fireEvent`, not `user.click`: a click from user-event would press a
+    // second button into the session that is holding the drag.
+    fireEvent.click(headerSelect(bassId));
+
+    // Still down, still moving — and now reaching nothing. `focused` going
+    // false does NOT end a pointer gesture (its teardown is tied to completion
+    // and unmount), so this is the one path the coordinator's synchronous call
+    // is the only thing covering.
+    await user.pointer([
+      { coords: { clientX: PX_PER_BEAT * 5, clientY: 0 } },
+      { keys: '[/MouseLeft]' },
+    ]);
+
+    // The outgoing block kept exactly what the drag had written when the switch
+    // happened...
+    expect(placementById(first).patternSnapshot.events[0].startTick).toBe(draggedTo);
+    // ...and the moves after it reached NOTHING. With the listeners still on
+    // `window` they reach the seam's new target instead, which by then is the
+    // library pattern — the leak this is here to catch.
+    expect(libraryStarts()).toEqual(libraryBefore);
+  });
+
+  /** The teardown is idempotent and re-selecting a track preserves its block —
+   *  what this actually observes is the second, since the count of teardowns is
+   *  not visible from here. */
+  it('preserves the active block when the same track is activated twice', async () => {
+    const { first, guitarId, onBass, bassId } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    await userEvent.click(headerSelect(guitarId));
+    await userEvent.click(headerSelect(guitarId));
+    // Re-selecting the track that is already active preserves its block.
+    expect(getEditingPlacementId()).toBe(first);
+
+    await userEvent.click(headerSelect(bassId));
+    await userEvent.click(headerSelect(bassId));
+    expect(getEditingPlacementId()).toBeNull();
+
+    // Everything still works afterwards.
+    await pressNote(onBass);
+    expect(getEditingPlacementId()).toBe(onBass);
+  });
+});
+
+describe('the activation coordinator — two Edit tracks in sequence', () => {
+  it('gives the keyboard and the selection to one block only', async () => {
+    const { first, onBass } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    expect(surfaceEl(first).dataset.focused).toBe('true');
+
+    await pressNote(onBass);
+
+    expect(getSelectedTrackId()).toBe(getTracks()[1].id);
+    expect(surfaceEl(onBass).dataset.focused).toBe('true');
+    expect(surfaceEl(first).dataset.focused).toBeUndefined();
+
+    await userEvent.keyboard('12');
+    expect(fretsIn(onBass)).toEqual([12]);
+    expect(fretsIn(first)).toEqual([SOURCE_FRET]);
+
+    // The inspector follows `patternService`'s NOTE selection, and the two
+    // tracks' patterns have different event ids — so this is the assertion that
+    // it can never show the other track's notes.
+    const bassIds = placementById(onBass).patternSnapshot.events.map((e) => e.id);
+    expect(getSelectedIds().length).toBeGreaterThan(0);
+    expect(getSelectedIds().every((id) => bassIds.includes(id))).toBe(true);
+  });
+
+  it('selecting an Edit header alone opens no block', async () => {
+    const { first, bassId } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    await userEvent.click(headerSelect(bassId));
+
+    expect(getSelectedTrackId()).toBe(bassId);
+    expect(getEditingPlacementId()).toBeNull();
+    expect(document.querySelector('[data-edit-placement][data-focused]')).toBeNull();
+  });
+
+  /**
+   * THE UNDO COST, stated as a test rather than as prose: the edits are written
+   * through and survive, the STEPS do not. `closePlacementEditing` clears the
+   * pattern history on the way out, and milestone 3 keeps that model — what it
+   * adds is saying so on screen while the block is open.
+   */
+  it('keeps the outgoing block’s edits and drops its undo history, and says so', async () => {
+    const { first, bassId, onBass } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    expect(screen.getByLabelText('Undo scope')).toHaveTextContent(/clears its undo history/i);
+    await userEvent.keyboard('07');
+    expect(fretsIn(first)).toEqual([7]);
+    expect(screen.getByLabelText('Undo')).toBeEnabled();
+
+    await userEvent.click(headerSelect(bassId));
+
+    expect(fretsIn(first)).toEqual([7]);
+    // The button and the shortcut are the same history, and both are now empty.
+    expect(screen.getByLabelText('Undo')).toBeDisabled();
+    await userEvent.keyboard('{Meta>}z{/Meta}');
+    expect(fretsIn(first)).toEqual([7]);
+    // No block is live, so the caveat is not on screen either.
+    expect(screen.queryByLabelText('Undo scope')).toBeNull();
+
+    // The next block's history is its own, and the toolbar's undo reaches it.
+    await pressNote(onBass);
+    await userEvent.keyboard('09');
+    expect(fretsIn(onBass)).toEqual([9]);
+    await userEvent.click(screen.getByLabelText('Undo'));
+    expect(fretsIn(onBass)).toEqual([SOURCE_FRET]);
+    expect(fretsIn(first)).toEqual([7]);
+  });
+
+  /**
+   * ⚠ THE TWO CASES §4 SAYS MUST NOT BE CONFLATED. A write to ANOTHER track that
+   * leaves the selection alone must leave the editor alone. Clicking that same
+   * track's header SELECTS it, and so must close the editor. Same track, opposite
+   * outcomes, and the difference is whether selection moved.
+   */
+  it('survives an unrelated track update, and closes on that track’s header press', async () => {
+    const { first, bassId } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    expect(getEditingPlacementId()).toBe(first);
+
+    act(() => {
+      const muted = setTrackMuted(bassId, true);
+      if (!muted.ok) throw new Error(muted.reason);
+    });
+
+    expect(getEditingPlacementId()).toBe(first);
+    expect(surfaceEl(first).dataset.focused).toBe('true');
+
+    await userEvent.click(headerSelect(bassId));
+
+    expect(getEditingPlacementId()).toBeNull();
+  });
+
+  it('clears the note selection on the way out, with or without a pattern to fall back to', () => {
+    const { first } = seedTwoEditTracks();
+    // Nothing remembered: `restorePatternPointer` is then a no-op, so the clear
+    // cannot be a side effect of re-opening the previous pattern.
+    usePatternsStore.setState({ editingPatternId: null });
+
+    const opened = openPlacementForEditing(first);
+    expect(opened.ok).toBe(true);
+    selectNotes(getEditingPattern()!.events.map((event) => event.id));
+    expect(getSelectedIds().length).toBeGreaterThan(0);
+
+    closePlacementEditing();
+
+    expect(getSelectedIds()).toEqual([]);
+  });
+
+  /**
+   * LIB-GAP(26), from the side the branch does NOT cover. The lib nulls
+   * `editingPlacementId` behind our back — `openComposition` calls
+   * `openCompositionForArranging` before this seam's own cleanup runs — and
+   * `openCompositionForArranging` leaves `selectedEventIds` alone. On that path
+   * the `editingPlacementId !== null` branch is skipped entirely, so a clear
+   * written inside it would never run and the ids of a closed snapshot would
+   * stay selected, naming events that exist in the LIBRARY pattern too.
+   */
+  it('clears it even when the lib nulled the placement pointer first', () => {
+    const { first } = seedTwoEditTracks();
+    usePatternsStore.setState({ editingPatternId: null });
+
+    const opened = openPlacementForEditing(first);
+    expect(opened.ok).toBe(true);
+    const ids = getEditingPattern()!.events.map((event) => event.id);
+    selectNotes(ids);
+    // Exactly what `openCompositionForArranging` does: the pointer goes, the
+    // note selection stays.
+    act(() => {
+      usePatternsStore.setState({ editingPlacementId: null });
+    });
+    expect(getSelectedIds()).toEqual(ids);
+
+    closePlacementEditing();
+
+    expect(getSelectedIds()).toEqual([]);
+  });
+
+  /**
+   * ⚠ And the case the clear must NOT touch: a library pattern open on the
+   * pattern page owns its own selection, and leaving the composition page calls
+   * this seam unconditionally.
+   */
+  it('leaves an open library pattern’s own note selection alone', () => {
+    const { patternId } = seedTwoEditTracks();
+    usePatternsStore.setState({ editingPatternId: patternId });
+    const ids = getEditingPattern()!.events.map((event) => event.id);
+    selectNotes(ids);
+
+    // Nothing is open in the composition: this is the no-op call every page exit
+    // makes.
+    expect(getEditingPlacementId()).toBeNull();
+    closePlacementEditing();
+
+    expect(getSelectedIds()).toEqual(ids);
+  });
+
+  /**
+   * §A's "close it when its placement/track disappears". `removeCompositionTrack`
+   * is a plain `applyComposition` in the lib — unlike `removePlacement`, which
+   * nulls the pointer itself — so nothing else closes the editor here, and a
+   * dangling `editingPlacementId` makes every later note write hit nothing.
+   */
+  it('closes the editor when the open block’s track is removed', async () => {
+    const { first, guitarId } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    expect(getEditingPlacementId()).toBe(first);
+
+    await act(async () => {
+      const removed = removeTrack(guitarId);
+      if (!removed.ok) throw new Error(removed.reason);
+    });
+
+    expect(getEditingPlacementId()).toBeNull();
+  });
+
+  /**
+   * PAGE EXIT. Its own effect, keyed on nothing that changes, so it fires on
+   * unmount and on nothing else — §A is explicit that an unconditional cleanup
+   * keyed on the view map (which milestone 4 introduces) would fire on every
+   * unrelated change instead. Without it the pattern page draws the block's
+   * snapshot, which is the CP-02 family of defect.
+   */
+  it('closes the editor when the page unmounts', async () => {
+    const { first } = seedTwoEditTracks();
+    const { unmount } = render(editGrid());
+
+    await pressNote(first);
+    expect(getEditingPlacementId()).toBe(first);
+
+    unmount();
+
+    expect(getEditingPlacementId()).toBeNull();
+  });
+});
+
+describe('the activation coordinator — while a generation job holds the document', () => {
+  it('refuses every activation path and suppresses the note keyboard, without closing the job’s block', async () => {
+    const { first, guitarId, bassId, onBass } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    expect(getEditingPlacementId()).toBe(first);
+
+    const job = beginJob();
+    if (!job.ok) throw new Error(job.reason);
+    // The lock is not React state the render knows about; the hook subscribes.
+    await act(async () => {});
+
+    // THE POINTER IS THE JOB'S. The UI stops owning it and does NOT close it:
+    // closing would repoint the lib's one pattern pointer out from under the
+    // agent, and a cancel does not put the agent's notes back.
+    expect(getEditingPlacementId()).toBe(first);
+    expect(surfaceEl(first).dataset.focused).toBeUndefined();
+
+    // A header press is refused, and says why.
+    await userEvent.click(headerSelect(bassId));
+    expect(getSelectedTrackId()).toBe(guitarId);
+    expect(trackAlert()).toHaveTextContent(JOB_LOCK_REASON);
+
+    // So is a surface taking focus — and the refusal must not fall through into
+    // the note gesture underneath it.
+    await pressNote(onBass);
+    expect(getEditingPlacementId()).toBe(first);
+    expect(fretsIn(onBass)).toEqual([SOURCE_FRET]);
+
+    // No surface is focused, so no window key listener is attached at all.
+    await userEvent.keyboard('12');
+    expect(fretsIn(first)).toEqual([SOURCE_FRET]);
+
+    // An EXTERNAL selection change during the job — the agent's own
+    // `selectTrack`, which stays pointer-free and view-free — must not trip UI
+    // cleanup of the job's pointer.
+    await act(async () => {
+      selectTrack(bassId);
+    });
+    expect(getEditingPlacementId()).toBe(first);
+  });
+
+  /**
+   * A REFUSAL REPEATED IS A REFUSAL ANNOUNCED. `role="alert"` fires when its
+   * content is inserted, and setting the same string twice is a React bail-out
+   * that renders nothing — so a second and third refused press during a job
+   * would be silent to a screen reader while looking identical on screen. The
+   * coordinator refuses with the same sentence on every path, which makes that
+   * the common case rather than a corner; the alert is keyed on a counter so
+   * each set replaces the node.
+   */
+  it('re-announces the same refusal on every refused press', async () => {
+    const { first, bassId, guitarId } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    const job = beginJob();
+    if (!job.ok) throw new Error(job.reason);
+    await act(async () => {});
+
+    await userEvent.click(headerSelect(bassId));
+    const firstAlert = trackAlert();
+    expect(firstAlert).toHaveTextContent(JOB_LOCK_REASON);
+
+    await userEvent.click(headerSelect(guitarId));
+    const secondAlert = trackAlert();
+    expect(secondAlert).toHaveTextContent(JOB_LOCK_REASON);
+    // A NEW node, which is the whole of what makes it announce again.
+    expect(secondAlert).not.toBe(firstAlert);
+
+    await act(async () => {
+      endJob();
+    });
+  });
+
+  /**
+   * §E lists JOB OWNERSHIP as an invalidator, and the arrangement's own gestures
+   * fold `isJobRunning()` into `invalidated`. A NOTE drag has no equivalent: its
+   * listeners are on `window`, `focused` going false ends none of them (that is
+   * the whole reason `endOutgoingWork` exists), and `patternService`'s writes are
+   * not behind the job lock — so without the reconciler ending the work, a drag
+   * in flight when a job starts keeps writing into the block the agent now owns,
+   * with an undo bracket held open across the run.
+   */
+  it('ends an in-flight note drag when a job takes the document', async () => {
+    const { patternId, first } = seedTwoEditTracks();
+    // The pattern the seam falls back to, pinned to the riff for the reason the
+    // programmatic-drag test gives: a snapshot copies event ids verbatim, so a
+    // leaked drag is SEEN to move the library pattern.
+    usePatternsStore.setState({ editingPatternId: patternId });
+    const user = userEvent.setup();
+    render(editGrid());
+    const libraryStarts = () =>
+      findLibraryPattern(patternId)!.events.map((event) => event.startTick);
+
+    await user.pointer([
+      { target: noteIn(first), keys: '[MouseLeft>]', coords: { clientX: 0, clientY: 0 } },
+      { coords: { clientX: PX_PER_BEAT, clientY: 0 } },
+    ]);
+    const draggedTo = placementById(first).patternSnapshot.events[0].startTick;
+    expect(draggedTo).toBeGreaterThan(0);
+    const libraryBefore = libraryStarts();
+
+    const job = beginJob();
+    if (!job.ok) throw new Error(job.reason);
+    await act(async () => {});
+
+    // Still down, still moving, and now reaching nothing.
+    await user.pointer([
+      { coords: { clientX: PX_PER_BEAT * 5, clientY: 0 } },
+      { keys: '[/MouseLeft]' },
+    ]);
+
+    expect(placementById(first).patternSnapshot.events[0].startTick).toBe(draggedTo);
+    expect(libraryStarts()).toEqual(libraryBefore);
+
+    await act(async () => {
+      endJob();
+    });
+  });
+
+  it('reconciles against live state when the job completes, and activates normally after', async () => {
+    const { first, bassId, onBass } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    const job = beginJob();
+    if (!job.ok) throw new Error(job.reason);
+    await act(async () => {
+      selectTrack(bassId);
+    });
+
+    await act(async () => {
+      job.value();
+    });
+
+    // The selected track is the bass and the open block is the guitar's, so the
+    // block the job left open is closed — the reconciliation §4 defers until
+    // ownership is handed back.
+    expect(getEditingPlacementId()).toBeNull();
+
+    await pressNote(onBass);
+    expect(getEditingPlacementId()).toBe(onBass);
+    await userEvent.keyboard('12');
+    expect(fretsIn(onBass)).toEqual([12]);
+    expect(fretsIn(first)).toEqual([SOURCE_FRET]);
+  });
+
+  it('activates normally after a CANCELLED job too', async () => {
+    const { first, guitarId, onBass } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    const job = beginJob();
+    if (!job.ok) throw new Error(job.reason);
+    await act(async () => {});
+    expect(surfaceEl(first).dataset.focused).toBeUndefined();
+
+    // The unconditional escape hatch, which is what a cancelled run reaches for.
+    await act(async () => {
+      endJob();
+    });
+
+    // Nothing moved while the job ran, so the block it left open is still the
+    // selected track's and stays open — ownership simply comes back.
+    expect(getSelectedTrackId()).toBe(guitarId);
+    expect(getEditingPlacementId()).toBe(first);
+    expect(surfaceEl(first).dataset.focused).toBe('true');
+
+    await userEvent.keyboard('12');
+    expect(fretsIn(first)).toEqual([12]);
+
+    await pressNote(onBass);
+    expect(getEditingPlacementId()).toBe(onBass);
+  });
+});
+
+describe('the activation coordinator — ownership of a block nobody selected', () => {
+  /**
+   * `openPlacementForEditing` is reachable by id with no pointer, which is the
+   * standing rule for every capability here — so the page must not disown what
+   * the agent opened. It ADOPTS the owning track instead of closing the block,
+   * which is the one case where reconciliation writes the selection rather than
+   * the pointer.
+   */
+  it('adopts the owning track when a block is opened by id with nothing selected', async () => {
+    const { first, guitarId } = seedTwoEditTracks();
+    render(editGrid());
+    expect(getSelectedTrackId()).toBeNull();
+
+    await act(async () => {
+      const opened = openPlacementForEditing(first);
+      if (!opened.ok) throw new Error(opened.reason);
+    });
+
+    expect(getSelectedTrackId()).toBe(guitarId);
+    expect(getEditingPlacementId()).toBe(first);
+    expect(surfaceEl(first).dataset.focused).toBe('true');
+  });
+
+  it('closes a block whose track loses the selection from outside', async () => {
+    const { first, bassId } = seedTwoEditTracks();
+    render(editGrid());
+
+    await pressNote(first);
+    await act(async () => {
+      selectTrack(bassId);
+    });
+
+    expect(getEditingPlacementId()).toBeNull();
+  });
+
+  /**
+   * The RECONCILER has to end the outgoing work too, and its trigger is a
+   * `selectTrack` from outside this page — the agent's, or another surface's.
+   * That is neither a pointerdown nor a keydown, so none of `NoteSurface`'s own
+   * capture-phase run-enders fire, and `focused` going false does not end a
+   * pointer gesture. Without the teardown the drag keeps writing, into whatever
+   * the seam has repointed at by then.
+   */
+  it('ends an in-flight drag when the selection is taken away programmatically', async () => {
+    const { patternId, first, bassId } = seedTwoEditTracks();
+    usePatternsStore.setState({ editingPatternId: patternId });
+    const user = userEvent.setup();
+    render(editGrid());
+    const libraryStarts = () =>
+      findLibraryPattern(patternId)!.events.map((event) => event.startTick);
+
+    await user.pointer([
+      { target: noteIn(first), keys: '[MouseLeft>]', coords: { clientX: 0, clientY: 0 } },
+      { coords: { clientX: PX_PER_BEAT, clientY: 0 } },
+    ]);
+    const draggedTo = placementById(first).patternSnapshot.events[0].startTick;
+    expect(draggedTo).toBeGreaterThan(0);
+    const libraryBefore = libraryStarts();
+
+    await act(async () => {
+      selectTrack(bassId);
+    });
+    await user.pointer([
+      { coords: { clientX: PX_PER_BEAT * 5, clientY: 0 } },
+      { keys: '[/MouseLeft]' },
+    ]);
+
+    expect(getEditingPlacementId()).toBeNull();
+    expect(placementById(first).patternSnapshot.events[0].startTick).toBe(draggedTo);
+    expect(libraryStarts()).toEqual(libraryBefore);
+  });
+});
+
+/**
+ * COMPS-TRACK-TABS milestone 3 §B — the same keyboard boundary, at the OTHER
+ * call site.
+ *
+ * `NoteSurface` renders on both pages, and its window key handler used the same
+ * literal `'input, textarea, select, [contenteditable]'` the arrangement used.
+ * Neither covered the voice editor's dials: `Knob` is `role="slider"` and
+ * `ParamEncoder` is `role="spinbutton"`. Both call `preventDefault` and neither
+ * calls `stopPropagation`, so ArrowUp over a dial reached this handler and
+ * nudged the selected note's fret as well as turning the dial.
+ *
+ * The dials are rendered BESIDE the grid rather than inside it, because the
+ * handler is on `window` and does not care where in the document the keystroke
+ * came from — which is the whole of the defect. A rack that is genuinely in the
+ * same stack as an edit lane arrives with milestone 4's per-track views.
+ */
+describe('note shortcuts stop at a local control', () => {
+  function Dial({ kind }: { kind: 'knob' | 'encoder' }) {
+    const [value, setValue] = useState(kind === 'knob' ? 3 : 0);
+    return kind === 'knob' ? (
+      <Knob
+        value={value}
+        onChange={setValue}
+        min={0}
+        max={10}
+        step={1}
+        label="Drive"
+        ariaLabel="Drive"
+      />
+    ) : (
+      <ParamEncoder
+        value={value}
+        onChange={setValue}
+        step={1}
+        precision={0}
+        fallback={0}
+        label="Offset"
+        ariaLabel="Offset"
+      />
+    );
+  }
+
+  it('lets a focused Knob have ArrowUp to itself', async () => {
+    const { first } = seedArrangement();
+    const user = userEvent.setup();
+    render(
+      <>
+        {editGrid()}
+        <Dial kind="knob" />
+      </>,
+    );
+
+    await pressNote(first);
+    const knob = screen.getByRole('slider', { name: 'Drive' });
+    knob.focus();
+    await user.keyboard('{ArrowUp}');
+
+    expect(knob).toHaveAttribute('aria-valuenow', '4');
+    expect(fretsIn(first)).toEqual([SOURCE_FRET]);
+  });
+
+  it('lets a focused ParamEncoder have ArrowUp to itself', async () => {
+    const { first } = seedArrangement();
+    const user = userEvent.setup();
+    render(
+      <>
+        {editGrid()}
+        <Dial kind="encoder" />
+      </>,
+    );
+
+    await pressNote(first);
+    const encoder = screen.getByRole('spinbutton', { name: 'Offset' });
+    encoder.focus();
+    await user.keyboard('{ArrowUp}');
+
+    expect(encoder).toHaveAttribute('aria-valuenow', '1');
+    expect(fretsIn(first)).toEqual([SOURCE_FRET]);
+  });
+
+  /**
+   * THE OTHER HALF, and the one that matters most: the surface's own shortcuts
+   * are unchanged. The pattern page renders this same component with no host
+   * callbacks at all, so "still works with nothing local focused" is the
+   * behaviour that must not have moved.
+   */
+  it('still nudges the note when nothing local has focus', async () => {
+    const { first } = seedArrangement();
+    const user = userEvent.setup();
+    render(
+      <>
+        {editGrid()}
+        <Dial kind="knob" />
+      </>,
+    );
+
+    await pressNote(first);
+    await user.keyboard('{ArrowUp}');
+
+    expect(fretsIn(first)).toEqual([SOURCE_FRET + 1]);
+  });
+});
+
+/**
+ * §4's command-context table, in the one row that is a deliberate change of
+ * behaviour: EDIT VIEW WITH NO BLOCK LIVE DISABLES UNDO.
+ *
+ * It used to point at the note history unconditionally, and the note history in
+ * that state is the PATTERN PAGE's — so a press undid an edit made to a document
+ * that is not on screen, with nothing in either stack to put it back.
+ */
+describe('the direct-editing command context', () => {
+  it('disables undo in edit view until a block is live', async () => {
+    const { first } = seedArrangement();
+    render(editGrid());
+
+    // A step waiting in the pattern seam's history, made before anything here
+    // was opened — exactly what the old wiring would have offered to undo.
+    act(() => {
+      openBlankPattern('Elsewhere');
+      stampNote({ stringIndex: 0, fret: 3, tick: 0, durationTicks: PPQ });
+    });
+    expect(screen.getByLabelText('Undo')).toBeDisabled();
+
+    await pressNote(first);
+    await userEvent.keyboard('{ArrowUp}');
+    // Live block, note history, enabled — and it acts on THIS block.
+    expect(screen.getByLabelText('Undo')).toBeEnabled();
+    await userEvent.click(screen.getByLabelText('Undo'));
+    expect(fretsIn(first)).toEqual([SOURCE_FRET]);
+  });
+});
+
+/**
+ * COMPS-TRACK-TABS milestone 3 §4/§5, at the PAGE level rather than at the hook's.
+ */
+describe('the page ends its work before it changes the ground', () => {
+  /**
+   * ⚠ THE ZOOM HALF OF §5 IS NOT ASSERTED HERE, AND CANNOT BE. `zoomTo` ends
+   * every in-flight gesture before it changes the scale, but a press on the Zoom
+   * button is a `pointerup` — which the drag's own window listener already
+   * catches — and a keyboard activation of it is a `keydown`, which
+   * `NoteSurface`'s handler already treats as the end of a key run. Every route
+   * to that button therefore ends the work BEFORE `zoomTo` runs, so no test
+   * through the UI can tell the teardown from the button press.
+   *
+   * The reachable half of the same requirement — a scale that changes UNDER a
+   * live gesture — is asserted at the hook, where it can be driven directly:
+   * "ends on a zoom change rather than mixing two scales" in
+   * tests/ArrangementGestures.test.tsx.
+   */
+
+  /**
+   * §4: "NoteSurface focus and arrangement KEYBOARD eligibility stay mutually
+   * exclusive". ⌘A is the sharpest probe — the arrangement answers it and the
+   * note surface does not, so a surface that let it through would leave every
+   * block in the composition selected under an open note editor, and the next
+   * ⌫ would delete blocks instead of notes.
+   */
+  it('gives the arrangement no keyboard while a block is live', async () => {
+    const { first } = seedArrangement();
+    const user = userEvent.setup();
+    render(editGrid());
+
+    await pressNote(first);
+    await user.keyboard('{Meta>}a{/Meta}');
+
+    expect(getSelectedPlacementIds()).toEqual([]);
   });
 });

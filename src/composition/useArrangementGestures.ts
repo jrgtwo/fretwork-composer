@@ -76,6 +76,7 @@ import {
   getSelectedPlacementIds,
   getSelectedTrackId,
   getTracks,
+  isJobRunning,
   movePlacement,
   placementEffectiveLength,
   placementEndTick,
@@ -91,6 +92,7 @@ import {
   type Result,
 } from './compositionService';
 import { findLibraryPattern, patternInstrumentId } from '../patterns/patternService';
+import { insideKeyboardControl } from '../timeline/keyboardBoundary';
 import { useEdgeAutoScroll } from '../timeline/useEdgeAutoScroll';
 
 /**
@@ -107,6 +109,66 @@ export const DRAG_THRESHOLD_PX = 3;
 
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
 const refuse = (reason: string): Result<never> => ({ ok: false, reason });
+
+// -------------------------------------------------------------- eligibility ---
+// ONE rule for "which blocks may this UI touch", used by the toolbar, by every
+// shortcut, by the marquee and by a group drag — see `TrackFilter`.
+
+/**
+ * Which tracks a UI command may act on.
+ *
+ * ⚠ THE DEFAULT IS THE WHOLE DOCUMENT, and that is the contract, not a
+ * convenience: the filter is an argument the VIEW passes, never something baked
+ * into a capability. A caller with no notion of a view — a test, a keyboard
+ * route, a future headless driver — gets the composition, exactly as it always
+ * has.
+ *
+ * ⚠ And NOT because the agent calls these. It cannot: `src/ai` may import only
+ * its siblings and the four seam modules (pinned by `tests/AgentTools.test.ts`)
+ * and this is neither. The agent's document-wide capabilities live in
+ * `compositionService`, and keeping them independent of view state is that
+ * module's job, not this one's. What this default buys is that view state never
+ * leaks INTO a capability by being its only spelling.
+ *
+ * What the view passes is "this track's lane is a Pattern lane". Under the one
+ * global mode this page still has, that is the identity function whenever the
+ * arrangement is on screen at all; it starts to bite when tracks can choose
+ * their own view, and a filter written then would be a filter written late.
+ */
+export type TrackFilter = (trackId: string) => boolean;
+
+/** What a caller with no notion of a view — the agent, a test, a keyboard
+ *  route — gets. */
+const EVERY_TRACK: TrackFilter = () => true;
+
+/**
+ * The selected blocks a UI command may act on: still in the document, and on a
+ * lane the filter admits.
+ *
+ * This is the "prune" §5 asks for, and it PRUNES BY DERIVING rather than by
+ * writing a narrower selection back to the seam. The store's selection can be
+ * set from outside this page — an agent run selects across every track it just
+ * wrote — and a UI that overwrote it to satisfy its own view would make a
+ * document-wide capability depend on React view state, which §4 forbids. So the
+ * ineligible ids stay selected in the document, the UI neither draws nor
+ * touches them, and nothing the agent did is lost.
+ */
+function eligibleSelection(
+  ids: readonly string[],
+  eligible: TrackFilter = EVERY_TRACK,
+): string[] {
+  return ids.filter((id) => {
+    const found = findPlacement(id);
+    return found !== undefined && eligible(found.track.id);
+  });
+}
+
+/** Every placement the filter admits, in track then placement order. */
+function eligiblePlacementIds(eligible: TrackFilter = EVERY_TRACK): string[] {
+  return getTracks()
+    .filter((track) => eligible(track.id))
+    .flatMap((track) => track.placements.map((placement) => placement.id));
+}
 
 // ------------------------------------------------------------- capabilities ---
 // Plain functions, each one undoable as exactly one step. The gestures below
@@ -180,17 +242,30 @@ export function appendPatternToTrack(patternId: string, trackId?: string): Resul
  *
  * TODO(CP-10): per-block keyboard selection needs focusable blocks, which is a
  * change to how the whole lane area dispatches — not a shortcut.
+ *
+ * ⚠ `eligible` IS WHAT ⌘A PASSES, and it is why this function could not stay as
+ * it was. Unfiltered it enumerates every track, so Select All in a mixed view
+ * would hand the block commands placements on lanes that are not drawing
+ * blocks — and the next Delete would remove them. The default is still the
+ * whole document, for the agent and for every pointer-free caller.
  */
-export function selectAllPlacements(): Result<number> {
-  const ids = getTracks().flatMap((track) => track.placements.map((p) => p.id));
+export function selectAllPlacements(eligible: TrackFilter = EVERY_TRACK): Result<number> {
+  const ids = eligiblePlacementIds(eligible);
   if (ids.length === 0) return refuse('Nothing is placed yet.');
   selectPlacements(ids);
   return ok(ids.length);
 }
 
-/** Remove every selected placement as one undo step. */
-export function deleteSelectedPlacements(): Result<number> {
-  const ids = getSelectedPlacementIds();
+/**
+ * Remove every selected placement as one undo step.
+ *
+ * `eligible` is resolved HERE, at execution time, against the live selection —
+ * not captured when the button rendered. A placement can leave the selection,
+ * leave its track or leave the document between the render that enabled a
+ * button and the press that fires it.
+ */
+export function deleteSelectedPlacements(eligible: TrackFilter = EVERY_TRACK): Result<number> {
+  const ids = eligibleSelection(getSelectedPlacementIds(), eligible);
   if (ids.length === 0) return refuse('Nothing is selected.');
   beginEditGesture();
   for (const id of ids) removePlacement(id);
@@ -205,8 +280,10 @@ export function deleteSelectedPlacements(): Result<number> {
  * is what makes duplicating a two-bar phrase spread over three tracks land as
  * that phrase again rather than as three blocks stacked on their originals.
  */
-export function duplicateSelectedPlacements(): Result<number> {
-  const ids = getSelectedPlacementIds();
+export function duplicateSelectedPlacements(
+  eligible: TrackFilter = EVERY_TRACK,
+): Result<number> {
+  const ids = eligibleSelection(getSelectedPlacementIds(), eligible);
   if (ids.length === 0) return refuse('Nothing is selected.');
 
   let start = Infinity;
@@ -234,8 +311,11 @@ export function duplicateSelectedPlacements(): Result<number> {
  * Relative to each placement's OWN current transpose, so a mixed selection
  * keeps its internal intervals instead of being flattened onto one value.
  */
-export function transposeSelectedPlacements(semitones: number): Result<number> {
-  const ids = getSelectedPlacementIds();
+export function transposeSelectedPlacements(
+  semitones: number,
+  eligible: TrackFilter = EVERY_TRACK,
+): Result<number> {
+  const ids = eligibleSelection(getSelectedPlacementIds(), eligible);
   if (ids.length === 0) return refuse('Nothing is selected.');
   beginEditGesture();
   for (const id of ids) {
@@ -260,8 +340,11 @@ export function transposeSelectedPlacements(semitones: number): Result<number> {
  * something to paper over — reselecting a half you can no longer name would
  * mean guessing which half was meant.
  */
-export function splitSelectedPlacements(atTick: Tick): Result<number> {
-  const ids = getSelectedPlacementIds();
+export function splitSelectedPlacements(
+  atTick: Tick,
+  eligible: TrackFilter = EVERY_TRACK,
+): Result<number> {
+  const ids = eligibleSelection(getSelectedPlacementIds(), eligible);
   if (ids.length === 0) return refuse('Nothing is selected.');
 
   let cut = 0;
@@ -349,8 +432,47 @@ export interface ArrangementGestures {
   /** The last refusal, for a live region. Cleared when the next gesture starts. */
   refusal: string | null;
   dismissRefusal(): void;
+  /**
+   * ── THE UI'S OWN COMMAND SET ────────────────────────────────────────────────
+   *
+   * The toolbar's buttons and the window shortcuts are the SAME functions, and
+   * these are they. Each resolves eligibility at EXECUTION time against live
+   * state, so a button that was enabled when it rendered still cannot touch a
+   * block that has since left its lane, left the selection or left the
+   * document.
+   *
+   * They exist on the hook rather than being imported straight from this module
+   * by the grid because `isPatternLane` is the hook's to hold: a caller that
+   * imported `deleteSelectedPlacements` directly would get the DOCUMENT-WIDE
+   * default and quietly delete blocks the view is not drawing. The exported
+   * capabilities keep that default on purpose — see `TrackFilter`.
+   */
+  /** The selected blocks this view may act on — `selectedIds` pruned to the
+   *  lanes the filter admits, and to placements that still exist. */
+  effectiveSelection: readonly string[];
+  /** Select every ELIGIBLE placement. Not `selectAllPlacements()`. */
+  selectAll(): void;
+  deleteSelection(): void;
+  duplicateSelection(): void;
+  transposeSelection(semitones: number): void;
   /** Split the selection at the last tick the pointer was over. */
   splitAtCursor(): void;
+  /**
+   * End every piece of work this hook still holds — an in-flight pointer drag's
+   * WINDOW listeners and its undo bracket, a held arrow's transpose bracket, and
+   * the edge auto-scroll — synchronously, against the geometry they started on.
+   *
+   * For the activation coordinator (COMPS-TRACK-TABS milestone 3 §B): a track
+   * switch repoints the document, and a bracket still open over the OUTGOING
+   * target would have its next close swallow the incoming one, after which
+   * `history.capture` ignores every later edit for the life of the page.
+   * Waiting for an effect cleanup is too late — the new target is already open
+   * by then.
+   *
+   * Idempotent: every piece clears its own handle, so calling it twice, or with
+   * nothing in flight, does nothing.
+   */
+  endGestures(): void;
 }
 
 interface GestureHandlers {
@@ -384,14 +506,69 @@ export interface ArrangementGesturesOptions {
    * `window` and so are `NoteSurface`'s, so ⌘Z would pop an arrangement step AND
    * a note step for one press, and Backspace would delete the selected BLOCK
    * while the user meant the selected note.
+   *
+   * ── WHY THIS IS TWO FLAGS AND NOT ONE ───────────────────────────────────────
+   *
+   * One `enabled` gated the pointer entry points AND the window key handler,
+   * which forced them to agree. They must not. A POINTER press names its own
+   * target — the lane it landed on — and activates that track before it writes
+   * anything, so it stays available while some other track's view is selected.
+   * The KEYBOARD names nothing; it acts on whatever the page is pointed at, and
+   * a second keyboard system over one surface is how a single ⌘Z pops an
+   * arrangement step and a note step at once. So keyboard eligibility is
+   * exclusive with a focused `NoteSurface` and pointer eligibility is not.
+   *
+   * Whether the arrangement's pointer surface is live at all. Per-LANE
+   * eligibility is `isPatternLane`'s job, checked at the press; this is the
+   * page-level question of whether there is any Pattern lane to press.
    */
-  enabled?: boolean;
+  pointerEnabled?: boolean;
+  /**
+   * Whether the window shortcuts are this surface's.
+   *
+   * Mutually exclusive with a focused `NoteSurface`, which owns the same keys
+   * against the notes. A mode switch mid-hold still ends a transpose run in
+   * flight rather than leaving its bracket open — see the key handler.
+   */
+  keyboardEnabled?: boolean;
+  /**
+   * Whether this track's lane is a PATTERN lane: the only lanes the arrangement
+   * hit-tests, drops onto, marquees over, or lets a block command touch.
+   *
+   * Read LIVE, through a ref, because window handlers outlive the render that
+   * installed them. Under the page's one global mode this is the identity
+   * whenever the arrangement is on screen; per-track views are what make it a
+   * real filter.
+   */
+  isPatternLane?: TrackFilter;
+  /**
+   * Take ownership of the track a lane press has landed on, BEFORE the gesture
+   * writes anything — the arrangement's entry into the page's activation
+   * coordinator (COMPS-TRACK-TABS milestone 3).
+   *
+   * Returning false REFUSES, and the press then does nothing at all: a track
+   * that has gone, or a generation job holding the document, must not fall
+   * through into a move, a trim or a marquee. Called once per press, from
+   * `onLanesPointerDown` only — a drag PASSING over a lane does not activate it,
+   * and neither does a hover or a library drop (plan §2).
+   *
+   * Defaults to allowing everything, which is what a host with no notion of an
+   * active track gets.
+   */
+  activateTrack?(trackId: string): boolean;
 }
+
+/** What a host with no notion of an active track answers — see
+ *  `ArrangementGesturesOptions.activateTrack`. */
+const ALWAYS_ACTIVE = () => true;
 
 export function useArrangementGestures({
   geometry,
   scrollerRef,
-  enabled = true,
+  pointerEnabled = true,
+  keyboardEnabled = true,
+  isPatternLane = EVERY_TRACK,
+  activateTrack = ALWAYS_ACTIVE,
 }: ArrangementGesturesOptions): ArrangementGestures {
   const selectedIds = useSelectedPlacementIds();
   const [preview, setPreview] = useState<GesturePreview | null>(null);
@@ -409,14 +586,44 @@ export function useArrangementGestures({
   const transposeRun = useRef(false);
 
   // Read inside window handlers, which outlive the render that installed them.
-  const selectedRef = useRef(selectedIds);
-  selectedRef.current = selectedIds;
+  //
+  // There is no `selectedRef` any more: every handler that used to read this
+  // render's selection now calls `uiSelection()`, which reads the SEAM at the
+  // moment it fires and prunes it to the lanes this view owns. A ref would have
+  // been one render stale and unfiltered — two ways to act on a block that is
+  // not there.
   const geometryRef = useRef(geometry);
   geometryRef.current = geometry;
   // A ref, not a dependency: the keyboard effect installs its listeners once and
   // must not re-install them on a mode change, which would drop a run in flight.
-  const enabledRef = useRef(enabled);
-  enabledRef.current = enabled;
+  const keyboardEnabledRef = useRef(keyboardEnabled);
+  keyboardEnabledRef.current = keyboardEnabled;
+  // Same reason: a gesture's window handlers and the key handler both ask which
+  // lanes are Pattern lanes, and both outlive the render that installed them.
+  const isPatternLaneRef = useRef(isPatternLane);
+  isPatternLaneRef.current = isPatternLane;
+
+  /**
+   * The lanes this surface's gestures act on, WITH THEIR ORIGINAL TOPS.
+   *
+   * An Edit or Voice lane is a GAP in this array, not a shifted neighbour: the
+   * tops still describe where the Pattern lanes are on screen, so `laneAt` over
+   * this list answers null for a press on a lane the arrangement does not own
+   * — which is exactly the refusal wanted — instead of answering the wrong
+   * lane. §5's "preserve original tops and IDs; Edit and Voice rows are gaps".
+   *
+   * The full `geo.tracks` is passed to `hitTest` and `placementsInBand`
+   * unfiltered on purpose: both resolve a track BY ID from the lane they
+   * matched, so a lane that is not in this list is never looked up. Filtering a
+   * parallel array and pairing it by index is the failure §5 names.
+   */
+  const patternLanesOf = (geo: GestureGeometry): LaneRect[] =>
+    geo.lanes.filter((lane) => isPatternLaneRef.current(lane.trackId));
+
+  /** The selection this view may act on, read LIVE — the toolbar's buttons and
+   *  the shortcuts both resolve through this at the moment they fire. */
+  const uiSelection = (): string[] =>
+    eligibleSelection(getSelectedPlacementIds(), isPatternLaneRef.current);
 
   // Drives the view while a drag is held near the lane area's edge, so a block
   // can be taken somewhere that wasn't on screen when the drag started.
@@ -442,11 +649,114 @@ export function useArrangementGestures({
    */
   const abortInFlight = () => abortRef.current?.();
 
+  /**
+   * Close the bracket swallowing a held arrow's repeats. Its snapshot is
+   * DISCARDED rather than pushed: the key's first press already recorded the
+   * pre-transpose state, so the whole hold undoes as that one step.
+   *
+   * At hook scope rather than inside the keyboard effect, because three things
+   * need it now — the effect, the unmount cleanup, and `endGestures` for the
+   * activation coordinator. It reads nothing but refs and module imports, so
+   * the effect's `[]`-deps closure over the first render's copy is the same
+   * function every later render would have built.
+   */
+  const endTransposeRun = () => {
+    if (!transposeRun.current) return;
+    transposeRun.current = false;
+    endEditGesture(false);
+  };
+
+  /**
+   * See `ArrangementGestures.endGestures`.
+   *
+   * ⚠ THE TRANSPOSE RUN FIRST. The two brackets NEST — a pointer drag opens
+   * depth 1 and a held arrow over it opens depth 2 (the reverse cannot happen:
+   * the capture-phase `pointerdown` listener in the keyboard effect ends a run
+   * before any press is handled) — and `endEditGesture(changed)` honours
+   * `changed` only on the OUTERMOST close. Ending the drag first would close at
+   * depth 2 (ignored) and then close the run at depth 1 with its own `false`,
+   * discarding the drag's snapshot and leaving its writes un-undoable.
+   */
+  const endGestures = () => {
+    endTransposeRun();
+    abortInFlight();
+    // Belt and braces: `abortInFlight` ends it through the gesture's own
+    // teardown when there IS one in flight, and this covers an auto-scroll left
+    // spinning by anything that is not.
+    edgeScrollRef.current.end();
+  };
+
+  /**
+   * ── WHAT A DOCUMENT-WRITING GESTURE CAPTURES AT ITS START ───────────────────
+   *
+   * The Pattern lane ID ORDER and the geometry that order was measured in, plus
+   * which composition it belongs to. §5: `planGroupMove` works in LANE INDICES,
+   * and an index is only meaningful against the array it was taken from — so the
+   * whole gesture resolves targets and refusals through `lanes` HERE, never
+   * through the live array and never through the full track list.
+   *
+   * `signature` is the cheap form of the same thing, re-derived each frame and
+   * compared. It folds in order, tops and heights because all three can move
+   * under a drag (a track added or removed, a voice rack measured or folded, a
+   * lane leaving Pattern) and every one of them silently re-points an index.
+   */
+  interface GestureCapture {
+    readonly lanes: readonly LaneRect[];
+    readonly compositionId: string | null;
+    readonly pxPerBeat: number;
+    readonly signature: string;
+  }
+
+  const laneSignature = (lanes: readonly LaneRect[], pxPerBeat: number): string =>
+    `${pxPerBeat}|${lanes.map((lane) => `${lane.trackId}:${lane.top}:${lane.height}`).join(',')}`;
+
+  const capture = (geo: GestureGeometry): GestureCapture => {
+    const lanes = patternLanesOf(geo);
+    return {
+      lanes,
+      compositionId: getEditingComposition()?.id ?? null,
+      pxPerBeat: geo.pxPerBeat,
+      signature: laneSignature(lanes, geo.pxPerBeat),
+    };
+  };
+
+  /**
+   * Whether the world has moved out from under a gesture that captured it.
+   *
+   * A true here means FINISH THROUGH THE EXISTING TEARDOWN and write nothing
+   * more (§5). The alternative — carrying on against stale indices — moves the
+   * wrong block to the wrong lane and leaves an undo step that says it was
+   * asked for.
+   *
+   * Job ownership is in here for the same reason it is step 1 of the page's
+   * activation coordinator: a job that starts mid-drag owns the document, and
+   * the seam would refuse each write separately while the gesture kept painting
+   * a preview of edits that were not happening.
+   */
+  const invalidated = (captured: GestureCapture, live: GestureGeometry): boolean =>
+    isJobRunning() ||
+    (getEditingComposition()?.id ?? null) !== captured.compositionId ||
+    laneSignature(patternLanesOf(live), live.pxPerBeat) !== captured.signature;
+
   const beginPointerGesture = (e: React.PointerEvent, handlers: GestureHandlers) => {
     const startX = e.clientX;
     const startY = e.clientY;
     let dragged = false;
     let last = { x: startX, y: startY };
+    /**
+     * Whether this gesture is still the one holding the pointer.
+     *
+     * `handlers.drag` CAN END THE GESTURE — `invalidated` aborts from inside it
+     * — and the code that called `drag` then keeps running. Without this flag
+     * `onMove` re-arms the edge auto-scroll the teardown just stopped, against a
+     * `pointermove` listener that is no longer installed: `pointerX` can never
+     * change again, so the speed never returns to 0 and the rAF loop scrolls the
+     * arrangement to the end forever.
+     *
+     * Not `abortRef.current !== abort` for the same job: a nested gesture would
+     * make that read answer about somebody else's.
+     */
+    let live = true;
 
     const pointAt = (x: number, y: number): Point | null => {
       const geo = geometryRef.current();
@@ -469,6 +779,9 @@ export function useArrangementGestures({
       dragged = true;
       last = { x: ev.clientX, y: ev.clientY };
       apply();
+      // `apply` may have torn this gesture down — see `live`. Re-arming the
+      // auto-scroll after that is a rAF loop nothing can stop.
+      if (!live) return;
       // Only once the press has become a drag: a click held over the edge is
       // not a request to go anywhere.
       edgeScrollRef.current.track(ev.clientX, apply);
@@ -476,6 +789,7 @@ export function useArrangementGestures({
 
     /** The ONE place listeners come off and the undo bracket closes. */
     const teardown = () => {
+      live = false;
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', abort);
@@ -540,19 +854,35 @@ export function useArrangementGestures({
   };
 
   /** Drag a block, or a whole selection, along its lane and across lanes. */
-  const startMove = (hit: Extract<ArrangementHit, { kind: 'placement' }>, e: React.PointerEvent, geo: GestureGeometry) => {
-    const alreadySelected = selectedRef.current.includes(hit.placementId);
+  const startMove = (
+    hit: Extract<ArrangementHit, { kind: 'placement' }>,
+    e: React.PointerEvent,
+    geo: GestureGeometry,
+  ) => {
+    // THE CAPTURE, before anything is selected or written: every index below is
+    // an index into `captured.lanes`, and the gesture resolves through that one
+    // array for its whole life — see `GestureCapture`.
+    const captured = capture(geo);
+    const eligible = uiSelection();
+    const alreadySelected = eligible.includes(hit.placementId);
     // Grabbing a block outside the selection replaces it; grabbing one inside
     // keeps the group, so a multi-selection drags as a unit. Same rule as
     // `Timeline.tsx`, deliberately — one selection model for both surfaces.
-    const group = alreadySelected ? [...selectedRef.current] : [hit.placementId];
+    //
+    // `eligible`, not the raw store selection: a selection written from outside
+    // this page can name blocks on lanes the arrangement is not drawing, and
+    // dragging one visible block must not drag those along with it.
+    const group = alreadySelected ? eligible : [hit.placementId];
     if (!alreadySelected) selectPlacements([hit.placementId]);
 
-    const laneIndexOf = new Map(geo.lanes.map((lane, index) => [lane.trackId, index]));
+    const laneIndexOf = new Map(captured.lanes.map((lane, index) => [lane.trackId, index]));
     const items: PlacementDragItem[] = [];
     for (const id of group) {
       const found = findPlacement(id);
       if (!found) continue;
+      // MEMBERSHIP VALIDATED BEFORE THE MOVE STARTS (§5): a block whose track is
+      // not one of the captured Pattern lanes has no index in this frame, and a
+      // gesture cannot express a delta from a lane that is not in the stack.
       const trackIndex = laneIndexOf.get(found.track.id);
       if (trackIndex === undefined) continue;
       items.push({ id, trackIndex, startTick: found.placement.startTick });
@@ -569,13 +899,24 @@ export function useArrangementGestures({
       drag(point) {
         const live = geometryRef.current();
         if (!live) return;
+        // The world moved: end the drag through the ONE teardown, before this
+        // frame writes anything against indices that no longer mean what they
+        // meant. `abortInFlight` closes the undo bracket, so the moves already
+        // made stay undoable as the one step they were.
+        if (invalidated(captured, live)) {
+          abortInFlight();
+          return;
+        }
         const wantedTick = snapArrangementTick(
           pxToTick(Math.max(0, point.x), live.pxPerBeat) - grabOffset,
           live.snap,
         );
-        const lane = laneAt(live.lanes, point.y);
+        // Against the CAPTURED lanes, not the live ones — the point is current
+        // (`toContent` is read live, so scrolling is already undone) but the
+        // stack it is measured against is the gesture's own.
+        const lane = laneAt(captured.lanes, point.y);
         const laneIndex = lane
-          ? live.lanes.findIndex((candidate) => candidate.trackId === lane.trackId)
+          ? captured.lanes.findIndex((candidate) => candidate.trackId === lane.trackId)
           : anchor.trackIndex;
 
         const deltaTicks = wantedTick - anchor.startTick;
@@ -583,7 +924,7 @@ export function useArrangementGestures({
           items,
           deltaTicks,
           laneIndex - anchor.trackIndex,
-          live.lanes.length,
+          captured.lanes.length,
         );
         // A drag across lanes is a placement onto another track, so it is held
         // to the same instrument rule a drop from the rail is — otherwise the
@@ -591,10 +932,10 @@ export function useArrangementGestures({
         // track and then dragging down one. The lane change is dropped rather
         // than the whole gesture: the block keeps following the pointer along
         // its own lane, which is the half of the drag that is still legal.
-        const blocked = laneChangeRefusal(plan, live.lanes);
+        const blocked = laneChangeRefusal(plan, captured.lanes);
         if (blocked !== null) {
           setRefusal(blocked);
-          plan = planGroupMove(items, deltaTicks, 0, live.lanes.length);
+          plan = planGroupMove(items, deltaTicks, 0, captured.lanes.length);
         } else {
           // Cleared as soon as the drag comes back to a lane it may enter, so
           // the reason describes where the block IS rather than where it was
@@ -602,7 +943,7 @@ export function useArrangementGestures({
           setRefusal(null);
         }
         for (const move of plan) {
-          const trackId = live.lanes[move.trackIndex]?.trackId;
+          const trackId = captured.lanes[move.trackIndex]?.trackId;
           if (trackId !== undefined) movePlacement(move.id, trackId, move.startTick);
         }
       },
@@ -636,10 +977,15 @@ export function useArrangementGestures({
     hit: Extract<ArrangementHit, { kind: 'placement' }>,
     e: React.PointerEvent,
     edge: 'start' | 'end',
+    geo: GestureGeometry,
   ) => {
     const found = findPlacement(hit.placementId);
     if (!found) return;
-    if (!selectedRef.current.includes(hit.placementId)) selectPlacements([hit.placementId]);
+    // A trim never changes lane, so it captures nothing but the invalidation
+    // baseline — which it still needs: a job taking the document, or the
+    // composition being swapped, mid-trim is the same "write nothing more".
+    const captured = capture(geo);
+    if (!uiSelection().includes(hit.placementId)) selectPlacements([hit.placementId]);
 
     const from = {
       id: found.placement.id,
@@ -670,6 +1016,10 @@ export function useArrangementGestures({
       drag(point) {
         const live = geometryRef.current();
         if (!live) return;
+        if (invalidated(captured, live)) {
+          abortInFlight();
+          return;
+        }
         const tick = snapArrangementTick(pxToTick(Math.max(0, point.x), live.pxPerBeat), live.snap);
 
         if (edge === 'end') {
@@ -692,16 +1042,28 @@ export function useArrangementGestures({
     });
   };
 
-  /** Rubber-band over empty lane space. Selection is not an edit, so no undo
-   *  bracket is opened — there is nothing here for an abort to wedge. */
+  /**
+   * Rubber-band over empty lane space. Selection is not an edit, so no undo
+   * bracket is opened — there is nothing here for an abort to wedge.
+   *
+   * It captures and checks `invalidated` anyway (§5: EVERY gesture finishes or
+   * cancels through the existing teardown). A band measured against one stack of
+   * lanes and swept over another selects rows the user never dragged across, and
+   * `before` — captured once — can name a placement a job has since deleted.
+   * Cheaper to end it than to re-derive a band nobody asked for.
+   */
   const startMarquee = (e: React.PointerEvent, geo: GestureGeometry) => {
+    const captured = capture(geo);
     // The anchor is kept in CONTENT space for the same reason the drag targets
     // are: under edge auto-scroll the lanes slide but the corner the user
     // started from stays on the block they started from, so the band grows
     // instead of sliding along with the view.
     const origin = geo.toContent(e.clientX, e.clientY);
     const additive = e.shiftKey;
-    const before = additive ? [...selectedRef.current] : [];
+    // The ELIGIBLE selection is what a shift-marquee adds to. Starting from the
+    // raw store selection would write ineligible ids back through
+    // `selectPlacements` as though the user had just picked them.
+    const before = additive ? uiSelection() : [];
     /** The previous frame's hits, so an auto-scroll frame that changes nothing
      *  doesn't re-render the whole arrangement 60 times a second. */
     let lastHits: string | null = null;
@@ -710,6 +1072,10 @@ export function useArrangementGestures({
       drag(point) {
         const live = geometryRef.current();
         if (!live) return;
+        if (invalidated(captured, live)) {
+          abortInFlight();
+          return;
+        }
         const band = {
           left: Math.min(origin.x, point.x),
           right: Math.max(origin.x, point.x),
@@ -724,7 +1090,14 @@ export function useArrangementGestures({
           height: band.bottom - band.top,
         });
 
-        const hits = placementsInBand(band, live.lanes, live.tracks, live.pxPerBeat);
+        // Pattern lanes only: a band dragged across an Edit or Voice row must
+        // not sweep up blocks that row is not drawing.
+        const hits = placementsInBand(
+          band,
+          patternLanesOf(live),
+          live.tracks,
+          live.pxPerBeat,
+        );
         const key = hits.join(' ');
         if (key === lastHits) return;
         lastHits = key;
@@ -748,7 +1121,9 @@ export function useArrangementGestures({
     if (e.button !== 0) return;
     // The rail holds the note inspector in edit mode, so nothing there can start
     // a pattern drag — but the entry point is public and must refuse anyway.
-    if (!enabled) return;
+    // POINTER eligibility: a drop needs a Pattern lane to land on, and it names
+    // its own target, so it does not care which track is selected.
+    if (!pointerEnabled) return;
     abortInFlight();
     const pattern = findLibraryPattern(patternId);
     if (!pattern) return;
@@ -764,9 +1139,12 @@ export function useArrangementGestures({
           setPreview(null);
           return;
         }
-        const target = dropTarget(point, live.lanes, live.pxPerBeat, live.snap);
+        // Pattern lanes only, with their original tops: an Edit or Voice row is
+        // a gap a drop falls through rather than a lane it lands on.
+        const dropLanes = patternLanesOf(live);
+        const target = dropTarget(point, dropLanes, live.pxPerBeat, live.snap);
         const lane = target
-          ? live.lanes.find((candidate) => candidate.trackId === target.trackId)
+          ? dropLanes.find((candidate) => candidate.trackId === target.trackId)
           : undefined;
         // Outside the lanes there is no track to guess at, so no indicator —
         // `dropTarget` returns null for exactly this reason.
@@ -798,7 +1176,7 @@ export function useArrangementGestures({
         // gesture ends with nothing placed, exactly as a release outside an
         // HTML5 drop target would.
         if (!live.inViewport(client.x, client.y)) return;
-        const target = dropTarget(point, live.lanes, live.pxPerBeat, live.snap);
+        const target = dropTarget(point, patternLanesOf(live), live.pxPerBeat, live.snap);
         if (!target) return;
         const track = findTrack(target.trackId);
         if (!track) return;
@@ -819,10 +1197,27 @@ export function useArrangementGestures({
 
   const onLanesPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
-    if (!enabled) return;
+    if (!pointerEnabled) return;
     abortInFlight();
     const geo = geometry();
     if (!geo) return;
+
+    const point = geo.toContent(e.clientX, e.clientY);
+    // PATTERN LANES ONLY, with their original tops. A press on an Edit or Voice
+    // row lands in a gap and `laneAt` answers null, so `hitTest` answers null
+    // and the press does nothing here — which is what lets the note surface
+    // underneath own it. The full `geo.tracks` is safe: `hitTest` resolves a
+    // track by the id of the lane it matched.
+    const hit = hitTest(point, patternLanesOf(geo), geo.tracks, geo.pxPerBeat);
+    // BEFORE `preventDefault` and before the focus is taken, and that ordering
+    // is the whole of the split in §4. While `pointerEnabled` meant "the page is
+    // in pattern view" this handler never ran over a lane it did not own; it now
+    // means "SOME lane is a Pattern lane", and `NoteSurface.onLaneDown` does not
+    // stop propagation — so a press on an Edit lane's empty row bubbles here.
+    // Suppressing its default and yanking DOM focus to the scroller on the way
+    // past would break the row's own handling of a press the arrangement has
+    // just declined.
+    if (hit === null) return;
     // Stops the browser selecting the block labels the drag passes over — which
     // also suppresses the focus the press would otherwise move, so the scroller
     // is focused by hand. Without it, pressing a lane leaves focus wherever it
@@ -830,10 +1225,12 @@ export function useArrangementGestures({
     e.preventDefault();
     scrollerRef.current?.focus();
     setRefusal(null);
-
-    const point = geo.toContent(e.clientX, e.clientY);
-    const hit = hitTest(point, geo.lanes, geo.tracks, geo.pxPerBeat);
-    if (hit === null) return;
+    // THE LANE'S ENTRY INTO THE ACTIVATION COORDINATOR, and it comes before the
+    // cursor tick is recorded and before any gesture starts: a press on a lane
+    // selects the track that owns it, and a REFUSED activation (the track has
+    // gone, a job holds the document) must leave the press doing nothing at all
+    // rather than moving a block on a track the page is not pointed at.
+    if (!activateTrack(hit.trackId)) return;
     // Snapped, exactly as `onLanesPointerMove` snaps it: `hitTest` reports an
     // UNSNAPPED tick on purpose (snap belongs to the gesture), and storing it
     // raw here would make Split cut at an arbitrary tick after a press and at a
@@ -847,15 +1244,23 @@ export function useArrangementGestures({
     // Shift is the selection modifier wherever a block can be grabbed —
     // including the trim edges, which are easy to hit by accident.
     if (e.shiftKey) {
-      selectPlacements([hit.placementId], 'toggle');
+      // Computed rather than `'toggle'`, because the seam's toggle acts on the
+      // STORE's selection and would carry ineligible ids — a selection written
+      // from outside this page — along with the one block the user picked.
+      const current = uiSelection();
+      selectPlacements(
+        current.includes(hit.placementId)
+          ? current.filter((id) => id !== hit.placementId)
+          : [...current, hit.placementId],
+      );
       return;
     }
     if (hit.zone === 'body') startMove(hit, e, geo);
-    else startTrim(hit, e, hit.zone === 'trim-start' ? 'start' : 'end');
+    else startTrim(hit, e, hit.zone === 'trim-start' ? 'start' : 'end', geo);
   };
 
   const onLanesPointerMove = (e: React.PointerEvent) => {
-    if (!enabled) return;
+    if (!pointerEnabled) return;
     const geo = geometry();
     if (!geo) return;
     const point = geo.toContent(e.clientX, e.clientY);
@@ -865,40 +1270,54 @@ export function useArrangementGestures({
     );
   };
 
+  // ---------------------------------------------------- the UI's commands ---
+  // ONE implementation per command, shared by the toolbar button and the
+  // shortcut — see `ArrangementGestures.effectiveSelection`. Each reads
+  // `isPatternLaneRef` at the moment it fires, so eligibility is decided at
+  // EXECUTION time and not at the render that drew the button.
+
+  /** Report a capability's refusal in the gesture strip, and clear it on
+   *  success so a stale sentence doesn't outlive the thing it described. */
+  const report = (result: Result<unknown>) => setRefusal(result.ok ? null : result.reason);
+
+  const selectAll = () => report(selectAllPlacements(isPatternLaneRef.current));
+  const deleteSelection = () => report(deleteSelectedPlacements(isPatternLaneRef.current));
+  const duplicateSelection = () => report(duplicateSelectedPlacements(isPatternLaneRef.current));
+  const transposeSelection = (semitones: number) =>
+    report(transposeSelectedPlacements(semitones, isPatternLaneRef.current));
+
   const splitAtCursor = () => {
     const tick = cursorTickRef.current;
     if (tick === null) {
       setRefusal('Move the cursor to where the cut should go, then split.');
       return;
     }
-    const result = splitSelectedPlacements(tick);
-    setRefusal(result.ok ? null : result.reason);
+    report(splitSelectedPlacements(tick, isPatternLaneRef.current));
   };
+
+  /** The same four, for the window key handler — which installs its listeners
+   *  once and so outlives the render that built them. Same reason as
+   *  `geometryRef` and `isPatternLaneRef` above. */
+  const commandsRef = useRef({ selectAll, deleteSelection, duplicateSelection, transposeSelection });
+  commandsRef.current = { selectAll, deleteSelection, duplicateSelection, transposeSelection };
 
   // Editing shortcuts. One listener for all of them, so nothing races a second
   // handler for the same key. `Timeline`'s equivalent is never mounted at the
   // same time — `App` swaps the whole page — so the two cannot collide.
   useEffect(() => {
-    /** Close the bracket swallowing a held arrow's repeats. Its snapshot is
-     *  DISCARDED rather than pushed: the key's first press already recorded the
-     *  pre-transpose state, so the whole hold undoes as that one step. */
-    const endTransposeRun = () => {
-      if (!transposeRun.current) return;
-      transposeRun.current = false;
-      endEditGesture(false);
-    };
-
     const onKey = (e: KeyboardEvent) => {
       // Not ours in edit mode — `NoteSurface` answers the same keys against the
       // notes. Still ends a run in flight: a mode switch mid-hold must not leave
       // the bracket open.
-      if (!enabledRef.current) {
+      if (!keyboardEnabledRef.current) {
         endTransposeRun();
         return;
       }
-      const target = e.target as HTMLElement | null;
-      // A `select` counts: arrows are how you change one.
-      if (target?.matches('input, textarea, select, [contenteditable]')) {
+      // Inside a control that answers arrows for itself — a field, a `select`,
+      // a `Knob` (`role="slider"`) or a `ParamEncoder` (`role="spinbutton"`).
+      // ONE predicate, shared with `NoteSurface`'s handler, because a second
+      // copy of the list is how the two dials came to be missing from both.
+      if (insideKeyboardControl(e.target)) {
         endTransposeRun();
         return;
       }
@@ -913,25 +1332,26 @@ export function useArrangementGestures({
       }
       if (mod && e.key.toLowerCase() === 'd') {
         e.preventDefault();
-        const result = duplicateSelectedPlacements();
-        if (!result.ok) setRefusal(result.reason);
+        commandsRef.current.duplicateSelection();
         return;
       }
       if (mod && e.key.toLowerCase() === 'a') {
         e.preventDefault();
-        const result = selectAllPlacements();
-        if (!result.ok) setRefusal(result.reason);
+        // Not `selectAllPlacements()`: Select All enumerates only the lanes this
+        // view owns, or the next Delete reaches blocks nothing is drawing (§5).
+        commandsRef.current.selectAll();
         return;
       }
       if (e.key === 'Backspace' || e.key === 'Delete') {
-        if (selectedRef.current.length === 0) return;
+        if (uiSelection().length === 0) return;
         e.preventDefault();
-        deleteSelectedPlacements();
+        commandsRef.current.deleteSelection();
         return;
       }
 
-      // Everything below edits the selection, so there has to be one.
-      if (selectedRef.current.length === 0) return;
+      // Everything below edits the selection, so there has to be one — and an
+      // ELIGIBLE one. Resolved here, at the keystroke, against live state.
+      if (uiSelection().length === 0) return;
 
       if (!mod && !e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
         // Without this the lane area scrolls under the gesture.
@@ -947,7 +1367,9 @@ export function useArrangementGestures({
           beginEditGesture();
         }
         // Shift is an octave, matching the pattern editor's fret nudge.
-        transposeSelectedPlacements((e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 12 : 1));
+        commandsRef.current.transposeSelection(
+          (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 12 : 1),
+        );
       }
     };
 
@@ -976,12 +1398,13 @@ export function useArrangementGestures({
   // leaves the same bracket open, so it closes here too.
   useEffect(
     () => () => {
+      // Inner bracket first — see `endGestures` for why the order decides
+      // whether the drag's undo step survives.
+      endTransposeRun();
       abortRef.current?.();
-      if (transposeRun.current) {
-        transposeRun.current = false;
-        endEditGesture(false);
-      }
     },
+    // `endTransposeRun` reads only refs, so the first render's copy is the same
+    // function every later one would build — see its declaration.
     [],
   );
 
@@ -992,6 +1415,14 @@ export function useArrangementGestures({
     preview,
     refusal,
     dismissRefusal: () => setRefusal(null),
+    // Render-time, from the reactive selection — what the toolbar counts and
+    // shows. The COMMANDS re-derive it at execution time instead.
+    effectiveSelection: eligibleSelection(selectedIds, isPatternLane),
+    selectAll,
+    deleteSelection,
+    duplicateSelection,
+    transposeSelection,
     splitAtCursor,
+    endGestures,
   };
 }

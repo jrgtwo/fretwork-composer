@@ -15,6 +15,7 @@ import {
 } from '@fretwork/lib';
 import { App } from '../src/App';
 import { ArrangementGrid } from '../src/composition/ArrangementGrid';
+import { insideKeyboardControl } from '../src/timeline/keyboardBoundary';
 import {
   TRACK_HEADER_HEIGHT,
 } from '../src/composition/arrangementMath';
@@ -1295,10 +1296,23 @@ describe('the rack in a lane', () => {
     fireEvent.keyDown(knob(getTracks()[0], 'Level', 'Volume'), { key: 'ArrowUp' });
 
     // ArrowUp transposes the selection a semitone in pattern mode. One press
-    // doing two things is the bug `gestures.enabled` exists to prevent, and
-    // voice mode needs the same lock edit mode already had.
+    // doing two things is the bug `keyboardEnabled` exists to prevent, and the
+    // voice context needs the same lock the edit one already had.
     expect(getTracks()[0].placements[0].transposeSemitones ?? 0).toBe(0);
     expect(dirtyOf(getTracks()[0])).toBe(true);
+
+    // ⚠ AND NOT ONLY BECAUSE THE KNOB SWALLOWED IT. The press above lands on a
+    // `role="slider"`, which the shared boundary predicate stops on its own, and
+    // the arrangement's eligibility filter admits no track in this view either —
+    // so that assertion holds whether or not `keyboardEnabled` is false.
+    //
+    // ⌘Z is the key that ISOLATES the flag: it runs BEFORE the key handler looks
+    // at the selection, so neither of the other two refusals is in its way, and
+    // nothing is focused so the boundary test answers false. With the flag on,
+    // this pops the step that placed the block and the arrangement loses it —
+    // an edit undone on a surface that is not on screen.
+    fireEvent.keyDown(document.body, { key: 'z', metaKey: true });
+    expect(getTracks()[0].placements).toHaveLength(1);
   });
 
   it('says which rack is unsaved, and reverts only that one', async () => {
@@ -1334,7 +1348,7 @@ describe('the rack in a lane', () => {
     expect(screen.queryByTestId('arrangement-ruler')).toBeNull();
     // Zoom, snap and the bar count are all quantities of TIME, and so is undo —
     // not because a history is temporal but because ⌘Z is dead in voice mode
-    // (`gestures.enabled`), and a live button with no working shortcut is the
+    // (`keyboardEnabled`), and a live button with no working shortcut is the
     // second, contradicting code path the grid's comment forbids.
     expect(screen.queryByRole('button', { name: 'Zoom in' })).toBeNull();
     expect(screen.queryByRole('combobox', { name: 'Arrangement snap' })).toBeNull();
@@ -3469,5 +3483,46 @@ describe('the pattern page’s voice pane is untouched', () => {
     await user.click(nav().getByRole('button', { name: 'Pattern' }));
     await user.click(screen.getByRole('button', { name: /Level/ }));
     expect(screen.queryByText('Unsaved')).toBeNull();
+  });
+});
+
+/**
+ * COMPS-TRACK-TABS milestone 3 §B — that the boundary covers the controls that
+ * actually ship, on the elements the page actually renders.
+ *
+ * The two window key handlers (`NoteSurface`'s and the arrangement's) share one
+ * predicate, and `tests/ArrangementGestures.test.tsx` and `tests/EditMode.test.tsx`
+ * drive the BEHAVIOUR through it. What those two cannot show is a real rack in a
+ * real lane, because under the page's one global mode a voice rack and either key
+ * handler are never on screen together — milestone 4's per-track views are what
+ * put them there. So the rack and the header are checked here, against the
+ * predicate directly: this is the assertion that fails if a dial is ever redrawn
+ * with a role the selector does not name.
+ */
+describe('the keyboard boundary covers the rack and the header', () => {
+  it('puts every header control and every rack dial inside it, and the lanes outside', () => {
+    const tracks = twoTracks();
+    setVoiceParam('track', tracks[0].id, 'source.kind', 'pluck-synth');
+    render(<VoiceGrid />);
+    openStage(getTracks()[0], 'Source');
+
+    // A HEADER control. Not a `Knob` — the header's fader is a native range, for
+    // the layout reason `TrackControls` states — but it is the control that is on
+    // screen in EVERY view, which is why selected-view gating alone cannot save
+    // the shortcuts from it.
+    const fader = screen.getAllByLabelText(/^Volume for .* in decibels$/)[0];
+    expect(insideKeyboardControl(fader)).toBe(true);
+
+    // A RACK dial of each kind.
+    const source = stage(getTracks()[0], 'Source');
+    expect(insideKeyboardControl(source.getAllByRole('slider')[0])).toBe(true);
+    expect(insideKeyboardControl(source.getByRole('spinbutton', { name: 'Resonance' }))).toBe(
+      true,
+    );
+
+    // And the surface the shortcuts belong to is NOT inside one, or they would
+    // never fire at all.
+    expect(insideKeyboardControl(screen.getByTestId('arrangement-lanes-scroller'))).toBe(false);
+    expect(insideKeyboardControl(null)).toBe(false);
   });
 });

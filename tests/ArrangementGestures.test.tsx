@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -25,7 +25,11 @@ import { ArrangementGrid } from '../src/composition/ArrangementGrid';
 import {
   addPlacement,
   addTrack,
+  beginJob,
   clearHistory,
+  endJob,
+  moveTrack,
+  removeTrack,
   getEditingComposition,
   getSelectedPlacementIds,
   getTracks,
@@ -57,6 +61,8 @@ import {
   stampNote,
   useLibraryPatterns,
 } from '../src/patterns/patternService';
+import { Knob } from '../src/voice/controls/Knob';
+import { ParamEncoder } from '../src/voice/controls/ParamEncoder';
 import { installFrameClock } from './frameClock';
 
 /**
@@ -1341,5 +1347,980 @@ describe('out-of-range transposition', () => {
     // Trimmed to a single beat, the high note is outside the playing range.
     usePatternsStore.getState().resizePlacement(id, PPQ);
     expect(droppedByTranspose(findBlock(id).placement)).toBe(0);
+  });
+});
+
+/**
+ * COMPS-TRACK-TABS milestone 3 — the hook's two new seams.
+ *
+ * `Harness` above passes NEITHER of them, which is deliberate and is half of
+ * what these assert: the defaults are what every existing test in this file
+ * runs on, so nothing here changed for a host with no notion of an active
+ * track.
+ */
+describe('activation and teardown seams', () => {
+  /** The harness again, with the coordinator's two entry points wired. */
+  function ActivatingHarness({
+    activateTrack,
+    endRef,
+  }: {
+    activateTrack?: (trackId: string) => boolean;
+    endRef?: React.RefObject<(() => void) | null>;
+  }) {
+    const scrollerRef = useRef<HTMLDivElement>(null);
+    const geometryRef = useRef<GestureGeometry | null>(null);
+    const composition = useEditingComposition();
+    const tracks = useTracks();
+    geometryRef.current = composition
+      ? {
+          lanes: patternLanes(tracks),
+          tracks,
+          pxPerBeat: PX,
+          snap: arrangementSnap(composition.timeSignature, DEFAULT_ARRANGEMENT_SNAP_ID),
+          toContent: (clientX: number, clientY: number) => ({ x: clientX, y: clientY }),
+          inViewport: () => true,
+        }
+      : null;
+    const gestures = useArrangementGestures({
+      geometry: useCallback(() => geometryRef.current, []),
+      scrollerRef,
+      activateTrack,
+    });
+    if (endRef) endRef.current = gestures.endGestures;
+    return (
+      <div ref={scrollerRef}>
+        <div
+          data-testid="lanes"
+          onPointerDown={gestures.onLanesPointerDown}
+          onPointerMove={gestures.onLanesPointerMove}
+          style={{ width: 4000, height: LANE_HEIGHT * tracks.length }}
+        />
+      </div>
+    );
+  }
+
+  it('activates the track a press landed on, before the gesture starts', async () => {
+    const { trackIds, c } = seedArrangement();
+    const asked: string[] = [];
+    const user = userEvent.setup();
+    render(<ActivatingHarness activateTrack={(id) => (asked.push(id), true)} />);
+
+    // A press on the block in lane 1 — not the lane the drag ends over.
+    await dragFrom(user, lanes(), [
+      { x: bodyX(0), y: laneY(1) },
+      { x: bodyX(0), y: laneY(0) },
+    ]);
+
+    // ONE activation, for the track the press landed on. A drag that crosses
+    // lanes does not activate every lane it passes.
+    expect(asked).toEqual([trackIds[1]]);
+    // And the gesture itself ran: the block moved up a lane.
+    expect(trackOf(c)).toBe(trackIds[0]);
+  });
+
+  it('does nothing at all when the activation is refused', async () => {
+    const { trackIds, c } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ActivatingHarness activateTrack={() => false} />);
+
+    await dragFrom(user, lanes(), [
+      { x: bodyX(0), y: laneY(1) },
+      { x: bodyX(0), y: laneY(0) },
+    ]);
+
+    // Not moved, not selected, and no marquee left behind — a refused
+    // activation must not fall through into the gesture underneath it.
+    expect(trackOf(c)).toBe(trackIds[1]);
+    expect(getSelectedPlacementIds()).toEqual([]);
+  });
+
+  /** The DEFAULT is covered by every other test in this file — none of them
+   *  passes `activateTrack` and all of them drag. What is asserted here is only
+   *  that a hover never asks. */
+  it('is not asked at all by a hover', async () => {
+    const asked: string[] = [];
+    const user = userEvent.setup();
+    seedArrangement();
+    render(<ActivatingHarness activateTrack={(id) => (asked.push(id), true)} />);
+
+    await user.pointer({ target: lanes(), coords: { clientX: bodyX(0), clientY: laneY(1) } });
+    expect(asked).toEqual([]);
+  });
+
+  /**
+   * `endGestures` is what the page's activation coordinator calls before it
+   * repoints the document. The listeners are on `window`, so unmounting the
+   * element they were installed from would not remove them — this is the only
+   * thing that does, and it has to be callable mid-drag.
+   */
+  it('ends an in-flight drag on demand, and is idempotent', async () => {
+    const { trackIds, b } = seedArrangement();
+    const endRef = { current: null } as React.RefObject<(() => void) | null>;
+    const user = userEvent.setup();
+    render(<ActivatingHarness endRef={endRef} />);
+
+    const startedAt = startOf(b);
+    await user.pointer([
+      {
+        target: lanes(),
+        keys: '[MouseLeft>]',
+        coords: { clientX: bodyX(startedAt), clientY: laneY(0) },
+      },
+      { coords: { clientX: bodyX(startedAt) + 400, clientY: laneY(0) } },
+    ]);
+    const draggedTo = startOf(b);
+    expect(draggedTo).not.toBe(startedAt);
+
+    act(() => {
+      endRef.current!();
+      // Twice: every piece clears its own handle, so the second call is a no-op.
+      endRef.current!();
+    });
+
+    await user.pointer([
+      { coords: { clientX: bodyX(startedAt) + 1200, clientY: laneY(0) } },
+      { keys: '[/MouseLeft]' },
+    ]);
+
+    expect(startOf(b)).toBe(draggedTo);
+    expect(trackOf(b)).toBe(trackIds[0]);
+  });
+
+  /**
+   * The OTHER half of `endGestures`: a held arrow's undo bracket is closed by a
+   * keyup, and a track switch is not a keyup. Left open, the gesture DEPTH never
+   * returns to zero, and while it is open `history.capture` is suppressed — so
+   * every later write pushes NO step and the arrangement's undo stack stops
+   * growing.
+   *
+   * ⚠ WHAT THIS DOES NOT CLAIM. Every ordinary way of reaching `endGestures`
+   * has already ended the run before it gets there: the keydown handler calls
+   * `endTransposeRun` on any non-repeat key, and a capture-phase `pointerdown`
+   * listener does the same for any press. So the follow-up edit here is a SEAM
+   * write with no DOM event at all — the agent's shape, and the only one that
+   * can observe the depth directly. The call in `endGestures` is the guarantee
+   * that the depth is zero when the coordinator repoints the document, which is
+   * what the next milestone's callers will rely on.
+   *
+   * Keys dispatched raw because `repeat: true` is the whole condition and
+   * user-event does not set it; with NO keyup, because that is the state a track
+   * switch arrives in.
+   */
+  it('returns the gesture depth to zero from a held arrow', () => {
+    const { a } = seedArrangement();
+    selectPlacements([a]);
+    const endRef = { current: null } as React.RefObject<(() => void) | null>;
+    render(<ActivatingHarness endRef={endRef} />);
+
+    const press = (repeat: boolean) =>
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, repeat }),
+      );
+    act(() => {
+      press(false);
+      press(true);
+    });
+    expect(findBlock(a).placement.transposeSemitones).toBe(2);
+
+    act(() => endRef.current!());
+
+    // With the bracket still open this write's `history.capture` is swallowed,
+    // no step is pushed, and the undo below lands on the state before the HOLD
+    // instead of on the state the hold left.
+    act(() => {
+      const moved = setPlacementTranspose(a, 5);
+      if (!moved.ok) throw new Error(moved.reason);
+    });
+    expect(findBlock(a).placement.transposeSemitones).toBe(5);
+
+    undo();
+    expect(findBlock(a).placement.transposeSemitones).toBe(2);
+  });
+
+  /**
+   * THE TWO BRACKETS NEST, AND THE ORDER DECIDES WHETHER THE DRAG SURVIVES.
+   *
+   * A pointer drag opens depth 1; a held arrow over it opens depth 2. Only the
+   * OUTERMOST close decides whether a step is pushed (`endEditGesture`), and the
+   * held arrow's close passes `false` because its first press already recorded
+   * the state. So ending the DRAG first closes at depth 2 (ignored) and leaves
+   * the run's `false` to close at depth 1 — the drag's snapshot is discarded and
+   * the move it wrote becomes un-undoable.
+   *
+   * Only reachable in this order: a `pointerdown` mid-run ends the run first
+   * (capture-phase listener), so a drag can never open INSIDE a hold.
+   */
+  it('keeps a drag’s undo step when an arrow is held over it', async () => {
+    const { b } = seedArrangement();
+    const endRef = { current: null } as React.RefObject<(() => void) | null>;
+    const user = userEvent.setup();
+    render(<ActivatingHarness endRef={endRef} />);
+
+    const startedAt = startOf(b);
+    await user.pointer([
+      {
+        target: lanes(),
+        keys: '[MouseLeft>]',
+        coords: { clientX: bodyX(startedAt), clientY: laneY(0) },
+      },
+      { coords: { clientX: bodyX(startedAt) + 400, clientY: laneY(0) } },
+    ]);
+    expect(startOf(b)).not.toBe(startedAt);
+
+    // The hold opens the INNER bracket, over the drag that is still down.
+    act(() => {
+      const press = (repeat: boolean) =>
+        document.body.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, repeat }),
+        );
+      press(false);
+      press(true);
+    });
+    expect(findBlock(b).placement.transposeSemitones).toBe(2);
+
+    act(() => endRef.current!());
+    await user.pointer([{ keys: '[/MouseLeft]' }]);
+
+    // ONE step covering both, and it is the drag's own pre-gesture snapshot.
+    // Closed in the wrong order there is no step at all and this undo does
+    // nothing.
+    undo();
+    expect(startOf(b)).toBe(startedAt);
+    expect(findBlock(b).placement.transposeSemitones).toBe(0);
+  });
+
+  // ⚠ NOT COVERED, and deliberately so: `endGestures` also ends the edge
+  // auto-scroll, which jsdom cannot show — it has no scrolling, so a scroller
+  // left spinning and one stopped are the same DOM.
+});
+
+/**
+ * COMPS-TRACK-TABS milestone 3, task 2 — eligibility, keyboard boundaries and
+ * captured geometry.
+ *
+ * ⚠ WHY THESE ARE DRIVEN THROUGH A HARNESS AND NOT THROUGH `ArrangementGrid`.
+ * The page still has ONE global mode, so `viewOfTrack` answers the same view for
+ * every track and the eligibility filter it passes is the identity. There is no
+ * arrangement of props that puts a Pattern lane and a non-Pattern lane in one
+ * stack yet — milestone 4 is what does. So the filter is exercised here, at the
+ * seam that will receive it, with the harness standing in for that selector.
+ * The alternative is a filter first written under milestone 4's deadline.
+ */
+/** What a test uses to move the world while a gesture is in flight. */
+interface WorldControl {
+  setLaneHeight(px: number): void;
+  setZoom(px: number): void;
+  /** Take a track out of Pattern view. Milestone 4's per-track selector,
+   *  stood in for by a prop while the page still has one global mode. */
+  hide(trackId: string | null): void;
+}
+
+/**
+ * The harness again, with the eligibility filter wired and a few controls to
+ * move the ground under a gesture.
+ *
+ * The four buttons are the TOOLBAR's wiring, literally: `ArrangementGrid`
+ * hangs its ♯ / ⧉ / ✕ on these same `gestures.*` members, so a command proved
+ * here is proved for the button and for the shortcut at once — which is the
+ * point of there being one implementation.
+ */
+function ScopedHarness({
+  control,
+  dials = false,
+  pointerEnabled = true,
+  keyboardEnabled = true,
+}: {
+  control?: React.RefObject<WorldControl | null>;
+  dials?: boolean;
+  /** The two halves of §4's split, driven INDEPENDENTLY. `ArrangementGrid`
+   *  still derives both from one global mode, so this harness is the only place
+   *  the two can be set against each other — which is the whole claim. */
+  pointerEnabled?: boolean;
+  keyboardEnabled?: boolean;
+}) {
+  const patterns = useLibraryPatterns();
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const geometryRef = useRef<GestureGeometry | null>(null);
+  const [laneHeight, setLaneHeight] = useState(LANE_HEIGHT);
+  // `number`, not the literal union `ARRANGEMENT_ZOOM_LEVELS` infers — the
+  // point of the control is to set a scale the zoom scale does not contain.
+  const [zoom, setZoom] = useState<number>(PX);
+  const [hidden, setHidden] = useState<string | null>(null);
+  if (control) control.current = { setLaneHeight, setZoom, hide: setHidden };
+
+  const composition = useEditingComposition();
+  const tracks = useTracks();
+  geometryRef.current = composition
+    ? {
+        lanes: laneRects(tracks, () => laneHeight),
+        tracks,
+        pxPerBeat: zoom,
+        snap: arrangementSnap(composition.timeSignature, DEFAULT_ARRANGEMENT_SNAP_ID),
+        toContent: (clientX: number, clientY: number) => ({ x: clientX, y: clientY }),
+        inViewport: () => true,
+      }
+    : null;
+
+  const isPatternLane = useCallback((trackId: string) => trackId !== hidden, [hidden]);
+  const gestures = useArrangementGestures({
+    geometry: useCallback(() => geometryRef.current, []),
+    scrollerRef,
+    isPatternLane,
+    pointerEnabled,
+    keyboardEnabled,
+  });
+
+  return (
+    <div ref={scrollerRef} data-testid="scoped-scroller">
+      <div
+        data-testid="lanes"
+        onPointerDown={gestures.onLanesPointerDown}
+        onPointerMove={gestures.onLanesPointerMove}
+        style={{ width: 4000, height: laneHeight * tracks.length }}
+      />
+      <p data-testid="sel">{gestures.effectiveSelection.join(' ')}</p>
+      {/* The rail's row, so the OTHER public pointer entry point is drivable
+          here too — `startPatternDrag` guards on `pointerEnabled` itself. */}
+      {patterns.map((pattern) => (
+        <button
+          key={pattern.id}
+          type="button"
+          aria-label={`library ${pattern.name}`}
+          onPointerDown={(e) => gestures.startPatternDrag(pattern.id, e)}
+        >
+          {pattern.name}
+        </button>
+      ))}
+      <button type="button" onClick={gestures.selectAll}>
+        select all
+      </button>
+      <button type="button" onClick={gestures.deleteSelection}>
+        delete
+      </button>
+      <button type="button" onClick={gestures.duplicateSelection}>
+        duplicate
+      </button>
+      <button type="button" onClick={() => gestures.transposeSelection(1)}>
+        transpose
+      </button>
+      {gestures.preview && <p data-testid={`preview-${gestures.preview.kind}`} />}
+      {dials && <Dials />}
+    </div>
+  );
+}
+
+/** A real `Knob` and a real `ParamEncoder`, because the two custom roles are
+ *  the whole point — a stand-in `div role="slider"` would prove the selector
+ *  matches itself and nothing about the controls that ship. */
+function Dials() {
+  const [knob, setKnob] = useState(3);
+  const [encoder, setEncoder] = useState(0);
+  return (
+    <>
+      <Knob
+        value={knob}
+        onChange={setKnob}
+        min={0}
+        max={10}
+        step={1}
+        label="Drive"
+        ariaLabel="Drive"
+      />
+      <ParamEncoder
+        value={encoder}
+        onChange={setEncoder}
+        step={1}
+        precision={0}
+        fallback={0}
+        label="Offset"
+        ariaLabel="Offset"
+      />
+    </>
+  );
+}
+
+
+describe('placement eligibility', () => {
+  const selectedIds = () => [...getSelectedPlacementIds()];
+  const transposeOf = (id: string) => findBlock(id).placement.transposeSemitones;
+
+  it('enumerates only eligible placements for Select All', async () => {
+    const { trackIds, a, b, c } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+    act(() => control.current!.hide(trackIds[1]));
+
+    await user.keyboard('{Meta>}a{/Meta}');
+
+    // `selectAllPlacements()` unfiltered would have returned all three.
+    expect(selectedIds().sort()).toEqual([a, b].sort());
+    expect(selectedIds()).not.toContain(c);
+  });
+
+  it('leaves an externally supplied out-of-view selection in the document, and out of the UI', async () => {
+    const { trackIds, a, c } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    render(<ScopedHarness control={control} />);
+    act(() => control.current!.hide(trackIds[1]));
+
+    // What an agent run leaves behind: a selection spanning every track it
+    // wrote, including one this view is not drawing.
+    act(() => selectPlacements([a, c]));
+
+    // The DOCUMENT still holds both — nothing was overwritten to satisfy the
+    // view — and the UI acts on one.
+    expect(selectedIds().sort()).toEqual([a, c].sort());
+    expect(screen.getByTestId('sel')).toHaveTextContent(a);
+    expect(screen.getByTestId('sel')).not.toHaveTextContent(c);
+  });
+
+  it('deletes only the eligible half of an external selection', async () => {
+    const { trackIds, a, c } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+    act(() => control.current!.hide(trackIds[1]));
+    act(() => selectPlacements([a, c]));
+
+    await user.click(screen.getByText('delete'));
+
+    expect(() => findBlock(a)).toThrow();
+    // Hidden, so untouchable: a UI command may not mutate what it is not drawing.
+    expect(trackOf(c)).toBe(trackIds[1]);
+  });
+
+  it('duplicates and transposes only the eligible half, from the keyboard too', async () => {
+    const { trackIds, a, c } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+    act(() => control.current!.hide(trackIds[1]));
+    act(() => selectPlacements([a, c]));
+
+    const before = countPlacements();
+    await user.keyboard('{Meta>}d{/Meta}');
+    expect(countPlacements()).toBe(before + 1);
+
+    await user.keyboard('{ArrowUp}');
+    expect(transposeOf(a)).toBe(1);
+    expect(transposeOf(c)).toBe(0);
+  });
+
+  it('marquees only over Pattern lanes, and adds to the eligible selection only', async () => {
+    const { trackIds, a, b, c } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+    act(() => control.current!.hide(trackIds[1]));
+
+    // A band over the WHOLE stack, both lanes included. It STARTS past the last
+    // block on lane 0 — a press that landed on a block would be a move, not a
+    // marquee — and is dragged back to the origin.
+    await dragFrom(user, lanes(), [
+      { x: 3000, y: laneY(0) },
+      { x: 0, y: LANE_HEIGHT * 2 },
+    ]);
+    expect(selectedIds().sort()).toEqual([a, b].sort());
+    expect(selectedIds()).not.toContain(c);
+
+    // Additive, over an external selection that names the hidden block: the
+    // shift-band adds to what the UI has, and does not write `c` back as
+    // though the user had just picked it.
+    act(() => selectPlacements([a, c]));
+    await dragFrom(
+      user,
+      lanes(),
+      [
+        // In the gap between the two blocks on lane 0, then into the second one.
+        { x: tickToPx(2 * bar(), PX) - 10, y: laneY(0) },
+        { x: tickToPx(2 * bar(), PX) + 20, y: laneY(0) },
+      ],
+      { shift: true },
+    );
+    expect(selectedIds().sort()).toEqual([a, b].sort());
+  });
+
+  it('ignores a press on a lane it does not own', async () => {
+    const { trackIds, c } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+    act(() => control.current!.hide(trackIds[1]));
+
+    await dragFrom(user, lanes(), [
+      { x: bodyX(0), y: laneY(1) },
+      { x: bodyX(0) + tickToPx(bar(), PX), y: laneY(1) },
+    ]);
+
+    // The lane is a GAP, not a shifted neighbour: the press must not land on
+    // lane 0's block either.
+    expect(startOf(c)).toBe(0);
+    expect(selectedIds()).toEqual([]);
+  });
+
+  it('leaves a press on a lane it does not own entirely alone', async () => {
+    const { trackIds } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+    act(() => control.current!.hide(trackIds[1]));
+
+    // Read on `window` in the BUBBLE phase, which is after React's root handler
+    // has run — so this is the flag the row underneath would see.
+    const prevented: boolean[] = [];
+    const spy = (e: Event) => prevented.push(e.defaultPrevented);
+    window.addEventListener('pointerdown', spy);
+    const press = async (y: number) => {
+      prevented.length = 0;
+      await user.pointer({
+        target: lanes(),
+        keys: '[MouseLeft]',
+        coords: { clientX: bodyX(0), clientY: y },
+      });
+      return prevented;
+    };
+
+    // ⚠ NOT JUST "writes nothing". `pointerEnabled` now means "SOME lane is a
+    // Pattern lane", so this handler runs over lanes the arrangement does not
+    // own — and `NoteSurface.onLaneDown` does not stop propagation, so an Edit
+    // lane's empty string row bubbles here. Suppressing the default and taking
+    // DOM focus on the way past would break the row's own handling of a press
+    // this handler has just declined.
+    expect(await press(laneY(1))).toEqual([false]);
+    // The control: a press the arrangement DOES own still suppresses the text
+    // selection a drag across the block labels would otherwise start.
+    expect(await press(laneY(0))).toEqual([true]);
+    window.removeEventListener('pointerdown', spy);
+  });
+
+  it('drags only the eligible members of a group', async () => {
+    const { trackIds, a, c } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+    act(() => control.current!.hide(trackIds[1]));
+    act(() => selectPlacements([a, c]));
+
+    await dragFrom(user, lanes(), [
+      { x: bodyX(0), y: laneY(0) },
+      { x: bodyX(0) + tickToPx(bar(), PX), y: laneY(0) },
+    ]);
+
+    expect(startOf(a)).toBe(bar());
+    // Validated BEFORE `startMove`: a block with no index in the captured lane
+    // array is not in the gesture at all.
+    expect(startOf(c)).toBe(0);
+  });
+
+  it('drops an ineligible id from an additive shift-CLICK rather than writing it back', async () => {
+    const { trackIds, a, b, c } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+    act(() => control.current!.hide(trackIds[1]));
+    // Written from OUTSIDE this page — an agent run that selected across every
+    // track it wrote. `c` is on the hidden lane.
+    act(() => selectPlacements([a, c]));
+
+    await clickAt(user, lanes(), { x: bodyX(2 * bar()), y: laneY(0) }, { shift: true });
+
+    // The seam's own `'toggle'` would have carried `c` straight through: it acts
+    // on the STORE's selection, which is where the ineligible id lives.
+    expect(selectedIds().sort()).toEqual([a, b].sort());
+    expect(selectedIds()).not.toContain(c);
+  });
+});
+
+/**
+ * COMPS-TRACK-TABS milestone 3 §A — the split itself.
+ *
+ * ⚠ THE ONLY PLACE THE TWO FLAGS ARE SET AGAINST EACH OTHER. `ArrangementGrid`
+ * derives both from one global mode, so through the page they always agree and
+ * nothing there can tell a split from the single `enabled` it replaced. Driven
+ * here, each one is pinned to the half of the machinery it actually gates.
+ */
+describe('pointer and keyboard eligibility are separate', () => {
+  const selectedIds = () => [...getSelectedPlacementIds()];
+  const transposeOf = (id: string) => findBlock(id).placement.transposeSemitones;
+
+  it('drags a block while the keyboard belongs to another surface', async () => {
+    const { a } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ScopedHarness pointerEnabled keyboardEnabled={false} />);
+    act(() => selectPlacements([a]));
+
+    await dragFrom(user, lanes(), [
+      { x: bodyX(0), y: laneY(0) },
+      { x: bodyX(0) + tickToPx(bar(), PX), y: laneY(0) },
+    ]);
+    // The POINTER names its own target, so it stays live while some other
+    // track's view owns the keys.
+    expect(startOf(a)).toBe(bar());
+
+    // ...and neither shortcut is this surface's. ⌘A would have selected all
+    // three; ArrowUp would have transposed the one that is selected.
+    act(() => selectPlacements([]));
+    await user.keyboard('{Meta>}a{/Meta}');
+    expect(selectedIds()).toEqual([]);
+
+    act(() => selectPlacements([a]));
+    await user.keyboard('{ArrowUp}');
+    expect(transposeOf(a)).toBe(0);
+  });
+
+  it('answers the shortcuts while both pointer entry points are closed', async () => {
+    const { a } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ScopedHarness pointerEnabled={false} keyboardEnabled />);
+    act(() => selectPlacements([a]));
+
+    // Neither the lane surface...
+    await dragFrom(user, lanes(), [
+      { x: bodyX(0), y: laneY(0) },
+      { x: bodyX(0) + tickToPx(bar(), PX), y: laneY(0) },
+    ]);
+    expect(startOf(a)).toBe(0);
+
+    // ...nor the rail's row, which is the other public entry point and guards
+    // itself rather than relying on the rail not rendering.
+    const placedBefore = countPlacements();
+    await dragFrom(user, screen.getByLabelText('library Riff'), [
+      { x: 0, y: 0 },
+      { x: bodyX(4 * bar()), y: laneY(0) },
+    ]);
+    expect(countPlacements()).toBe(placedBefore);
+
+    // The keyboard is untouched by either.
+    await user.keyboard('{ArrowUp}');
+    expect(transposeOf(a)).toBe(1);
+  });
+});
+
+/**
+ * COMPS-TRACK-TABS milestone 3 §B — the keyboard boundary.
+ *
+ * ⚠ REACHABILITY, stated so nobody deletes these as speculative. Under the one
+ * global mode a voice rack and the arrangement's key handler are never on screen
+ * together, so it is not a bug a user can reach TODAY. It is a bug the moment one
+ * track can show Voice while another shows Pattern, and the controls are the ones
+ * that ship: `Knob` is `role="slider"`, `ParamEncoder` is `role="spinbutton"`,
+ * and the selector these two handlers shared covered neither.
+ *
+ * Both dials `preventDefault` and do NOT `stopPropagation`, so the keystroke
+ * genuinely reaches the window handler. Without the boundary test one ArrowUp
+ * would turn the dial AND transpose a block.
+ */
+describe('arrangement shortcuts stop at a local control', () => {
+  it('lets a focused Knob have ArrowUp to itself', async () => {
+    const { a } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ScopedHarness dials />);
+    act(() => selectPlacements([a]));
+
+    const knob = screen.getByRole('slider', { name: 'Drive' });
+    knob.focus();
+    await user.keyboard('{ArrowUp}');
+
+    expect(knob).toHaveAttribute('aria-valuenow', '4');
+    expect(findBlock(a).placement.transposeSemitones).toBe(0);
+  });
+
+  it('lets a focused ParamEncoder have ArrowUp to itself', async () => {
+    const { a } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ScopedHarness dials />);
+    act(() => selectPlacements([a]));
+
+    const encoder = screen.getByRole('spinbutton', { name: 'Offset' });
+    encoder.focus();
+    await user.keyboard('{ArrowUp}');
+
+    expect(encoder).toHaveAttribute('aria-valuenow', '1');
+    expect(findBlock(a).placement.transposeSemitones).toBe(0);
+  });
+
+  it('still answers the same key when nothing local has focus', async () => {
+    const { a } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ScopedHarness dials />);
+    act(() => selectPlacements([a]));
+
+    await user.keyboard('{ArrowUp}');
+
+    expect(findBlock(a).placement.transposeSemitones).toBe(1);
+  });
+
+  it('keeps the field, textarea and select boundaries it already had', async () => {
+    const { a } = seedArrangement();
+    const user = userEvent.setup();
+    render(
+      <>
+        <ScopedHarness />
+        <input aria-label="field" />
+      </>,
+    );
+    act(() => selectPlacements([a]));
+
+    screen.getByLabelText('field').focus();
+    await user.keyboard('{ArrowUp}');
+
+    expect(findBlock(a).placement.transposeSemitones).toBe(0);
+  });
+});
+
+/**
+ * COMPS-TRACK-TABS milestone 3 §E — a group drag captures its lane order and its
+ * geometry, and finishes through the EXISTING teardown the moment either stops
+ * describing the page.
+ *
+ * Each of these asserts the same two things: no further write lands after the
+ * invalidation, and the listeners came OFF — which is why every one of them
+ * keeps moving the pointer afterwards. Removing handlers from JSX would not have
+ * done that; the listeners are on `window`.
+ */
+describe('a gesture ends when the ground moves under it', () => {
+  /** Press a block and drag it one bar, leaving the pointer DOWN. */
+  async function halfDrag(user: ReturnType<typeof userEvent.setup>, id: string) {
+    const from = startOf(id);
+    await user.pointer([
+      { target: lanes(), keys: '[MouseLeft>]', coords: { clientX: bodyX(from), clientY: laneY(0) } },
+      { coords: { clientX: bodyX(from) + tickToPx(bar(), PX), clientY: laneY(0) } },
+    ]);
+    return from;
+  }
+
+  /** Drag on, far past where the block already is, then release. */
+  async function finishDrag(user: ReturnType<typeof userEvent.setup>, from: number) {
+    await user.pointer([
+      { coords: { clientX: bodyX(from) + tickToPx(4 * bar(), PX), clientY: laneY(0) } },
+      { keys: '[/MouseLeft]' },
+    ]);
+  }
+
+  it('ends on a track reorder', async () => {
+    const { trackIds, a } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ScopedHarness />);
+
+    const from = await halfDrag(user, a);
+    expect(startOf(a)).toBe(from + bar());
+
+    act(() => {
+      moveTrack(trackIds[1], 0);
+    });
+    await finishDrag(user, from);
+
+    // The captured lane order no longer describes the stack, so nothing more was
+    // written against indices into it.
+    expect(startOf(a)).toBe(from + bar());
+  });
+
+  it('ends on a track deletion', async () => {
+    const { trackIds, a } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ScopedHarness />);
+
+    const from = await halfDrag(user, a);
+    act(() => {
+      removeTrack(trackIds[1]);
+    });
+    await finishDrag(user, from);
+
+    expect(startOf(a)).toBe(from + bar());
+  });
+
+  it('ends on a lane height change', async () => {
+    const { a } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+
+    const from = await halfDrag(user, a);
+    // A voice rack being measured or folded is exactly this: every lane below it
+    // gets a new top, and an index captured against the old tops now names a
+    // different row.
+    act(() => control.current!.setLaneHeight(LANE_HEIGHT + 24));
+    await finishDrag(user, from);
+
+    expect(startOf(a)).toBe(from + bar());
+  });
+
+  it('ends when a lane leaves Pattern view', async () => {
+    const { trackIds, a } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+
+    const from = await halfDrag(user, a);
+    act(() => control.current!.hide(trackIds[1]));
+    await finishDrag(user, from);
+
+    expect(startOf(a)).toBe(from + bar());
+  });
+
+  it('ends when a generation job takes the document', async () => {
+    const { a } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ScopedHarness />);
+
+    const from = await halfDrag(user, a);
+    act(() => {
+      const started = beginJob();
+      if (!started.ok) throw new Error(started.reason);
+    });
+    // ONE move under the lock — which is what ends the gesture; the check runs
+    // on a pointer move, not on the job starting. To a DIFFERENT point from the
+    // release below, because `userEvent` does not dispatch a move to the
+    // coordinates the pointer is already at.
+    await user.pointer([
+      { coords: { clientX: bodyX(from) + tickToPx(6 * bar(), PX), clientY: laneY(0) } },
+    ]);
+    // ⚠ THE JOB IS RELEASED BEFORE THE POINTER IS, so what is asserted below
+    // cannot be the seam refusing each write. The document is the user's again
+    // and the pointer is still down: only the listeners being gone explains it.
+    act(() => endJob());
+    await finishDrag(user, from);
+
+    expect(startOf(a)).toBe(from + bar());
+  });
+
+  it('ends on a zoom change rather than mixing two scales', async () => {
+    const { a } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+
+    const from = await halfDrag(user, a);
+    // ZOOMED OUT, not in, and it matters for the test rather than for the code:
+    // the same pointer travel at half the scale asks for a tick twice as far
+    // along, which is empty. Zoomed IN it asks for bar 2 — where the seeded
+    // arrangement's second block already sits, so the lib would block the move
+    // and the test would pass whether or not the gesture had ended.
+    act(() => control.current!.setZoom(PX / 2));
+    await finishDrag(user, from);
+
+    expect(startOf(a)).toBe(from + bar());
+  });
+
+  /**
+   * The edge auto-scroll's own teardown, from the ONE path that can reach it
+   * from inside a drag frame.
+   *
+   * `invalidated` aborts from inside `handlers.drag`, which is called from
+   * `apply()`, which `onMove` calls — and `onMove` then re-armed the loop the
+   * teardown had just stopped. With the `pointermove` listener gone the tracked
+   * x can never change again, so the speed never falls back to 0 and the rAF
+   * loop scrolls the arrangement to the end for the life of the page.
+   *
+   * ⚠ IT NEEDS THE RIG. jsdom measures every element 0×0 and `edgeScrollSpeed`
+   * answers 0 for a degenerate box, so without a box the loop never starts and
+   * this passes with the leak in place — which is why the other seven tests in
+   * this block missed it.
+   */
+  it('leaves no auto-scroll loop running when it ends mid-drag', async () => {
+    const { trackIds, a } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+
+    const WELL_W = 400;
+    const scroller = screen.getByTestId('scoped-scroller');
+    let scrollLeft = 0;
+    Object.defineProperty(scroller, 'scrollLeft', {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (v: number) => {
+        scrollLeft = Math.max(0, Math.min(1200, v));
+      },
+    });
+    scroller.getBoundingClientRect = () => new DOMRect(0, 0, WELL_W, 300);
+    const clock = installFrameClock();
+
+    // Press the block, then invalidate BEFORE the pointer reaches the edge zone:
+    // the abort has to happen inside a `pointermove`, which is the frame that
+    // re-armed the loop.
+    const from = startOf(a);
+    await user.pointer({
+      target: lanes(),
+      keys: '[MouseLeft>]',
+      coords: { clientX: bodyX(from), clientY: laneY(0) },
+    });
+    act(() => control.current!.hide(trackIds[1]));
+
+    // Five pixels short of the right edge, deep in the zone.
+    await user.pointer({ coords: { clientX: WELL_W - 5, clientY: laneY(0) } });
+
+    // Nothing was written — the gesture ended on that move.
+    expect(startOf(a)).toBe(from);
+    // And nothing is still driving the view. Several frames, because the loop
+    // re-arms itself before it does any work: one step would not catch it.
+    clock.step(50);
+    clock.step(50);
+    clock.step(50);
+    expect(scrollLeft).toBe(0);
+  });
+
+  it('ends a marquee when the ground moves under it', async () => {
+    const { trackIds } = seedArrangement();
+    const control = { current: null } as React.RefObject<WorldControl | null>;
+    const user = userEvent.setup();
+    render(<ScopedHarness control={control} />);
+
+    // Start on empty lane space — past both blocks on lane 0 — and sweep LEFT
+    // back across them.
+    await user.pointer([
+      {
+        target: lanes(),
+        keys: '[MouseLeft>]',
+        coords: { clientX: tickToPx(5 * bar(), PX), clientY: laneY(0) },
+      },
+      { coords: { clientX: tickToPx(4 * bar(), PX), clientY: laneY(0) } },
+    ]);
+    act(() => {
+      moveTrack(trackIds[1], 0);
+    });
+    await user.pointer([
+      { coords: { clientX: 1, clientY: laneY(0) } },
+      { keys: '[/MouseLeft]' },
+    ]);
+
+    // NOTHING was selected, because the gesture ended on the first move after
+    // the stack changed. Carrying on, the band would have been measured against
+    // the REORDERED lanes: lane 0 is now the other track, so a sweep the user
+    // made across `a` and `b` would have picked up `c` — a row the pointer never
+    // crossed. Selection is not an edit, which is why this is the cheap failure
+    // rather than a bad write; §5 still says every gesture ends through the one
+    // teardown.
+    expect([...getSelectedPlacementIds()]).toEqual([]);
+    // And the band itself is gone: the abort runs `finish`, which clears it.
+    expect(screen.queryByTestId('preview-marquee')).toBeNull();
+  });
+
+  it('leaves the whole aborted drag as exactly one undo step', async () => {
+    const { trackIds, a } = seedArrangement();
+    const user = userEvent.setup();
+    render(<ScopedHarness />);
+
+    const from = await halfDrag(user, a);
+    act(() => {
+      moveTrack(trackIds[1], 0);
+    });
+    await finishDrag(user, from);
+
+    // The bracket closed on the way out. If it had been left open the abort's
+    // own step would still be there — `endEditGesture` is what pushes it — so
+    // the discriminating question is whether a LATER, unrelated edit still
+    // records one: with a bracket open, `history.capture` ignores every one of
+    // them for the life of the page.
+    undo();
+    expect(startOf(a)).toBe(from);
+
+    act(() => selectPlacements([a]));
+    const moved = transposeSelectedPlacements(1);
+    expect(moved.ok).toBe(true);
+    expect(findBlock(a).placement.transposeSemitones).toBe(1);
+    undo();
+    expect(findBlock(a).placement.transposeSemitones).toBe(0);
   });
 });

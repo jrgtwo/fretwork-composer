@@ -51,6 +51,7 @@ import {
   SUBDIVISION_OPTIONS,
   clearHistory as clearPatternHistory,
   listGrooves,
+  selectNotes,
   type GrooveId,
   type Result,
   type SubdivisionId,
@@ -204,6 +205,20 @@ function subscribeJob(listener: () => void): () => void {
  *  wants the same sentence for its banner that the seam returns to the control. */
 export const JOB_LOCK_REASON =
   'A generation job is building this arrangement — wait for it to finish, or cancel it.' as const;
+
+/**
+ * The two refusals the page's activation coordinator answers with, authored HERE
+ * for `JOB_LOCK_REASON`'s reason: the UI validates a target against live state
+ * before it tears anything down, and a second paraphrase of "that block is gone"
+ * is one more sentence to keep in step with the seam's own
+ * `'No such block in this composition.'`.
+ *
+ * Both describe a target that has gone STALE between the render that offered it
+ * and the press — a lane geometry ref outliving its track, an agent removing a
+ * placement mid-gesture. Neither is a case the UI produces on its own.
+ */
+export const TRACK_GONE_REASON = 'That track is gone.' as const;
+export const BLOCK_OFF_TRACK_REASON = 'That block is no longer on this track.' as const;
 
 /** True when this call is the USER's and a job holds the document. */
 const lockedOut = (): boolean => jobRunning && jobWriteDepth === 0;
@@ -1305,6 +1320,13 @@ export function removeTrack(trackId: string): Result {
   if (!tracks.some((t) => t.id === trackId)) return refuse('No such track.');
   if (tracks.length === 1) return refuse("A composition can't have zero tracks.");
   commit(() => store().removeCompositionTrack(trackId));
+  // The EDITING pointer first, and it is not symmetry. The lib nulls
+  // `editingPlacementId` itself when its own `removePlacement` runs, but
+  // `removeCompositionTrack` only calls `applyComposition` — so removing a track
+  // while one of its blocks is open in Edit leaves the pointer naming a
+  // placement that no longer exists, which is the exact state
+  // `pruneEditingPlacement` describes. Same trio, same order, as `undo`.
+  pruneEditingPlacement();
   prunePlacementSelection();
   pruneTrackSelection();
   return ok(undefined);
@@ -1874,6 +1896,25 @@ export function openPlacementForEditing(placementId: string): Result<string> {
  */
 export function closePlacementEditing(): Result<void> {
   const state = usePatternsStore.getState();
+  // LIB-GAP(26): the NOTE selection, which `openCompositionForArranging` does
+  // NOT clear — it nulls the placement pointer and the placement selection and
+  // stops there, while its two siblings (`openPlacementForEditing`,
+  // `openPatternForEditing`) both empty `selectedEventIds`. Left behind, those
+  // ids name events of a document that is no longer open, and
+  // `snapshotPatternForPlacement` copies event ids VERBATIM — so they exist in
+  // the library pattern too and the next Backspace would delete from a document
+  // the user was not editing.
+  //
+  // OUTSIDE the branch below on purpose. `restorePatternPointer` clears it as a
+  // side effect of re-opening the remembered pattern, but only when there IS
+  // one — and the branch below is skipped entirely on the paths where the lib
+  // already nulled `editingPlacementId` behind our back (`openComposition`
+  // calls `openCompositionForArranging` BEFORE this runs), which is exactly
+  // where the stale ids survive. The guard is "nothing is left to own a note
+  // selection": a library pattern that IS open owns its own and keeps it.
+  if (state.editingPlacementId !== null || state.editingPatternId === null) {
+    selectNotes(NO_IDS);
+  }
   if (state.editingPlacementId !== null) {
     store().openCompositionForArranging(state.editingCompositionId);
     writeSelection(NO_IDS);

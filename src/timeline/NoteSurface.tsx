@@ -29,6 +29,7 @@ import {
   useSelectedIds,
 } from '../patterns/patternService';
 import type { EdgeAutoScroll } from './useEdgeAutoScroll';
+import { insideKeyboardControl } from './keyboardBoundary';
 import {
   clampMoveDelta,
   clampResizeDelta,
@@ -339,6 +340,29 @@ export interface NoteSurfaceProps {
    */
   edgeScroll: EdgeAutoScroll;
   geometry: SurfaceGeometry;
+  /**
+   * Hand the host a SYNCHRONOUS teardown for this surface, so it can end the
+   * work in flight before it repoints the document (COMPS-TRACK-TABS milestone
+   * 3 §B). Returns the unregister, which is what the effect cleans up with.
+   *
+   * What the host cannot do for itself is the whole point. A half-typed fret and
+   * a held arrow hold an undo bracket in THIS component's refs, and a pointer
+   * drag's listeners are on `window` — removing this element from the tree
+   * removes neither, and `focused` going false ends neither. Waiting for the
+   * effect cleanup below is too late as well: by the time React runs it the new
+   * target is already open, and the bracket would close over the wrong document.
+   *
+   * ⚠ REGISTERED ON MOUNT, NOT ON `focused`, and that is not tidiness. Effects
+   * flush child-first, so a surface that deregistered when it lost focus would
+   * have deregistered BEFORE its host's own effect ran — and the host's
+   * reconciler, which is exactly the caller that needs this, would find nothing
+   * to end. Every mounted surface registers, and the teardown is a no-op on any
+   * surface that has nothing in flight.
+   *
+   * OMITTED ON THE PATTERN PAGE, which is the default and is unchanged: there is
+   * one surface, one target, and nothing ever repoints it.
+   */
+  registerDeactivate?: (end: () => void) => () => void;
 }
 
 /**
@@ -388,6 +412,7 @@ export function NoteSurface({
   grid,
   edgeScroll,
   geometry,
+  registerDeactivate,
 }: NoteSurfaceProps) {
   // The store's selection belongs to the EDIT TARGET, so a surface that does not
   // own the target has none — see `focused`.
@@ -414,6 +439,55 @@ export function NoteSurface({
   /** True while an arrow key's auto-repeat is being folded into the undo step
    *  its first press already recorded. */
   const nudgeRun = useRef(false);
+  /** For `endSurfaceWork`, which is built once and so cannot close over this
+   *  render's hook result. */
+  const edgeScrollRef = useRef(edgeScroll);
+  edgeScrollRef.current = edgeScroll;
+
+  /**
+   * End every piece of work this surface still holds, against THIS surface's
+   * target — the pointer gesture's window listeners and undo bracket, a
+   * half-typed fret's timer and bracket, a held arrow's bracket, and the edge
+   * auto-scroll the drag left spinning.
+   *
+   * Built ONCE (`useRef(...).current`) and stable for the life of the component,
+   * so registering it with the host is not a new identity on every note edit.
+   * Everything it touches is a ref, so the first render's closure is the same
+   * function every later render would have written.
+   *
+   * IDEMPOTENT: `abortGesture` nulls itself inside its own teardown,
+   * `closeKeyRuns` clears both refs, and `edgeScroll.end()` is a no-op when
+   * nothing is spinning — so a second call, or one with nothing in flight, does
+   * nothing.
+   *
+   * ⚠ KEY RUNS FIRST, POINTER GESTURE SECOND, and the order decides whether a
+   * drag's undo step survives. The two brackets NEST — a pointer gesture opens
+   * depth 1 and a held arrow over it opens depth 2 (the reverse cannot happen:
+   * the capture-phase `pointerdown` listener below ends a key run before any
+   * press is handled) — and `endEditGesture(changed)` honours `changed` only on
+   * the OUTERMOST close. Closing the drag first discards its snapshot behind the
+   * key run's `false`, and the drag's writes land un-undoable.
+   *
+   * ⚠ `closeKeyRuns` here is DEFENCE IN DEPTH, not the mechanism. Every path
+   * that reaches this has already closed the runs: a press trips the
+   * capture-phase `pointerdown` listener, and a programmatic activation flips
+   * `focused` to false, whose own effect cleanup runs child-first — i.e. before
+   * the host's reconciler calls this. The POINTER gesture and the edge scroll
+   * are what this exists for; the key runs are here so the nesting above is
+   * correct if a future path ever does arrive with one open.
+   */
+  const endSurfaceWork = useRef(() => {
+    closeKeyRuns(fretRun, nudgeRun);
+    abortGesture.current?.();
+    edgeScrollRef.current.end();
+  }).current;
+
+  /** Publish that teardown for the life of this surface — see
+   *  `registerDeactivate` for why it is mount-scoped rather than focus-scoped. */
+  useEffect(
+    () => registerDeactivate?.(endSurfaceWork),
+    [registerDeactivate, endSurfaceWork],
+  );
 
   // Editing shortcuts — one listener for all of them, so nothing has to race a
   // second handler for the same key. All ignored while typing into a field: a
@@ -462,8 +536,7 @@ export function NoteSurface({
     };
 
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target?.matches('input, textarea, select, [contenteditable]')) {
+      if (insideKeyboardControl(e.target)) {
         // The keystroke isn't ours, but it still ends a run — otherwise tabbing
         // into a field mid-number leaves the gesture open, and every edit made
         // through that field goes unrecorded.
@@ -579,8 +652,10 @@ export function NoteSurface({
   // arrow leaves the same gesture open, so those close here too.
   useEffect(
     () => () => {
-      abortGesture.current?.();
+      // Inner bracket first — see `endSurfaceWork` for why the order decides
+      // whether the drag's undo step survives.
       closeKeyRuns(fretRun, nudgeRun);
+      abortGesture.current?.();
     },
     [],
   );

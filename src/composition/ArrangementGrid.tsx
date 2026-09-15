@@ -34,11 +34,19 @@ import {
 } from '../audio/playbackService';
 import { useTimelineAutoScroll } from '../timeline/useTimelineAutoScroll';
 import {
+  BLOCK_OFF_TRACK_REASON,
+  JOB_LOCK_REASON,
   MAX_COMPOSITION_TRACKS,
   TRACK_CAP_REASON,
+  TRACK_GONE_REASON,
   VOLUME_RANGE_DB,
   addTrack,
+  closePlacementEditing,
   openBlankComposition,
+  getEditingPlacementId,
+  getSelectedTrackId,
+  getTracks,
+  isJobRunning,
   isTrackAudible,
   openPlacementForEditing,
   redo,
@@ -49,7 +57,7 @@ import {
   useEditingComposition,
   useEditingPlacementId,
   useHistoryState,
-  useSelectedPlacementIds,
+  useIsJobRunning,
   useSelectedTrackId,
   useTracks,
 } from './compositionService';
@@ -61,9 +69,6 @@ import {
 } from '../patterns/patternService';
 import { DEFAULT_SNAP_ID, snapOptions, type SnapOption } from '../timeline/timelineMath';
 import {
-  deleteSelectedPlacements,
-  duplicateSelectedPlacements,
-  transposeSelectedPlacements,
   useArrangementGestures,
   type GestureGeometry,
 } from './useArrangementGestures';
@@ -166,6 +171,58 @@ const NO_COLLAPSED_SECTIONS: Readonly<Record<string, readonly SectionId[]>> = {}
 export type PatternDragStarter = (patternId: string, e: React.PointerEvent) => void;
 
 /**
+ * What an activation is being asked FOR — the last step of the coordinator
+ * below, and the only thing that varies between its callers.
+ *
+ * `select` is a header press, a lane press or a freshly added track: it makes a
+ * track the active one and starts nothing. Selecting an Edit header therefore
+ * does NOT open a block, which is deliberate — the inspector's empty state is
+ * what says so.
+ *
+ * `edit` is a note surface taking the document. It selects the track AND points
+ * the editor at that block, and only a successful open grants focus.
+ */
+type TrackActivation =
+  | { readonly kind: 'select' }
+  | { readonly kind: 'edit'; readonly placementId: string };
+
+/** Shared, so the common case is not a new object on every press. */
+const SELECT_TRACK: TrackActivation = { kind: 'select' };
+
+/** What a context with no document of its own reports — `edit-idle` and
+ *  `voice`. A shared constant so it is not a fresh object every render. */
+const NO_HISTORY = { canUndo: false, canRedo: false } as const;
+
+/**
+ * ── THE ONE DIRECT-EDITING COMMAND CONTEXT (§4) ──────────────────────────────
+ *
+ * What the toolbar's buttons and the window shortcuts are BOTH derived from, so
+ * there is one answer to "which document does ⌘Z pop" rather than one for the
+ * button and another for the key.
+ *
+ * | context     | undo / redo           | other commands                      |
+ * | ----------- | --------------------- | ----------------------------------- |
+ * | `pattern`   | composition history   | the eligible placement selection    |
+ * | `edit`      | note history          | that placement's notes              |
+ * | `edit-idle` | DISABLED              | a prompt to select a block          |
+ * | `voice`     | neither is available  | the voice controls' own behaviour   |
+ *
+ * `edit-idle` is the row that is a real change. Edit mode with nothing open used
+ * to point ↶ at the NOTE history anyway — which is the pattern page's history,
+ * carrying whatever was done there — so a press undid an edit on a document not
+ * on screen. It is disabled now.
+ *
+ * It controls DIRECT EDITING only. The agent's composition commands are
+ * available in every one of these rows; milestone 5 is where that split is drawn
+ * in the rail.
+ */
+type DirectEditContext =
+  | { readonly kind: 'pattern' }
+  | { readonly kind: 'edit'; readonly placementId: string }
+  | { readonly kind: 'edit-idle' }
+  | { readonly kind: 'voice' };
+
+/**
  * The sweeping playhead.
  *
  * Its own component for one reason, and it is the same reason `playbackService`
@@ -232,6 +289,7 @@ function PlacementSurface({
   grid,
   edgeScroll,
   geometry,
+  registerDeactivate,
 }: {
   placement: Placement;
   /** The COMPOSITION's meter, threaded down rather than read from the snapshot
@@ -250,6 +308,9 @@ function PlacementSurface({
   grid: SnapOption;
   edgeScroll: EdgeAutoScroll;
   geometry: SurfaceGeometry;
+  /** The activation coordinator's handle on this surface's in-flight work —
+   *  see `NoteSurface.registerDeactivate`. */
+  registerDeactivate: (end: () => void) => () => void;
 }) {
   return (
     <div
@@ -329,6 +390,7 @@ function PlacementSurface({
         grid={grid}
         edgeScroll={edgeScroll}
         geometry={geometry}
+        registerDeactivate={registerDeactivate}
       />
     </div>
   );
@@ -383,7 +445,20 @@ export function ArrangementGrid({
   const composition = useEditingComposition();
   const tracks = useTracks();
   const selectedTrackId = useSelectedTrackId();
-  const selectedPlacementIds = useSelectedPlacementIds();
+  // No `useSelectedPlacementIds()` here any more. Everything on this page that
+  // asks about the block selection asks `gestures.effectiveSelection`, which is
+  // that subscription with the view's eligibility already applied — and the
+  // hook holds it, so this component still re-renders on every selection change.
+  /**
+   * A generation job holds the document.
+   *
+   * Read HERE and not only at the seam, because two of the three things this
+   * milestone added are UI state the seam cannot refuse: which surface owns the
+   * keyboard, and whether a press may take a track. The seam still refuses every
+   * WRITE (`openPlacementForEditing` and friends) — this is what stops a refused
+   * activation from ever reaching one.
+   */
+  const jobRunning = useIsJobRunning();
   const editing = mode === 'edit';
   /**
    * THE ONE PLACE A TRACK'S VIEW IS DECIDED.
@@ -396,9 +471,11 @@ export function ArrangementGrid({
    * than reading `mode` a second time. Adding a `mode ===` test to a per-lane
    * branch is how that stops being true.
    *
-   * PAGE-level questions still read `mode` directly and should: the toolbar, the
-   * ⌘Z routing and `gestures.enabled` are statements about the whole page, and
-   * milestone 3 is where they learn about a selected track.
+   * PAGE-level questions still read `mode` directly and should: the toolbar and
+   * the ⌘Z routing are statements about the whole page. The gestures hook's two
+   * flags are the exception — `pointerEnabled` and `keyboardEnabled` are both
+   * derived from this helper and from `commandContext`, which is where they
+   * learned about a selected track.
    */
   // The parameter is unused ON PURPOSE and the signature is the point: every
   // per-lane branch below already passes a track id, so milestone 4 replaces the
@@ -406,7 +483,7 @@ export function ArrangementGrid({
   // zero-argument version would have to be re-threaded through a dozen call
   // sites the day it grows one.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const viewOfTrack = (_trackId: string): ArrangementMode => mode;
+  const viewOfTrack = useCallback((_trackId: string): ArrangementMode => mode, [mode]);
   /**
    * Whether there is a time axis on screen at all.
    *
@@ -454,9 +531,6 @@ export function ArrangementGrid({
    */
   const compositionHistory = useHistoryState();
   const noteHistory = useNoteHistoryState();
-  const { canUndo, canRedo } = editing ? noteHistory : compositionHistory;
-  const undoHere = editing ? undoNote : undo;
-  const redoHere = editing ? redoNote : redo;
   /** Which block the note editor is pointed at. Null until one is pressed —
    *  nothing is editable, and no surface owns the keyboard, until then. */
   const editingPlacementId = useEditingPlacementId();
@@ -497,7 +571,23 @@ export function ArrangementGrid({
    * the page, names none of them. What is left here is about the TRACK: its
    * instrument, its place in the stack, a drop the arrangement refused.
    */
-  const [trackNotice, setTrackNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; seq: number } | null>(null);
+  /**
+   * ⚠ A COUNTER RIDES ALONG, and it is what makes a REPEATED refusal audible.
+   * Setting the same string twice is a React bail-out, so the second and third
+   * refused press during a job would re-render nothing and a screen reader would
+   * announce nothing — and the coordinator refuses the same way on every path,
+   * which makes that the common case rather than a corner. The counter changes
+   * on every set, and the alert is keyed on it, so the node is replaced and
+   * `role="alert"` fires again.
+   */
+  const setTrackNotice = useCallback(
+    (text: string | null) =>
+      setNotice((previous) =>
+        text === null ? null : { text, seq: (previous?.seq ?? 0) + 1 },
+      ),
+    [],
+  );
   /** Why the empty state's New press did nothing. Its own state rather than
    *  `trackNotice`'s: they cannot be on screen together — one belongs to a
    *  composition that exists and the other to there being none. */
@@ -668,21 +758,294 @@ export function ArrangementGrid({
    */
   const geometryRef = useRef<GestureGeometry | null>(null);
 
+  /**
+   * Every mounted note surface's synchronous teardown — see
+   * `NoteSurface.registerDeactivate`.
+   *
+   * ALL of them, not just the focused one's, because effects flush child-first:
+   * a surface that deregistered on losing focus would already be gone by the
+   * time this component's own reconciler effect ran, which is the one caller
+   * that has no other way to reach it. Each teardown is a no-op on a surface
+   * with nothing in flight, so the set costs nothing to sweep.
+   */
+  const surfaceTeardownsRef = useRef(new Set<() => void>());
+  const registerSurfaceDeactivate = useCallback((end: () => void) => {
+    const teardowns = surfaceTeardownsRef.current;
+    teardowns.add(end);
+    return () => {
+      teardowns.delete(end);
+    };
+  }, []);
+  /**
+   * The arrangement gestures' teardown, through a ref because the two are
+   * mutually recursive: the coordinator has to end a block drag before it
+   * repoints the page, and the gesture hook has to call the coordinator before
+   * it starts one. A ref is the cut.
+   */
+  const endArrangementGesturesRef = useRef<() => void>(() => {});
+
+  /**
+   * End everything the page is still holding over the OUTGOING target — the
+   * focused note surface's pointer gesture, fret timer and undo brackets, and
+   * any arrangement drag or held-arrow bracket (COMPS-TRACK-TABS milestone 3
+   * §B). Synchronous, and idempotent.
+   *
+   * ⚠ WHAT THE AUDIT FOUND, so the next reader does not re-derive it.
+   * `NoteSurface` already ends its KEY RUNS from its own capture-phase
+   * `pointerdown` listener and from the first non-digit keydown, so every
+   * activation that arrives through a press or a key press has already closed
+   * them before this runs — that is why the `closes.at` assertions in
+   * tests/EditMode.test.tsx hold either way for those paths. Two things are NOT
+   * covered by that, and are the reason this exists:
+   *
+   *  - A POINTER GESTURE. `focused` going false does not end one; its teardown
+   *    is tied to completion and unmount, so a note drag's window listeners
+   *    survive a track switch and keep writing — into whatever the seam has
+   *    repointed at by then.
+   *  - A PROGRAMMATIC activation. The reconciler below closes the editor in
+   *    response to a `selectTrack` from outside this page, which trips neither
+   *    of `NoteSurface`'s listeners.
+   */
+  const endOutgoingWork = useCallback(() => {
+    for (const end of surfaceTeardownsRef.current) end();
+    endArrangementGesturesRef.current();
+  }, []);
+
+  /**
+   * ── THE ACTIVATION COORDINATOR ──────────────────────────────────────────────
+   *
+   * THE ONE WAY A TRACK BECOMES THE ACTIVE ONE, and the one place the order of
+   * operations is written down. Track headers, lane presses and the note
+   * surfaces' focus callbacks all arrive here (COMPS-TRACK-TABS milestone 3 §A);
+   * milestone 4's per-track view buttons will too.
+   *
+   * The order is the whole of it, and every step is load-bearing:
+   *
+   *  1. VALIDATE the target and the lock, before anything is torn down — a
+   *     refusal here has to leave the page exactly as it was, which is why step
+   *     1 checks every condition step 5 could refuse on (the lock, the track,
+   *     and that the track still owns the block). Step 5 refusing anyway would
+   *     mean the document moved between the two, and it leaves the new track
+   *     SELECTED with nothing open rather than the page untouched — stated
+   *     because it is an exception to the sentence above, not a hole in it.
+   *  2. END THE OUTGOING GESTURES SYNCHRONOUSLY, against the target they started
+   *     on. A React effect cleanup runs after the new target is already open,
+   *     by which point a fret timer's or a held arrow's undo bracket closes over
+   *     the wrong document and `history.capture` swallows every later edit.
+   *  3. CLOSE the outgoing placement — BEFORE any new selection, because
+   *     `closePlacementEditing` empties the placement selection itself and would
+   *     erase one made first (§C).
+   *  4. SELECT the new track.
+   *  5. START the requested action.
+   *
+   * Returns whether the activation SUCCEEDED, and a false must stop the caller:
+   * a refused focus that fell through into `NoteSurface`'s gesture would write
+   * into whichever pattern happened to be open.
+   *
+   * What it deliberately does NOT do is touch `compositionService.selectTrack`'s
+   * contract or any agent capability. The seam stays reachable by id with no
+   * pointer and with no view state; this is the UI's own front door to it.
+   */
+  const activateTrack = (trackId: string, action: TrackActivation): boolean => {
+    // 1 — the lock first, so a refusal costs nothing. The mode bar is disabled
+    // during a job for the same reason (`CompositionPage`), but a header press,
+    // a lane press and a surface taking focus reach no disabled control.
+    if (isJobRunning()) {
+      setTrackNotice(JOB_LOCK_REASON);
+      return false;
+    }
+    // LIVE, not this render's array. The coordinator is called from window
+    // handlers that outlive their render, and from the Add Track button in the
+    // same tick as the write that created the track — a render-time list would
+    // report the new track as gone and refuse the activation it was asked for.
+    //
+    // Both refusals below are defences against a target that went STALE between
+    // the render that offered it and the press — a lane geometry ref outliving
+    // its track, an agent retracting a placement mid-gesture. Neither is a case
+    // the UI produces on its own, which is why neither has a test that drives it
+    // through the UI.
+    const track = getTracks().find((candidate) => candidate.id === trackId);
+    if (!track) {
+      setTrackNotice(TRACK_GONE_REASON);
+      return false;
+    }
+    const owns = (placementId: string) =>
+      track.placements.some((placement) => placement.id === placementId);
+    if (action.kind === 'edit' && !owns(action.placementId)) {
+      setTrackNotice(BLOCK_OFF_TRACK_REASON);
+      return false;
+    }
+
+    const openPlacementId = getEditingPlacementId();
+    // The open block belongs to the track being activated — which is how
+    // re-selecting a track PRESERVES its active placement, and how a block the
+    // agent opened by id is adopted rather than thrown away.
+    const keepsOpenPlacement = openPlacementId !== null && owns(openPlacementId);
+    const willClose = openPlacementId !== null && !keepsOpenPlacement;
+    const willOpen = action.kind === 'edit' && openPlacementId !== action.placementId;
+
+    // 2 — nothing below may run with a bracket still open over the outgoing
+    // target. Idempotent, so this costs nothing when nothing is in flight.
+    if (getSelectedTrackId() !== trackId || willClose || willOpen) endOutgoingWork();
+
+    // 3 — before the selection, never after it.
+    if (willClose) closePlacementEditing();
+
+    // 4
+    selectTrack(trackId);
+
+    // 5 — only a SUCCESSFUL open grants focus.
+    if (action.kind === 'edit') {
+      const opened = openPlacementForEditing(action.placementId);
+      if (!opened.ok) {
+        setTrackNotice(opened.reason);
+        return false;
+      }
+    }
+    return true;
+  };
+
+  /**
+   * Which TRACK owns the open block, or null when nothing is open — or when the
+   * block has been retracted out from under the pointer, which an undo can do
+   * (the seam's `pruneEditingPlacement` is what closes it; this only has to stop
+   * drawing it as live in the meantime).
+   */
+  const editingTrackId =
+    editingPlacementId === null
+      ? null
+      : (tracks.find((track) =>
+          track.placements.some((placement) => placement.id === editingPlacementId),
+        )?.id ?? null);
+  /**
+   * The block the UI treats as live — the one a surface may focus, the one whose
+   * notes the inspector is about, the one the keyboard is pointed at.
+   *
+   * DERIVED FROM CURRENT OWNERSHIP, not from an effect, and that is the point of
+   * §4: an effect that closed the editor on the way to agreeing with the
+   * selection would have rendered one frame of the wrong track's notes first.
+   * The reconciler below is a BACKSTOP for changes that arrive from outside this
+   * component (the agent, an undo, another page), never the primary path.
+   *
+   * Three things can make the open block not ours:
+   *
+   *  - A JOB HOLDS THE DOCUMENT. The pointer is the agent's, and §4 is explicit
+   *    that UI reconciliation must not close or repoint it to satisfy an
+   *    invariant — so the block stays open and the UI simply stops owning it.
+   *    With no surface focused, no window key listener is attached (see
+   *    `NoteSurface.focused`) and the shortcuts are suppressed rather than
+   *    fought over.
+   *  - ANOTHER TRACK IS SELECTED. Selection is what ownership follows.
+   *  - THE OWNING TRACK IS NOT IN EDIT. Its lane draws no surface at all.
+   *
+   * A null selection is deliberately NOT one of them: `openPlacementForEditing`
+   * is reachable by id with no pointer, and a page that immediately disowned
+   * what the agent opened would make that capability depend on React view state
+   * — which §4 forbids. The reconciler adopts the track instead.
+   */
+  const uiEditingPlacementId =
+    editingPlacementId !== null &&
+    !jobRunning &&
+    editingTrackId !== null &&
+    (selectedTrackId === null || selectedTrackId === editingTrackId) &&
+    viewOfTrack(editingTrackId) === 'edit'
+      ? editingPlacementId
+      : null;
+
+  /**
+   * Which view the page's DIRECT EDITING commands belong to — see
+   * `DirectEditContext`.
+   *
+   * Read off the ONE global mode today, exactly as everything else on this page
+   * still is. Milestone 4 repoints it at the SELECTED track's view, which is why
+   * `uiEditingPlacementId` is the edit arm's input rather than the store's raw
+   * pointer: that derivation already asks who owns the block, and ownership is
+   * what the selected track's view will decide.
+   */
+  const commandContext: DirectEditContext =
+    mode === 'voice'
+      ? { kind: 'voice' }
+      : mode === 'edit'
+        ? uiEditingPlacementId !== null
+          ? { kind: 'edit', placementId: uiEditingPlacementId }
+          : { kind: 'edit-idle' }
+        : { kind: 'pattern' };
+  /**
+   * ↶ and ↷, routed by the ONE context above rather than by `mode`.
+   *
+   * `edit-idle` — edit view with no block live — is DISABLED, which is the
+   * behaviour change §4's table asks for. Pointed at the note history it was
+   * pointed at the pattern page's own stack, so the press undid an edit made on
+   * a document that is not on screen and left nothing to redo it with. `voice`
+   * has no arrangement or note document to act on either, and the buttons do not
+   * render there at all.
+   */
+  const { canUndo, canRedo } =
+    commandContext.kind === 'edit'
+      ? noteHistory
+      : commandContext.kind === 'pattern'
+        ? compositionHistory
+        : NO_HISTORY;
+  const undoHere = commandContext.kind === 'edit' ? undoNote : undo;
+  const redoHere = commandContext.kind === 'edit' ? redoNote : redo;
+  /**
+   * Whether this track's lane draws BLOCKS — the arrangement's own hit target.
+   *
+   * The one input the gesture hook needs to filter lanes, selections and drops.
+   * `useCallback` because it is read through a ref inside window handlers and a
+   * new identity every render would churn the hook's mirror for nothing.
+   */
+  const isPatternLane = useCallback(
+    (trackId: string) => viewOfTrack(trackId) === 'pattern',
+    [viewOfTrack],
+  );
+
   const gestures = useArrangementGestures({
     geometry: useCallback(() => geometryRef.current, []),
     scrollerRef,
-    // In edit mode the lanes ARE note surfaces and those own the pointer and the
-    // keyboard. Two gesture systems over one surface is how a drag ends up doing
-    // two things — and ⌘Z would pop an arrangement step and a note step for one
-    // press. See `ArrangementGesturesOptions.enabled`.
-    //
-    // Voice mode is the same argument for a different reason: the lanes are
-    // racks, so a press is a knob, a switch or a mic dot, and a block gesture
-    // running under one would rubber-band a selection while you drag Drive —
-    // and, worse, a marquee release would REPLACE the block selection you left
-    // behind in pattern mode. Hence `=== 'pattern'` rather than `!editing`.
-    enabled: mode === 'pattern',
+    /**
+     * ── THE SPLIT (§4) ───────────────────────────────────────────────────────
+     *
+     * POINTER: is there a Pattern lane on screen to press at all. WHICH lane
+     * was pressed is `isPatternLane`'s answer at the press, not this one — a
+     * press on an Edit or Voice row falls through to whatever that row draws,
+     * because the arrangement hit-tests only the lanes it owns. So the pointer
+     * surface does not care which track is SELECTED, and a Pattern block stays
+     * draggable while some other track's view is the one in the rail.
+     *
+     * Under the one global mode this is still `mode === 'pattern'` — with one
+     * exception, and it is deliberate: a composition with NO TRACKS answers
+     * false here where `mode === 'pattern'` answered true. `openBlankComposition`
+     * makes one, so the state is reachable. There is nothing to press and
+     * nothing to drop onto (`dropTarget` over zero lanes is null either way), so
+     * the only change is that `startPatternDrag` now declines instead of
+     * starting a drag that could never place anything.
+     */
+    pointerEnabled: tracks.some((track) => viewOfTrack(track.id) === 'pattern'),
+    /**
+     * KEYBOARD: exclusive with a focused `NoteSurface`, which answers the same
+     * keys against the notes. Two keyboard systems over one surface is how one
+     * ⌘Z pops an arrangement step and a note step at once.
+     *
+     * The exclusion is STRUCTURAL rather than a second rule to keep in step:
+     * this is true only in the `pattern` context, and `uiEditingPlacementId` —
+     * the only thing that focuses a surface — is non-null only in `edit`. No
+     * arrangement of the two can be true at once.
+     *
+     * Voice is the same argument for a different reason: those lanes are racks,
+     * so ArrowUp there belongs to a knob. The boundary predicate catches a
+     * FOCUSED dial in any view; this is what stops the arrangement answering
+     * keys in a view that is drawing no blocks at all.
+     */
+    keyboardEnabled: commandContext.kind === 'pattern',
+    isPatternLane,
+    // A lane press takes its track before the gesture writes anything — and a
+    // refusal stops the press dead. Only `onLanesPointerDown` calls it: a drag
+    // passing over a lane, a hover, and a library drop all deliberately leave
+    // the selection alone (plan §2).
+    activateTrack: (trackId) => activateTrack(trackId, SELECT_TRACK),
   });
+  endArrangementGesturesRef.current = gestures.endGestures;
 
   /**
    * Edge auto-scroll for the NOTE surfaces, distinct from the one
@@ -705,20 +1068,110 @@ export function ArrangementGrid({
   );
 
   /**
-   * Point the note editor at a block — the seam call every press in a lane makes
+   * Point the note editor at a block — what every press inside an edit lane does
    * before it writes anything.
    *
-   * Returns whether the surface may now edit, so a refusal (the block is gone, no
-   * composition is open) stops the gesture instead of letting it write into
-   * whichever pattern happened to be open. Reachable by id without a pointer
-   * through `compositionService.openPlacementForEditing`, which is what the agent
-   * will call.
+   * Through the COORDINATOR now rather than straight at the seam: a press has to
+   * take the block's TRACK as well, and it has to end whatever the outgoing
+   * block still had in flight first. Returns whether the surface may now edit,
+   * so a refusal (a job holds the document, the block is gone, no composition is
+   * open) stops the gesture instead of letting it write into whichever pattern
+   * happened to be open. Still reachable by id without a pointer through
+   * `compositionService.openPlacementForEditing`, which is what the agent calls.
    */
-  const focusPlacement = (placementId: string): boolean => {
-    const opened = openPlacementForEditing(placementId);
-    if (!opened.ok) setTrackNotice(opened.reason);
-    return opened.ok;
-  };
+  const focusPlacement = (trackId: string, placementId: string): boolean =>
+    activateTrack(trackId, { kind: 'edit', placementId });
+
+  /**
+   * THE BACKSTOP. Reconcile the open block with who owns it, for the changes
+   * this component did not make: an agent run that opened one by id, an undo
+   * that moved a placement to another track, a view or selection written from
+   * somewhere else.
+   *
+   * Silent while a JOB IS RUNNING — the pointer is the job's, and closing it
+   * here would land the agent's next note in the user's library pattern, which a
+   * cancel does not undo. The effect re-runs when the lock lifts, which is where
+   * "reconcile against live state when the job releases ownership" happens.
+   *
+   * ⚠ Silent about the DOCUMENT, not about the pointer. A job taking the
+   * document is one of §E's invalidators, and the arrangement's own gestures
+   * fold `isJobRunning()` into `invalidated`; a NOTE drag has no equivalent.
+   * `uiEditingPlacementId` goes null under the lock, so `focused` goes false —
+   * and `focused` going false ends no pointer gesture (see `endOutgoingWork`):
+   * the surface's window listeners keep writing into the block the agent now
+   * owns, with a `patternService` undo bracket held open across the job. So the
+   * work ends here even though the pointer stays where it is.
+   */
+  useEffect(() => {
+    // Idempotent, and the effect re-runs only when one of its inputs moves, so
+    // this is one sweep per lock transition rather than per agent write.
+    if (jobRunning) {
+      endOutgoingWork();
+      return;
+    }
+    if (editingPlacementId === null) return;
+    // Gone from the document entirely: the seam's own `pruneEditingPlacement`
+    // owns that case, and closing it here as well would race it. Its callers are
+    // every write that can retract a placement out from under the pointer —
+    // `removeTrack`, `removePlacement` (the lib's own action nulls the pointer
+    // there), `undo`, `redo` and `abortEditGesture` — so by the time this effect
+    // runs the pointer has already been closed, and `editingPlacementId === null`
+    // above has returned.
+    if (editingTrackId === null) return;
+    if (viewOfTrack(editingTrackId) !== 'edit') {
+      endOutgoingWork();
+      closePlacementEditing();
+      return;
+    }
+    // Nobody owns the selection, so the open block claims its own track rather
+    // than being discarded — see `uiEditingPlacementId`.
+    if (selectedTrackId === null) {
+      selectTrack(editingTrackId);
+      return;
+    }
+    if (selectedTrackId !== editingTrackId) {
+      // The teardown first, exactly as the coordinator does it — this path is
+      // reached by a `selectTrack` from OUTSIDE the page, which arrives through
+      // neither a pointerdown nor a keydown and so trips none of `NoteSurface`'s
+      // own capture-phase run-enders.
+      endOutgoingWork();
+      closePlacementEditing();
+    }
+  }, [jobRunning, editingPlacementId, editingTrackId, selectedTrackId, viewOfTrack, endOutgoingWork]);
+
+  /**
+   * PAGE EXIT, and its own effect on purpose.
+   *
+   * Leaving the composition page leaves the lib's one editing pointer parked on
+   * a placement, and the pattern page would then draw that block's snapshot —
+   * the CP-02 family of defect. `CompositionPage` has the same cleanup keyed on
+   * `mode`; this one is keyed on the two STABLE callbacks it uses, so it fires
+   * on unmount and on nothing else. Milestone 4 replaces `mode` with a
+   * per-composition map, and an unconditional cleanup keyed on that map would
+   * run on every unrelated view change — which is exactly what §4 says not to
+   * do. Idempotent, so the two cleanups running together costs nothing.
+   *
+   * The teardown FIRST, as everywhere else: this is the only close the
+   * coordinator does not own, and a pointer gesture's window listeners are not
+   * removed by taking its element out of the tree (§B).
+   *
+   * ⚠ In dev this cleanup also runs once immediately after mount, because
+   * `main.tsx` wraps the app in `StrictMode`, so it is not literally "on unmount
+   * only" in the environment the app is developed in. Still a no-op, and the
+   * reason is worth naming now that `closePlacementEditing` also clears the NOTE
+   * selection (LIB-GAP(26)): that clear is guarded on
+   * `editingPlacementId !== null || editingPatternId === null`, and at mount
+   * neither holds while the pattern page has a pattern open — which is the only
+   * state with a note selection worth keeping. With no pattern open the ids are
+   * the stale ones the guard exists to drop.
+   */
+  useEffect(
+    () => () => {
+      endOutgoingWork();
+      closePlacementEditing();
+    },
+    [endOutgoingWork],
+  );
 
   const isPlaying = useIsPlaying();
   // Which blocks are sounding. A snapshot slice rather than something derived
@@ -761,7 +1214,7 @@ export function ArrangementGrid({
   const compositionId = composition?.id ?? null;
   useEffect(() => {
     setTrackNotice(null);
-  }, [compositionId]);
+  }, [compositionId, setTrackNotice]);
 
   useEffect(() => {
     if (!patternDragRef) return;
@@ -828,6 +1281,22 @@ export function ArrangementGrid({
   const zoomTo = (index: number) => {
     const next = Math.max(0, Math.min(ARRANGEMENT_ZOOM_LEVELS.length - 1, index));
     if (next === zoomIndex) return;
+    // END THE GESTURE BEFORE THE SCALE CHANGES (§5). A drag captures its lane
+    // geometry and its pixels-per-beat at the press; carrying it across a zoom
+    // would mix a tick computed at the new scale with a grab offset measured at
+    // the old one, and the block would jump.
+    //
+    // ⚠ NOTHING ASSERTS THIS, and that is a property of the button rather than a
+    // gap in the tests. Every route to it already ends the work first: a press
+    // is a `pointerup`, which every in-flight drag's own window listener
+    // catches, and a keyboard activation is a `keydown`, which both key
+    // handlers treat as the end of a run. So this is belt to the braces the
+    // gesture layer already wears — the REACHABLE case, a scale that changes
+    // under a live gesture, is the hook's `invalidated` check, which folds in
+    // `pxPerBeat` and is tested there. Kept because the day a wheel or pinch
+    // zoom calls this, it will be the only thing standing between a live drag
+    // and two scales at once.
+    endOutgoingWork();
     // Anchor from the zoom being LEFT, before `setZoomIndex`: afterwards there is
     // no way to know what pixel-per-beat the current offset was measured in.
     const el = scrollerRef.current;
@@ -946,7 +1415,14 @@ export function ArrangementGrid({
   // two must not disagree about what is selected.
   // `=== 'pattern'`, not `!editing`: every one of these acts on a BLOCK, and
   // voice mode has no blocks on screen to act on either.
-  const hasSelection = selectedPlacementIds.length > 0 && mode === 'pattern';
+  //
+  // `gestures.effectiveSelection`, not the store's: a selection written from
+  // outside this page can name blocks on lanes the arrangement is not drawing,
+  // and a toolbar that counted those would offer five buttons that act on
+  // something nobody can see. The COMMANDS re-derive the same set when they
+  // fire, so this is only what is drawn — see `ArrangementGestures`.
+  const uiSelection = gestures.effectiveSelection;
+  const hasSelection = uiSelection.length > 0 && commandContext.kind === 'pattern';
 
   // Assigned during render rather than from an effect: a gesture can begin on
   // the very first pointerdown after a zoom, which is before any effect for that
@@ -954,12 +1430,11 @@ export function ArrangementGrid({
   // handoff, not work.
   //
   // `lanes` now includes VOICE lanes, where it used to be empty in voice mode —
-  // so `hitTest` can land on one. Harmless today and deliberately not guarded
-  // here: gestures run only while the whole page is in pattern view
-  // (`gestures.enabled`), and under a uniform view that means no lane in this
-  // stack is a voice lane while a gesture is live. Milestone 3 is where a mixed
-  // stack makes that a real question, and it belongs with the activation
-  // coordinator rather than as a special case in the geometry.
+  // so `hitTest` can land on one. Deliberately not guarded here — it is guarded
+  // at the hit test instead: every gesture filters this array through
+  // `isPatternLane` before touching it, so a voice lane is a GAP that `laneAt`
+  // answers null for rather than a row a press can land on. Keeping the full
+  // stack here is what makes those gaps keep their original tops.
   geometryRef.current = {
     lanes,
     tracks,
@@ -1034,13 +1509,13 @@ export function ArrangementGrid({
           </>
         )}
         {/* ⚠ THESE GO WITH ⌘Z, WHICHEVER WAY IT GOES. They are that shortcut's
-            twin and call the same function, and voice mode disables the window
-            key handler outright (`gestures.enabled`), so a live ↶ there would be
-            the second, contradicting code path this comment block exists to
-            forbid — and it would undo an arrangement edit that is not on screen,
+            twin and call the same function, and the voice context disables the
+            window key handler outright (`keyboardEnabled`), so a live ↶ there
+            would be the second, contradicting code path this comment block
+            exists to forbid — and it would undo an arrangement edit that is not on screen,
             with no keyboard equivalent to redo it. Undo comes back with the
             surface it acts on. */}
-        {timed && (
+        {timed && commandContext.kind !== 'voice' && (
           <>
             <button
               type="button"
@@ -1067,7 +1542,7 @@ export function ArrangementGrid({
             <span className="mx-1 h-4 w-px bg-line" />
             <label className="flex items-center gap-1.5">
               <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-                {editing ? 'Grid' : 'Snap'}
+                {commandContext.kind === 'pattern' ? 'Snap' : 'Grid'}
               </span>
               {/* The arrangement's default is the BAR where the note grid's is
                   the 16th — the one place the two surfaces intentionally
@@ -1077,9 +1552,15 @@ export function ArrangementGrid({
                   that means two things under one name is one nobody can
                   address. */}
               <select
-                aria-label={editing ? 'Note grid' : 'Arrangement snap'}
-                value={editing ? noteSnapId : snapId}
-                onChange={(e) => (editing ? setNoteSnapId : setSnapId)(e.target.value)}
+                aria-label={
+                  commandContext.kind === 'pattern' ? 'Arrangement snap' : 'Note grid'
+                }
+                value={commandContext.kind === 'pattern' ? snapId : noteSnapId}
+                onChange={(e) =>
+                  (commandContext.kind === 'pattern' ? setSnapId : setNoteSnapId)(
+                    e.target.value,
+                  )
+                }
                 className="control rounded-lg px-1.5 py-1 font-mono text-[9px] font-bold text-ink"
               >
                 {gridOptions.map((option) => (
@@ -1092,10 +1573,46 @@ export function ArrangementGrid({
           </>
         )}
 
+        {/* THE UNDO COST, said while it is being incurred.
+            `closePlacementEditing` clears the pattern history on the way out, so
+            moving to another track loses the open block's note undo stack — the
+            EDITS are written through and survive, the steps do not. That is the
+            existing history model and milestone 3 keeps it (per-placement
+            retained histories are a separate follow-up); what it does not keep
+            is leaving the user to discover it.
+
+            Here rather than in the inspector's empty state, because an empty
+            state is the one screen a user editing notes never looks at. Beside
+            the ↶ it qualifies, and only while a block is actually live.
+
+            ⚠ TWO LINES AT THIS WIDTH, and at the toolbar's own 9px rather than
+            anything smaller. The row is `items-center` with `h-4` separators,
+            so a caveat wrapping to three or four lines would grow the toolbar
+            every time a block went live. jsdom has no layout, so nothing here
+            can assert it — it is held by the copy staying short. */}
+        {uiEditingPlacementId !== null && (
+          <>
+            <span className="mx-1 h-4 w-px bg-line" />
+            <span
+              // Named and quiet: it is a standing caveat, not an event, so it
+              // must not read out as an alert every time the selection changes.
+              role="note"
+              aria-label="Undo scope"
+              className="max-w-[40ch] font-mono text-[9px] leading-tight tracking-[0.04em] text-ink-mut"
+            >
+              Undo is this block’s. Leaving it keeps its edits, clears its undo
+              history.
+            </span>
+          </>
+        )}
+
         {/* The selection's actions. Present only with a selection, because every
             one of them needs one and a permanently-greyed row of five buttons
             teaches nothing about what enables them. Each is the keyboard
-            shortcut's twin, calling the same function — no second code path.
+            shortcut's twin, calling the LITERAL same function — `gestures.*` is
+            what the window key handler calls too, so eligibility is resolved
+            once, at the press, against live state (§4: both the toolbar and the
+            keyboard must validate the current context at execution time).
 
             Deliberately NO repeat control: `Placement.repeat` is legacy and the
             lib's own note says the new arranger hides it. Repeated placements
@@ -1109,7 +1626,7 @@ export function ArrangementGrid({
           <>
             <span className="mx-1 h-4 w-px bg-line" />
             <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-              {selectedPlacementIds.length} sel
+              {uiSelection.length} sel
             </span>
             <button
               type="button"
@@ -1124,7 +1641,7 @@ export function ArrangementGrid({
               type="button"
               aria-label="Transpose down a semitone"
               title="Transpose down (↓ · shift for an octave)"
-              onClick={() => transposeSelectedPlacements(-1)}
+              onClick={() => gestures.transposeSelection(-1)}
               className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
             >
               ♭
@@ -1133,7 +1650,7 @@ export function ArrangementGrid({
               type="button"
               aria-label="Transpose up a semitone"
               title="Transpose up (↑ · shift for an octave)"
-              onClick={() => transposeSelectedPlacements(1)}
+              onClick={() => gestures.transposeSelection(1)}
               className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
             >
               ♯
@@ -1142,7 +1659,7 @@ export function ArrangementGrid({
               type="button"
               aria-label="Duplicate selection"
               title="Duplicate one selection-length to the right (⌘D)"
-              onClick={() => duplicateSelectedPlacements()}
+              onClick={gestures.duplicateSelection}
               className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
             >
               ⧉
@@ -1151,7 +1668,7 @@ export function ArrangementGrid({
               type="button"
               aria-label="Delete selection"
               title="Delete (⌫)"
-              onClick={() => deleteSelectedPlacements()}
+              onClick={gestures.deleteSelection}
               className="pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold"
             >
               ✕
@@ -1216,7 +1733,7 @@ export function ArrangementGrid({
             // refused drop, "3 blocks were written for another instrument" — is
             // unrelated to this press and may not have been read yet.
             if (!added.ok) setTrackNotice(added.reason);
-            else selectTrack(added.value.id);
+            else activateTrack(added.value.id, SELECT_TRACK);
           }}
           className={`pressable control rounded-lg px-2 py-1 font-mono text-[9px] font-bold ${
             tracks.length >= MAX_COMPOSITION_TRACKS ? 'opacity-40' : ''
@@ -1268,14 +1785,17 @@ export function ArrangementGrid({
           own row rather than sharing the gesture strip, so a refused drop and a
           refused add can be on screen at once — they are unrelated events and
           the second must not overwrite the first. */}
-      {trackNotice && (
+      {notice && (
         <div className="mb-1.5 flex flex-none items-center gap-2">
           <p
+            // Re-keyed on every set so a repeat of the SAME sentence is a new
+            // node, and so announced — see `setTrackNotice`.
+            key={notice.seq}
             role="alert"
             aria-label="Track message"
             className="flex-1 rounded-md border border-brass/50 px-2 py-1 font-mono text-[9.5px] text-ink"
           >
-            {trackNotice}
+            {notice.text}
           </p>
           <button
             type="button"
@@ -1387,7 +1907,11 @@ export function ArrangementGrid({
                   // on every other track's solo state — a header cannot work it
                   // out from the track it is given.
                   audible={isTrackAudible(track, tracks)}
-                  onSelect={() => selectTrack(lane.trackId)}
+                  // Through the coordinator: selecting a track ends whatever
+                  // the outgoing one had in flight and closes its open block
+                  // before the selection moves. `selectTrack` itself stays the
+                  // pointer-free seam the agent uses.
+                  onSelect={() => activateTrack(lane.trackId, SELECT_TRACK)}
                   onNotice={setTrackNotice}
                 />
               );
@@ -1684,9 +2208,12 @@ export function ArrangementGrid({
                                 placement={placement}
                                 timeSignature={ts}
                                 span={span}
-                                focused={editingPlacementId === placement.id}
+                                // OWNERSHIP, not the raw store pointer: a block
+                                // the agent holds, or one on a track that is not
+                                // the selected one, is drawn but is not live.
+                                focused={uiEditingPlacementId === placement.id}
                                 sounding={playingPlacementIds.includes(placement.id)}
-                                onFocus={() => focusPlacement(placement.id)}
+                                onFocus={() => focusPlacement(track.id, placement.id)}
                                 drifted={placementDrifted(
                                   placement,
                                   libraryById.get(placement.patternSnapshot.id),
@@ -1697,6 +2224,7 @@ export function ArrangementGrid({
                                 grid={noteGrid}
                                 edgeScroll={noteEdgeScroll}
                                 geometry={surfaceGeometry}
+                                registerDeactivate={registerSurfaceDeactivate}
                               />
                             );
                           })
@@ -1706,7 +2234,14 @@ export function ArrangementGrid({
                               placement={placement}
                               pxPerBeat={pxPerBeat}
                               laneHeight={lane.height}
-                              selected={selectedPlacementIds.includes(placement.id)}
+                              // The EFFECTIVE selection, so what is drawn as
+                              // selected is exactly what the toolbar counts and
+                              // what a command would touch. On a lane that is
+                              // drawing blocks the two sets agree by
+                              // construction; they stop agreeing the moment a
+                              // selection from outside this page names a lane
+                              // that is not.
+                              selected={uiSelection.includes(placement.id)}
                               playing={playingPlacementIds.includes(placement.id)}
                               drifted={placementDrifted(
                                 placement,
