@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { useCompositionPlayback } from '../audio/playbackService';
 import { ArrangementGrid, type PatternDragStarter } from './ArrangementGrid';
-import type { ArrangementMode } from './arrangementMath';
 import {
-  closePlacementEditing,
+  selectedTrackView,
+  setTrackView,
+  type ArrangementMode,
+  type CompositionTrackViews,
+} from './arrangementMath';
+import {
   ensureComposition,
-  JOB_LOCK_REASON,
+  useEditingComposition,
   useIsJobRunning,
+  useSelectedTrackId,
+  useTracks,
 } from './compositionService';
 import { NoteInspectorRail } from './NoteInspectorRail';
 import { CompositionLibraryRail } from './CompositionLibraryRail';
@@ -18,22 +24,21 @@ import { Section } from '../shell/Section';
 import type { SectionId } from '../voice/paramSchema';
 
 /**
- * The composition rail's sections, of which there is currently one.
+ * The rail's foldable sections, and CP-17 made this a union of three.
  *
  * A list rather than a boolean for the reason `App` holds the pattern page's:
  * the next section added must not have to change the shape of the state, and
  * open-ids rather than collapsed-ids means a section nobody asked for is not
  * open by default.
- */
-/**
- * The rail's foldable sections, and CP-17 made this a union of three.
  *
- * ⚠ 'patterns' and 'compositions' are PATTERN MODE's, not the page's — edit mode
- * still swaps in the note inspector and voice mode the voice rail, neither of
- * which is a section. That asymmetry is knowingly temporary: a document switcher
- * living inside pattern mode is the wrong home, and the alternatives (a top-bar
- * document menu, or the whole rail as sections with no mode swap) were both
- * deferred rather than rejected. See CP-17 on the board.
+ * ⚠ 'patterns' and 'compositions' belong to the PATTERN RAIL — the rail a
+ * SELECTED TRACK ON PATTERN gets (there is no page mode any more; see the
+ * component). A selected Edit track swaps in the note inspector and a selected
+ * Voice track the voice rail, neither of which is a section. That asymmetry is
+ * knowingly temporary: a document switcher living inside the pattern rail is the
+ * wrong home, and the alternatives (a top-bar document menu, or the whole rail
+ * as sections with no swap at all) were both deferred rather than rejected. See
+ * CP-17 on the board.
  */
 export type CompositionRailSectionId = 'commands' | 'patterns' | 'compositions';
 
@@ -44,24 +49,9 @@ export type CompositionRailSectionId = 'commands' | 'patterns' | 'compositions';
  *  new array identity on every render. */
 const NONE_OPEN: readonly CompositionRailSectionId[] = [];
 
-/**
- * The three modes are one surface, not three pages: the ruler, the track headers
- * and the scroll position never move between them — only what a lane draws and
- * what the rail holds. Drawing all three from the start, with two inert, is what
- * makes that legible before slices 2 and 3 fill them in.
- */
-const MODES: readonly {
-  id: ArrangementMode;
-  label: string;
-  /** Stated separately from `pending` so enabling a mode is one edit and losing
-   *  its tooltip is not what enables it. */
-  disabled?: true;
-  pending?: string;
-}[] = [
-  { id: 'pattern', label: 'Pattern' },
-  { id: 'edit', label: 'Edit' },
-  { id: 'voice', label: 'Voice' },
-];
+/** What an uncontrolled render starts with: every track on Pattern. A module
+ *  constant so an uncontrolled page does not get a new empty map per render. */
+const NO_VIEWS: CompositionTrackViews = {};
 
 /**
  * The page's audio lifecycle, mounted as a leaf that renders nothing.
@@ -70,9 +60,9 @@ const MODES: readonly {
  * `useCompositionPlayback` calls `usePlaybackEngine`, which reads the beat
  * counters out of the lib's metronome store — so its CALLER re-renders on every
  * beat and subdivision for as long as the transport runs. From the page that
- * would reconcile the mode bar, the whole grid (re-running the ruler marks, the
- * lane rects and every block) and the rail four to eight times a bar, competing
- * with the 60 Hz playhead. Here the re-render reconciles nothing.
+ * would reconcile the whole grid (re-running the ruler marks, the lane rects,
+ * every header and every block) and the rail four to eight times a bar,
+ * competing with the 60 Hz playhead. Here the re-render reconciles nothing.
  */
 function CompositionAudio() {
   useCompositionPlayback();
@@ -82,19 +72,28 @@ function CompositionAudio() {
 /**
  * The composition page.
  *
- * Deliberately not a `PaneStack`: this page owns fixed regions — mode bar, then
- * a grid and a rail that fill the rest of the viewport — and never scrolls as a
- * page. Two scrollable time grids inside a scrolling page is the pane-layout
- * debt in docs/FOLLOW-UPS.md, and this surface is avoiding it rather than
- * inheriting it.
+ * Deliberately not a `PaneStack`: this page owns fixed regions — a transport
+ * strip, then a grid and a rail that fill the rest of the viewport — and never
+ * scrolls as a page. Two scrollable time grids inside a scrolling page is the
+ * pane-layout debt in docs/FOLLOW-UPS.md, and this surface is avoiding it rather
+ * than inheriting it.
  *
- * `mode` is owned by `App` for the same reason `referenceView` and
- * `workingVoice` are: state that has to outlive an unmount lives above the thing
- * that unmounts, and this page unmounts every time you visit the pattern page.
+ * ⚠ THERE IS NO PAGE MODE ANY MORE. COMPS-TRACK-TABS milestone 4 removed the
+ * three-button bar: each TRACK carries its own view (`views`), and the rail
+ * follows the SELECTED track's. What used to be a page-wide statement is now
+ * always one of two questions — "what is this lane showing" (the grid asks
+ * `viewOf` per lane) or "what is the selected track showing" (this page, for the
+ * rail). A third spelling of it here would be the competing authority the
+ * milestone exists to delete.
+ *
+ * `views` is owned by `App` for the same reason `referenceView` and the
+ * collapsed racks are: state that has to outlive an unmount lives above the
+ * thing that unmounts, and this page unmounts every time you visit the pattern
+ * page.
  */
 export function CompositionPage({
-  mode,
-  onModeChange,
+  views,
+  onTrackViewChange,
   collapsedRacks,
   onCollapsedRacksChange,
   collapsedRackSections,
@@ -102,10 +101,22 @@ export function CompositionPage({
   openRailSections,
   onOpenRailSectionsChange,
 }: {
-  mode: ArrangementMode;
-  onModeChange: (mode: ArrangementMode) => void;
   /**
-   * Which voice racks are folded, owned by `App` for the reason `mode` is —
+   * Which view each track of each composition is showing — keyed by composition
+   * id, then track id, a MISSING entry meaning Pattern (`arrangementMath`).
+   *
+   * Optional, with local state behind it, exactly as the rail sections are: an
+   * uncontrolled render is a working page whose view buttons work locally, which
+   * is what a test rendering this component directly gets.
+   */
+  views?: CompositionTrackViews;
+  onTrackViewChange?: (
+    compositionId: string,
+    trackId: string,
+    view: ArrangementMode,
+  ) => void;
+  /**
+   * Which voice racks are folded, owned by `App` for the reason `views` is —
    * this page unmounts on every visit to the pattern page. The UNSAVED edits
    * those racks hold are a different problem with a different answer: they are
    * in `voice/voiceDrafts`, above every component, because the engine has
@@ -119,10 +130,10 @@ export function CompositionPage({
   onCollapsedRackSectionsChange?: (
     collapsed: Readonly<Record<string, readonly SectionId[]>>,
   ) => void;
-  /** Which rail sections are unfolded — owned by `App` for the reason `mode` is:
-   *  this page unmounts on every visit to the pattern page, and a section that
-   *  refolded itself on the way back is the same broken promise as a mode that
-   *  forgets itself. */
+  /** Which rail sections are unfolded — owned by `App` for the reason `views`
+   *  is: this page unmounts on every visit to the pattern page, and a section
+   *  that refolded itself on the way back is the same broken promise as a view
+   *  that forgets itself. */
   openRailSections?: readonly CompositionRailSectionId[];
   onOpenRailSectionsChange?: (
     next: (open: readonly CompositionRailSectionId[]) => readonly CompositionRailSectionId[],
@@ -149,9 +160,60 @@ export function CompositionPage({
     if (onOpenRailSectionsChange) onOpenRailSectionsChange(next);
     else setOwnRailSections(next);
   };
-  /** A generation job owns the document — the mode bar goes with it. See the
-   *  buttons for why this one control is disabled rather than left to refuse. */
+  /**
+   * The same uncontrolled fallback, for the view map — see the rail sections
+   * above. `App` passes both halves; a caller that passes neither gets a page
+   * whose per-track view buttons work locally rather than a row of dead controls.
+   *
+   * A PASSED MAP WINS, exactly as a passed section list does — see the same
+   * fallback in `ArrangementGrid`.
+   */
+  const [ownViews, setOwnViews] = useState<CompositionTrackViews>(NO_VIEWS);
+  const trackViews = views ?? ownViews;
+  const changeTrackView = (
+    compositionId: string,
+    trackId: string,
+    view: ArrangementMode,
+  ) => {
+    if (onTrackViewChange) onTrackViewChange(compositionId, trackId, view);
+    // Only when UNCONTROLLED — a caller that passes a map and no handler owns it
+    // and does not want it written from in here. Same guard as the grid's.
+    else if (views === undefined) {
+      setOwnViews((was) => setTrackView(was, compositionId, trackId, view));
+    }
+  };
+  /** A generation job owns the document. The per-track view buttons go with it —
+   *  see `TrackHeader`, which disables them for the reason the mode bar used to
+   *  be disabled: a view change can close an open block, and the agent may be
+   *  inside one. */
   const jobRunning = useIsJobRunning();
+  /**
+   * ── THE RAIL FOLLOWS THE SELECTED TRACK'S VIEW (§1, §2) ────────────────────
+   *
+   * Not the page's — there is no page view. Three tracks can be in three
+   * different views at once, and the one in the rail is the one whose track is
+   * SELECTED.
+   *
+   * `arrangementMath.selectedTrackView`, which is the SAME function
+   * `ArrangementGrid` routes ⌘Z and the toolbar's twins through. The membership
+   * check and the no-selection Pattern fallback live there, in one place, so the
+   * rail and the keyboard cannot end up disagreeing about which document the
+   * user is pointed at.
+   *
+   * These three subscriptions cost nothing extra: `CompositionShell` — this
+   * component's parent, which does not memoise it — already reads the
+   * composition to title the page, so this subtree reconciles on every store
+   * write either way.
+   */
+  const composition = useEditingComposition();
+  const tracks = useTracks();
+  const selectedTrackId = useSelectedTrackId();
+  const railView: ArrangementMode = selectedTrackView(
+    trackViews,
+    composition?.id ?? null,
+    selectedTrackId,
+    tracks,
+  );
   /**
    * The grid's drag-to-place entry point, published while the grid is mounted.
    *
@@ -173,83 +235,60 @@ export function CompositionPage({
   }, []);
 
   /**
-   * ⚠ THE CROSS-PAGE LEAK. Edit mode points the lib's ONE editing pointer at a
-   * placement, and `selectEditingPattern` **is** that pointer's target — so
-   * while a block is open the PATTERN PAGE would draw that block's snapshot, and
+   * ⚠ THE CROSS-PAGE LEAK, AND WHERE IT IS GUARDED NOW.
+   *
+   * Edit points the lib's ONE editing pointer at a placement, and
+   * `selectEditingPattern` **is** that pointer's target — so while a block is
+   * open the PATTERN PAGE would draw that block's snapshot, and
    * `openPlacementForEditing` nulls `editingPatternId` outright, so the library
    * pattern is closed rather than merely shadowed. `App`'s `ensurePattern` would
-   * then adopt whatever was updated most recently on the way back.
+   * then adopt whatever was updated most recently on the way back. Same family
+   * as the CP-02 defect where `openBlankComposition` nulled the same pointer and
+   * `App` answered by creating a junk pattern on every call.
    *
-   * All three exits are covered by this one effect: the cleanup runs when `mode`
-   * changes (leaving edit mode) and when this page unmounts (leaving the
-   * composition page, which is also every visit to the pattern page). The
-   * leading call covers arriving in a non-edit mode with a block still open —
-   * which a remembered `mode` in `App` makes reachable. `closePlacementEditing`
-   * is a no-op when nothing is open, which is why it can be wired this bluntly.
+   * This page used to carry the whole guard as one effect keyed on `mode`, whose
+   * cleanup closed the placement. There is no page mode to key it on any more,
+   * and §4 is explicit that the replacement must NOT be an unconditional cleanup
+   * keyed on the view map — that fires on every unrelated track's view change,
+   * closing a block the user is editing on some other track because a third
+   * track switched to Voice. `ArrangementGrid` splits the two halves instead:
    *
-   * Same family as the CP-02 defect where `openBlankComposition` nulled the same
-   * pointer and `App` answered by creating a junk pattern on every call. Covered
-   * by a regression test, not a manual check — tests/EditMode.test.tsx.
+   *  - LEAVING EDIT closes that track's block, in the grid's own reconciler —
+   *    per TRACK, which is the granularity the condition actually has
+   *    (`viewOfTrack(editingTrackId) !== 'edit'`), and synchronously in the view
+   *    button's own handler so no frame draws a live block on a lane that has
+   *    stopped drawing one.
+   *  - PAGE EXIT closes whatever is left, in the grid's unmount effect — keyed
+   *    only on stable callbacks, so it fires on unmount and on nothing else.
+   *
+   * Both run `endOutgoingWork()` first, and both are idempotent. The regression
+   * for the leak itself is tests/EditMode.test.tsx, against the page.
    */
-  useEffect(() => {
-    if (mode !== 'edit') closePlacementEditing();
-    return () => {
-      closePlacementEditing();
-    };
-  }, [mode]);
 
   return (
     <div className="grid min-h-0 grid-rows-[auto_1fr]">
       {/* The audio lifecycle for this page — the shared metronome, the
           multi-track engine, and the store subscription that makes a mute, a
           solo or a fader audible mid-playback. A sibling of the grid rather
-          than something inside it for the reason `App` holds `mode`: the grid
-          is replaced by a failure message when a composition can't be opened,
-          and the transport must not be torn down and rebuilt by that. */}
+          than something inside it for the reason `App` holds the view map: the
+          grid is replaced by a failure message when a composition can't be
+          opened, and the transport must not be torn down and rebuilt by that. */}
       <CompositionAudio />
+      {/* What is left of the mode bar: the strip and its rule, holding the
+          transport alone. The three view buttons moved into the track headers,
+          where the view now lives (COMPS-TRACK-TABS milestone 4). The inline
+          separator went with them — it divided the buttons from the transport
+          and there is nothing left on its left to divide.
+
+          The transport itself is in the page chrome rather than the grid's
+          toolbar, and this milestone is where that pays: it is the one control
+          here that is about the WHOLE composition and stays true whatever mix of
+          views the stack is in, where everything in the grid's strip (zoom,
+          snap, the selection's actions) is about the surface you are looking at.
+          (It renders nothing when no composition is open, which is also the
+          failed-open state — there is no transport for a document that doesn't
+          exist.) */}
       <div className="flex items-center gap-2 border-b border-rim-dark bg-panel px-3 py-1.5">
-        <span className="font-mono text-[9px] font-semibold tracking-[0.16em] text-ink-mut uppercase">
-          Mode
-        </span>
-        <div className="flex gap-[3px]" role="group" aria-label="Composition mode">
-          {MODES.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              // ⚠ AND while a generation job holds the composition. The effect
-              // below closes an open placement on EVERY mode change, and the
-              // agent may be inside one — a switch would repoint the lib's one
-              // pattern pointer out from under it and land the job's next notes
-              // in the user's library pattern, which a cancel does not restore.
-              // The seam refuses `openPlacementForEditing` for the same reason,
-              // but `mode` lives in `App` and reaches no seam, so this is the
-              // only place it can be refused.
-              disabled={m.disabled || jobRunning}
-              title={m.pending ?? (jobRunning ? JOB_LOCK_REASON : undefined)}
-              // The page nav also has a button reading "Pattern"; without this
-              // the two are indistinguishable in a screen reader's button list
-              // or to voice control, and only sighted users get the grouping.
-              aria-label={`${m.label} mode`}
-              aria-pressed={mode === m.id}
-              onClick={() => onModeChange(m.id)}
-              className={`pressable rounded-lg px-2.5 py-1 font-mono text-[9px] font-bold tracking-[0.12em] uppercase disabled:opacity-40 ${
-                mode === m.id ? 'control-accent' : 'control'
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-
-        <span className="mx-1 h-4 w-px bg-line" />
-
-        {/* In the page chrome rather than the grid's toolbar: the transport is
-            the one control here that is about the WHOLE composition and stays
-            true in all three modes, where everything in the grid's strip (zoom,
-            snap, the selection's actions) is about the surface you are looking
-            at. (It renders nothing when no composition is open, which is also
-            the failed-open state — there is no transport for a document that
-            doesn't exist.) */}
         <TransportBar />
       </div>
 
@@ -271,7 +310,8 @@ export function CompositionPage({
               </div>
             ) : (
               <ArrangementGrid
-                mode={mode}
+                views={trackViews}
+                onTrackViewChange={changeTrackView}
                 collapsedRacks={collapsedRacks}
                 onCollapsedRacksChange={onCollapsedRacksChange}
                 collapsedRackSections={collapsedRackSections}
@@ -282,21 +322,28 @@ export function CompositionPage({
           </div>
         </section>
 
-        {/* The rail is what CHANGES between the three modes, along with what a
-            lane draws — the ruler, the headers and the scroll position never do
-            (tickets/composition-page/README.md). Pattern mode gets the library,
-            edit mode the note inspector, voice mode the voice list. */}
+        {/* The rail is what CHANGES with the SELECTED TRACK'S view, along with
+            what that track's lane draws — the ruler, the headers and the scroll
+            position never do (tickets/composition-page/README.md). A Pattern
+            track gets the library, an Edit track the note inspector, a Voice
+            track the voice list; no valid selection gets the library. */}
         <aside
           aria-label={
-            mode === 'pattern' ? 'Pattern library' : mode === 'voice' ? 'Voices' : 'Inspector'
+            railView === 'pattern'
+              ? 'Pattern library'
+              : railView === 'voice'
+                ? 'Voices'
+                : 'Inspector'
           }
           className="rail flex min-h-0 flex-col"
         >
-          {/* COMMANDS, ALWAYS — then whatever the mode holds. The section is
-              persistent and sits above the mode-swapped region on purpose: a
-              generation job runs for minutes across mode switches, and its
-              progress and its Cancel button cannot live in a region that is
-              replaced when the user goes to look at what the agent just built.
+          {/* COMMANDS, ALWAYS — then whatever the selected track's view holds.
+              The section is persistent and sits above the swapped region on
+              purpose: a generation job runs for minutes across view and
+              selection changes, and its progress and its Cancel button cannot
+              live in a region that is replaced when the user goes to look at
+              what the agent just built. Splitting its contents into composition
+              commands and selected-track commands is milestone 5's.
               No `grow`: it is as tall as its content, so opening it costs the
               rail below it rows rather than half the column (see `PatternRail`
               in `App.tsx` for the whole argument). */}
@@ -306,21 +353,27 @@ export function CompositionPage({
             onToggle={() => toggleRailSection('commands')}
             // Visible whether the section is folded or not, because a folded
             // section's body is `hidden` — this is the only thing telling a user
-            // who folded it that the agent is still working, and the mode bar
-            // being dead is otherwise unexplained.
+            // who folded it that the agent is still working, and the headers'
+            // view buttons being dead is otherwise unexplained.
             note={jobRunning ? 'Running…' : undefined}
             // The rail is a flex column with no scroller of its own and this
             // section is `flex-none`, so anything unbounded inside it squeezes
-            // the mode rail below towards zero and overflows the aside. The
+            // the view-specific region below towards zero and overflows the
+            // aside. The
             // panel bounds its own tallest region (the tool trace) and this is
             // the belt: at worst the commands scroll rather than the column.
             // Not assertable in jsdom, which has no layout.
             bodyClassName="max-h-[50vh] overflow-y-auto"
           >
-            <CompositionCommandPanel mode={mode} />
+            {/* The SELECTED TRACK'S view, which is what `mode` means here now:
+                the panel uses it to pick which rows it offers, and the rows are
+                about the surface the user is looking at. Its own prop keeps its
+                name until milestone 5 splits the offering into composition
+                commands and track commands. */}
+            <CompositionCommandPanel mode={railView} />
           </Section>
 
-          {mode === 'pattern' ? (
+          {railView === 'pattern' ? (
             <>
               {/* `grow`, and the only section here that has it: the pattern list
                   is what the grid is filled FROM, so it keeps the whole-rail
@@ -350,7 +403,7 @@ export function CompositionPage({
                 <CompositionLibraryRail />
               </Section>
             </>
-          ) : mode === 'edit' ? (
+          ) : railView === 'edit' ? (
             // Follows the NOTE selection, not the placement selection — see the
             // header of NoteInspectorRail. It is always mounted here, empty
             // state included, because a rail that appeared and vanished with the

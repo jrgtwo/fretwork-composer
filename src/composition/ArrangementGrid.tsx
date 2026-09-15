@@ -16,11 +16,16 @@ import {
   lanesHeight,
   placementDrifted,
   rulerMarks,
+  selectedTrackView,
   tickToPx,
+  setTrackView,
   timedBands,
+  viewOf,
   zoomAnchoredScrollLeft,
   type ArrangementMode,
+  type CompositionTrackViews,
   type EditableSpan,
+  type LaneRect,
   type TimedBand,
 } from './arrangementMath';
 import type { PatternTimeSignature } from '@fretwork/lib';
@@ -89,6 +94,10 @@ const TRAILING_BARS = 2;
 
 /** Shared empty list so the default prop keeps a stable identity across renders. */
 const NO_COLLAPSED_RACKS: readonly string[] = [];
+
+/** Same, for the view map: an uncontrolled grid is one where every track is on
+ *  Pattern, which is what an empty map means (`arrangementMath.viewOf`). */
+const NO_VIEWS: CompositionTrackViews = {};
 
 /** Same, for the per-section folds. An absent entry means nobody has folded that
  *  track's rack yet, and it opens on the schema's `DEFAULT_OPEN_SECTIONS` — see
@@ -161,12 +170,12 @@ const NO_COLLAPSED_SECTIONS: Readonly<Record<string, readonly SectionId[]>> = {}
  *
  * Zoom and scroll are held HERE, and so are forgotten when this unmounts — which
  * is every visit to the pattern page. That is deliberate rather than overlooked:
- * `App` owns `mode` for exactly the opposite reason (a mode that silently resets
- * is a mode you can't trust), but zoom and scroll are re-established by looking
- * at the screen, and lifting them would put a scroll offset measured in one
- * zoom's pixels into a component tree that outlives the zoom it was measured
- * against. If a later ticket needs the view restored across a page visit, it is
- * the same lift `mode` already models — see `App.tsx`.
+ * `App` owns the per-track VIEW MAP for exactly the opposite reason (a stack of
+ * views that silently resets is a page you can't trust), but zoom and scroll are
+ * re-established by looking at the screen, and lifting them would put a scroll
+ * offset measured in one zoom's pixels into a component tree that outlives the
+ * zoom it was measured against. If a later ticket needs the view restored across
+ * a page visit, it is the same lift the view map already models — see `App.tsx`.
  */
 export type PatternDragStarter = (patternId: string, e: React.PointerEvent) => void;
 
@@ -174,10 +183,12 @@ export type PatternDragStarter = (patternId: string, e: React.PointerEvent) => v
  * What an activation is being asked FOR — the last step of the coordinator
  * below, and the only thing that varies between its callers.
  *
- * `select` is a header press, a lane press or a freshly added track: it makes a
- * track the active one and starts nothing. Selecting an Edit header therefore
- * does NOT open a block, which is deliberate — the inspector's empty state is
- * what says so.
+ * `select` is a header press, a view-button press, a lane press or a freshly
+ * added track: it makes a track the active one and starts nothing. Selecting an
+ * Edit header therefore does NOT open a block, which is deliberate — the
+ * inspector's empty state is what says so. A VIEW press is a `select` plus the
+ * view write that follows it (`changeTrackView`), rather than a case of its own:
+ * what the coordinator has to do is identical, and the write is the caller's.
  *
  * `edit` is a note surface taking the document. It selects the track AND points
  * the editor at that block, and only a successful open grants focus.
@@ -397,18 +408,34 @@ function PlacementSurface({
 }
 
 export function ArrangementGrid({
-  mode,
+  views,
+  onTrackViewChange,
   collapsedRacks = NO_COLLAPSED_RACKS,
   onCollapsedRacksChange,
   collapsedRackSections = NO_COLLAPSED_SECTIONS,
   onCollapsedRackSectionsChange,
   patternDragRef,
 }: {
-  mode: ArrangementMode;
   /**
-   * Which tracks' voice racks are folded. Held by `App` for the reason `mode`
+   * WHICH VIEW EACH TRACK IS SHOWING, keyed by composition id then track id —
+   * `App`'s map, read through `arrangementMath.viewOf` and never indexed here.
+   * A missing entry means Pattern, which is why an uncontrolled grid needs no
+   * seeding.
+   *
+   * Optional with local state behind it, the way `CompositionPage`'s rail
+   * sections are: a caller that passes neither half gets working view buttons
+   * that simply do not outlive this component.
+   */
+  views?: CompositionTrackViews;
+  onTrackViewChange?: (
+    compositionId: string,
+    trackId: string,
+    view: ArrangementMode,
+  ) => void;
+  /**
+   * Which tracks' voice racks are folded. Held by `App` for the reason `views`
    * is: this component unmounts on every visit to the pattern page, and a rack
-   * that unfolds itself behind your back is the same bug as a mode that resets.
+   * that unfolds itself behind your back is the same bug as a view that resets.
    *
    * Defaulted so every existing caller — and every test of the other two modes —
    * needs to know nothing about racks.
@@ -459,31 +486,50 @@ export function ArrangementGrid({
    * activation from ever reaching one.
    */
   const jobRunning = useIsJobRunning();
-  const editing = mode === 'edit';
+  /** The composition the map is keyed under. `''` with none open — no track id
+   *  is asked about in that state, and `viewOf` is total, so it needs no guard
+   *  of its own. */
+  const compositionId = composition?.id ?? '';
+  /**
+   * The uncontrolled fallback — see the `views` prop, and the rail sections in
+   * `CompositionPage` for the shape.
+   *
+   * A PASSED MAP WINS, exactly as a passed section list does: the caller owns
+   * it, and a caller that passes one and no handler is one that does not want it
+   * changed from in here (a test pinning a fixed stack, a `rerender` standing in
+   * for a view change). The local state is what an uncontrolled render uses, and
+   * the buttons write to it.
+   */
+  const [ownViews, setOwnViews] = useState<CompositionTrackViews>(NO_VIEWS);
+  const trackViews = views ?? ownViews;
   /**
    * THE ONE PLACE A TRACK'S VIEW IS DECIDED.
    *
-   * Today it answers this page's single global mode for every track, which is
-   * exactly what the page did before — COMPS-TRACK-TABS milestone 2 changes the
-   * LAYOUT, not the feature. Milestone 4 replaces the body of this one line with
-   * the per-composition map (`arrangementMath.viewOf`), and nothing else below
-   * has to move, BECAUSE every per-lane decision is routed through here rather
-   * than reading `mode` a second time. Adding a `mode ===` test to a per-lane
-   * branch is how that stops being true.
+   * Every per-lane decision in this file routes through here — the lane's
+   * height, what it draws, whether it is timed, whether its blocks can be
+   * pressed, which history ⌘Z pops — so there is exactly one answer to "what is
+   * this track showing" and the per-composition map is the only place it comes
+   * from. Adding a second lookup to a per-lane branch is how that stops being
+   * true; milestone 2 kept this signature through a uniform-mode step precisely
+   * so this milestone could replace the BODY and nothing else.
    *
-   * PAGE-level questions still read `mode` directly and should: the toolbar and
-   * the ⌘Z routing are statements about the whole page. The gestures hook's two
-   * flags are the exception — `pointerEnabled` and `keyboardEnabled` are both
-   * derived from this helper and from `commandContext`, which is where they
-   * learned about a selected track.
+   * Total: an unknown track answers Pattern, because that is what the absence of
+   * an entry means (`arrangementMath.viewOf`).
    */
-  // The parameter is unused ON PURPOSE and the signature is the point: every
-  // per-lane branch below already passes a track id, so milestone 4 replaces the
-  // BODY and touches nothing else. Suppressed rather than dropped — a
-  // zero-argument version would have to be re-threaded through a dozen call
-  // sites the day it grows one.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const viewOfTrack = useCallback((_trackId: string): ArrangementMode => mode, [mode]);
+  const viewOfTrack = useCallback(
+    (trackId: string): ArrangementMode => viewOf(trackViews, compositionId, trackId),
+    [trackViews, compositionId],
+  );
+  /**
+   * Is there a Pattern lane on screen at all.
+   *
+   * A PER-LANE question asked of the whole stack, and the page-level half of the
+   * pointer split (§4): WHICH lane was pressed is `isPatternLane`'s answer at
+   * the press. It gates the lane area's own pointer handlers, the gesture hook,
+   * and the empty-arrangement hint's wording — every one of which is a statement
+   * about whether a block can be placed or grabbed anywhere in this stack.
+   */
+  const anyPatternLane = tracks.some((track) => viewOfTrack(track.id) === 'pattern');
   /**
    * Whether there is a time axis on screen at all.
    *
@@ -495,35 +541,31 @@ export function ArrangementGrid({
    * voice".
    *
    * An EMPTY stack has no lane to ask, and `some` on nothing is `false` — which
-   * would be the wrong answer for pattern and edit, so the page's own view is
-   * the fallback. This is the one deliberate read of `mode` outside
-   * `viewOfTrack`, and it is not a per-lane branch: it is what the page shows
-   * when there are no lanes. A trackless composition is not reachable through
-   * `compositionService` (the seam refuses to delete the last track), but one
-   * built elsewhere can carry zero tracks, and an unconditional `true` here put
-   * the ruler, the zoom steps, the snap menu, the bar count and "Nothing placed
-   * yet" on screen beside a rail labelled Voices. Milestone 4 replaces it with
-   * that composition's own default view.
+   * is the wrong answer, so the composition's OWN DEFAULT VIEW is the fallback
+   * and that default is Pattern (`viewOf` on a track nobody has switched). A
+   * trackless composition is therefore timed. It is not a per-lane branch: it is
+   * what the page shows when there are no lanes.
    *
-   * Under a uniform view this reduces to `mode !== 'voice'` for EVERY track
-   * count, which is exactly the value it has always had. Expressed per-lane NOW
-   * so milestone 4 does not have to rewrite the scroll machinery that hangs off
-   * it.
+   * ⚠ Why it is not simply `true`. A trackless composition is not reachable
+   * through `compositionService` (the seam refuses to delete the last track),
+   * but one built elsewhere can carry zero tracks — and before milestone 2 this
+   * was an unconditional `true`, which put the ruler, the zoom steps, the snap
+   * menu, the bar count and "Nothing placed yet" on screen beside a rail
+   * labelled Voices. Keeping the fallback explicit is what documents that the
+   * answer comes from a VIEW rather than from there being nothing to draw.
    *
-   * `editing` stays a separate question because edit mode very much has a time
-   * axis and merely hands the pointer to the note surfaces.
+   * Edit stays timed: an edit lane very much has a time axis and merely hands
+   * the pointer to the note surfaces.
    */
   const timed =
-    tracks.length === 0
-      ? mode !== 'voice'
-      : tracks.some((track) => viewOfTrack(track.id) !== 'voice');
+    tracks.length === 0 || tracks.some((track) => viewOfTrack(track.id) !== 'voice');
   /**
    * Undo is per-DOCUMENT, and edit mode edits a different one.
    *
    * The two histories are separate stacks — `compositionService`'s holds whole
    * `Composition` snapshots, `patternService`'s holds `Pattern`s — and ⌘Z is
-   * already routed by mode (the arrangement's key handler is disabled in edit
-   * mode; the focused `NoteSurface`'s is not). These two buttons have to follow
+   * already routed by the selected track's view (the arrangement's key handler
+   * is off in Edit; the focused `NoteSurface`'s is not). These two buttons follow
    * it or they are a second, contradicting code path: pressing ↶ after a note
    * edit would restore a composition snapshot captured before it and stamp the
    * pre-edit `patternSnapshot` back over the block — destroying the edit with no
@@ -815,11 +857,10 @@ export function ArrangementGrid({
    * ── THE ACTIVATION COORDINATOR ──────────────────────────────────────────────
    *
    * THE ONE WAY A TRACK BECOMES THE ACTIVE ONE, and the one place the order of
-   * operations is written down. Track headers, lane presses and the note
-   * surfaces' focus callbacks all arrive here (COMPS-TRACK-TABS milestone 3 §A);
-   * milestone 4's per-track view buttons will too.
-   *
-   * The order is the whole of it, and every step is load-bearing:
+   * operations is written down. Track headers, their view buttons, lane presses
+   * and the note surfaces' focus callbacks all arrive here (COMPS-TRACK-TABS
+   * milestone 3 §A, milestone 4 §2). The order is the whole of it, and every
+   * step is load-bearing:
    *
    *  1. VALIDATE the target and the lock, before anything is torn down — a
    *     refusal here has to leave the page exactly as it was, which is why step
@@ -847,9 +888,10 @@ export function ArrangementGrid({
    * pointer and with no view state; this is the UI's own front door to it.
    */
   const activateTrack = (trackId: string, action: TrackActivation): boolean => {
-    // 1 — the lock first, so a refusal costs nothing. The mode bar is disabled
-    // during a job for the same reason (`CompositionPage`), but a header press,
-    // a lane press and a surface taking focus reach no disabled control.
+    // 1 — the lock first, so a refusal costs nothing. The headers' view buttons
+    // are disabled during a job for the same reason (§4 asks for both), but a
+    // header press, a lane press and a surface taking focus reach no disabled
+    // control.
     if (isJobRunning()) {
       setTrackNotice(JOB_LOCK_REASON);
       return false;
@@ -953,25 +995,42 @@ export function ArrangementGrid({
       : null;
 
   /**
+   * THE SELECTED TRACK'S VIEW — the input to everything below that is about a
+   * DOCUMENT rather than about a lane.
+   *
+   * `arrangementMath.selectedTrackView`, which is also what the RAIL is picked
+   * from (`CompositionPage`). One function rather than the same three clauses
+   * written out in both files: the two must agree, and a fallback changed in one
+   * copy would split the rail from the keyboard with nothing to catch it. The
+   * membership check and the no-selection fallback are documented there.
+   */
+  const selectedView: ArrangementMode = selectedTrackView(
+    trackViews,
+    compositionId,
+    selectedTrackId,
+    tracks,
+  );
+  /**
    * Which view the page's DIRECT EDITING commands belong to — see
    * `DirectEditContext`.
    *
-   * Read off the ONE global mode today, exactly as everything else on this page
-   * still is. Milestone 4 repoints it at the SELECTED track's view, which is why
+   * The SELECTED track's view, which is what §4's table means by a context:
+   * ⌘Z pops the history of the document the user is pointed at, and with three
+   * tracks in three views on screen at once "the page's view" names nothing.
    * `uiEditingPlacementId` is the edit arm's input rather than the store's raw
-   * pointer: that derivation already asks who owns the block, and ownership is
-   * what the selected track's view will decide.
+   * pointer because that derivation already asks who OWNS the block, and
+   * ownership is what the selected track's view decides.
    */
   const commandContext: DirectEditContext =
-    mode === 'voice'
+    selectedView === 'voice'
       ? { kind: 'voice' }
-      : mode === 'edit'
+      : selectedView === 'edit'
         ? uiEditingPlacementId !== null
           ? { kind: 'edit', placementId: uiEditingPlacementId }
           : { kind: 'edit-idle' }
         : { kind: 'pattern' };
   /**
-   * ↶ and ↷, routed by the ONE context above rather than by `mode`.
+   * ↶ and ↷, routed by the ONE context above — the selected track's view.
    *
    * `edit-idle` — edit view with no block live — is DISABLED, which is the
    * behaviour change §4's table asks for. Pointed at the note history it was
@@ -1013,31 +1072,48 @@ export function ArrangementGrid({
      * surface does not care which track is SELECTED, and a Pattern block stays
      * draggable while some other track's view is the one in the rail.
      *
-     * Under the one global mode this is still `mode === 'pattern'` — with one
-     * exception, and it is deliberate: a composition with NO TRACKS answers
-     * false here where `mode === 'pattern'` answered true. `openBlankComposition`
-     * makes one, so the state is reachable. There is nothing to press and
+     * A composition with NO TRACKS answers false: there is nothing to press and
      * nothing to drop onto (`dropTarget` over zero lanes is null either way), so
-     * the only change is that `startPatternDrag` now declines instead of
-     * starting a drag that could never place anything.
+     * `startPatternDrag` declines rather than starting a drag that could never
+     * place anything. `openBlankComposition` makes one, so the state is
+     * reachable.
      */
-    pointerEnabled: tracks.some((track) => viewOfTrack(track.id) === 'pattern'),
+    pointerEnabled: anyPatternLane,
     /**
      * KEYBOARD: exclusive with a focused `NoteSurface`, which answers the same
      * keys against the notes. Two keyboard systems over one surface is how one
      * ⌘Z pops an arrangement step and a note step at once.
      *
-     * The exclusion is STRUCTURAL rather than a second rule to keep in step:
-     * this is true only in the `pattern` context, and `uiEditingPlacementId` —
-     * the only thing that focuses a surface — is non-null only in `edit`. No
-     * arrangement of the two can be true at once.
+     * ⚠ THE EXCLUSION IS SPELLED OUT, and milestone 4 is why. It used to be
+     * structural: `keyboardEnabled` was true only in the `pattern` context, and
+     * `uiEditingPlacementId` — the only thing that focuses a surface — was
+     * non-null only in `edit`, because both read the ONE page mode. They read
+     * two different things now. The context is the SELECTED track's view;
+     * ownership is the view of the track that OWNS the open block. With nothing
+     * selected those disagree by design: a block opened by id adopts its own
+     * track (§4 forbids making that capability depend on React view state), so
+     * it is live and focused while the context is still the no-selection Pattern
+     * fallback. The reconciler selects that track on the very next effect, so
+     * the overlap cannot outlive one commit and no keypress can land inside it —
+     * but "cannot be true at once" is no longer a property of the derivation,
+     * and a second window key handler over a focused note surface is not
+     * something to leave resting on an effect's timing.
      *
      * Voice is the same argument for a different reason: those lanes are racks,
      * so ArrowUp there belongs to a knob. The boundary predicate catches a
      * FOCUSED dial in any view; this is what stops the arrangement answering
      * keys in a view that is drawing no blocks at all.
+     *
+     * ⚠ `timed` IS PART OF IT, and it is the ALL-VOICE stack with nothing
+     * selected: §4's table puts the no-selection fallback in the Pattern row, so
+     * without this a ⌘Z over a screen holding nothing but racks would pop an
+     * arrangement step made on a surface that is not on screen — and the
+     * toolbar's ↶, its literal twin, is not even rendered there (it is gated on
+     * `timed` too). The two must agree or one of them is a second, contradicting
+     * code path.
      */
-    keyboardEnabled: commandContext.kind === 'pattern',
+    keyboardEnabled:
+      timed && commandContext.kind === 'pattern' && uiEditingPlacementId === null,
     isPatternLane,
     // A lane press takes its track before the gesture writes anything — and a
     // refusal stops the press dead. Only `onLanesPointerDown` calls it: a drag
@@ -1081,6 +1157,58 @@ export function ArrangementGrid({
    */
   const focusPlacement = (trackId: string, placementId: string): boolean =>
     activateTrack(trackId, { kind: 'edit', placementId });
+
+  /**
+   * ── A TRACK'S VIEW BUTTON (§2) ──────────────────────────────────────────────
+   *
+   * A view click SELECTS ITS TRACK AND SETS ITS VIEW, even when that view is
+   * already the active one — which is the whole reason this is not a bare
+   * setter. It goes through the coordinator like every other activation, so a
+   * job holding the document refuses it, an outgoing note drag is ended against
+   * the block it started on, and another track's open block is closed before the
+   * selection moves. A refused activation writes NO VIEW: the page has to be
+   * left exactly as it was.
+   *
+   * ⚠ LEAVING EDIT CLOSES THIS TRACK'S OWN BLOCK, here and synchronously.
+   * `activateTrack` deliberately KEEPS an open block that belongs to the track
+   * being activated — that is how re-selecting a track preserves what it was
+   * editing — so on the Pattern and Voice buttons this is the step that gives it
+   * up. The reconciler below would also catch it one commit later (it asks
+   * `viewOfTrack(editingTrackId) !== 'edit'`), but that is the BACKSTOP for
+   * changes made outside this component, and a close that arrives a commit late
+   * leaves the lib's editing pointer parked on a lane that has stopped drawing
+   * it. The cost is the documented one: the block's edits survive, its note undo
+   * history does not.
+   *
+   * The teardown before the close, as everywhere else — this is a button press,
+   * so `NoteSurface`'s own capture-phase run-enders have already fired, but a
+   * POINTER gesture is not ended by either of them (§B).
+   */
+  const changeTrackView = (trackId: string, view: ArrangementMode): void => {
+    if (!activateTrack(trackId, SELECT_TRACK)) return;
+    if (view !== 'edit') {
+      const open = getEditingPlacementId();
+      const owned =
+        open !== null &&
+        (getTracks()
+          .find((candidate) => candidate.id === trackId)
+          ?.placements.some((placement) => placement.id === open) ??
+          false);
+      if (owned) {
+        endOutgoingWork();
+        closePlacementEditing();
+      }
+    }
+    if (onTrackViewChange) onTrackViewChange(compositionId, trackId, view);
+    // ⚠ ONLY WHEN THIS GRID IS UNCONTROLLED. A caller that passes `views` and no
+    // handler owns the map and does not want it written from in here (see the
+    // prop) — `setOwnViews` there would write state nothing reads and re-render
+    // for it, which is the classic controlled/uncontrolled trap. The SELECTION
+    // above still moves, because that is the seam's and not this map's.
+    else if (views === undefined) {
+      setOwnViews((was) => setTrackView(was, compositionId, trackId, view));
+    }
+  };
 
   /**
    * THE BACKSTOP. Reconcile the open block with who owns it, for the changes
@@ -1144,12 +1272,14 @@ export function ArrangementGrid({
    *
    * Leaving the composition page leaves the lib's one editing pointer parked on
    * a placement, and the pattern page would then draw that block's snapshot —
-   * the CP-02 family of defect. `CompositionPage` has the same cleanup keyed on
-   * `mode`; this one is keyed on the two STABLE callbacks it uses, so it fires
-   * on unmount and on nothing else. Milestone 4 replaces `mode` with a
-   * per-composition map, and an unconditional cleanup keyed on that map would
-   * run on every unrelated view change — which is exactly what §4 says not to
-   * do. Idempotent, so the two cleanups running together costs nothing.
+   * the CP-02 family of defect. `CompositionPage` used to carry the same cleanup
+   * keyed on its global `mode`; milestone 4 deleted that mode, and an
+   * unconditional cleanup keyed on the view map that replaced it would run on
+   * every unrelated track's view change, which is exactly what §4 says not to
+   * do. So this is now the ONLY page-exit close, and it is keyed on the one
+   * STABLE callback it uses: it fires on unmount and on nothing else. Leaving
+   * Edit is the other half, and it is per-TRACK — `changeTrackView` closes
+   * synchronously and the reconciler above is its backstop.
    *
    * The teardown FIRST, as everywhere else: this is the only close the
    * coordinator does not own, and a pointer gesture's window listeners are not
@@ -1210,22 +1340,49 @@ export function ArrangementGrid({
 
   // A track notice names a track — or a cap — in ONE composition. Carried across
   // a switch it is a refusal from a document that is no longer on screen, with no
-  // way to tell that is what it is.
-  const compositionId = composition?.id ?? null;
+  // way to tell that is what it is. `compositionId` is declared with the view
+  // map above, which is keyed by it.
   useEffect(() => {
     setTrackNotice(null);
   }, [compositionId, setTrackNotice]);
 
+  // Pulled out of `gestures` so the effect below depends on the ONE function it
+  // calls rather than on the whole hook result, which changes every render.
+  const { startPatternDrag } = gestures;
   useEffect(() => {
     if (!patternDragRef) return;
-    patternDragRef.current = gestures.startPatternDrag;
+    /**
+     * ⚠ SAY SO WHEN THE DRAG CANNOT LAND, rather than letting it be inert.
+     *
+     * `startPatternDrag` returns immediately when `pointerEnabled` is false, and
+     * milestone 4 is what makes that state reachable WITH THE LIBRARY ON SCREEN:
+     * the rail falls back to the pattern library whenever no valid track is
+     * selected, so a stack with every lane in Edit or Voice — or a composition
+     * with no tracks at all — shows a list of patterns that nothing can be
+     * dragged out of. A press that does nothing and explains nothing reads as a
+     * broken library.
+     *
+     * The track strip's notice line, which is where every other refusal about
+     * this stack already lands.
+     */
+    patternDragRef.current = (patternId, e) => {
+      if (!anyPatternLane) {
+        setTrackNotice(
+          tracks.length === 0
+            ? 'Add a track before placing a block.'
+            : 'Put a track in Pattern view to place a block.',
+        );
+        return;
+      }
+      startPatternDrag(patternId, e);
+    };
     // Cleared on unmount: the rail outlives this component (the page keeps
     // rendering it while the grid reports a failure to open), and a stale
     // starter would drag against a geometry that no longer exists.
     return () => {
       patternDragRef.current = null;
     };
-  }, [patternDragRef, gestures.startPatternDrag]);
+  }, [patternDragRef, startPatternDrag, anyPatternLane, tracks.length, setTrackNotice]);
 
   /** Match the two clipped viewports to wherever the scroller actually is. */
   const syncViewports = useCallback(() => {
@@ -1330,8 +1487,12 @@ export function ArrangementGrid({
             page used to mint an "Untitled composition" nobody asked for.
 
             Here rather than in the rail's list, even though that list has a New
-            of its own: the rail is only mounted in pattern mode, and this state
-            is reachable in all three. */}
+            of its own: the rail's composition list belongs to the PATTERN rail,
+            and that is only the rail a selected Pattern track gets. With no
+            composition open there is no track to select, so the page does fall
+            back to the pattern rail here — but that is the fallback answering,
+            not a guarantee, and an empty state with no way out is what CP-17
+            went to the trouble of removing. */}
         <button
           type="button"
           onClick={() => {
@@ -1393,6 +1554,28 @@ export function ArrangementGrid({
   // The strips a bar line or the playhead may be drawn across. One band spanning
   // the whole stack whenever no lane is in voice, which is the case this page
   // has always drawn.
+  /**
+   * ⚠ NEVER PAIR A LANE LIST WITH THE TRACK LIST BY INDEX (§5).
+   *
+   * `laneRects` returns one rect per track in order, so today `lanes[i]` and
+   * `tracks[i]` ARE the same track — and that is exactly what makes the bug
+   * invisible: §5 requires a Pattern-ONLY lane array for hit tests, drops and
+   * marquee selection (the gesture hook builds one, keeping the original tops,
+   * so a non-Pattern row is a GAP), and the day any FILTERED list is handed to a
+   * `.map((lane, index) => tracks[index])` the headers and the blocks silently
+   * belong to the wrong tracks and still look plausible. Resolving by id cannot
+   * drift, so the three render loops below all go through this.
+   *
+   * The index is carried with the track because `TrackControls`' move-up /
+   * move-down needs the track's position in the STACK — which is the track
+   * list's index, never the filtered lane list's.
+   *
+   * Not memoised, unlike `libraryById` above, and it cannot be: this sits below
+   * the `!composition` early return, where a hook is illegal. `MAX_COMPOSITION_TRACKS`
+   * is 8, so the map is eight entries built from an array that is already in hand.
+   */
+  const laneTrackById = new Map(tracks.map((track, index) => [track.id, { track, index }]));
+  const laneTrack = (lane: LaneRect) => laneTrackById.get(lane.trackId);
   const bands = timedBands(lanes, viewOfTrack);
   const height = lanesHeight(lanes);
   const snap = arrangementSnap(ts, snapId);
@@ -1408,13 +1591,13 @@ export function ArrangementGrid({
   // Emptiness is "no blocks", not "no duration": a snapshot that measures zero
   // still put a block on screen, and a hint printed over one is a lie.
   const nothingPlaced = tracks.every((track) => track.placements.length === 0);
-  // Hidden in edit mode: every one of these acts on a BLOCK, and in edit mode
-  // the thing you have selected is a note. The block selection is EMPTIED on the
-  // way in, not merely hidden — `closePlacementEditing` clears it, because the
-  // lib nulls its own `selectedPlacementId` when a placement is opened and the
-  // two must not disagree about what is selected.
-  // `=== 'pattern'`, not `!editing`: every one of these acts on a BLOCK, and
-  // voice mode has no blocks on screen to act on either.
+  // Hidden when the SELECTED track is in Edit: every one of these acts on a
+  // BLOCK, and there the thing you have selected is a note. The block selection
+  // is EMPTIED on the way in, not merely hidden — `closePlacementEditing` clears
+  // it, because the lib nulls its own `selectedPlacementId` when a placement is
+  // opened and the two must not disagree about what is selected.
+  // `commandContext.kind === 'pattern'`, which is also false for a selected
+  // Voice track: that context has no block on screen to act on either.
   //
   // `gestures.effectiveSelection`, not the store's: a selection written from
   // outside this page can name blocks on lanes the arrangement is not drawing,
@@ -1422,6 +1605,8 @@ export function ArrangementGrid({
   // something nobody can see. The COMMANDS re-derive the same set when they
   // fire, so this is only what is drawn — see `ArrangementGestures`.
   const uiSelection = gestures.effectiveSelection;
+  // Also what the blocks are DRAWN selected on, so the ring and the actions row
+  // appear and disappear together — see `PlacementBlock` below.
   const hasSelection = uiSelection.length > 0 && commandContext.kind === 'pattern';
 
   // Assigned during render rather than from an effect: a gesture can begin on
@@ -1537,8 +1722,8 @@ export function ArrangementGrid({
             </button>
             {/* Same argument as zoom: a snap is a quantity of TIME. Both
                 settings are React state and so are held across the switch —
-                nothing is re-quantised by visiting a mode that cannot express
-                them. */}
+                nothing is re-quantised by looking at a track whose view cannot
+                express them. */}
             <span className="mx-1 h-4 w-px bg-line" />
             <label className="flex items-center gap-1.5">
               <span className="font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
@@ -1548,7 +1733,7 @@ export function ArrangementGrid({
                   the 16th — the one place the two surfaces intentionally
                   disagree (`arrangementMath`). The menu is shared so the labels
                   can't drift; which of the two settings it drives follows the
-                  mode, and the accessible name says which, because a control
+                  context, and the accessible name says which, because a control
                   that means two things under one name is one nobody can
                   address. */}
               <select
@@ -1893,8 +2078,10 @@ export function ArrangementGrid({
           className="overflow-hidden border-t border-t-transparent border-r border-r-rim-dark"
         >
           <div ref={headerStackRef} data-testid="track-header-stack" style={{ height }}>
-            {lanes.map((lane, index) => {
-              const track = tracks[index];
+            {lanes.map((lane) => {
+              const entry = laneTrack(lane);
+              if (!entry) return null;
+              const { track, index } = entry;
               return (
                 <TrackHeader
                   key={lane.trackId}
@@ -1903,6 +2090,17 @@ export function ArrangementGrid({
                   trackCount={tracks.length}
                   height={lane.height}
                   selected={selectedTrackId === lane.trackId}
+                  // This track's own view, and the button that changes it. Both
+                  // by id: the header is drawn from a lane, and a lane knows
+                  // which track it belongs to and nothing about where that track
+                  // sits in an array.
+                  view={viewOfTrack(lane.trackId)}
+                  onViewChange={(view) => changeTrackView(lane.trackId, view)}
+                  // A job owns the document; a view change can close an open
+                  // block, so the buttons go dead with the rest of the page's
+                  // activation (§4). The coordinator refuses the callback too —
+                  // disabling is what makes the refusal legible before the press.
+                  locked={jobRunning}
                   // Computed HERE, once per render, because the answer depends
                   // on every other track's solo state — a header cannot work it
                   // out from the track it is given.
@@ -1985,9 +2183,10 @@ export function ArrangementGrid({
               data-testid="arrangement-voice-layer"
               className="pointer-events-none sticky left-0 z-20 h-0 w-full"
             >
-              {lanes.map((lane, index) => {
+              {lanes.map((lane) => {
                 if (viewOfTrack(lane.trackId) !== 'voice') return null;
-                const track = tracks[index];
+                const track = laneTrack(lane)?.track;
+                if (!track) return null;
                 return (
                   <div
                     key={lane.trackId}
@@ -2140,19 +2339,26 @@ export function ArrangementGrid({
               <div
                 ref={lanesRef}
                 data-testid="arrangement-lanes"
-                // Nothing in edit mode: the note surfaces below own the pointer
-                // there, and a second handler on their container would run a
-                // block gesture under every note gesture. A voice lane's rack is
-                // in the layer ABOVE this one and takes its own presses; what is
-                // left here for a voice lane is an empty spacer.
-                onPointerDown={mode === 'pattern' ? gestures.onLanesPointerDown : undefined}
-                onPointerMove={mode === 'pattern' ? gestures.onLanesPointerMove : undefined}
-                className={`lanes absolute inset-0 ${
-                  mode === 'pattern' ? 'cursor-crosshair' : ''
-                }`}
+                // ⚠ ONE CONTAINER, A MIXED STACK UNDER IT. This is attached
+                // whenever SOME lane is a Pattern lane — the same question
+                // `pointerEnabled` asks — and the per-lane half is the hit test:
+                // `onLanesPointerDown` filters `geo.lanes` through
+                // `isPatternLane`, so a press over an Edit or Voice row lands in
+                // a gap, answers null and returns BEFORE it takes focus or
+                // suppresses the default. That ordering is what lets the note
+                // surface underneath own a press this declines (§4), and it is
+                // why the handler can sit over rows it does not own at all.
+                //
+                // A voice lane's rack is in the layer ABOVE this one and takes
+                // its own presses; what is left down here for it is an empty
+                // spacer.
+                onPointerDown={anyPatternLane ? gestures.onLanesPointerDown : undefined}
+                onPointerMove={anyPatternLane ? gestures.onLanesPointerMove : undefined}
+                className="lanes absolute inset-0"
               >
-                {lanes.map((lane, index) => {
-                  const track = tracks[index];
+                {lanes.map((lane) => {
+                  const track = laneTrack(lane)?.track;
+                  if (!track) return null;
                   const instrumentId = trackInstrumentId(track);
                   const view = viewOfTrack(lane.trackId);
                   return (
@@ -2176,8 +2382,17 @@ export function ArrangementGrid({
                       // and a recessed timeline channel drawn behind a faceplate
                       // is two conflicting statements about which surface is on
                       // top. The divider is kept here too.
+                      // The crosshair is PER LANE now, not on the container:
+                      // it advertises a lane you can place into, and over an
+                      // Edit or Voice row — whose press the arrangement declines
+                      // — it would be a promise the surface underneath does not
+                      // keep.
                       className={`relative ${
-                        view === 'edit' ? 'edit-lane' : view === 'voice' ? 'voice-lane' : ''
+                        view === 'edit'
+                          ? 'edit-lane'
+                          : view === 'voice'
+                            ? 'voice-lane'
+                            : 'cursor-crosshair'
                       }`}
                     >
                       {/* What a lane draws is the ONLY thing that changes between
@@ -2234,14 +2449,25 @@ export function ArrangementGrid({
                               placement={placement}
                               pxPerBeat={pxPerBeat}
                               laneHeight={lane.height}
-                              // The EFFECTIVE selection, so what is drawn as
-                              // selected is exactly what the toolbar counts and
-                              // what a command would touch. On a lane that is
-                              // drawing blocks the two sets agree by
-                              // construction; they stop agreeing the moment a
-                              // selection from outside this page names a lane
-                              // that is not.
-                              selected={uiSelection.includes(placement.id)}
+                              // The EFFECTIVE selection AND the toolbar's own
+                              // gate, so what is drawn as selected is exactly
+                              // what the toolbar counts and what a command would
+                              // touch — the same `hasSelection` the actions row
+                              // is rendered on.
+                              //
+                              // ⚠ THE GATE IS NOT REDUNDANT, and milestone 4 is
+                              // why. `effectiveSelection` filters to PATTERN
+                              // LANES, which a mixed stack still has plenty of
+                              // while the SELECTED track sits in Voice or Edit —
+                              // and the plan's context table gives neither of
+                              // those rows any placement-selection command. So
+                              // without this the blocks on some other track kept
+                              // their selected ring while every action on them,
+                              // toolbar and keyboard alike, was gone with no
+                              // explanation. The selection itself is untouched:
+                              // it is the store's, and re-selecting a Pattern
+                              // track draws it again.
+                              selected={hasSelection && uiSelection.includes(placement.id)}
                               playing={playingPlacementIds.includes(placement.id)}
                               drifted={placementDrifted(
                                 placement,
@@ -2327,16 +2553,23 @@ export function ArrangementGrid({
           {/* Nothing like it with every lane in voice: an empty arrangement
               still has tracks, and every one of them has a voice to tune — so
               "nothing placed yet" would be printed over a screen doing its whole
-              job. Gated on `timed` rather than on the mode, so it is the presence
+              job. Gated on `timed` rather than on a view, so it is the presence
               of a time axis that decides. */}
           {timed && nothingPlaced && (
             <p className="pointer-events-none absolute top-2 left-3 font-mono text-[9px] tracking-[0.12em] text-ink-mut uppercase">
-              {/* Edit mode's rail holds the inspector, not the library, so
-                  "drag a pattern in from the rail" would name a thing that
-                  isn't there. Notes are only editable inside a block. */}
-              {editing
-                ? 'Nothing to edit yet — place a pattern in Pattern mode first'
-                : 'Nothing placed yet — drag a pattern in from the rail'}
+              {/* The library is the rail of a PATTERN track, so with no
+                  Pattern lane in the stack "drag a pattern in from the rail"
+                  names a thing that isn't there — and notes are only editable
+                  inside a block, so there is nothing to edit either. Asked of
+                  the lanes rather than of a selection: it is about where a
+                  pattern could be dropped, and a drop does not need a
+                  selection.
+                  An EMPTY stack has no lane to ask and takes the composition's
+                  own default view, exactly as `timed` does — the track it does
+                  not have yet will arrive on Pattern. */}
+              {tracks.length === 0 || anyPatternLane
+                ? 'Nothing placed yet — drag a pattern in from the rail'
+                : 'Nothing to edit yet — put a track in Pattern view and place one first'}
             </p>
           )}
         </div>

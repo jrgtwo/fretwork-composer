@@ -52,7 +52,6 @@ import {
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   contentEndTick,
   tickToPx,
-  type ArrangementMode,
 } from '../src/composition/arrangementMath';
 import {
   playComposition,
@@ -82,7 +81,6 @@ import {
 } from '../src/composition/compositionService';
 import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/patternService';
 
-const MODE: ArrangementMode = 'pattern';
 const PX_PER_BEAT = ARRANGEMENT_ZOOM_LEVELS[DEFAULT_ARRANGEMENT_ZOOM_INDEX];
 const BAR = 4 * PPQ;
 
@@ -135,8 +133,19 @@ function add(patternId: string, trackId: string, atTick: number): string {
   return result.value;
 }
 
-const grid = () => render(<ArrangementGrid mode={MODE} />);
-const playhead = () => screen.queryByTestId('arrangement-playhead');
+const grid = () => render(<ArrangementGrid />);
+/**
+ * The playhead, if there is one.
+ *
+ * ⚠ `queryAll`, not `query`. Milestone 2 draws ONE SEGMENT PER CONTIGUOUS TIMED
+ * BAND, and COMPS-TRACK-TABS milestone 4 made a mixed stack reachable — a voice
+ * lane between two timed ones is two segments, and a singular query throws on
+ * multiple matches. Every stack in this file is uniform and timed, so there is
+ * exactly one; `heads()` is here so a fixture that ever stops being uniform
+ * fails on its own assertion rather than on the query.
+ */
+const heads = () => screen.queryAllByTestId('arrangement-playhead');
+const playhead = () => heads()[0] ?? null;
 const blockEl = (id: string) =>
   document.querySelector<HTMLElement>(`[data-placement="${id}"]`);
 
@@ -235,7 +244,7 @@ describe('the arrangement playhead', () => {
 
     vi.mocked(useIsPlaying).mockReturnValue(false);
     vi.mocked(useHeadTick).mockReturnValue(null);
-    view.rerender(<ArrangementGrid mode={MODE} />);
+    view.rerender(<ArrangementGrid />);
 
     // A line parked wherever the last frame put it is how a stopped transport
     // still looks like it is playing.
@@ -280,7 +289,7 @@ describe('follow-scroll', () => {
 describe('the page audio lifecycle', () => {
   it('is mounted by the page, from a leaf that renders nothing', () => {
     seedArrangement();
-    render(<CompositionPage mode={MODE} onModeChange={() => {}} />);
+    render(<CompositionPage />);
 
     // The hook lives in a null-rendering child so the metronome's beat counters
     // don't reconcile the whole page 4–8× a bar — which is exactly the kind of

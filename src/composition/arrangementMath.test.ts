@@ -47,6 +47,7 @@ import {
   previewMarks,
   pxToTick,
   rulerMarks,
+  selectedTrackView,
   setTrackView,
   snapArrangementTick,
   tickToPx,
@@ -1873,6 +1874,53 @@ describe('per-track view state', () => {
     for (const view of ARRANGEMENT_MODES) {
       expect(viewOf(setTrackView(EMPTY, 'c1', 't1', view), 'c1', 't1')).toBe(view);
     }
+  });
+});
+
+/**
+ * THE SELECTED TRACK'S VIEW — the one derivation the rail (`CompositionPage`)
+ * and the direct-editing commands (`ArrangementGrid`) share. It lived in both
+ * files as the same three clauses until it was pulled in here; these are what
+ * stop a change made for one of them from quietly changing the other.
+ */
+describe('selectedTrackView', () => {
+  const EMPTY: CompositionTrackViews = {};
+  const TRACKS = [{ id: 't1' }, { id: 't2' }] as const;
+
+  it('is the selected track’s own view', () => {
+    const views = setTrackView(setTrackView(EMPTY, 'c1', 't1', 'voice'), 'c1', 't2', 'edit');
+    expect(selectedTrackView(views, 'c1', 't1', TRACKS)).toBe('voice');
+    expect(selectedTrackView(views, 'c1', 't2', TRACKS)).toBe('edit');
+  });
+
+  // §2's fallback, and the same one the plan's context table gives the no-track
+  // row: whatever is missing, the answer is the arrangement.
+  it('falls back to pattern with no selection, no composition, or no tracks', () => {
+    const views = setTrackView(EMPTY, 'c1', 't1', 'voice');
+    expect(selectedTrackView(views, 'c1', null, TRACKS)).toBe('pattern');
+    expect(selectedTrackView(views, null, 't1', TRACKS)).toBe('pattern');
+    expect(selectedTrackView(views, 'c1', 't1', [])).toBe('pattern');
+  });
+
+  // ⚠ THE WHOLE REASON THE MEMBERSHIP CHECK IS IN HERE. The map RETAINS a
+  // deleted track's entry on purpose, so a selection still pointing at a track
+  // that has gone would otherwise revive it — a Voice rail beside a stack with
+  // no such track, and ⌘Z routed to a view with no lane.
+  it('ignores a retained entry for a track that is no longer in the stack', () => {
+    const views = setTrackView(EMPTY, 'c1', 'doomed', 'voice');
+    expect(viewOf(views, 'c1', 'doomed')).toBe('voice');
+    expect(selectedTrackView(views, 'c1', 'doomed', TRACKS)).toBe('pattern');
+    // And it comes back the moment an undo puts that id back in the stack.
+    expect(selectedTrackView(views, 'c1', 'doomed', [...TRACKS, { id: 'doomed' }])).toBe(
+      'voice',
+    );
+  });
+
+  // The map is keyed by composition first, so the same selected id in another
+  // document answers that document's view and not this one's.
+  it('reads the composition it is asked about', () => {
+    const views = setTrackView(EMPTY, 'c1', 't1', 'voice');
+    expect(selectedTrackView(views, 'c2', 't1', TRACKS)).toBe('pattern');
   });
 });
 

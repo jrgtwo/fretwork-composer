@@ -8,12 +8,18 @@ import { NotePopup } from '../src/timeline/NotePopup';
 import { DEPTHS, DYNAMIC_NAMES, FLAGS } from '../src/timeline/noteModel';
 import { readNotePitch } from '../src/patterns/articulations';
 import {
+  getEditingComposition,
   addPlacement,
   closePlacementEditing,
   getTracks,
   openBlankComposition,
   openPlacementForEditing,
+  selectTrack,
 } from '../src/composition/compositionService';
+import type {
+  ArrangementMode,
+  CompositionTrackViews,
+} from '../src/composition/arrangementMath';
 import {
   clearHistory,
   findLibraryPattern,
@@ -26,6 +32,27 @@ import {
   stampNote,
   undo,
 } from '../src/patterns/patternService';
+
+/**
+ * Every track of the open composition in ONE view — the uniform stack this suite
+ * assumed back when the page had a single global mode (COMPS-TRACK-TABS
+ * milestone 4 made the view per track).
+ *
+ * Built from the LIVE composition at the moment it is called, so it goes in the
+ * render call after the fixtures are up. Tracks added afterwards are not in it,
+ * and that is the real rule rather than a limitation of the helper: a new track
+ * defaults to Pattern (§3).
+ */
+const viewsOf = (view: ArrangementMode): CompositionTrackViews => {
+  const composition = getEditingComposition();
+  if (!composition || view === 'pattern') return {};
+  return {
+    [composition.id]: Object.fromEntries(
+      composition.tracks.map((track) => [track.id, view] as const),
+    ),
+  };
+};
+
 
 /**
  * CP-12 — the note inspector in the composition page's rail.
@@ -95,8 +122,13 @@ describe('NoteInspectorRail — nothing selected', () => {
     expect(optionsOf(container)).toEqual([]);
   });
 
-  it("is what edit mode's rail shows, in place of the CP-12 placeholder", () => {
-    render(<CompositionPage mode="edit" onModeChange={() => {}} />);
+  it("is what an Edit track's rail shows, in place of the CP-12 placeholder", () => {
+    // The rail follows the SELECTED track's view (COMPS-TRACK-TABS milestone 4),
+    // so a track has to exist, be on Edit, and be the selected one — there is no
+    // page mode to put the page into any more.
+    openBlankComposition('Song');
+    selectTrack(getTracks()[0].id);
+    render(<CompositionPage views={viewsOf('edit')} />);
 
     const rail = screen.getByRole('complementary', { name: 'Inspector' });
     expect(rail).toHaveTextContent('No note selected');

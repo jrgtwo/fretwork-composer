@@ -51,8 +51,11 @@ import {
   DEFAULT_ARRANGEMENT_ZOOM_INDEX,
   editableSpans,
   editLaneHeight,
+  setTrackView,
   tickToPx,
   TRACK_HEADER_HEIGHT,
+  type ArrangementMode,
+  type CompositionTrackViews,
 } from '../src/composition/arrangementMath';
 import {
   JOB_LOCK_REASON,
@@ -91,6 +94,27 @@ import {
 } from '../src/patterns/patternService';
 import { Knob } from '../src/voice/controls/Knob';
 import { ParamEncoder } from '../src/voice/controls/ParamEncoder';
+
+/**
+ * Every track of the open composition in ONE view — the uniform stack this suite
+ * assumed back when the page had a single global mode (COMPS-TRACK-TABS
+ * milestone 4 made the view per track).
+ *
+ * Built from the LIVE composition at the moment it is called, so it goes in the
+ * render call after the fixtures are up. Tracks added afterwards are not in it,
+ * and that is the real rule rather than a limitation of the helper: a new track
+ * defaults to Pattern (§3).
+ */
+const viewsOf = (view: ArrangementMode): CompositionTrackViews => {
+  const composition = getEditingComposition();
+  if (!composition || view === 'pattern') return {};
+  return {
+    [composition.id]: Object.fromEntries(
+      composition.tracks.map((track) => [track.id, view] as const),
+    ),
+  };
+};
+
 
 /**
  * CP-11 — edit mode.
@@ -235,7 +259,7 @@ const surfaceEl = (placementId: string) =>
 const noteIn = (placementId: string) =>
   within(surfaceEl(placementId)).getAllByTitle(/^Fret /)[0];
 
-const editGrid = () => <ArrangementGrid mode="edit" />;
+const editGrid = () => <ArrangementGrid views={viewsOf('edit')} />;
 
 describe("the composition overrides a block's own meter (CP-18)", () => {
   it("computes the note lanes' grid from the ARRANGEMENT's meter, not the snapshot's", () => {
@@ -252,7 +276,7 @@ describe("the composition overrides a block's own meter (CP-18)", () => {
     expect(snapshotMeter).toEqual({ numerator: 4, denominator: 4 });
     vi.mocked(laneGridImage).mockClear();
 
-    render(<ArrangementGrid mode="edit" />);
+    render(<ArrangementGrid views={viewsOf('edit')} />);
 
     const meters = vi.mocked(laneGridImage).mock.calls.map((call) => call[2]);
     expect(meters.length).toBeGreaterThan(0);
@@ -380,8 +404,8 @@ describe('what an edit-mode lane draws', () => {
 
     // Pattern mode is where a block wears its name, so the mark is asserted
     // there — the surface's watermark is the same string.
-    const { rerender } = render(<ArrangementGrid mode="pattern" />);
-    rerender(<ArrangementGrid mode="pattern" />);
+    const { rerender } = render(<ArrangementGrid />);
+    rerender(<ArrangementGrid />);
     const blocks = document.querySelectorAll<HTMLElement>('[data-placement]');
     const edited = [...blocks].filter((el) => el.dataset.placement === second);
     const untouched = [...blocks].filter((el) => el.dataset.placement === first);
@@ -466,14 +490,19 @@ describe('the keyboard gate', () => {
     expect(fretsIn(second)).toEqual([12]);
   });
 
-  it('does not let ⌘Z in edit mode pop an ARRANGEMENT step as well', async () => {
-    const { second, bassId } = seedArrangement();
+  it('does not let ⌘Z in an Edit context pop an ARRANGEMENT step as well', async () => {
+    const { second, bassId, guitarId } = seedArrangement();
     // An arrangement step to lose: a block moved onto the other track.
     const tracksBefore = getTracks();
     movePlacement(second, bassId, 0);
     expect(getTracks()).not.toBe(tracksBefore);
     const placedOnBass = getTracks()[1].placements.map((p) => p.id);
 
+    // ⚠ THE SELECTION IS WHAT DECIDES NOW. The direct-editing context is the
+    // SELECTED track's view (§4), not a page mode — an Edit lane nobody has
+    // selected leaves the arrangement's own shortcuts armed, which is the
+    // no-track Pattern fallback and is correct.
+    selectTrack(guitarId);
     render(editGrid());
     await userEvent.keyboard('{Meta>}z{/Meta}');
 
@@ -556,16 +585,19 @@ describe('the keyboard gate', () => {
     );
   });
 
-  it('points the toolbar’s undo at the document the mode is editing', async () => {
+  it('points the toolbar’s undo at the document the selected track is editing', async () => {
     const { first, second, guitarId } = seedArrangement();
-    const { rerender } = render(<ArrangementGrid mode="pattern" />);
+    const { rerender } = render(<ArrangementGrid />);
 
-    // A step in the COMPOSITION history — the one the toolbar is wired to in
-    // pattern mode, and the one it must stop being wired to in edit mode.
+    // A step in the COMPOSITION history — the one the toolbar is wired to on a
+    // Pattern track, and the one it must stop being wired to on an Edit one.
     movePlacement(second, guitarId, 6 * BAR_TICKS);
     expect(placementById(second).startTick).toBe(6 * BAR_TICKS);
 
-    rerender(<ArrangementGrid mode="edit" />);
+    // The SELECTED track's view is the context (§4), so the switch is a
+    // selection as well as a map.
+    act(() => selectTrack(guitarId));
+    rerender(<ArrangementGrid views={viewsOf('edit')} />);
     // Nothing has been edited in THIS document yet, so there is nothing to undo
     // — even though the arrangement has a step waiting.
     expect(screen.getByLabelText('Undo')).toBeDisabled();
@@ -718,21 +750,21 @@ describe('the cross-page pointer', () => {
   it('restores the pattern pointer when edit mode is left', async () => {
     const { patternId, second } = seedArrangement();
     const { rerender } = render(
-      <CompositionPage mode="edit" onModeChange={() => {}} />,
+      <CompositionPage views={viewsOf('edit')} />,
     );
 
     await userEvent.pointer({ target: noteIn(second), keys: '[MouseLeft]' });
     expect(getEditingPlacementId()).toBe(second);
     expect(getEditingPattern()).not.toBe(findLibraryPattern(patternId));
 
-    rerender(<CompositionPage mode="pattern" onModeChange={() => {}} />);
+    rerender(<CompositionPage />);
 
     expectPatternPagePointer(patternId);
   });
 
   it('restores it when the composition page unmounts', async () => {
     const { patternId, second } = seedArrangement();
-    const { unmount } = render(<CompositionPage mode="edit" onModeChange={() => {}} />);
+    const { unmount } = render(<CompositionPage views={viewsOf('edit')} />);
 
     await userEvent.pointer({ target: noteIn(second), keys: '[MouseLeft]' });
     unmount();
@@ -753,12 +785,12 @@ describe('the cross-page pointer', () => {
 
   it('does not carry the note selection out to the pattern page', async () => {
     const { patternId, second } = seedArrangement();
-    const { rerender } = render(<CompositionPage mode="edit" onModeChange={() => {}} />);
+    const { rerender } = render(<CompositionPage views={viewsOf('edit')} />);
 
     await userEvent.pointer({ target: noteIn(second), keys: '[MouseLeft]' });
     expect(getSelectedIds()).toHaveLength(1);
 
-    rerender(<CompositionPage mode="pattern" onModeChange={() => {}} />);
+    rerender(<CompositionPage />);
 
     expectPatternPagePointer(patternId);
     // The other half of the leak: a placement's events keep the ids they were
@@ -819,10 +851,10 @@ describe('the cross-page pointer', () => {
         name: 'Composition',
       }),
     );
+    // The view lives in the TRACK HEADER now — there is no mode bar. The press
+    // selects the track and sets its view in one go (§2).
     await userEvent.click(
-      within(screen.getByRole('group', { name: 'Composition mode' })).getByRole('button', {
-        name: 'Edit mode',
-      }),
+      screen.getByRole('button', { name: `Edit view, ${getTracks()[0].name}` }),
     );
     await userEvent.pointer({ target: noteIn(second), keys: '[MouseLeft]' });
     await userEvent.keyboard('12');
@@ -845,7 +877,7 @@ describe('the cross-page pointer', () => {
 describe('what does NOT change between modes', () => {
   it('keeps the ruler, the header column and the time axis where they were', async () => {
     seedArrangement();
-    const { rerender } = render(<ArrangementGrid mode="pattern" />);
+    const { rerender } = render(<ArrangementGrid />);
 
     // OFF the default zoom before the switch. At the default, a mode change that
     // reset the zoom would land back on the very number this test captured and
@@ -867,7 +899,7 @@ describe('what does NOT change between modes', () => {
     // page, and a remount would silently discard the user's scroll position.
     const scroller = screen.getByTestId('arrangement-lanes-scroller');
 
-    rerender(<ArrangementGrid mode="edit" />);
+    rerender(<ArrangementGrid views={viewsOf('edit')} />);
 
     expect(screen.getByTestId('arrangement-ruler-content').style.width).toBe(rulerWidth);
     expect(document.querySelectorAll('[data-ruler-line]')).toHaveLength(markCount);
@@ -880,17 +912,20 @@ describe('what does NOT change between modes', () => {
   });
 
   it('holds a separate grid for notes and for blocks', async () => {
-    seedArrangement();
-    const { rerender } = render(<ArrangementGrid mode="pattern" />);
+    const { guitarId } = seedArrangement();
+    const { rerender } = render(<ArrangementGrid />);
     expect(screen.getByLabelText('Arrangement snap')).toHaveValue('bar');
 
-    rerender(<ArrangementGrid mode="edit" />);
+    // Which of the two is on screen follows the SELECTED track's view, so the
+    // selection is part of the switch now.
+    act(() => selectTrack(guitarId));
+    rerender(<ArrangementGrid views={viewsOf('edit')} />);
     // Note entry needs sub-beat resolution where block placement does not, so
-    // the two settings are separate and the mode chooses which is on screen.
+    // the two settings are separate and the context chooses which is on screen.
     expect(screen.getByLabelText('Note grid')).toHaveValue('16');
     await userEvent.selectOptions(screen.getByLabelText('Note grid'), '8');
 
-    rerender(<ArrangementGrid mode="pattern" />);
+    rerender(<ArrangementGrid />);
     expect(screen.getByLabelText('Arrangement snap')).toHaveValue('bar');
   });
 });
@@ -929,6 +964,34 @@ function seedTwoEditTracks() {
   clearPatternHistory();
   return { ...base, bassPatternId, onBass: placed.value };
 }
+
+/**
+ * The grid with an OWNER, seeded with every track on Edit.
+ *
+ * `editGrid()` passes a map with no handler, which is a FIXTURE the caller does
+ * not want changed (see `ArrangementGrid`'s `views` prop) — fine for a stack
+ * that never moves, useless for pressing a view button. This is the shape the
+ * app runs in: `App` holds the map and hands back the updated one.
+ */
+function OwnedEditGrid() {
+  const [views, setViews] = useState<CompositionTrackViews>(() => viewsOf('edit'));
+  return (
+    <ArrangementGrid
+      views={views}
+      onTrackViewChange={(compositionId, trackId, view) =>
+        setViews((was) => setTrackView(was, compositionId, trackId, view))
+      }
+    />
+  );
+}
+
+/** A track's view button, in its own header — the control that replaced the
+ *  page's mode bar (COMPS-TRACK-TABS milestone 4). */
+const viewButton = (label: string, trackId: string) => {
+  const track = getTracks().find((candidate) => candidate.id === trackId);
+  if (!track) throw new Error(`no track ${trackId}`);
+  return screen.getByRole('button', { name: `${label} view, ${track.name}` });
+};
 
 const headerSelect = (trackId: string) => {
   const track = getTracks().find((candidate) => candidate.id === trackId);
@@ -1308,6 +1371,138 @@ describe('the activation coordinator — two Edit tracks in sequence', () => {
     unmount();
 
     expect(getEditingPlacementId()).toBeNull();
+  });
+
+  /**
+   * ⚠ THE PAIR §4 SAYS MUST NOT BE CONFLATED, now through the control that
+   * actually makes a view change — the header's own view buttons
+   * (COMPS-TRACK-TABS milestone 4). The mute test above is the same distinction
+   * seen through an unrelated WRITE; this is it seen through an unrelated VIEW,
+   * which is the state the milestone introduces and the one an unconditional
+   * cleanup keyed on the view map would get wrong.
+   */
+  it('survives an unrelated track’s view change when the selection does not move', async () => {
+    const { first, bassId } = seedTwoEditTracks();
+    const composition = getEditingComposition()!;
+    const allEdit = viewsOf('edit');
+    const { rerender } = render(<ArrangementGrid views={allEdit} />);
+
+    await pressNote(first);
+    expect(getEditingPlacementId()).toBe(first);
+    const guitarId = getTracks()[0].id;
+
+    // The map moves for ANOTHER track and the selection stays put — the shape a
+    // change arriving from the owner has (`App` holds the map; this page is not
+    // the only thing that can write it). §4: a state update to an unrelated
+    // track that preserves selection must PRESERVE the active editor, and an
+    // unconditional cleanup keyed on the whole map is what gets this wrong.
+    rerender(
+      <ArrangementGrid
+        views={setTrackView(allEdit, composition.id, bassId, 'voice')}
+      />,
+    );
+
+    expect(getSelectedTrackId()).toBe(guitarId);
+    expect(getEditingPlacementId()).toBe(first);
+    expect(surfaceEl(first).dataset.focused).toBe('true');
+  });
+
+  /**
+   * ⚠ THE PAIR §4 SAYS MUST NOT BE CONFLATED, now through the control that
+   * actually makes a view change — the header's own view buttons
+   * (COMPS-TRACK-TABS milestone 4). The same track's view button PRESERVES the
+   * editor; another track's CLOSES it, because a view press selects its track
+   * (§2). Same control, opposite outcomes, and the difference is whether
+   * selection moved.
+   */
+  it('keeps the editor on a same-track view press and closes it on another track’s', async () => {
+    const user = userEvent.setup();
+    const { first, bassId } = seedTwoEditTracks();
+    render(<OwnedEditGrid />);
+
+    await pressNote(first);
+    const guitarId = getTracks()[0].id;
+    expect(getSelectedTrackId()).toBe(guitarId);
+
+    // SAME TRACK, its already-active view: selects it again and preserves the
+    // open block. §2 is explicit that the press still counts as a selection.
+    await user.click(viewButton('Edit', guitarId));
+    expect(getSelectedTrackId()).toBe(guitarId);
+    expect(getEditingPlacementId()).toBe(first);
+    expect(surfaceEl(first).dataset.focused).toBe('true');
+
+    // ANOTHER track's view button: it selects that track, so it closes the
+    // outgoing editor.
+    await user.click(viewButton('Edit', bassId));
+    expect(getSelectedTrackId()).toBe(bassId);
+    expect(getEditingPlacementId()).toBeNull();
+    // The edits survive; only the history goes (the documented cost).
+    expect(fretsIn(first)).toEqual([SOURCE_FRET]);
+  });
+
+  /**
+   * LEAVING EDIT ON THE OWNING TRACK. `activateTrack` deliberately KEEPS a block
+   * that belongs to the track being activated — that is how re-selecting
+   * preserves it — so the Pattern and Voice buttons are what have to give it up.
+   *
+   * ⚠ HONEST ABOUT WHAT COVERS IT. `changeTrackView` closes synchronously and
+   * the grid's reconciler closes it again on the next effect
+   * (`viewOfTrack(editingTrackId) !== 'edit'`), so this test PASSES with the
+   * synchronous call stubbed out — probe-checked. What it pins is the outcome;
+   * the synchronous half exists so no commit renders with the lib's editing
+   * pointer parked on a lane that has stopped drawing it, and jsdom cannot see a
+   * difference that lives inside one commit.
+   */
+  it('closes its own block when the track leaves Edit', async () => {
+    const user = userEvent.setup();
+    const { first } = seedTwoEditTracks();
+    render(<OwnedEditGrid />);
+
+    await pressNote(first);
+    expect(getEditingPlacementId()).toBe(first);
+    const guitarId = getTracks()[0].id;
+
+    await user.click(viewButton('Pattern', guitarId));
+
+    expect(getEditingPlacementId()).toBeNull();
+    expect(getSelectedTrackId()).toBe(guitarId);
+    // The lane is drawing blocks now, not surfaces.
+    expect(document.querySelectorAll(`[data-edit-placement="${first}"]`)).toHaveLength(0);
+    expect(fretsIn(first)).toEqual([SOURCE_FRET]);
+  });
+
+  /**
+   * And the same press while a JOB owns the document: the button is DISABLED,
+   * and the view does not move.
+   *
+   * ⚠ HONEST ABOUT WHICH HALF THIS IS. §4 asks for two — disable the buttons and
+   * guard the callback — and only the first is assertable from here. React does
+   * not dispatch synthetic mouse events on a disabled `button`
+   * (`shouldPreventMouseEvent`), so a `fireEvent.click` on this control reaches
+   * no handler and would pass against any callback whatsoever. The CALLBACK half
+   * is `changeTrackView`'s opening `if (!activateTrack(...)) return`, and it is
+   * the coordinator's own refusal — covered, through a control that is not
+   * disabled, by 'refuses every activation path…' in the next describe.
+   */
+  it('refuses a view press while a job holds the document', async () => {
+    const { first, bassId } = seedTwoEditTracks();
+    render(<OwnedEditGrid />);
+    await pressNote(first);
+
+    act(() => {
+      const started = beginJob();
+      if (!started.ok) throw new Error('job refused');
+    });
+
+    const button = viewButton('Voice', bassId);
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('aria-pressed', 'false');
+    // The job's block is still the open one, and the lock is what is keeping the
+    // view where it is: every view button in the stack is out of reach.
+    expect(viewButton('Pattern', bassId)).toBeDisabled();
+    expect(getEditingPlacementId()).toBe(first);
+
+    act(() => endJob());
   });
 });
 

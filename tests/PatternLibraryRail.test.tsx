@@ -19,6 +19,7 @@ import {
 import {
   addTrack,
   clearHistory,
+  getSelectedTrackId,
   getTracks,
   openBlankComposition,
   selectPlacements,
@@ -248,11 +249,7 @@ describe('where the rail appears', () => {
     // default is everything shut — `App` is what opens Patterns by default. So a
     // test rendering the page directly has to say which sections are open.
     render(
-      <CompositionPage
-        mode="pattern"
-        onModeChange={() => {}}
-        openRailSections={['patterns']}
-      />,
+      <CompositionPage openRailSections={['patterns']} />,
     );
 
     const rail = screen.getByRole('complementary', { name: 'Pattern library' });
@@ -281,11 +278,7 @@ describe('where the rail appears', () => {
     // mount, so without this the drop crosses into an empty state.
     openBlankComposition('Song');
     render(
-      <CompositionPage
-        mode="pattern"
-        onModeChange={() => {}}
-        openRailSections={['patterns']}
-      />,
+      <CompositionPage openRailSections={['patterns']} />,
     );
     const twoBars = 2 * ticksPerBar(TS);
 
@@ -299,16 +292,115 @@ describe('where the rail appears', () => {
     expect(getTracks()[0].placements[0].startTick).toBe(twoBars);
   });
 
-  it('is replaced in the modes that own their own rail', () => {
+  /**
+   * ── A DRAG ACROSS A MIXED STACK (§F) ─────────────────────────────────────────
+   *
+   * "A library drag may target ANY Pattern track — do not select a new track just
+   * by dragging over it." Both halves of that were unreachable before
+   * COMPS-TRACK-TABS milestone 4: every lane used to be a Pattern lane, and the
+   * library was only on screen when they were.
+   *
+   * The lane tops are read off the rendered lanes rather than recomputed, so this
+   * cannot drift with the height rule. jsdom reports every box as 0×0 at the
+   * ORIGIN, which makes the grid's `toContent` the identity — a `clientY` is a
+   * distance down the lane stack.
+   */
+  const laneTopOf = (trackId: string): number => {
+    let top = 0;
+    for (const lane of document.querySelectorAll<HTMLElement>('[data-lane-track]')) {
+      if (lane.dataset.laneTrack === trackId) return top;
+      top += Number.parseFloat(lane.style.height);
+    }
+    throw new Error(`no lane for ${trackId}`);
+  };
+
+  it('drops onto a Pattern track that is not the selected one, and leaves the selection where it was', async () => {
+    const user = userEvent.setup();
     seedPattern('Riff');
-    // Each mode's rail names itself for what it holds — CP-15 gave voice mode
-    // its own list, so 'Inspector' is no longer the name for both.
+    openBlankComposition('Song');
+    addTrack('Bass');
+    addTrack('Keys');
+    const [lead, middle, last] = getTracks();
+    const composition = usePatternsStore.getState().library.compositions.at(-1)!;
+    // The MIDDLE lane is a rack, so the third Pattern lane does not sit where a
+    // uniform stack would put it — the drop has to find it by geometry.
+    const views = { [composition.id]: { [middle.id]: 'voice' as const } };
+    selectTrack(lead.id);
+    render(<CompositionPage views={views} openRailSections={['patterns']} />);
+    const twoBars = 2 * ticksPerBar(TS);
+
+    await user.pointer([
+      { target: rowFor('Riff'), keys: '[MouseLeft>]', coords: { clientX: 0, clientY: 0 } },
+      {
+        coords: { clientX: tickToPx(twoBars, PX), clientY: laneTopOf(last.id) + 8 },
+      },
+      { keys: '[/MouseLeft]' },
+    ]);
+
+    const placedOn = getTracks().find((track) => track.id === last.id)!;
+    expect(placedOn.placements).toHaveLength(1);
+    expect(placedOn.placements[0].startTick).toBe(twoBars);
+    // Not on the selected track, and not on the rack's.
+    expect(getTracks().find((track) => track.id === lead.id)!.placements).toHaveLength(0);
+    expect(getTracks().find((track) => track.id === middle.id)!.placements).toHaveLength(0);
+    // ⚠ AND THE SELECTION DID NOT MOVE. Dragging over a lane is not a press on
+    // it: only `onLanesPointerDown` activates a track. Drop this and the rail
+    // would swap out from under the drag that is still in flight.
+    expect(getSelectedTrackId()).toBe(lead.id);
+  });
+
+  /**
+   * And the state milestone 4 makes reachable in the other direction: the rail
+   * falls back to the pattern library with no valid selected track, so the
+   * library is on screen over a stack where nothing can take a block. The drag
+   * declines — `pointerEnabled` is false — and a decline that says nothing is
+   * indistinguishable from a broken library.
+   */
+  it('says why, rather than doing nothing, when no lane is on Pattern', async () => {
+    const user = userEvent.setup();
+    seedPattern('Riff');
+    openBlankComposition('Song');
+    addTrack('Bass');
+    const composition = usePatternsStore.getState().library.compositions.at(-1)!;
+    const views = {
+      [composition.id]: Object.fromEntries(
+        getTracks().map((track) => [track.id, 'edit' as const]),
+      ),
+    };
+    render(<CompositionPage views={views} openRailSections={['patterns']} />);
+    // The fallback is what put the library here: nothing is selected.
+    expect(screen.getByRole('complementary', { name: 'Pattern library' })).toBeInTheDocument();
+
+    await user.pointer([
+      { target: rowFor('Riff'), keys: '[MouseLeft>]', coords: { clientX: 0, clientY: 0 } },
+      { coords: { clientX: 200, clientY: 8 } },
+      { keys: '[/MouseLeft]' },
+    ]);
+
+    expect(screen.getByRole('alert', { name: 'Track message' })).toHaveTextContent(
+      'Put a track in Pattern view to place a block.',
+    );
+    expect(getTracks().every((track) => track.placements.length === 0)).toBe(true);
+  });
+
+  it('is replaced when the SELECTED track is in a view that owns its own rail', () => {
+    seedPattern('Riff');
+    // COMPS-TRACK-TABS milestone 4: the rail follows the selected track's view,
+    // so putting a rail on screen is now "select a track and set its view".
+    // Each rail names itself for what it holds — CP-15 gave the voice list its
+    // own name, so 'Inspector' is no longer the name for both.
     const railName = { edit: 'Inspector', voice: 'Voices' } as const;
-    for (const mode of ['edit', 'voice'] as const) {
-      const view = render(<CompositionPage mode={mode} onModeChange={() => {}} />);
+    for (const view of ['edit', 'voice'] as const) {
+      openBlankComposition('Song');
+      const track = getTracks()[0];
+      selectTrack(track.id);
+      const composition = usePatternsStore.getState().library.compositions.at(-1)!;
+      const rendered = render(
+        <CompositionPage views={{ [composition.id]: { [track.id]: view } }} />,
+      );
       expect(screen.queryByRole('button', { name: 'Place pattern Riff' })).not.toBeInTheDocument();
-      expect(screen.getByRole('complementary', { name: railName[mode] })).toBeInTheDocument();
-      view.unmount();
+      expect(screen.getByRole('complementary', { name: railName[view] })).toBeInTheDocument();
+      rendered.unmount();
     }
   });
 });

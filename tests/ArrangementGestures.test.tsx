@@ -1313,7 +1313,7 @@ describe('out-of-range transposition', () => {
     openBlankPattern('High');
     stampNote({ stringIndex: 0, fret: 20, tick: 0, durationTicks: PPQ });
     const id = place(getEditingPattern()!.id, getTracks()[0].id, 0);
-    const view = render(<ArrangementGrid mode="pattern" />);
+    const view = render(<ArrangementGrid />);
 
     expect(document.querySelector('[data-dropped]')).toBeNull();
 

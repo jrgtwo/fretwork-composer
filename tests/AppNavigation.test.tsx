@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { DEFAULT_PATTERNS_STATE, usePatternsStore } from '@fretwork/lib';
 import { App } from '../src/App';
 import { stop } from '../src/audio/playbackService';
-import { openBlankComposition } from '../src/composition/compositionService';
+import { getTracks, openBlankComposition } from '../src/composition/compositionService';
 
 // Only `stop` is stood in for — jsdom has no Web Audio, so the transport's
 // having been released is not observable any other way. Everything else in the
@@ -31,7 +31,10 @@ vi.mock('../src/audio/playbackService', async (importOriginal) => {
  */
 
 const nav = () => within(screen.getByRole('navigation', { name: 'Editor' }));
-const modes = () => within(screen.getByRole('group', { name: 'Composition mode' }));
+/** One track's view group, in its own header — the per-track control that
+ *  replaced the page's `Composition mode` bar (COMPS-TRACK-TABS milestone 4). */
+const views = (trackName: string) =>
+  within(screen.getByRole('group', { name: `View for ${trackName}` }));
 const goTo = (page: 'Pattern' | 'Composition') =>
   userEvent.click(nav().getByRole('button', { name: page }));
 
@@ -192,21 +195,32 @@ describe('page routing', () => {
   });
 });
 
-describe('composition mode bar', () => {
-  it('offers three modes, all built, with Pattern active', async () => {
+describe('per-track view controls', () => {
+  it('offers three views per track, all built, with Pattern active', async () => {
+    // A composition to hold a track: arriving creates none (CP-17), and the
+    // view controls live in a track's header.
+    openBlankComposition('Song');
     render(<App />);
     await goTo('Composition');
+    // ⚠ THE MODE BAR IS GONE (COMPS-TRACK-TABS milestone 4). The view is a
+    // property of a TRACK now, so there is one group per header rather than one
+    // for the page.
+    expect(screen.queryByRole('group', { name: 'Composition mode' })).not.toBeInTheDocument();
 
-    expect(modes().getByRole('button', { name: 'Pattern mode' })).toHaveAttribute(
+    const trackName = getTracks()[0].name;
+    // A missing entry means Pattern, which is what a fresh composition has.
+    expect(views(trackName).getByRole('button', { name: `Pattern view, ${trackName}` })).toHaveAttribute(
       'aria-pressed',
       'true',
     );
-    // Edit mode landed in CP-11, voice mode in CP-14. The `pending` tooltip and
-    // the `disabled` flag went with the placeholder they described.
-    expect(modes().getByRole('button', { name: 'Edit mode' })).toBeEnabled();
-    const voice = modes().getByRole('button', { name: 'Voice mode' });
+    // Edit landed in CP-11, voice in CP-14. Both are live, and each carries a
+    // tooltip saying what its view holds — the letter on the button does not.
+    const edit = views(trackName).getByRole('button', { name: `Edit view, ${trackName}` });
+    expect(edit).toBeEnabled();
+    expect(edit).toHaveAttribute('title', expect.stringContaining('Edit'));
+    const voice = views(trackName).getByRole('button', { name: `Voice view, ${trackName}` });
     expect(voice).toBeEnabled();
-    expect(voice).not.toHaveAttribute('title');
+    expect(voice).toHaveAttribute('title', expect.stringContaining('Voice'));
   });
 });
 

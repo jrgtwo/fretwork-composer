@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -23,14 +24,18 @@ import {
   placementRect,
   placementRepeatRects,
   rulerMarks,
+  setTrackView,
+  viewOf,
   zoomAnchoredScrollLeft,
   type ArrangementMode,
+  type CompositionTrackViews,
 } from '../src/composition/arrangementMath';
 import {
   addPlacement,
   addTrack,
   clearHistory,
   getEditingComposition,
+  getSelectedPlacementIds,
   getSelectedTrackId,
   getTracks,
   openBlankComposition,
@@ -39,6 +44,27 @@ import {
   trackInstrumentId,
 } from '../src/composition/compositionService';
 import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/patternService';
+
+/**
+ * Every track of the open composition in ONE view — the uniform stack this suite
+ * assumed back when the page had a single global mode (COMPS-TRACK-TABS
+ * milestone 4 made the view per track).
+ *
+ * Built from the LIVE composition at the moment it is called, so it goes in the
+ * render call after the fixtures are up. Tracks added afterwards are not in it,
+ * and that is the real rule rather than a limitation of the helper: a new track
+ * defaults to Pattern (§3).
+ */
+const viewsOf = (view: ArrangementMode): CompositionTrackViews => {
+  const composition = getEditingComposition();
+  if (!composition || view === 'pattern') return {};
+  return {
+    [composition.id]: Object.fromEntries(
+      composition.tracks.map((track) => [track.id, view] as const),
+    ),
+  };
+};
+
 
 /**
  * The arrangement grid — its geometry, its scroll sync and its toolbar.
@@ -243,7 +269,7 @@ function stubScroller(maxScrollLeft = Number.POSITIVE_INFINITY) {
 describe('lanes and headers', () => {
   it('draws one lane and one header per track, at the heights arrangementMath gives', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const expected = modeLanes(tracksNow(), MODE);
     const lanes = laneEls();
@@ -270,7 +296,7 @@ describe('lanes and headers', () => {
 
   it('marks every lane with the attribute the lane styling keys off', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     // `.lanes > [data-lane]` in src/styles/index.css is what carves the
     // recessed channel, the divider between lanes and the zebra shading — the
@@ -288,7 +314,7 @@ describe('lanes and headers', () => {
 
   it('takes its lane height from the mode it is given', () => {
     seedArrangement();
-    render(<ArrangementGrid mode="edit" />);
+    render(<ArrangementGrid views={viewsOf('edit')} />);
 
     const expected = modeLanes(tracksNow(), 'edit');
     // The modes genuinely differ, or this assertion would hold for a component
@@ -300,7 +326,7 @@ describe('lanes and headers', () => {
   it('renders every track up to the composition cap', () => {
     openBlankComposition('Song');
     while (getTracks().length < MAX_COMPOSITION_TRACKS) addTrack();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     expect(laneEls()).toHaveLength(MAX_COMPOSITION_TRACKS);
     expect(screen.getAllByRole('button', { name: /^Select track / })).toHaveLength(
@@ -312,7 +338,7 @@ describe('lanes and headers', () => {
 describe('placement blocks', () => {
   it('positions every block exactly where placementRect puts it', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const lanes = modeLanes(tracksNow(), MODE);
     let drawn = 0;
@@ -340,7 +366,7 @@ describe('placement blocks', () => {
 
   it('moves every block when the zoom changes', async () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const placement = tracksNow()[0].placements[1];
     const lanes = modeLanes(tracksNow(), MODE);
 
@@ -355,7 +381,7 @@ describe('placement blocks', () => {
 
   it('draws no repeat division on an ordinary unrepeated placement', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     // A division is a RESTART mark. The first repetition starts at the block's
     // own left edge, so drawing it would put a second dark rule down the left of
@@ -373,7 +399,7 @@ describe('placement blocks', () => {
     // is imported / legacy data reaching the store the only way it can.
     act(() => usePatternsStore.getState().setPlacementRepeat(placementId, 3));
 
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const placement = placementsNow()[0];
     expect(placement.repeat).toBe(3);
@@ -407,7 +433,7 @@ describe('placement blocks', () => {
   it('marks the selected placement, and stays inert DOM', () => {
     seedArrangement();
     const [first, second] = placementsNow();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     expect(blockEl(first.id)?.dataset.selected).toBeUndefined();
 
@@ -433,7 +459,7 @@ describe('the selection toolbar', () => {
   function seedSelected() {
     seedArrangement();
     const [first] = placementsNow();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     act(() => selectPlacements([first.id]));
     return first.id;
   }
@@ -443,7 +469,7 @@ describe('the selection toolbar', () => {
 
   it('appears only with a selection, and counts it', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     expect(screen.queryByRole('button', { name: 'Delete selection' })).toBeNull();
 
     act(() => selectPlacements(placementsNow().map((p) => p.id)));
@@ -467,7 +493,7 @@ describe('the selection toolbar', () => {
     const user = userEvent.setup();
     seedArrangement();
     const before = placementsNow().length;
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     act(() => selectPlacements([placementsNow()[0].id]));
 
     await user.click(button('Duplicate selection'));
@@ -510,7 +536,7 @@ describe('the selection toolbar', () => {
 describe('ruler', () => {
   it('draws the marks arrangementMath returns, where it puts them', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const marks = rulerMarks(barsNow(), timeSignature(), PX_PER_BEAT);
     const lines = Array.from(
@@ -532,7 +558,7 @@ describe('ruler', () => {
 
   it('rules the lanes with the very same lines', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     // The surface the blocks are read against. Drawn from the ruler's own mark
     // list rather than a second computation — round the two differently and
@@ -555,7 +581,7 @@ describe('ruler', () => {
 
   it('is a picture, not something a screen reader reads out as numbers', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     // Bar numbers announced as content read "1 2 3 4 5 6 7 8" with no way to
     // tell what they are. The track and bar counts are stated in words instead.
@@ -568,7 +594,7 @@ describe('ruler', () => {
     // Bar 13, well past the 8-bar minimum, so it is the trailing room being
     // measured and not the floor.
     place(patternId, getTracks()[0].id, 12 * ticksPerBar(timeSignature()));
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     // No minimum, no trailing room: what the content alone fills.
     const filled = arrangementBars(tracksNow(), timeSignature(), {});
@@ -585,7 +611,7 @@ describe('ruler', () => {
 
   it('is exactly as wide as the lane area, at every zoom', async () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     for (let step = 0; step < 3; step++) {
       const zoom = ARRANGEMENT_ZOOM_LEVELS[DEFAULT_ARRANGEMENT_ZOOM_INDEX - step];
@@ -598,7 +624,7 @@ describe('ruler', () => {
 
   it('thins its labels out as the zoom gets too coarse to number every bar', async () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const labelCount = () => rulerContent().querySelectorAll('[data-ruler-label]').length;
     const dense = labelCount();
 
@@ -617,7 +643,7 @@ describe('ruler', () => {
 
   it('stops zooming at the ends of the scale', async () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     for (let step = 0; step < ARRANGEMENT_ZOOM_LEVELS.length; step++) {
       await userEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
@@ -642,7 +668,7 @@ describe('scroll sync', () => {
    */
   it('locks the ruler to the lane area horizontally and the headers vertically', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     expect(rulerContent().style.transform).toBe('translateX(0px)');
     expect(headerStack().style.transform).toBe('translateY(0px)');
@@ -662,7 +688,7 @@ describe('scroll sync', () => {
 
   it('keeps the leftmost visible tick fixed across a zoom', async () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     scrollTo(960);
 
     await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
@@ -684,7 +710,7 @@ describe('scroll sync', () => {
 
   it('writes nothing back onto a scroller the user is driving', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const stub = stubScroller();
 
     stub.userScrollTo(480);
@@ -699,7 +725,7 @@ describe('scroll sync', () => {
 
   it('follows the element, not its own arithmetic, when a zoom-out is clamped', async () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const stub = stubScroller();
     stub.userScrollTo(10_000);
@@ -729,7 +755,7 @@ describe('scroll sync', () => {
 describe('reaching the lanes without a pointer', () => {
   it('puts the lane area in the tab order, named', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     // Nothing inside a lane is focusable in this ticket — blocks are inert by
     // design (CP-06 owns every gesture) — so without this the arrangement past
@@ -744,7 +770,7 @@ describe('reaching the lanes without a pointer', () => {
   it('takes focus when the lane area is pressed', async () => {
     const user = userEvent.setup();
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     // The lane handler calls `preventDefault` to stop the browser selecting
     // block labels the drag passes over — which also suppresses the focus the
@@ -761,7 +787,7 @@ describe('track selection', () => {
     seedArrangement();
     const names = tracksNow().map((track) => track.name);
     const ids = tracksNow().map((track) => track.id);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const header = (name: string) =>
       screen.getByRole('button', { name: `Select track ${name}` });
@@ -784,7 +810,7 @@ describe('track selection', () => {
   it('reflects a selection made anywhere else', () => {
     seedArrangement();
     const [track] = tracksNow();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     act(() => selectTrack(track.id));
 
@@ -801,7 +827,7 @@ describe('track selection', () => {
   it('renders a mix control per header', () => {
     seedArrangement();
     const [track] = tracksNow();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const header = document.querySelector<HTMLElement>(`[data-track-header="${track.id}"]`);
     if (!header) throw new Error('no header rendered');
@@ -816,7 +842,7 @@ describe('track selection', () => {
 describe('empty states', () => {
   it('renders a usable grid for a composition with one empty track', () => {
     openBlankComposition('Song');
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     // A grid, not a blank box: a lane to drop into, a header, and a ruler that
     // spans the minimum span rather than zero bars.
@@ -836,20 +862,25 @@ describe('empty states', () => {
 
   it('drops the empty-arrangement hint once something is placed', () => {
     seedArrangement();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     expect(screen.queryByText(/nothing placed yet/i)).not.toBeInTheDocument();
   });
 
-  it('hides the time axis for a trackless composition in voice view', () => {
+  it('keeps the time axis for a trackless composition, whatever the map holds', () => {
     // Not reachable through `compositionService` — the seam refuses to delete the
     // last track — so it is forced here the way `tests/CommandCatalog.test.ts`
     // forces it. A composition made elsewhere can carry zero tracks, and
     // `timed`'s "does any lane want an axis" question has no lane to ask: `some`
-    // on nothing is `false`, which is the wrong answer for pattern and edit, so
-    // the page's own view is the fallback. An unconditional `true` there put the
-    // ruler, the zoom steps, the snap menu and "Nothing placed yet" on screen
-    // beside a rail labelled Voices.
+    // on nothing is `false`, which is the WRONG answer. The fallback is the
+    // composition's own default view, and that default is Pattern — so a
+    // trackless composition is timed.
+    //
+    // ⚠ This is the behaviour COMPS-TRACK-TABS milestone 4 CHANGED. Under the
+    // old global mode the fallback was `mode !== 'voice'`, so the same empty
+    // stack hid its ruler in voice mode; there is no page mode to ask any more,
+    // and a map keyed by track id says nothing about a composition with no
+    // tracks in it.
     openBlankComposition('Song');
     usePatternsStore.setState((state) => ({
       library: {
@@ -860,21 +891,19 @@ describe('empty states', () => {
         })),
       },
     }));
+    const composition = getEditingComposition()!;
 
-    const voice = render(<ArrangementGrid mode="voice" />);
-    expect(screen.queryByTestId('arrangement-ruler')).toBeNull();
-    expect(screen.queryByText(/nothing placed yet/i)).not.toBeInTheDocument();
-    voice.unmount();
-
-    // …and the same empty stack in pattern view still has one, which is what
-    // makes the line above about the VIEW and not about the track count.
-    render(<ArrangementGrid mode={MODE} />);
+    // A map that puts a track id — one this composition does not have — on
+    // voice, to prove the answer comes from the LANES and not from the map.
+    render(
+      <ArrangementGrid views={{ [composition.id]: { 'gone-track': 'voice' } }} />,
+    );
     expect(screen.getByTestId('arrangement-ruler')).toBeInTheDocument();
     expect(screen.getByText(/nothing placed yet/i)).toBeInTheDocument();
   });
 
   it('says so, rather than rendering an empty grid, when no composition is open', () => {
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     expect(screen.getByText(/no composition open/i)).toBeInTheDocument();
     expect(screen.queryByTestId('arrangement-lanes-scroller')).not.toBeInTheDocument();
@@ -885,7 +914,7 @@ describe('empty states', () => {
     // creates one on arrival, and a delete leaves you here. Without a way out it
     // is a dead end, which is the only reason the auto-create existed.
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     await user.click(screen.getByRole('button', { name: 'New composition' }));
 
@@ -900,7 +929,7 @@ describe('empty states', () => {
     const real = usePatternsStore.getState().createComposition;
     usePatternsStore.setState({ createComposition: () => '' });
     try {
-      render(<ArrangementGrid mode={MODE} />);
+      render(<ArrangementGrid />);
 
       await user.click(screen.getByRole('button', { name: 'New composition' }));
 
@@ -920,7 +949,7 @@ describe('on the composition page', () => {
     // composition fills the tray with the grid.
     openBlankComposition('Song');
     usePatternsStore.setState({ editingCompositionId: null });
-    render(<CompositionPage mode={MODE} onModeChange={() => {}} />);
+    render(<CompositionPage />);
 
     expect(await screen.findByTestId('arrangement-lanes-scroller')).toBeInTheDocument();
     expect(laneEls().length).toBeGreaterThan(0);
@@ -942,5 +971,324 @@ describe('on the composition page', () => {
     });
     // Sanity on the fixture itself: a block at bar 2 has to be a bar in.
     expect(placement.startTick).toBe(ticksPerBar(timeSignature()));
+  });
+});
+
+/**
+ * ── A MIXED STACK (COMPS-TRACK-TABS milestone 4, acceptance 1) ────────────────
+ *
+ * Three tracks in three different views AT ONCE — the state the page could not
+ * express at all while a single global mode decided every lane, and the state
+ * every per-lane branch in `ArrangementGrid` was written for.
+ *
+ * ⚠ THE FAILURE THIS BLOCK IS FOR is the index pairing §5 names: `lanes.map((lane,
+ * index) => tracks[index])` is correct only while the two arrays stay the same
+ * length and order, and it draws the wrong header on the wrong track while
+ * looking entirely plausible. Every assertion below pairs a lane or a header
+ * with a track BY ID for that reason.
+ */
+describe('three views at once', () => {
+  /** Guitar on Pattern, Rhythm on Edit, Lead on Voice — in that order, so a
+   *  Voice lane sits at the END and an Edit one in the MIDDLE. */
+  const mixed = () => {
+    const { patternId, trackIds } = seedArrangement();
+    // Something for the middle lane to edit: `seedArrangement` leaves the third
+    // track empty on purpose, and an Edit lane with no block draws no surface.
+    place(patternId, trackIds[1], 0);
+    const composition = getEditingComposition()!;
+    const views: CompositionTrackViews = {
+      [composition.id]: { [trackIds[1]]: 'edit', [trackIds[2]]: 'voice' },
+    };
+    return { patternId, trackIds, views };
+  };
+  const laneFor = (trackId: string) =>
+    document.querySelector<HTMLElement>(`[data-lane-track="${trackId}"]`)!;
+  const headerFor = (trackId: string) =>
+    document.querySelector<HTMLElement>(`[data-track-header="${trackId}"]`)!;
+
+  it('draws each lane its own view, and each header beside its own track', () => {
+    const { trackIds, views } = mixed();
+    render(<ArrangementGrid views={views} />);
+    const tracks = tracksNow();
+
+    // Pattern: blocks. Edit: note surfaces, no blocks. Voice: neither — its rack
+    // is in the layer above and what is left here is a spacer.
+    expect(laneFor(trackIds[0]).querySelectorAll('[data-placement]').length).toBeGreaterThan(0);
+    expect(laneFor(trackIds[0]).querySelectorAll('[data-edit-placement]')).toHaveLength(0);
+    expect(laneFor(trackIds[1]).querySelectorAll('[data-edit-placement]').length).toBeGreaterThan(0);
+    expect(laneFor(trackIds[1]).querySelectorAll('[data-placement]')).toHaveLength(0);
+    expect(laneFor(trackIds[2]).children).toHaveLength(0);
+    expect(
+      document.querySelector(`[data-voice-lane-track="${trackIds[2]}"]`),
+    ).not.toBeNull();
+    // One rack, on the track that asked for one — not three, and not the first.
+    expect(document.querySelectorAll('[data-voice-rack]')).toHaveLength(1);
+    expect(
+      document.querySelector('[data-voice-rack]')?.getAttribute('data-voice-rack'),
+    ).toBe(trackIds[2]);
+
+    // ⚠ THE PAIRING. Each header carries its own track's name and its own
+    // track's view — a header drawn from `tracks[index]` against a filtered lane
+    // list is exactly what this catches.
+    for (const track of tracks) {
+      const header = within(headerFor(track.id));
+      expect(header.getByRole('button', { name: `Select track ${track.name}` })).toBeInTheDocument();
+    }
+    expect(
+      within(headerFor(trackIds[0])).getByRole('button', {
+        name: `Pattern view, ${tracks[0].name}`,
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    expect(
+      within(headerFor(trackIds[1])).getByRole('button', {
+        name: `Edit view, ${tracks[1].name}`,
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    expect(
+      within(headerFor(trackIds[2])).getByRole('button', {
+        name: `Voice view, ${tracks[2].name}`,
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('gives every lane the height its own view earns', () => {
+    const { trackIds, views } = mixed();
+    render(<ArrangementGrid views={views} />);
+    const composition = getEditingComposition()!;
+    // The component's own resolver, fed the same map — a per-lane height
+    // regression fails here rather than waiting for an eye.
+    const expected = laneRects(
+      tracksNow(),
+      laneHeightResolver({
+        viewOf: (trackId) => viewOf(views, composition.id, trackId),
+        instrumentOf: (trackId) =>
+          trackInstrumentId(tracksNow().find((track) => track.id === trackId)!),
+        voiceRackHeight: () => 0,
+      }),
+    );
+    for (const [index, trackId] of trackIds.entries()) {
+      expect(laneFor(trackId).style.height).toBe(px(expected[index].height));
+      expect(headerFor(trackId).style.height).toBe(px(expected[index].height));
+    }
+    // The stack is not uniform — otherwise the assertion above would hold for
+    // any height rule at all.
+    expect(new Set(expected.map((lane) => lane.height)).size).toBeGreaterThan(1);
+  });
+
+  /**
+   * The grid with an OWNER, which is how the app runs it: `App` holds the map
+   * and hands back the updated one. A map passed with no handler is a fixture
+   * the caller does not want changed (see the `views` prop), so a test that
+   * presses a view button has to own it the way the app does.
+   */
+  function OwnedGrid({ initial }: { initial: CompositionTrackViews }) {
+    const [views, setViews] = useState(initial);
+    return (
+      <ArrangementGrid
+        views={views}
+        onTrackViewChange={(compositionId, trackId, view) =>
+          setViews((was) => setTrackView(was, compositionId, trackId, view))
+        }
+      />
+    );
+  }
+
+  it('changes ONE lane and selects its track, leaving the other two alone', async () => {
+    const user = userEvent.setup();
+    const { trackIds, views } = mixed();
+    render(<OwnedGrid initial={views} />);
+    const tracks = tracksNow();
+
+    await user.click(
+      within(headerFor(trackIds[0])).getByRole('button', {
+        name: `Voice view, ${tracks[0].name}`,
+      }),
+    );
+
+    expect(document.querySelectorAll('[data-voice-rack]')).toHaveLength(2);
+    // The other two lanes did not move.
+    expect(laneFor(trackIds[1]).querySelectorAll('[data-edit-placement]').length).toBeGreaterThan(0);
+    expect(
+      within(headerFor(trackIds[2])).getByRole('button', {
+        name: `Voice view, ${tracks[2].name}`,
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    // …and the press SELECTED the track it changed (§2).
+    expect(getSelectedTrackId()).toBe(trackIds[0]);
+  });
+
+  /**
+   * ⚠ ONE POINTER HANDLER, A MIXED STACK UNDER IT (§4, §5).
+   *
+   * `.lanes` carries the arrangement's pointer handlers whenever SOME lane is a
+   * Pattern lane, and every lane in the stack is underneath it — including the
+   * Edit lanes, whose note surfaces do not stop propagation. What keeps the two
+   * apart is the hit test: the gesture layer filters `geo.lanes` through
+   * `isPatternLane` and KEEPS THE ORIGINAL TOPS, so an Edit or Voice row is a
+   * GAP that `laneAt` answers null for, and the press returns before it takes
+   * focus or suppresses the default.
+   *
+   * This was unreachable before milestone 4 — the handlers were attached only in
+   * pattern mode, where every lane was a Pattern lane.
+   */
+  it('starts no block gesture from a drag inside an Edit lane', async () => {
+    const user = userEvent.setup();
+    const { trackIds, views } = mixed();
+    render(<ArrangementGrid views={views} />);
+    // `addPlacement` selects what it places, so the fixture leaves one standing
+    // — captured rather than assumed empty, since what matters is that the drag
+    // does not CHANGE it.
+    const selectionBefore = getSelectedPlacementIds();
+    const onEditTrack = tracksNow()[1].placements[0];
+    expect(onEditTrack).toBeDefined();
+
+    // jsdom reports every box as 0×0 at the origin, so a clientY is a distance
+    // down the lane stack and a clientX is a lane-content pixel — the same
+    // identity the gesture suite relies on. The first lane's height puts this
+    // inside the SECOND lane, which is the Edit one, and the x is past both of
+    // that track's blocks: EMPTY lane is what a marquee starts from, and a
+    // marquee is what this must not produce. (Probe-checked: admitting this row
+    // to the hit test makes the rubber band appear and this test fail.)
+    const y = modeLanes(tracksNow(), 'pattern')[0].height + 8;
+    await user.pointer([
+      {
+        target: screen.getByTestId('arrangement-lanes'),
+        keys: '[MouseLeft>]',
+        coords: { clientX: 1500, clientY: y },
+      },
+      { coords: { clientX: 1740, clientY: y + 12 } },
+    ]);
+
+    // No rubber band across a lane the arrangement does not own — this is what
+    // the Pattern-only hit test with ORIGINAL TOPS buys: the row is a gap, not a
+    // lane one row up.
+    expect(screen.queryByTestId('arrangement-marquee')).toBeNull();
+
+    await user.pointer({ keys: '[/MouseLeft]' });
+    expect(getSelectedPlacementIds()).toEqual(selectionBefore);
+    // And nothing on that track moved either. (`trackIds` is ordered Pattern,
+    // Edit, Voice.)
+    const after = tracksNow()[1].placements.find(
+      (candidate) => candidate.id === onEditTrack.id,
+    )!;
+    expect(after.startTick).toBe(onEditTrack.startTick);
+    expect(trackIds).toHaveLength(3);
+  });
+
+  it('still drags blocks on the Pattern lane while another track is in Edit', async () => {
+    const user = userEvent.setup();
+    const { trackIds, views } = mixed();
+    render(<ArrangementGrid views={views} />);
+    const placement = tracksNow()[0].placements[0];
+    const laneHeight = modeLanes(tracksNow(), 'pattern')[0].height;
+
+    // A press on the first lane's block, which is a Pattern lane — the pointer
+    // surface does not care which track is SELECTED, only that the lane it hit
+    // is one it owns.
+    await user.pointer([
+      {
+        target: screen.getByTestId('arrangement-lanes'),
+        keys: '[MouseLeft>]',
+        coords: { clientX: 4, clientY: laneHeight / 2 },
+      },
+      { coords: { clientX: 4 + PX_PER_BEAT * 4, clientY: laneHeight / 2 } },
+      { keys: '[/MouseLeft]' },
+    ]);
+
+    const moved = tracksNow()[0].placements.find((candidate) => candidate.id === placement.id)!;
+    expect(moved.startTick).toBeGreaterThan(placement.startTick);
+    // …and the press took its own track, as any lane press does.
+    expect(getSelectedTrackId()).toBe(trackIds[0]);
+  });
+
+  /**
+   * THE FIXTURE CONTRACT, pinned so it cannot rot into a half-controlled press.
+   *
+   * A caller that passes `views` and NO handler owns the map and does not want
+   * it written from inside the grid — the local fallback is for a caller that
+   * passes neither. So the press does what belongs to the seam (it selects) and
+   * nothing that belongs to the map, rather than writing local state nothing
+   * reads and re-rendering for it.
+   */
+  it('leaves a passed-in map alone when there is no handler to report to', async () => {
+    const user = userEvent.setup();
+    const { trackIds, views } = mixed();
+    render(<ArrangementGrid views={views} />);
+    const tracks = tracksNow();
+
+    await user.click(
+      within(headerFor(trackIds[2])).getByRole('button', {
+        name: `Pattern view, ${tracks[2].name}`,
+      }),
+    );
+
+    // Still the rack the passed map asked for…
+    expect(
+      within(headerFor(trackIds[2])).getByRole('button', {
+        name: `Voice view, ${tracks[2].name}`,
+      }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    expect(document.querySelectorAll('[data-voice-rack]')).toHaveLength(1);
+    // …and the selection, which is the seam's and not the map's, DID move.
+    expect(getSelectedTrackId()).toBe(trackIds[2]);
+  });
+
+  /**
+   * ── THE RING AND THE ACTIONS ROW GO TOGETHER ─────────────────────────────────
+   *
+   * A selection made on a Pattern lane SURVIVES a selection change to a track in
+   * another view — `effectiveSelection` filters by LANE, and that lane is still
+   * a Pattern lane. What does not survive is the right to act on it: the plan's
+   * direct-editing table gives the Voice and Edit rows no placement-selection
+   * commands, so the toolbar's Split / ♭ / ♯ / Duplicate / Delete row and the
+   * keyboard twins are both gone.
+   *
+   * ⚠ WHICH LEFT THE BLOCKS DRAWN SELECTED WITH NOTHING ABLE TO TOUCH THEM. This
+   * was unreachable under the old global mode — 'voice' meant no Pattern lane
+   * was drawn at all — and milestone 4 is what makes a mixed stack put a live
+   * ring beside a vanished toolbar. The two are gated on the same value now.
+   */
+  it('stops drawing the selection ring exactly when the actions that act on it go', async () => {
+    const user = userEvent.setup();
+    const { trackIds, views } = mixed();
+    render(<ArrangementGrid views={views} />);
+    const tracks = tracksNow();
+    const onPattern = tracks[0].placements[0];
+    expect(onPattern).toBeDefined();
+
+    act(() => {
+      selectTrack(trackIds[0]);
+      selectPlacements([onPattern.id]);
+    });
+    expect(blockEl(onPattern.id)).toHaveAttribute('data-selected');
+    expect(screen.getByRole('button', { name: 'Split at cursor' })).toBeInTheDocument();
+
+    // The VOICE track becomes the selected one. The Pattern lane is untouched —
+    // it still draws its blocks — and the selection is still in the store.
+    await user.click(screen.getByRole('button', { name: `Select track ${tracks[2].name}` }));
+
+    expect(screen.queryByRole('button', { name: 'Split at cursor' })).toBeNull();
+    expect(blockEl(onPattern.id)).not.toHaveAttribute('data-selected');
+    expect(getSelectedPlacementIds()).toEqual([onPattern.id]);
+
+    // Back to a Pattern track and both return — nothing was thrown away.
+    await user.click(screen.getByRole('button', { name: `Select track ${tracks[0].name}` }));
+    expect(blockEl(onPattern.id)).toHaveAttribute('data-selected');
+    expect(screen.getByRole('button', { name: 'Split at cursor' })).toBeInTheDocument();
+  });
+
+  it('keeps a time axis while any lane has one, and bands it around the voice lane', () => {
+    const { trackIds, views } = mixed();
+    render(<ArrangementGrid views={views} />);
+
+    // One ruler for the stack — the axis is up unless EVERY lane is a rack.
+    expect(screen.getByTestId('arrangement-ruler')).toBeInTheDocument();
+    // Two timed lanes, contiguous, so one band of grid lines: the voice lane is
+    // last here, which is what makes a single band the right answer.
+    const bands = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-grid-line]'),
+    ).map((line) => line.parentElement);
+    expect(new Set(bands).size).toBe(1);
+    expect(trackIds).toHaveLength(3);
   });
 });

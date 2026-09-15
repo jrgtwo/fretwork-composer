@@ -220,7 +220,6 @@ vi.mock('@fretwork/lib', async (importOriginal) => {
 // ------------------------------------------------------------------ fixtures ---
 
 const BAR = 4 * PPQ;
-const MODE = 'pattern' as const;
 
 /** A built-in guitar voice — the picker's own first offer, so the write and the
  *  offer set are the same set by construction. */
@@ -511,7 +510,7 @@ describe('the per-track voice picker', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     const driven = userVoice('Driven');
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     await pickVoice(user, tracks[1], voiceKey(driven));
 
@@ -529,7 +528,7 @@ describe('the per-track voice picker', () => {
     const tracks = twoTracks();
     const driven = userVoice('Driven');
     userVoice('Thumpy', 'bass');
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const picker = await openVoice(user, tracks[0]);
     expect(within(picker).getByRole('option', { name: 'Auto' })).toBeInTheDocument();
@@ -548,7 +547,7 @@ describe('the per-track voice picker', () => {
     // `deleteVoice` repairs the editing PATTERN and leaves other holders to the
     // lib's clean fallback, so a track's ref can dangle from two clicks away.
     act(() => useVoiceStore.getState().deleteVariant(driven.id));
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const picker = await openVoice(user, getTracks()[0]);
     expect(picker).toHaveValue(voiceKey(driven));
@@ -569,7 +568,7 @@ describe('the per-track voice picker', () => {
     // document through persistence, a hand edit, or an instrument change under a
     // ref the lib did not clear. The seam has to name it for what it is.
     setTrackVoiceRef(tracks[0].id, bass);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     expect(trackVoiceRefStatus(getTracks()[0])).toBe('wrong-instrument');
     const picker = await openVoice(user, getTracks()[0]);
@@ -583,7 +582,7 @@ describe('the per-track voice picker', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     selectVoice('track', tracks[0].id, userVoice('Driven'));
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     await pickVoice(user, tracks[0], '');
 
@@ -593,7 +592,7 @@ describe('the per-track voice picker', () => {
   it('says which voice the track is on without being opened', async () => {
     twoTracks();
     const driven = userVoice('Driven');
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     // Both tracks are on the fallback, so both name the instrument's voice…
     expect(voiceButton(getTracks()[1])).toHaveAttribute(
@@ -619,7 +618,7 @@ describe('the per-track voice picker', () => {
     const tracks = twoTracks();
     const first = builtInVoice(0);
     const second = builtInVoice(1);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const picker = await openVoice(user, tracks[0]);
 
     // `fireEvent` rather than `userEvent`, and both in ONE synchronous block, so
@@ -647,7 +646,7 @@ describe('the per-track voice picker', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     const driven = userVoice('Driven');
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const picker = await openVoice(user, tracks[0]);
 
     act(() => {
@@ -674,7 +673,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     // Nothing placed, so `strandedByInstrument` is 0 — before CP-13 this change
     // applied silently, and the voice went with it.
     selectVoice('track', tracks[0].id, userVoice('Driven'));
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     await user.selectOptions(instrumentPicker(tracks[0]), 'bass');
 
@@ -690,7 +689,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     const tracks = twoTracks();
     const driven = userVoice('Driven');
     selectVoice('track', tracks[0].id, driven);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     await user.selectOptions(instrumentPicker(tracks[0]), 'bass');
     await user.click(
@@ -706,7 +705,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
   it('applies straight away when the track has no voice of its own', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     await user.selectOptions(instrumentPicker(tracks[0]), 'bass');
 
@@ -724,7 +723,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     // it did. There is nothing left for the write to destroy, and a confirmation
     // for a free action is how people learn to click through confirmations.
     act(() => useVoiceStore.getState().deleteVariant(driven.id));
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     await user.selectOptions(instrumentPicker(getTracks()[0]), 'bass');
 
@@ -740,7 +739,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     const patternId = seedPattern('High riff', [0, 4, 5]);
     place(patternId, tracks[0].id, 0);
     selectVoice('track', tracks[0].id, userVoice('Driven'));
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     await user.selectOptions(instrumentPicker(tracks[0]), 'bass');
 
@@ -755,7 +754,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
     selectVoice('track', tracks[0].id, userVoice('Driven'));
     // An undoable arrangement edit, captured while the override was still set.
     place(patternId, tracks[0].id, 0);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     await user.selectOptions(instrumentPicker(tracks[0]), 'bass');
     await user.click(

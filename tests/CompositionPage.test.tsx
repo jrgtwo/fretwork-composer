@@ -4,22 +4,53 @@ import userEvent from '@testing-library/user-event';
 import { DEFAULT_PATTERNS_STATE, usePatternsStore } from '@fretwork/lib';
 import { CompositionPage } from '../src/composition/CompositionPage';
 import {
+  addTrack,
   beginJob,
   endJob,
+  getEditingComposition,
+  getTracks,
   JOB_LOCK_REASON,
   openBlankComposition,
+  selectTrack,
 } from '../src/composition/compositionService';
+import type {
+  ArrangementMode,
+  CompositionTrackViews,
+} from '../src/composition/arrangementMath';
 
 /**
- * `CompositionPage` is a controlled component: `mode` comes in as a prop and
- * every change goes back out through `onModeChange`, because `App` owns the
- * mode and this page unmounts on every visit to the pattern page.
+ * Every track of the open composition in ONE view — the uniform stack this suite
+ * assumed back when the page had a single global mode (COMPS-TRACK-TABS
+ * milestone 4 made the view per track).
  *
- * That is exactly what `App`-level tests cannot show — with Edit and Voice
- * disabled the mode never changes there, so hard-coding the highlight or
- * dropping the callback would pass every one of them. Rendering the page
- * directly at a mode `App` can't currently reach is the only way to make the
- * ownership falsifiable.
+ * Built from the LIVE composition at the moment it is called, so it goes in the
+ * render call after the fixtures are up. Tracks added afterwards are not in it,
+ * and that is the real rule rather than a limitation of the helper: a new track
+ * defaults to Pattern (§3).
+ */
+const viewsOf = (view: ArrangementMode): CompositionTrackViews => {
+  const composition = getEditingComposition();
+  if (!composition || view === 'pattern') return {};
+  return {
+    [composition.id]: Object.fromEntries(
+      composition.tracks.map((track) => [track.id, view] as const),
+    ),
+  };
+};
+
+
+/**
+ * `CompositionPage` after COMPS-TRACK-TABS milestone 4.
+ *
+ * ⚠ THERE IS NO MODE BAR AND NO PAGE MODE. Each TRACK carries its own view, the
+ * map lives in `App` (this page unmounts on every visit to the pattern page),
+ * and the page's one remaining view question is which rail to draw — the
+ * SELECTED track's view, with Pattern as the fallback when nothing valid is
+ * selected.
+ *
+ * The map is a controlled prop with local state behind it, the way the rail
+ * sections are: a render passing neither half gets working view buttons that
+ * simply do not outlive the component. That is what most of this file uses.
  */
 beforeEach(() => {
   sessionStorage.clear();
@@ -27,24 +58,26 @@ beforeEach(() => {
     ...DEFAULT_PATTERNS_STATE,
     library: { patterns: [], compositions: [], collections: [] },
   });
-  // Module state on the seam — a leaked job would disable the mode bar in every
-  // test after the one that left it open.
+  // Module state on the seam — a leaked job would disable every header's view
+  // buttons in every test after the one that left it open. `selectTrack` is the
+  // same kind of module state and decides which rail is drawn.
   endJob();
+  selectTrack(null);
 });
 
-const modeButton = (label: string) => screen.getByRole('button', { name: `${label} mode` });
+/** A track's view button. Named with the TRACK, because eight headers are on
+ *  screen in a full composition and the letter on the button is not a name. */
+const viewButton = (label: string, track: string) =>
+  screen.getByRole('button', { name: `${label} view, ${track}` });
+const railName = () => screen.getByRole('complementary').getAttribute('aria-label');
 
 describe('the rail (CP-17)', () => {
   const railSection = (name: string) =>
     screen.getByRole('button', { name: new RegExp(`^${name}$`, 'i') });
 
-  it('holds three independently foldable sections in pattern mode', () => {
+  it('holds three independently foldable sections on a Pattern rail', () => {
     render(
-      <CompositionPage
-        mode="pattern"
-        onModeChange={() => {}}
-        openRailSections={['commands', 'patterns', 'compositions']}
-      />,
+      <CompositionPage openRailSections={['commands', 'patterns', 'compositions']} />,
     );
 
     for (const name of ['Commands', 'Patterns', 'Compositions']) {
@@ -57,8 +90,6 @@ describe('the rail (CP-17)', () => {
     const onOpenRailSectionsChange = vi.fn();
     render(
       <CompositionPage
-        mode="pattern"
-        onModeChange={() => {}}
         openRailSections={['commands', 'patterns', 'compositions']}
         onOpenRailSectionsChange={onOpenRailSectionsChange}
       />,
@@ -66,18 +97,19 @@ describe('the rail (CP-17)', () => {
 
     await user.click(railSection('Compositions'));
 
-    // Controlled, like `mode`: the page reports the change and `App` owns it, so
-    // a fold survives the unmount every visit to the pattern page causes.
+    // Controlled, like the view map: the page reports the change and `App` owns
+    // it, so a fold survives the unmount every visit to the pattern page causes.
     expect(onOpenRailSectionsChange).toHaveBeenCalled();
     const next = onOpenRailSectionsChange.mock.calls[0][0](['commands', 'patterns', 'compositions']);
     expect(next).toEqual(['commands', 'patterns']);
   });
 
-  it('offers neither library outside pattern mode', () => {
+  it('offers neither library when the selected track is not on Pattern', () => {
+    openBlankComposition('Song');
+    selectTrack(getTracks()[0].id);
     render(
       <CompositionPage
-        mode="voice"
-        onModeChange={() => {}}
+        views={viewsOf('voice')}
         openRailSections={['commands', 'patterns', 'compositions']}
       />,
     );
@@ -86,81 +118,200 @@ describe('the rail (CP-17)', () => {
     expect(screen.queryByRole('region', { name: 'Patterns section' })).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Compositions section' })).not.toBeInTheDocument();
   });
+
+  /** A Voice map with NOTHING SELECTED is still the Pattern rail — the fallback
+   *  is about the selection, not about what the stack happens to be showing. It
+   *  is the one case a naive "is any track on voice" reading would get wrong. */
+  it('keeps the library when the stack is on Voice but nothing is selected', () => {
+    openBlankComposition('Song');
+    render(
+      <CompositionPage views={viewsOf('voice')} openRailSections={['patterns']} />,
+    );
+
+    expect(screen.getByRole('region', { name: 'Patterns section' })).toBeInTheDocument();
+    expect(railName()).toBe('Pattern library');
+  });
 });
 
-describe('CompositionPage mode bar', () => {
-  it('presses the mode it is given, not a hard-coded default', () => {
-    render(<CompositionPage mode="edit" onModeChange={() => {}} />);
+describe('the mode bar is gone (COMPS-TRACK-TABS milestone 4)', () => {
+  it('offers no page-wide mode control at all', () => {
+    openBlankComposition('Song');
+    render(<CompositionPage />);
 
-    expect(modeButton('Edit')).toHaveAttribute('aria-pressed', 'true');
-    expect(modeButton('Pattern')).toHaveAttribute('aria-pressed', 'false');
-    expect(modeButton('Voice')).toHaveAttribute('aria-pressed', 'false');
+    // The three buttons were named '<label> mode' and grouped as 'Composition
+    // mode'. Nothing may answer to either: a leftover bar is the second
+    // authority this milestone exists to delete, and it would look right.
+    expect(screen.queryByRole('group', { name: 'Composition mode' })).not.toBeInTheDocument();
+    for (const label of ['Pattern', 'Edit', 'Voice']) {
+      expect(screen.queryByRole('button', { name: `${label} mode` })).not.toBeInTheDocument();
+    }
   });
 
-  it('reports a press back out rather than changing mode itself', async () => {
-    const onModeChange = vi.fn();
-    render(<CompositionPage mode="edit" onModeChange={onModeChange} />);
+  it('keeps the transport, which never depended on a view', () => {
+    openBlankComposition('Song');
+    render(<CompositionPage />);
 
-    await userEvent.click(modeButton('Pattern'));
+    // Page-wide and true whatever mix of views the stack is in — the reason it
+    // is in the page chrome rather than the grid's toolbar.
+    expect(screen.getByRole('button', { name: 'Play' })).toBeInTheDocument();
+  });
+});
 
-    expect(onModeChange).toHaveBeenCalledWith('pattern');
-    // Still 'edit': the prop did not change, so neither did the page.
-    expect(modeButton('Edit')).toHaveAttribute('aria-pressed', 'true');
+describe('the rail follows the SELECTED track (§1, §2)', () => {
+  /** Three tracks, three views, at once — the state the old page could not
+   *  express at all. */
+  const threeViews = () => {
+    openBlankComposition('Song');
+    addTrack('Bass');
+    addTrack('Keys');
+    const [pattern, edit, voice] = getTracks();
+    const composition = getEditingComposition()!;
+    return {
+      pattern,
+      edit,
+      voice,
+      views: {
+        [composition.id]: { [edit.id]: 'edit', [voice.id]: 'voice' },
+      } as CompositionTrackViews,
+    };
+  };
+
+  it('draws the selected track own rail, with the other two unchanged', async () => {
+    const user = userEvent.setup();
+    const { pattern, edit, voice, views } = threeViews();
+    render(<CompositionPage views={views} openRailSections={[]} />);
+
+    // A header press selects, and the rail follows that selection rather than
+    // any page-wide state.
+    await user.click(screen.getByRole('button', { name: `Select track ${voice.name}` }));
+    expect(railName()).toBe('Voices');
+
+    await user.click(screen.getByRole('button', { name: `Select track ${edit.name}` }));
+    expect(railName()).toBe('Inspector');
+
+    await user.click(screen.getByRole('button', { name: `Select track ${pattern.name}` }));
+    expect(railName()).toBe('Pattern library');
+
+    // The views themselves did not move: selecting a track never changes what it
+    // shows (§2).
+    expect(viewButton('Voice', voice.name)).toHaveAttribute('aria-pressed', 'true');
+    expect(viewButton('Edit', edit.name)).toHaveAttribute('aria-pressed', 'true');
+    expect(viewButton('Pattern', pattern.name)).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('offers all three modes now that the last one is built', () => {
-    render(<CompositionPage mode="pattern" onModeChange={() => {}} />);
+  it('falls back to the Pattern rail with no valid selected track', async () => {
+    const user = userEvent.setup();
+    const { voice, views } = threeViews();
+    render(<CompositionPage views={views} openRailSections={[]} />);
 
-    // CP-11 built edit mode and CP-14 built voice mode; nothing here is a
-    // placeholder any more, so nothing here is inert.
-    expect(modeButton('Pattern')).toBeEnabled();
-    expect(modeButton('Edit')).toBeEnabled();
-    expect(modeButton('Voice')).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: `Select track ${voice.name}` }));
+    expect(railName()).toBe('Voices');
+
+    // Nothing selected — the agent can do this, and so can an undo that retracts
+    // the selected track.
+    act(() => selectTrack(null));
+    expect(railName()).toBe('Pattern library');
   });
 
   /**
-   * AG-07. The mode effect closes an open placement on EVERY mode change, and a
-   * generation job may be inside one — the switch would repoint the lib's single
-   * pattern pointer out from under it and land the job's next notes in the user's
-   * LIBRARY pattern, which cancelling the job does not restore. The seam refuses
-   * `openPlacementForEditing` for the same reason, but `mode` lives in `App` and
-   * reaches no seam, so this is the only place it can be refused.
+   * ⚠ THE RETAINED ENTRY, seen from the rail. A deleted track KEEPS its view
+   * entry for the session (§3, so an undo restoring the id restores the view) —
+   * so the rail has to check MEMBERSHIP and not merely read the map, or a
+   * selection left pointing at a track that has gone draws a Voice rail for a
+   * track the stack no longer has.
    */
-  it('closes the mode bar while a generation job owns the composition', async () => {
-    const onModeChange = vi.fn();
-    // `beginJob` needs a document to own, and CP-17 stopped the page seeding one
-    // on mount — a composition has to exist before the job can take it.
+  it('checks membership rather than trusting the retained entry', () => {
+    const { voice, views } = threeViews();
+    // A selection the pruner has not seen — the shape an external write leaves.
+    selectTrack(voice.id);
+    usePatternsStore.setState((state) => ({
+      ...state,
+      library: {
+        ...state.library,
+        compositions: state.library.compositions.map((composition) => ({
+          ...composition,
+          tracks: composition.tracks.filter((track) => track.id !== voice.id),
+        })),
+      },
+    }));
+    render(<CompositionPage views={views} openRailSections={[]} />);
+
+    expect(railName()).toBe('Pattern library');
+  });
+});
+
+describe('a track view button', () => {
+  it('sets that track view and selects it, leaving every other track alone', async () => {
+    const user = userEvent.setup();
     openBlankComposition('Song');
-    const { rerender } = render(
-      <CompositionPage mode="pattern" onModeChange={onModeChange} />,
-    );
-    expect(modeButton('Edit')).toBeEnabled();
+    addTrack('Bass');
+    const [lead, bass] = getTracks();
+    render(<CompositionPage openRailSections={[]} />);
+
+    // Uncontrolled: the page holds the map itself, which is what a render
+    // passing neither half of the pair gets.
+    await user.click(viewButton('Voice', bass.name));
+
+    expect(viewButton('Voice', bass.name)).toHaveAttribute('aria-pressed', 'true');
+    expect(viewButton('Pattern', lead.name)).toHaveAttribute('aria-pressed', 'true');
+    // It SELECTED it as well as setting it (§2) — which is why the rail moved.
+    expect(railName()).toBe('Voices');
+  });
+
+  it('selects its track even when that view is already the active one', async () => {
+    const user = userEvent.setup();
+    openBlankComposition('Song');
+    addTrack('Bass');
+    const [lead, bass] = getTracks();
+    render(<CompositionPage openRailSections={[]} />);
+
+    selectTrack(lead.id);
+    // Bass is already on Pattern — the press changes nothing about its view and
+    // must still take the selection (§2).
+    await user.click(viewButton('Pattern', bass.name));
+
+    expect(
+      screen.getByRole('button', { name: `Select track ${bass.name}` }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  /**
+   * AG-07, moved from the mode bar to the buttons that replaced it. A view
+   * change can CLOSE an open placement, and a generation job may be inside one —
+   * the close would repoint the lib's single pattern pointer out from under it
+   * and land the job's next notes in the user's LIBRARY pattern, which
+   * cancelling does not restore.
+   */
+  it('goes dead while a generation job owns the composition', async () => {
+    openBlankComposition('Song');
+    const [lead] = getTracks();
+    const { rerender } = render(<CompositionPage openRailSections={[]} />);
+    expect(viewButton('Edit', lead.name)).toBeEnabled();
 
     act(() => {
       const started = beginJob();
       if (!started.ok) throw new Error('job refused');
     });
-    rerender(<CompositionPage mode="pattern" onModeChange={onModeChange} />);
+    rerender(<CompositionPage openRailSections={[]} />);
 
-    // Disabled rather than left to refuse: `onModeChange` is `App`'s and there is
-    // no seam call in the path to return a reason through.
-    expect(modeButton('Edit')).toBeDisabled();
-    expect(modeButton('Voice')).toBeDisabled();
-    expect(modeButton('Edit')).toHaveAttribute('title', JOB_LOCK_REASON);
-    await userEvent.click(modeButton('Edit'));
-    expect(onModeChange).not.toHaveBeenCalled();
+    expect(viewButton('Edit', lead.name)).toBeDisabled();
+    expect(viewButton('Voice', lead.name)).toBeDisabled();
+    // The seam's own sentence, so the tooltip and the refusal agree.
+    expect(viewButton('Edit', lead.name)).toHaveAttribute('title', JOB_LOCK_REASON);
+    await userEvent.click(viewButton('Edit', lead.name));
+    expect(viewButton('Edit', lead.name)).toHaveAttribute('aria-pressed', 'false');
 
     // And it comes back on its own — the flag is reactive, not read once.
     act(() => {
       endJob();
     });
-    expect(modeButton('Edit')).toBeEnabled();
+    expect(viewButton('Edit', lead.name)).toBeEnabled();
   });
 });
 
 /**
  * The Commands section — AG-07. Its open state is `App`'s to own, for the reason
- * `mode` is: this page unmounts on every visit to the pattern page. But the pair
+ * the view map is: this page unmounts on every visit to the pattern page. But the pair
  * is OPTIONAL, the way `collapsedRacks` is, and an optional prop that leaves the
  * control it names permanently dead is worse than one that works locally.
  */
@@ -169,7 +320,7 @@ describe('CompositionPage rail sections', () => {
 
   it('opens and closes on its own when nobody is controlling it', async () => {
     openBlankComposition('Song');
-    render(<CompositionPage mode="pattern" onModeChange={() => {}} />);
+    render(<CompositionPage />);
 
     expect(commandsButton()).toHaveAttribute('aria-expanded', 'false');
     await userEvent.click(commandsButton());
@@ -183,8 +334,6 @@ describe('CompositionPage rail sections', () => {
     openBlankComposition('Song');
     render(
       <CompositionPage
-        mode="pattern"
-        onModeChange={() => {}}
         openRailSections={['commands']}
         onOpenRailSectionsChange={onOpenRailSectionsChange}
       />,

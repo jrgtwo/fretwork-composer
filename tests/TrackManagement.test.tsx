@@ -8,11 +8,15 @@ import {
   usePatternsStore,
   type Track,
 } from '@fretwork/lib';
+import { App } from '../src/App';
 import { ArrangementGrid } from '../src/composition/ArrangementGrid';
 import {
   TRACK_CAP_REASON,
   addPlacement,
   addTrack,
+  beginJob,
+  endJob,
+  openComposition,
 
   getEditingComposition,
   getSelectedTrackId,
@@ -55,7 +59,6 @@ import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/
  * against a header that had quietly stopped writing anything.
  */
 
-const MODE = 'pattern' as const;
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -191,7 +194,7 @@ describe('mute and solo', () => {
 
   it('says on screen which tracks are silent, not just which buttons are down', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [first, second] = tracksNow();
 
     await user.click(
@@ -206,7 +209,7 @@ describe('mute and solo', () => {
 
   it('drives mute and solo from the header through the seam', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
 
     const mute = () =>
@@ -234,7 +237,7 @@ describe('pan (CP-19)', () => {
   }
 
   it('is its own control on the strip, spanning hard left to hard right', () => {
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
 
     const pan = panFor(track);
@@ -248,7 +251,7 @@ describe('pan (CP-19)', () => {
   });
 
   it('says where it is the way a mixer says it, not as a signed fraction', () => {
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
 
     // `-0.35` is the value and tells a listener nothing. This is what both the
@@ -263,7 +266,7 @@ describe('pan (CP-19)', () => {
   it('has a detent — a drag that lands near the middle lands ON it', () => {
     // A pan pot has a physical centre you can feel; a range input has none.
     // Without this, "put it back in the middle" is a fiddle rather than a drag.
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
 
     fireEvent.change(panFor(track), { target: { value: '0.05' } });
@@ -272,7 +275,7 @@ describe('pan (CP-19)', () => {
   });
 
   it('re-centres on a double-click', () => {
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
     fireEvent.change(panFor(track), { target: { value: '-0.8' } });
     expect(tracksNow()[0].pan).toBe(-0.8);
@@ -330,7 +333,7 @@ describe('pan (CP-19)', () => {
       },
     }));
 
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
 
     expect((panFor(track) as HTMLInputElement).value).toBe('0');
@@ -344,7 +347,7 @@ describe('volume', () => {
   beforeEach(() => openBlankComposition('Song'));
 
   it('is a dB fader, not a percentage', () => {
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
 
     const fader = within(headerFor(track)).getByRole('slider', {
@@ -364,7 +367,7 @@ describe('volume', () => {
   });
 
   it('moves the composition master through the seam', () => {
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const master = screen.getByRole('slider', { name: 'Master volume in decibels' });
     fireEvent.change(master, { target: { value: '-6' } });
@@ -448,7 +451,7 @@ describe('the track cap', () => {
 
   it('adds through the button and states the reason when it cannot', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
 
     const add = () => screen.getByRole('button', { name: 'Add track' });
     await user.click(add());
@@ -490,7 +493,7 @@ describe('the track cap', () => {
 
   it('keeps a track focused after adding it, without clearing an unread notice', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [only] = tracksNow();
 
     // Something already on the strip and possibly unread.
@@ -513,7 +516,7 @@ describe('the track cap', () => {
 
   it('forgets a track notice when another composition is opened', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [only] = tracksNow();
 
     await user.click(
@@ -544,7 +547,7 @@ describe('removing a track', () => {
     if (!added.ok) return;
     place(patternId, added.value.id, 0);
     place(patternId, added.value.id, 8 * PPQ);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[1];
 
     await user.click(
@@ -579,7 +582,7 @@ describe('removing a track', () => {
     const added = addTrack('Lead');
     if (!added.ok) throw new Error(added.reason);
     place(patternId, added.value.id, 0);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[1];
 
     await user.click(
@@ -598,7 +601,7 @@ describe('removing a track', () => {
   it('removes an empty track without asking — there is nothing to lose', async () => {
     const user = userEvent.setup();
     addTrack('Scratch');
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[1];
 
     await user.click(
@@ -610,7 +613,7 @@ describe('removing a track', () => {
 
   it('states why the last remaining track cannot go', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
 
     await user.click(
@@ -628,7 +631,7 @@ describe('removing a track', () => {
     const user = userEvent.setup();
     const patternId = seedPattern('Riff');
     place(patternId, tracksNow()[0].id, 0);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
 
     await user.click(
@@ -715,7 +718,7 @@ describe('reordering', () => {
 
   it('drives the header buttons through the seam, and undoes', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const before = tracksNow().map((t) => t.name);
     const track = tracksNow()[2];
 
@@ -731,7 +734,7 @@ describe('reordering', () => {
   });
 
   it('disables the arrows at the ends of the stack', () => {
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const tracks = tracksNow();
 
     const top = within(headerFor(tracks[0]));
@@ -763,7 +766,7 @@ describe('renaming', () => {
 
   it('commits a draft to the seam on Enter', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
 
     await user.click(
@@ -784,7 +787,7 @@ describe('renaming', () => {
 
   it('abandons the draft on Escape, and writes nothing', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
     const original = track.name;
 
@@ -804,7 +807,7 @@ describe('renaming', () => {
 
   it('drops an empty name instead of writing one', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
     const original = track.name;
 
@@ -844,7 +847,7 @@ describe('renaming', () => {
 
   it('commits a draft on blur, not only on Enter', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
 
     await user.click(
@@ -862,7 +865,7 @@ describe('renaming', () => {
 
   it('takes the rename button away while the field is open', async () => {
     const user = userEvent.setup();
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
 
     await user.click(
@@ -889,7 +892,7 @@ describe('changing a track’s instrument', () => {
     // so nothing is asked.
     const patternId = seedPattern('Low riff', [0, 1, 2, 3]);
     place(patternId, tracksNow()[0].id, 0);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
 
     await user.selectOptions(
@@ -907,7 +910,7 @@ describe('changing a track’s instrument', () => {
     // Two notes on strings 4 and 5 — a bass has neither.
     const patternId = seedPattern('High riff', [0, 4, 5]);
     place(patternId, tracksNow()[0].id, 0);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
 
     await user.selectOptions(
@@ -945,7 +948,7 @@ describe('changing a track’s instrument', () => {
     const user = userEvent.setup();
     const patternId = seedPattern('High riff', [0, 4, 5]);
     place(patternId, tracksNow()[0].id, 0);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
 
     await user.selectOptions(
@@ -974,7 +977,7 @@ describe('changing a track’s instrument', () => {
     const user = userEvent.setup();
     const patternId = seedPattern('Low riff', [0, 1]);
     place(patternId, tracksNow()[0].id, 0);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
 
     await user.selectOptions(
@@ -1028,7 +1031,7 @@ describe('changing a track’s instrument', () => {
     const user = userEvent.setup();
     const lowPatternId = seedPattern('Low riff', [0, 1]);
     place(lowPatternId, tracksNow()[0].id, 0);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const track = tracksNow()[0];
 
     await user.selectOptions(
@@ -1065,7 +1068,7 @@ describe('the message strips', () => {
     const user = userEvent.setup();
     const patternId = seedPattern('Riff');
     place(patternId, tracksNow()[0].id, 0);
-    render(<ArrangementGrid mode={MODE} />);
+    render(<ArrangementGrid />);
     const [track] = tracksNow();
 
     // A split with no cursor anywhere — the gesture strip.
@@ -1080,5 +1083,275 @@ describe('the message strips', () => {
       /move the cursor/i,
     );
     expect(trackAlert()).toHaveTextContent(/zero tracks/i);
+  });
+});
+
+// ------------------------------------------- the per-track view (milestone 4) ---
+
+/**
+ * COMPS-TRACK-TABS milestone 4 — the view controls in the header, and where the
+ * view state lives.
+ *
+ * The map itself is pure and is pinned in `arrangementMath.test.ts` (§3's rules:
+ * missing means Pattern, Pattern deletes the key, a no-op returns the same
+ * reference, a deleted track's entry is RETAINED). What is here is the half that
+ * needs a page: which control writes it, what a press also does, and that `App`
+ * holds it across the unmounts that would otherwise forget it.
+ */
+describe('a track’s view controls', () => {
+  beforeEach(() => openBlankComposition('Song'));
+
+  const viewsGroup = (track: Track) =>
+    within(headerFor(track)).getByRole('group', { name: `View for ${track.name}` });
+  const viewButton = (track: Track, label: string) =>
+    within(headerFor(track)).getByRole('button', { name: `${label} view, ${track.name}` });
+
+  it('names every control, and groups them per track', () => {
+    addTrack('Bass');
+    render(<ArrangementGrid />);
+    const [lead, bass] = tracksNow();
+
+    // ⚠ THE LETTER IS NOT THE NAME. Eight tracks would otherwise give a screen
+    // reader twenty-four buttons called "P", "E" and "V".
+    expect(viewsGroup(lead)).toBeInTheDocument();
+    expect(viewsGroup(bass)).toBeInTheDocument();
+    for (const label of ['Pattern', 'Edit', 'Voice']) {
+      expect(viewButton(lead, label)).toHaveAttribute('title', expect.stringContaining(label));
+      // Mutually exclusive, and said as a toggle rather than as tab styling —
+      // one of the two shapes §6 allows.
+      expect(viewButton(lead, label)).toHaveAttribute('aria-pressed');
+    }
+    expect(viewButton(lead, 'Pattern')).toHaveAttribute('aria-pressed', 'true');
+    expect(viewButton(lead, 'Edit')).toHaveAttribute('aria-pressed', 'false');
+    expect(viewButton(lead, 'Voice')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  /**
+   * ASSISTIVE ACTIVATION (§2, acceptance 2). A screen reader's or voice
+   * control's activation is a `click` with no pointer events at all — nothing
+   * captures, nothing focuses first. It must select the track exactly as a press
+   * does, because everything downstream (the rail, the note keyboard, the
+   * direct-editing context) follows the selection.
+   */
+  it('selects its track on a pointerless activation', () => {
+    addTrack('Bass');
+    render(<ArrangementGrid />);
+    const [, bass] = tracksNow();
+
+    fireEvent.click(viewButton(bass, 'Voice'));
+
+    expect(getSelectedTrackId()).toBe(bass.id);
+    expect(viewButton(tracksNow()[1], 'Voice')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  /**
+   * KEYBOARD FOCUS (§2, acceptance 2). Tabbing into a track's controls selects
+   * it. Without this a keyboard user can move track 3's fader while the rail,
+   * the note keyboard and every direct-editing command are still pointed at
+   * track 1 — selected-view gating cannot save them, because header controls
+   * exist in every view.
+   */
+  it('selects its track when focus enters the header at all', () => {
+    addTrack('Bass');
+    render(<ArrangementGrid />);
+    const [, bass] = tracksNow();
+    expect(getSelectedTrackId()).toBeNull();
+
+    // Not a view button: the rule is about the whole header, and the mixer
+    // strip is where a keyboard user actually lands.
+    act(() => {
+      within(headerFor(bass))
+        .getByRole('slider', { name: `Volume for ${bass.name} in decibels` })
+        .focus();
+    });
+
+    expect(getSelectedTrackId()).toBe(bass.id);
+  });
+
+  /**
+   * POINTER, AND WHY IT IS NOT THE SAME TEST. Clicking a `<button>` focuses it on
+   * Chrome and does NOT on Safari or Firefox, so the focus rule above is the
+   * KEYBOARD path and cannot be the pointer one — left to it, pressing a track's
+   * mute would select that track on one browser and not on another.
+   *
+   * `pointerDown` alone, with no focus and no click, is that press as the two
+   * other engines deliver it. jsdom does not focus on pointer events either, so
+   * this is the one shape here that tells the two handlers apart.
+   */
+  it('selects its track on a pointer press that focuses nothing', () => {
+    addTrack('Bass');
+    render(<ArrangementGrid />);
+    const [, bass] = tracksNow();
+    expect(getSelectedTrackId()).toBeNull();
+
+    fireEvent.pointerDown(
+      within(headerFor(bass)).getByRole('slider', {
+        name: `Volume for ${bass.name} in decibels`,
+      }),
+    );
+
+    expect(getSelectedTrackId()).toBe(bass.id);
+  });
+
+  /**
+   * …but a focus must not SPEND THE ALERT LINE while a job owns the document.
+   *
+   * The coordinator refuses every activation during a job and says so on the
+   * track strip, which is right for a press — the user asked for something and
+   * must be told why it did nothing. A focus is not a request; announcing a
+   * refusal because a tab stop went past would put an `role="alert"` on screen
+   * that nobody asked for, and the guard is what a bare `onSelect()` here would
+   * lose. (`selected` is the guard's other half and is not observable: the
+   * coordinator does nothing at all when the track is already selected.)
+   */
+  it('says nothing when focus lands on a track while a job holds the document', () => {
+    addTrack('Bass');
+    render(<ArrangementGrid />);
+    const [, bass] = tracksNow();
+    act(() => {
+      const started = beginJob();
+      if (!started.ok) throw new Error('job refused');
+    });
+
+    act(() => {
+      within(headerFor(bass))
+        .getByRole('slider', { name: `Volume for ${bass.name} in decibels` })
+        .focus();
+    });
+
+    expect(screen.queryByRole('alert', { name: 'Track message' })).toBeNull();
+    expect(getSelectedTrackId()).toBeNull();
+
+    act(() => endJob());
+  });
+
+  it('a new track arrives on Pattern, whatever its neighbours are showing', async () => {
+    const user = userEvent.setup();
+    render(<ArrangementGrid />);
+    const [lead] = tracksNow();
+
+    await user.click(viewButton(lead, 'Voice'));
+    await user.click(screen.getByRole('button', { name: 'Add track' }));
+
+    const added = tracksNow()[1];
+    expect(viewButton(added, 'Pattern')).toHaveAttribute('aria-pressed', 'true');
+    // …and the neighbour kept its own.
+    expect(viewButton(tracksNow()[0], 'Voice')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('a reorder moves the view with the track, because the key is the id', async () => {
+    const user = userEvent.setup();
+    addTrack('Bass');
+    render(<ArrangementGrid />);
+    const [lead, bass] = tracksNow();
+
+    await user.click(viewButton(bass, 'Voice'));
+    act(() => {
+      const moved = moveTrack(bass.id, 0);
+      if (!moved.ok) throw new Error(moved.reason);
+    });
+
+    expect(tracksNow().map((track) => track.id)).toEqual([bass.id, lead.id]);
+    // Keyed by ID, so the view rode along rather than staying at position 1.
+    expect(viewButton(tracksNow()[0], 'Voice')).toHaveAttribute('aria-pressed', 'true');
+    expect(viewButton(tracksNow()[1], 'Pattern')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  /**
+   * ⚠ THE RETAINED ENTRY (§3). A deleted track keeps its view for the session,
+   * so an undo that restores the same id restores the view it was showing. This
+   * is the one place the map deliberately does NOT copy the collapsed-racks
+   * pruning idiom beside it, and the cost of getting it wrong is a view silently
+   * reset by an undo.
+   */
+  it('gives a track its view back when an undo restores it', async () => {
+    const user = userEvent.setup();
+    addTrack('Bass');
+    render(<ArrangementGrid />);
+    const [, bass] = tracksNow();
+
+    await user.click(viewButton(bass, 'Voice'));
+    expect(viewButton(tracksNow()[1], 'Voice')).toHaveAttribute('aria-pressed', 'true');
+
+    act(() => {
+      const removed = removeTrack(bass.id);
+      if (!removed.ok) throw new Error(removed.reason);
+    });
+    expect(tracksNow()).toHaveLength(1);
+
+    act(() => {
+      undo();
+    });
+
+    const restored = tracksNow().find((track) => track.id === bass.id);
+    expect(restored).toBeDefined();
+    expect(viewButton(restored!, 'Voice')).toHaveAttribute('aria-pressed', 'true');
+  });
+});
+
+/**
+ * WHERE THE MAP LIVES (§3, acceptance 9). `App` owns it because
+ * `CompositionPage` unmounts on every visit to the pattern page and the grid
+ * unmounts with it — a view held any lower forgets itself on a page round trip,
+ * which is the same broken promise the collapsed racks are held up there to
+ * avoid.
+ */
+describe('the view map outlives what unmounts', () => {
+  const viewButton = (track: Track, label: string) =>
+    screen.getByRole('button', { name: `${label} view, ${track.name}` });
+  const goTo = (page: 'Pattern' | 'Composition') =>
+    userEvent.click(
+      within(screen.getByRole('navigation', { name: 'Editor' })).getByRole('button', {
+        name: page,
+      }),
+    );
+
+  it('survives a page round trip', async () => {
+    openBlankComposition('Song');
+    addTrack('Bass');
+    render(<App />);
+    await goTo('Composition');
+    const [lead, bass] = tracksNow();
+
+    await userEvent.click(viewButton(bass, 'Voice'));
+    expect(viewButton(bass, 'Voice')).toHaveAttribute('aria-pressed', 'true');
+
+    await goTo('Pattern');
+    await goTo('Composition');
+
+    expect(viewButton(bass, 'Voice')).toHaveAttribute('aria-pressed', 'true');
+    expect(viewButton(lead, 'Pattern')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  /**
+   * A → B → A. The outer key is the COMPOSITION id for exactly this: B's views
+   * are not A's, and coming back to A must not find B's stack.
+   */
+  it('keeps each composition’s views apart, and gives A’s back on return', async () => {
+    const a = openBlankComposition('A');
+    if (!a.ok) throw new Error(a.reason);
+    render(<App />);
+    await goTo('Composition');
+    const leadOfA = tracksNow()[0];
+
+    await userEvent.click(viewButton(leadOfA, 'Voice'));
+    expect(viewButton(leadOfA, 'Voice')).toHaveAttribute('aria-pressed', 'true');
+
+    // A NEW composition — the same route an import or a generated backing track
+    // takes: a new key, and every other composition's entry carried over.
+    act(() => {
+      const b = openBlankComposition('B');
+      if (!b.ok) throw new Error(b.reason);
+    });
+    const leadOfB = tracksNow()[0];
+    expect(leadOfB.id).not.toBe(leadOfA.id);
+    expect(viewButton(leadOfB, 'Pattern')).toHaveAttribute('aria-pressed', 'true');
+
+    act(() => {
+      const back = openComposition(a.value.id);
+      if (!back.ok) throw new Error(back.reason);
+    });
+
+    expect(viewButton(tracksNow()[0], 'Voice')).toHaveAttribute('aria-pressed', 'true');
   });
 });

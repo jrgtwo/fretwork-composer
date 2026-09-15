@@ -1,12 +1,34 @@
 import { useRef, useState } from 'react';
 import type { Track } from '@fretwork/lib';
+import type { ArrangementMode } from './arrangementMath';
 import {
+  JOB_LOCK_REASON,
   mismatchedPlacements,
   setTrackName,
   strandedByInstrument,
   trackInstrumentId,
 } from './compositionService';
 import { TrackControls } from './TrackControls';
+
+/**
+ * The three views a track can show, as the header offers them.
+ *
+ * ⚠ THE LETTER IS NOT THE NAME. `P` is what fits beside a track name in a 200 px
+ * column; the ACCESSIBLE NAME is built from `label` and the track's own name, so
+ * eight tracks do not give a screen reader twenty-four controls called "P", "E"
+ * and "V" with nothing to tell them apart. The `title` says what the view holds,
+ * because a single letter teaches nothing on hover either.
+ */
+const VIEWS: readonly {
+  id: ArrangementMode;
+  letter: string;
+  label: string;
+  hint: string;
+}[] = [
+  { id: 'pattern', letter: 'P', label: 'Pattern view', hint: 'Pattern — the blocks on this track' },
+  { id: 'edit', letter: 'E', label: 'Edit view', hint: 'Edit — the notes inside this track’s blocks' },
+  { id: 'voice', letter: 'V', label: 'Voice view', hint: 'Voice — this track’s instrument and amp' },
+];
 
 /**
  * One track's header, in the fixed column left of the lanes.
@@ -41,6 +63,9 @@ export function TrackHeader({
   height,
   selected,
   audible,
+  view,
+  onViewChange,
+  locked = false,
   onSelect,
   onNotice,
 }: {
@@ -53,6 +78,17 @@ export function TrackHeader({
    *  track's own flags. Passed in rather than computed here because it depends
    *  on every OTHER track's solo state, which a single header does not have. */
   audible: boolean;
+  /** What THIS track's lane is drawing. One of three, per track — there is no
+   *  page mode any more (COMPS-TRACK-TABS milestone 4). */
+  view?: ArrangementMode;
+  /** Sets this track's view AND selects it, even when the view picked is the one
+   *  already showing (§2). The host routes it through the activation
+   *  coordinator; this component only says which button was pressed. */
+  onViewChange?: (view: ArrangementMode) => void;
+  /** A generation job owns the document, so nothing here may repoint it. Only
+   *  the view buttons are disabled: they are the control whose press can CLOSE
+   *  an open block, and the agent may be inside one. */
+  locked?: boolean;
   onSelect: () => void;
   onNotice: (message: string) => void;
 }) {
@@ -104,24 +140,83 @@ export function TrackHeader({
    */
   const stranded = strandedByInstrument(track, trackInstrumentId(track));
   const mismatched = mismatchedPlacements(track);
+  /** Defaulted so a host that knows nothing about views — the pattern page has
+   *  none, and neither did this column before milestone 4 — still renders a
+   *  header whose buttons agree with what a lane with no entry draws. */
+  const viewShown: ArrangementMode = view ?? 'pattern';
 
   return (
     <div
       data-track-header={track.id}
       style={{ height }}
-      // Tight on purpose: three control rows and a status line have to fit
-      // `TRACK_HEADER_HEIGHT` (arrangementMath), which is the FLOOR under every
-      // lane — so what this needs is exactly what a pattern or a folded-voice
-      // lane comes out at. `height` is the LANE's, though, not that constant,
-      // and since COMPS-TRACK-TABS milestone 2's correction it can be far
-      // taller: an open rack's lane stretches this column's `justify-between`
-      // rows apart. Compact headers at a measured height are milestone 6's work
-      // — do not chase it here. jsdom has no layout, so nothing here can TEST
-      // that any of it fits; it is checked in the browser, and the rows are
-      // sized so the mismatch line is the only optional one.
-      className="flex flex-col justify-between gap-0.5 overflow-hidden border-b border-rim-dark px-1.5 py-1"
+      /**
+       * ⚠ TOUCHING ANYTHING IN THIS HEADER SELECTS ITS TRACK (§2) — by pointer
+       * and by keyboard focus alike. Tabbing into this track's fader, its
+       * instrument picker or its view buttons makes it the selected one, and so
+       * does pressing one; without it a user can change a control on track 3
+       * while the rail, the note keyboard and every direct-editing command are
+       * still pointed at track 1.
+       *
+       * BOTH HALVES, and that is not belt-and-braces. Clicking a `<button>`
+       * focuses it on Chrome and does NOT on Safari or Firefox, so focus alone
+       * would be a selection model that differs per browser — mute selects the
+       * track on one and not on another. Pointer-down capture is the uniform
+       * path; focus capture is the KEYBOARD one, and the guard below makes the
+       * second of the two a no-op wherever both fire.
+       *
+       * CAPTURE for the same reason on both: `focus` does not bubble (the React
+       * prop is `focusin` underneath, which does), and a press deep inside a
+       * control must reach this before that control's own handler runs.
+       *
+       * Guarded on both sides. Already selected: nothing to do, and calling the
+       * coordinator on every focus move WITHIN the header would sweep the note
+       * surfaces' teardowns for no reason. Locked: a job owns the document, and
+       * a mere focus must not spend the track strip's one alert line on a
+       * refusal the user did not ask for — the view buttons still refuse out loud.
+       *
+       * ⚠ THE COST, stated because it is a real behaviour change and not an
+       * accident: a MIXER press on track 5 while track 1 has a block open closes
+       * that block, and the block's note undo history goes with it (its EDITS
+       * survive — the documented reset). Selecting a track is what closes another
+       * track's editor, and reaching for a fader is reaching for that track.
+       *
+       * §2's "programmatic focus after an action must not reactivate a stale
+       * track" is satisfied by WHAT is activated rather than by a guard: the
+       * track is this header's own, drawn from the live stack, and the
+       * coordinator re-validates the id against `getTracks()` anyway.
+       */
+      onPointerDownCapture={() => {
+        if (selected || locked) return;
+        onSelect();
+      }}
+      onFocusCapture={() => {
+        if (selected || locked) return;
+        onSelect();
+      }}
+      // Tight on purpose: a name/view row, three control rows and a status line
+      // have to fit `TRACK_HEADER_HEIGHT` (arrangementMath), which is the FLOOR
+      // under every lane — so what this needs is exactly what a pattern or a
+      // folded-voice lane comes out at.
+      //
+      // ⚠ TOP-ALIGNED, not `justify-between`. `height` is the LANE's, not that
+      // constant, and since COMPS-TRACK-TABS milestone 2's correction it can be
+      // far taller — an open rack's lane is several hundred pixels, and
+      // `justify-between` threw the name plate, the status line and the mixer
+      // strip into three corners of it. The rows stack from the top and the
+      // slack falls at the bottom, so a header reads the same beside a 143 px
+      // pattern lane and a 900 px voice one. MEASURED compact headers are still
+      // milestone 6's; this is the alignment only.
+      //
+      // jsdom has no layout, so nothing here can TEST that any of it fits; it is
+      // checked in the browser, and the rows are sized so the mismatch line is
+      // the only optional one.
+      className="flex flex-col gap-0.5 overflow-hidden border-b border-rim-dark px-1.5 py-1"
     >
-      <div className="flex items-center gap-1">
+      {/* `flex-none`: the name and the view buttons are the one row that must
+          never be squeezed, because they are how the track is identified and how
+          its view is changed. Everything below them takes the remaining height
+          and scrolls if it has to. */}
+      <div className="flex flex-none items-center gap-1">
         {draftName === null ? (
           /* The whole name plate selects, so the target is the header rather
              than a checkbox-sized thing inside it. `aria-pressed` because this
@@ -194,37 +289,114 @@ export function TrackHeader({
             ✎
           </button>
         )}
+
+        {/* ── THIS TRACK'S VIEW ────────────────────────────────────────────────
+            A LABELLED GROUP OF MUTUALLY EXCLUSIVE `aria-pressed` BUTTONS, which
+            is one of the two shapes §6 allows. The other is real tab semantics,
+            and it is the wrong one here: a `tablist` promises arrow-key movement
+            between the tabs of ONE panel, and these are eight independent
+            three-way switches down a column whose arrow keys already belong to
+            the arrangement. `aria-pressed` says exactly what this is — a toggle
+            per view, one of which is on.
+
+            NOT VISUAL TABS. The letters are the only thing compact enough for a
+            200 px column; the accessible name and the tooltip carry the meaning
+            (see `VIEWS`).
+
+            The group is named with the TRACK, because eight of these are on
+            screen and "View" alone would be eight identical groups. It does not
+            close the case of two tracks NAMED THE SAME — the seam does not
+            enforce unique names, and `Select track X` and `Rename track X` have
+            always collided the same way. Disambiguating by stack position is
+            milestone 6's, with the rest of the header's naming, because doing it
+            here alone would leave one control in the row named differently from
+            its neighbours. */}
+        <div
+          className="flex flex-none gap-px"
+          role="group"
+          aria-label={`View for ${track.name}`}
+        >
+          {VIEWS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              // ⚠ AND while a generation job holds the composition: pressing one
+              // of these can CLOSE an open placement, and the agent may be
+              // inside one — a close would repoint the lib's one pattern pointer
+              // out from under it and land the job's next notes in the user's
+              // library pattern, which a cancel does not restore. The host's
+              // coordinator refuses the callback too (§4 asks for both); this is
+              // what makes the refusal legible before the press.
+              disabled={locked}
+              title={locked ? JOB_LOCK_REASON : option.hint}
+              aria-label={`${option.label}, ${track.name}`}
+              aria-pressed={viewShown === option.id}
+              // Unconditional: §2 is explicit that a view press selects its
+              // track EVEN IF that view is already active, which is the whole
+              // reason this is not `disabled` when pressed.
+              onClick={() => onViewChange?.(option.id)}
+              className={`pressable rounded-md px-1 py-0.5 font-mono text-[8.5px] font-bold leading-none disabled:opacity-40 ${
+                viewShown === option.id ? 'control-accent' : 'control'
+              }`}
+            >
+              {option.letter}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* A standing fact rather than an event, and never a claim about what will
-          be heard (LIB-GAP(15)): a track's instrument selects its voice, not its
-          tuning, so what this can honestly report is the STRINGS. Not an error —
-          CP-07 decided the change is allowed — so it states the count and stays
-          out of the way. */}
-      {stranded > 0 ? (
-        <span
-          title={`${stranded} ${stranded === 1 ? 'note sits' : 'notes sit'} on strings this track's instrument hasn't got`}
-          className="font-mono text-[7.5px] tracking-[0.12em] text-ink-mut uppercase"
-        >
-          ⚠ {stranded} off-instrument
-        </span>
-      ) : (
-        mismatched > 0 && (
+      {/* THE LOWER CONTROLS, in a bounded scroll area.
+          `flex-1` takes whatever the lane leaves after the name row, and
+          `overflow-y-auto` is what §6 asks for on a SHORT lane: the floor is
+          143 px, the name row and the mixer strip are sized to it, and a
+          four-string edit lane sits exactly on it — but the status line is
+          optional and a narrow window can wrap a row, and the alternative to
+          scrolling is a fader clipped away with no way to reach it. Preserves
+          every control; hides none of them. `min-h-0` because a flex item's
+          default `min-height: auto` refuses to shrink below its content, which
+          is what turns an overflow into an overflowing COLUMN instead of a
+          scroller. Nothing in jsdom can see any of this (every box is 0×0).
+
+          ⚠ IT IS ALSO A WHEEL TARGET. The header column scrolls in sync with the
+          lane stack, so a wheel over a header that actually overflows scrolls
+          this box first and chains to the stack only once it bottoms out, and a
+          resting scrollbar eats ~15 px of a 200 px column. Both are the SYMPTOM
+          of the header not fitting, and the cure is the measured compact header
+          milestone 6 owns — `scrollbar-gutter` would spend that 15 px in every
+          header to hide it. The browser checklist carries it as a blocking
+          observation: if one rests at the 143 px floor, milestone 6 is needed
+          before this ships rather than after. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto">
+        {/* A standing fact rather than an event, and never a claim about what will
+            be heard (LIB-GAP(15)): a track's instrument selects its voice, not its
+            tuning, so what this can honestly report is the STRINGS. Not an error —
+            CP-07 decided the change is allowed — so it states the count and stays
+            out of the way. */}
+        {stranded > 0 ? (
           <span
-            title={`${mismatched} ${mismatched === 1 ? 'block was' : 'blocks were'} written for another instrument`}
+            title={`${stranded} ${stranded === 1 ? 'note sits' : 'notes sit'} on strings this track's instrument hasn't got`}
             className="font-mono text-[7.5px] tracking-[0.12em] text-ink-mut uppercase"
           >
-            ≠ {mismatched} mismatched
+            ⚠ {stranded} off-instrument
           </span>
-        )
-      )}
+        ) : (
+          mismatched > 0 && (
+            <span
+              title={`${mismatched} ${mismatched === 1 ? 'block was' : 'blocks were'} written for another instrument`}
+              className="font-mono text-[7.5px] tracking-[0.12em] text-ink-mut uppercase"
+            >
+              ≠ {mismatched} mismatched
+            </span>
+          )
+        )}
 
-      <TrackControls
-        track={track}
-        index={index}
-        trackCount={trackCount}
-        onNotice={onNotice}
-      />
+        <TrackControls
+          track={track}
+          index={index}
+          trackCount={trackCount}
+          onNotice={onNotice}
+        />
+      </div>
     </div>
   );
 }

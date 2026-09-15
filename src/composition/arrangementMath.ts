@@ -261,6 +261,43 @@ export function setTrackView(
 }
 
 /**
+ * THE SELECTED TRACK'S VIEW — the one page-level statement a per-track feature
+ * still has to make, and the ONE place it is made.
+ *
+ * Two surfaces need it and they must not disagree: `CompositionPage` picks the
+ * rail from it, and `ArrangementGrid` routes the direct-editing commands (⌘Z and
+ * the toolbar's twins) from it. Spelling the three clauses out in both files is
+ * the "competing authority" COMPS-TRACK-TABS milestone 4 exists to delete — it
+ * cannot disagree today only because the two copies happen to be identical, and
+ * a change to the fallback made in one of them splits the rail from the
+ * keyboard silently.
+ *
+ * MEMBERSHIP IS CHECKED, not taken on trust from the selection: the view map
+ * RETAINS a deleted track's entry on purpose ({@link CompositionTrackViews}), so
+ * a selection left pointing at a track that has gone would otherwise revive that
+ * entry — a Voice rail beside a stack with no such track, and the keyboard handed
+ * to a view with no lane. `compositionService` prunes the selection on every
+ * write that can retract a track; this is the render-time half of the same rule.
+ *
+ * NO VALID SELECTED TRACK IS PATTERN — the plan's no-track fallback row. It is
+ * also what a fresh page shows, and the library is the surface you need before
+ * anything else has something to act on.
+ *
+ * `tracks` is asked for its ids only, so this stays a plain function over plain
+ * data and is unit-testable without a store or a DOM.
+ */
+export function selectedTrackView(
+  views: CompositionTrackViews,
+  compositionId: string | null,
+  selectedTrackId: string | null,
+  tracks: readonly { readonly id: string }[],
+): ArrangementMode {
+  if (compositionId === null || selectedTrackId === null) return 'pattern';
+  if (!tracks.some((track) => track.id === selectedTrackId)) return 'pattern';
+  return viewOf(views, compositionId, selectedTrackId);
+}
+
+/**
  * What the track HEADER needs, and therefore the FLOOR under every lane.
  *
  * ── Why this number is this number (the record, carried forward) ─────────────

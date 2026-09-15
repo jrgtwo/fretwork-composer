@@ -23,6 +23,10 @@ import {
   setTrackInstrument,
   setTrackVoiceRef,
 } from '../src/composition/compositionService';
+import type {
+  ArrangementMode,
+  CompositionTrackViews,
+} from '../src/composition/arrangementMath';
 import {
   listSelectableVoices,
   readTrackVoiceRef,
@@ -38,6 +42,27 @@ import {
 } from '../src/voice/voiceDrafts';
 import { getAtPath } from '../src/voice/presetPaths';
 import { getEditingPattern, openBlankPattern } from '../src/patterns/patternService';
+
+/**
+ * Every track of the open composition in ONE view — the uniform stack this suite
+ * assumed back when the page had a single global mode (COMPS-TRACK-TABS
+ * milestone 4 made the view per track).
+ *
+ * Built from the LIVE composition at the moment it is called, so it goes in the
+ * render call after the fixtures are up. Tracks added afterwards are not in it,
+ * and that is the real rule rather than a limitation of the helper: a new track
+ * defaults to Pattern (§3).
+ */
+const viewsOf = (view: ArrangementMode): CompositionTrackViews => {
+  const composition = getEditingComposition();
+  if (!composition || view === 'pattern') return {};
+  return {
+    [composition.id]: Object.fromEntries(
+      composition.tracks.map((track) => [track.id, view] as const),
+    ),
+  };
+};
+
 
 /**
  * CP-15 — the voice rail: the list a track's voice is picked from.
@@ -197,18 +222,30 @@ describe('the empty rail', () => {
     expect(screen.queryByText('No composition open')).not.toBeInTheDocument();
   });
 
-  it('stays mounted in voice mode whether or not a track is selected', () => {
+  it('stays mounted while its track is the selected one, and gives way to the library when the selection goes', () => {
     twoTracks();
-    render(<CompositionPage mode="voice" onModeChange={() => {}} />);
-
-    // The rail is a landmark of its own, named for what it holds rather than
-    // sharing edit mode's 'Inspector'. Always there: one that appeared and
-    // vanished with the selection would move the grid beside it on every click.
-    const rail = screen.getByRole('complementary', { name: 'Voices' });
-    expect(within(rail).getByText('No track selected')).toBeInTheDocument();
-
+    // ⚠ WHAT MILESTONE 4 CHANGED, and it is the rail's own 'No track selected'
+    // state. The rail follows the SELECTED track's view, so reaching a Voice
+    // rail at all now REQUIRES a live selected track — which means that empty
+    // state is no longer reachable THROUGH THE PAGE. It is still the component's
+    // correct answer when it is rendered without one (the test above renders it
+    // directly, which is the only route left), and whether it should survive at
+    // all is recorded for milestone 6 in the task doc's working notes.
+    //
+    // What this pins instead: the rail does not appear and vanish with the NOTE
+    // or preset state inside it — a rail that came and went would move the grid
+    // beside it on every click — and losing the selection REPLACES it with the
+    // library rather than emptying it in place.
     act(() => selectTrack(lead().id));
+    render(<CompositionPage views={viewsOf('voice')} />);
+
+    const rail = screen.getByRole('complementary', { name: 'Voices' });
     expect(within(rail).getByRole('group', { name: 'Presets' })).toBeInTheDocument();
+
+    act(() => selectTrack(null));
+    expect(screen.getByRole('complementary', { name: 'Pattern library' })).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: 'Voices' })).not.toBeInTheDocument();
+    expect(screen.queryByText('No track selected')).not.toBeInTheDocument();
   });
 });
 

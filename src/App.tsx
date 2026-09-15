@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { AppShell, type PageId } from './shell/AppShell';
 import type { Pane } from './shell/PaneStack';
 import { stop } from './audio/playbackService';
 import { CompositionPage, type CompositionRailSectionId } from './composition/CompositionPage';
-import type { ArrangementMode } from './composition/arrangementMath';
+import {
+  setTrackView,
+  type ArrangementMode,
+  type CompositionTrackViews,
+} from './composition/arrangementMath';
 import { useEditingComposition } from './composition/compositionService';
 import { ReferencePane, type ReferenceViewId } from './reference/ReferencePane';
 import { ThemeReference } from './theme/ThemeReference';
@@ -70,14 +74,33 @@ export function App() {
   // is a single editor with two surfaces, not two documents you can link to.
   const [page, setPage] = useState<PageId>('pattern');
 
-  // The composition page's mode, held here for exactly the reason the two pieces
-  // of pane state below are: `CompositionPage` unmounts whenever you step over to
-  // the pattern page, and a mode that forgets itself on every visit is the same
-  // bug as a pane that forgets its view on every collapse.
-  const [mode, setMode] = useState<ArrangementMode>('pattern');
+  // WHICH VIEW EACH TRACK IS SHOWING, per composition — the state COMPS-TRACK-TABS
+  // replaced the page's one global mode with. Held here for exactly the reason the
+  // pieces of pane state below are: `CompositionPage` unmounts whenever you step
+  // over to the pattern page, and a stack of views that forgets itself on every
+  // visit is the same bug as a pane that forgets its view on every collapse.
+  //
+  // Keyed by COMPOSITION first, so A -> B -> A comes back to the views A was
+  // showing. Session only: nothing here is persisted (a reload starts every track
+  // on Pattern) and nothing here is PRUNED — a deleted track keeps its entry so an
+  // undo restoring that same id restores its view. `collapsedRacks` below is the
+  // opposite on that last point and deliberately so; see `arrangementMath`'s
+  // `CompositionTrackViews` for why this map must not copy it.
+  const [trackViews, setTrackViews] = useState<CompositionTrackViews>({});
+
+  // A functional update addressed by composition AND track id (§3), so two
+  // changes batched into one render cannot lose the first — the rule the rail
+  // sections' updater already follows. `setTrackView` returns the SAME REFERENCE
+  // when nothing changes, which is what keeps a view button that re-picks the
+  // active view from re-rendering every lane.
+  const changeTrackView = useCallback(
+    (compositionId: string, trackId: string, view: ArrangementMode) =>
+      setTrackViews((was) => setTrackView(was, compositionId, trackId, view)),
+    [],
+  );
 
   // Which voice racks are folded — the same rule again, one level deeper: the
-  // racks are drawn by lanes that are replaced on every mode switch, inside a
+  // racks are drawn by lanes that are replaced on every view change, inside a
   // page that unmounts on every visit to the pattern page. The UNSAVED EDITS
   // those racks hold are deliberately NOT here, and neither is the pattern
   // pane's: `playbackService` builds every voice from them, so they have to be
@@ -134,7 +157,7 @@ export function App() {
   // with a different section list — `CompositionPage` unmounts on every visit to
   // the pattern page, so a folded Commands section would unfold itself on the
   // way back. Held here rather than in `CompositionShell` for the same reason
-  // `mode` is: the shell is unmounted by the same round trip.
+  // `trackViews` is: the shell is unmounted by the same round trip.
   const [openCompositionRailSections, setOpenCompositionRailSections] = useState<
     readonly CompositionRailSectionId[]
   >(DEFAULT_OPEN_COMPOSITION_RAIL_SECTIONS);
@@ -188,8 +211,8 @@ export function App() {
     return (
       <CompositionShell
         onPageChange={setPage}
-        mode={mode}
-        onModeChange={setMode}
+        trackViews={trackViews}
+        onTrackViewChange={changeTrackView}
         collapsedRacks={collapsedRacks}
         onCollapsedRacksChange={setCollapsedRacks}
         collapsedRackSections={collapsedRackSections}
@@ -330,8 +353,8 @@ function PatternRail({
  */
 function CompositionShell({
   onPageChange,
-  mode,
-  onModeChange,
+  trackViews,
+  onTrackViewChange,
   collapsedRacks,
   onCollapsedRacksChange,
   collapsedRackSections,
@@ -340,8 +363,12 @@ function CompositionShell({
   onOpenRailSectionsChange,
 }: {
   onPageChange: (page: PageId) => void;
-  mode: ArrangementMode;
-  onModeChange: (mode: ArrangementMode) => void;
+  trackViews: CompositionTrackViews;
+  onTrackViewChange: (
+    compositionId: string,
+    trackId: string,
+    view: ArrangementMode,
+  ) => void;
   collapsedRacks: readonly string[];
   onCollapsedRacksChange: (collapsed: readonly string[]) => void;
   collapsedRackSections: Readonly<Record<string, readonly SectionId[]>>;
@@ -372,8 +399,8 @@ function CompositionShell({
       onPageChange={onPageChange}
     >
       <CompositionPage
-        mode={mode}
-        onModeChange={onModeChange}
+        views={trackViews}
+        onTrackViewChange={onTrackViewChange}
         collapsedRacks={collapsedRacks}
         onCollapsedRacksChange={onCollapsedRacksChange}
         collapsedRackSections={collapsedRackSections}

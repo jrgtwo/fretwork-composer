@@ -18,6 +18,8 @@ import { ArrangementGrid } from '../src/composition/ArrangementGrid';
 import { insideKeyboardControl } from '../src/timeline/keyboardBoundary';
 import {
   TRACK_HEADER_HEIGHT,
+  type ArrangementMode,
+  type CompositionTrackViews,
 } from '../src/composition/arrangementMath';
 import {
   addPlacement,
@@ -70,6 +72,27 @@ import {
   openBlankPattern,
   stampNote,
 } from '../src/patterns/patternService';
+
+/**
+ * Every track of the open composition in ONE view — the uniform stack this suite
+ * assumed back when the page had a single global mode (COMPS-TRACK-TABS
+ * milestone 4 made the view per track).
+ *
+ * Built from the LIVE composition at the moment it is called, so it goes in the
+ * render call after the fixtures are up. Tracks added afterwards are not in it,
+ * and that is the real rule rather than a limitation of the helper: a new track
+ * defaults to Pattern (§3).
+ */
+const viewsOf = (view: ArrangementMode): CompositionTrackViews => {
+  const composition = getEditingComposition();
+  if (!composition || view === 'pattern') return {};
+  return {
+    [composition.id]: Object.fromEntries(
+      composition.tracks.map((track) => [track.id, view] as const),
+    ),
+  };
+};
+
 
 /**
  * CP-14 — voice mode: a rack per track.
@@ -385,7 +408,7 @@ const DEFAULT_FOLDED = PARAM_SECTIONS.filter(
  *
  * `TrackVoiceRack` is controlled all the way up — `App` holds the folds, because
  * the rack unmounts on every mode switch and every visit to the pattern page —
- * so a bare `<ArrangementGrid mode="voice" />` has disclosure buttons that
+ * so a bare `<ArrangementGrid views={viewsOf('voice')} />` has disclosure buttons that
  * report and do nothing. This is the smallest stand-in for `App`, for the tests
  * that need to open a stage before turning something inside it.
  */
@@ -395,7 +418,7 @@ function VoiceGrid() {
   );
   return (
     <ArrangementGrid
-      mode="voice"
+      views={viewsOf('voice')}
       collapsedRackSections={sections}
       onCollapsedRackSectionsChange={setSections}
     />
@@ -1003,7 +1026,7 @@ describe('the rack in a lane', () => {
     // different — otherwise every assertion below passes on a shared one.
     expect(theirsVoice.name).not.toBe(mineVoice.name);
 
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     for (const track of getTracks()) {
       expect(
@@ -1032,7 +1055,7 @@ describe('the rack in a lane', () => {
     const cabbed = voiceNamed('Crunch');
     getTracks().forEach((track) => selectVoice('track', track.id, cabbed.ref));
 
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // `<label htmlFor>` resolves to whichever element with that id mounted
     // FIRST, so an id built from the schema path alone leaves every rack after
@@ -1174,7 +1197,7 @@ describe('the rack in a lane', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     selectVoice('track', tracks[0].id, voiceNamed('Crunch').ref);
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     await user.click(
       screen.getByRole('button', { name: `Remove Amp for ${getTracks()[0].name}` }),
@@ -1311,6 +1334,13 @@ describe('the rack in a lane', () => {
     // nothing is focused so the boundary test answers false. With the flag on,
     // this pops the step that placed the block and the arrangement loses it —
     // an edit undone on a surface that is not on screen.
+    //
+    // ⚠ NOTHING IS SELECTED HERE, which is deliberate and is what milestone 4
+    // made the interesting case: the direct-editing context is the SELECTED
+    // track's view, and with no selection that is the Pattern fallback (§4's
+    // table). What keeps the flag off is `timed` — no lane has a time axis, so
+    // there is no arrangement surface on screen and the toolbar's ↶ is not
+    // rendered either.
     fireEvent.keyDown(document.body, { key: 'z', metaKey: true });
     expect(getTracks()[0].placements).toHaveLength(1);
   });
@@ -1344,7 +1374,7 @@ describe('the rack in a lane', () => {
     // edits whose keyboard twins are switched off here with the gesture layer.
     selectPlacements([getTracks()[0].placements[0].id]);
 
-    const view = render(<ArrangementGrid mode="voice" />);
+    const view = render(<ArrangementGrid views={viewsOf('voice')} />);
     expect(screen.queryByTestId('arrangement-ruler')).toBeNull();
     // Zoom, snap and the bar count are all quantities of TIME, and so is undo —
     // not because a history is temporal but because ⌘Z is dead in voice mode
@@ -1360,7 +1390,7 @@ describe('the rack in a lane', () => {
 
     // …and every one of them comes back in a mode that has an axis, so this is
     // an assertion about voice mode rather than about the grid being broken.
-    render(<ArrangementGrid mode="pattern" />);
+    render(<ArrangementGrid />);
     expect(screen.getByTestId('arrangement-ruler')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Zoom in' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'Arrangement snap' })).toBeInTheDocument();
@@ -1375,7 +1405,7 @@ describe('the rack in a lane', () => {
     const collapsed: string[][] = [];
     render(
       <ArrangementGrid
-        mode="voice"
+        views={viewsOf('voice')}
         collapsedRacks={[]}
         onCollapsedRacksChange={(next) => collapsed.push([...next])}
       />,
@@ -1393,7 +1423,7 @@ describe('the rack in a lane', () => {
   it('shows a folded rack’s strip and nothing else', () => {
     const tracks = twoTracks();
 
-    render(<ArrangementGrid mode="voice" collapsedRacks={[tracks[0].id]} />);
+    render(<ArrangementGrid views={viewsOf('voice')} collapsedRacks={[tracks[0].id]} />);
 
     expect(
       screen.getByRole('button', { name: `Voice rack for ${tracks[0].name}` }),
@@ -1454,7 +1484,7 @@ describe('saving a voice from the track’s own rack', () => {
     const tracks = twoTracks();
     selectVoice('track', tracks[0].id, voiceNamed('Clean Amp').ref);
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // Disabled AND explained: the fourteen slots are readonly lib consts with no
     // setter, so Save is impossible rather than discouraged.
@@ -1472,7 +1502,7 @@ describe('saving a voice from the track’s own rack', () => {
 
   it('explains the fallback rather than the read-only rule when there is no ref at all', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // `no-voice`, not `built-in`: there is nothing read-only here, there is simply
     // nothing to save INTO, and the two have different things to do about them.
@@ -1485,7 +1515,7 @@ describe('saving a voice from the track’s own rack', () => {
     const created = saveVoiceAs('track', tracks[0].id, 'Shared tone', presetOf(tracks[0]));
     if (!created.ok) throw new Error(created.reason);
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -9);
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // A voice is a SHARED asset: this is the sentence that travels with the button,
     // and it has to be readable BEFORE the button is pressed rather than after.
@@ -1512,7 +1542,7 @@ describe('saving a voice from the track’s own rack', () => {
     selectVoice('track', tracks[1].id, { kind: 'user', id: created.id });
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -9);
 
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
     expect(rack(tracks[0]).getByText('Unsaved')).toBeInTheDocument();
 
     await user.click(
@@ -1535,7 +1565,7 @@ describe('saving a voice from the track’s own rack', () => {
     const tracks = twoTracks();
     openBlankPattern('Riff');
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     await user.click(
       rack(tracks[0]).getByRole('button', {
@@ -1576,7 +1606,7 @@ describe('saving a voice from the track’s own rack', () => {
     const created = saveVoiceAs('track', tracks[0].id, 'Named tone', presetOf(tracks[0]));
     if (!created.ok) throw new Error(created.reason);
 
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
     const renameButton = rack(tracks[0]).getByRole('button', {
       name: `Rename ${tracks[0].name}’s voice`,
     });
@@ -1624,7 +1654,7 @@ describe('saving a voice from the track’s own rack', () => {
     const created = saveVoiceAs('track', tracks[0].id, 'Doomed', presetOf(tracks[0]));
     if (!created.ok) throw new Error(created.reason);
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     await user.click(
       rack(tracks[0]).getByRole('button', { name: `Delete ${tracks[0].name}’s voice` }),
@@ -1663,7 +1693,7 @@ describe('saving a voice from the track’s own rack', () => {
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
     setVoiceParam('track', tracks[1].id, VOLUME_PATH, -6);
 
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // The rail's guard, which is the stricter of the two the app had: `status`
     // refuses a deleted variant and a variant belonging to another instrument, and
@@ -1694,7 +1724,7 @@ describe('saving a voice from the track’s own rack', () => {
   it('renders the seam’s own reason rather than inventing copy', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     await user.click(
       rack(tracks[0]).getByRole('button', {
@@ -1714,7 +1744,7 @@ describe('saving a voice from the track’s own rack', () => {
   it('keeps two racks’ name forms and notice lines apart', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // Two forms open at once, which has never been possible before: one input id,
     // one label, one live region — each rendered twice.
@@ -1793,7 +1823,7 @@ describe('saving a voice from the track’s own rack', () => {
     // BOTH tracks on the one variant, which is the case the variant's name alone
     // cannot disambiguate — two racks, two Delete buttons, one name in the dialog.
     selectVoice('track', tracks[1].id, { kind: 'user', id: created.id });
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     await user.click(
       rack(getTracks()[1]).getByRole('button', { name: `Delete ${getTracks()[1].name}’s voice` }),
@@ -1827,7 +1857,7 @@ describe('the rack header’s voice picker', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     openBlankPattern('Riff');
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const clean = voiceNamed('Clean Amp');
     await user.selectOptions(picker(tracks[0]), clean.key);
@@ -1848,7 +1878,7 @@ describe('the rack header’s voice picker', () => {
     // write to the right place from one write to the wrong one.
     twoTracks();
     openBlankPattern('Riff');
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // A native `<select>` fires `change` once per arrow key while closed, and ten
     // of the eleven guitar voices are sampler-sourced: unwindowed, one keyboard
@@ -1889,7 +1919,7 @@ describe('the rack header’s voice picker', () => {
     const clean = voiceNamed('Clean Amp');
     selectVoice('track', tracks[0].id, clean.ref);
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const asked: string[] = [];
     let answer = false;
@@ -1958,7 +1988,7 @@ describe('the rack header’s voice picker', () => {
     const clean = voiceNamed('Clean Amp');
     selectVoice('track', tracks[0].id, clean.ref);
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const asked: string[] = [];
     vi.stubGlobal('confirm', (message: string) => {
@@ -1998,7 +2028,7 @@ describe('the rack header’s voice picker', () => {
   it('commits on leaving the field rather than waiting the window out', () => {
     twoTracks();
     openBlankPattern('Riff');
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const crunch = voiceNamed('Crunch');
     vi.useFakeTimers();
@@ -2019,7 +2049,7 @@ describe('the rack header’s voice picker', () => {
 
   it('commits a clean pick the unmount interrupts, and asks nothing during teardown', () => {
     twoTracks();
-    const grid = render(<ArrangementGrid mode="voice" />);
+    const grid = render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const asked: string[] = [];
     vi.stubGlobal('confirm', (message: string) => {
@@ -2054,7 +2084,7 @@ describe('the rack header’s voice picker', () => {
     const clean = voiceNamed('Clean Amp');
     selectVoice('track', tracks[0].id, clean.ref);
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
-    const grid = render(<ArrangementGrid mode="voice" />);
+    const grid = render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const asked: string[] = [];
     vi.stubGlobal('confirm', (message: string) => {
@@ -2089,7 +2119,7 @@ describe('the rack header’s voice picker', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     selectVoice('track', tracks[0].id, voiceNamed('Clean Amp').ref);
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     await user.selectOptions(picker(getTracks()[0]), '');
 
@@ -2102,7 +2132,7 @@ describe('the rack header’s voice picker', () => {
     const tracks = twoTracks();
     const clean = voiceNamed('Clean Amp');
     selectVoice('track', tracks[0].id, clean.ref);
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // Something on the line first, so "cleared" is distinguishable from "never set".
     await user.click(
@@ -2246,7 +2276,7 @@ describe('the pedalboard in a rack', () => {
 describe('the stages stack, and the lane holds them', () => {
   it('draws the four stages as siblings in one column, in schema order', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const stages = PARAM_SECTIONS.map((section) =>
       screen.getByRole('region', { name: `${tracks[0].name} ${section.label}` }),
@@ -2272,7 +2302,7 @@ describe('the stages stack, and the lane holds them', () => {
 
   it('draws every rack in the sticky layer, which is the scroller’s FIRST child', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const scroller = screen.getByTestId('arrangement-lanes-scroller');
     const layer = screen.getByTestId('arrangement-voice-layer');
@@ -2319,7 +2349,7 @@ describe('the stages stack, and the lane holds them', () => {
 
   it('gives a voice lane a rect, and puts its rack at that rect’s top', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // A voice lane HAS a rect now. CP-16's voice rows were normal flow and
     // `laneRects` was handed an empty stack, which is why this could not have
@@ -2359,7 +2389,7 @@ describe('the stages stack, and the lane holds them', () => {
     // doing and not something every lane carries, or the recessed timeline
     // channel is off everywhere and the flattening is silent.
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="pattern" />);
+    render(<ArrangementGrid />);
 
     for (const track of tracks) {
       expect(spacer(track).className.split(/\s+/)).not.toContain('voice-lane');
@@ -2376,7 +2406,7 @@ describe('the stages stack, and the lane holds them', () => {
   // rack does not knock the stack's arithmetic out: the lanes still abut.
   it('keeps the stack whole when a rack is folded', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" collapsedRacks={[tracks[0].id]} />);
+    render(<ArrangementGrid views={viewsOf('voice')} collapsedRacks={[tracks[0].id]} />);
 
     expect(row(tracks[0]).style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
     expect(row(tracks[1]).style.top).toBe(`${TRACK_HEADER_HEIGHT}px`);
@@ -2392,7 +2422,7 @@ describe('the stages stack, and the lane holds them', () => {
   // wrapper that is left is the OBSERVED box rather than a viewport.
   it('puts no scroller between a voice row and its rack', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     for (const track of tracks) {
       const mine = row(track);
@@ -2425,7 +2455,7 @@ describe('the stages stack, and the lane holds them', () => {
 
   it('draws every header in the ONE column, voice lanes included', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // The point of voice becoming a lane: its header is not inside its row any
     // more, drawn at a constant of its own (`VOICE_HEADER_HEIGHT`, deleted with
@@ -2443,7 +2473,7 @@ describe('the stages stack, and the lane holds them', () => {
 
   it('keeps the scroller and the stack mounted with every lane in voice', () => {
     twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // MOUNTED, unlike CP-16's subtree: it is what preserves `scrollTop` and what
     // gives the voice layer a real origin. What goes is the RULER, and with it
@@ -2475,7 +2505,7 @@ describe('the stages stack, and the lane holds them', () => {
     const folded: Record<string, readonly SectionId[]>[] = [];
     render(
       <ArrangementGrid
-        mode="voice"
+        views={viewsOf('voice')}
         collapsedRackSections={{}}
         onCollapsedRackSectionsChange={(next) => folded.push({ ...next })}
       />,
@@ -2502,7 +2532,7 @@ describe('the stages stack, and the lane holds them', () => {
 
   it('opens on the same stages the pattern page does', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" collapsedRackSections={{}} />);
+    render(<ArrangementGrid views={viewsOf('voice')} collapsedRackSections={{}} />);
 
     // A rack nobody has touched shows Amp and Cabinet and folds the rest, which
     // is what `VoicePane` has always done with the same four sections. CP-14
@@ -2523,7 +2553,7 @@ describe('the stages stack, and the lane holds them', () => {
     let sections: Readonly<Record<string, readonly SectionId[]>> = {};
     const view = render(
       <ArrangementGrid
-        mode="voice"
+        views={viewsOf('voice')}
         collapsedRackSections={sections}
         onCollapsedRackSectionsChange={(next) => {
           sections = next;
@@ -2542,7 +2572,7 @@ describe('the stages stack, and the lane holds them', () => {
       );
       view.rerender(
         <ArrangementGrid
-          mode="voice"
+          views={viewsOf('voice')}
           collapsedRackSections={sections}
           onCollapsedRackSectionsChange={(next) => {
             sections = next;
@@ -2566,7 +2596,7 @@ describe('the stages stack, and the lane holds them', () => {
 
     render(
       <ArrangementGrid
-        mode="voice"
+        views={viewsOf('voice')}
         collapsedRackSections={{ [getTracks()[0].id]: ['amp'] }}
       />,
     );
@@ -2681,7 +2711,7 @@ describe('a voice lane is as tall as its rack measures', () => {
 
   it('grows the lane to the measured rack and moves the lanes below it down', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     // Before any measurement: the documented fallback, both lanes.
     expect(row(tracks[0]).style.height).toBe(`${TRACK_HEADER_HEIGHT}px`);
@@ -2710,7 +2740,7 @@ describe('a voice lane is as tall as its rack measures', () => {
     // would come up short by exactly the rack's padding and border in the
     // browser, which is a bug no layout-free test could otherwise see.
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     measure([[measuredBox(tracks[0]), 640]]);
 
@@ -2719,7 +2749,7 @@ describe('a voice lane is as tall as its rack measures', () => {
 
   it('observes the border box, so a border-only change still notifies', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const observer = FakeResizeObserver.live.find((candidate) =>
       candidate.observed.has(measuredBox(tracks[0])),
@@ -2737,7 +2767,7 @@ describe('a voice lane is as tall as its rack measures', () => {
     // §E asked for this to be verified rather than assumed, and this is the only
     // place in the suite where a fold can actually produce a number.
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" collapsedRacks={[tracks[0].id]} />);
+    render(<ArrangementGrid views={viewsOf('voice')} collapsedRacks={[tracks[0].id]} />);
 
     measure([[measuredBox(tracks[0]), 34]]);
 
@@ -2747,7 +2777,7 @@ describe('a voice lane is as tall as its rack measures', () => {
 
   it('follows a rack that shrinks back under the header', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     measure([[measuredBox(tracks[0]), 900]]);
     expect(row(tracks[0]).style.height).toBe('900px');
@@ -2760,7 +2790,7 @@ describe('a voice lane is as tall as its rack measures', () => {
 
   it('measures each track independently', () => {
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     measure([
       [measuredBox(tracks[0]), 400],
@@ -2786,7 +2816,7 @@ describe('a voice lane is as tall as its rack measures', () => {
       <Profiler id="grid" onRender={() => {
         commits += 1;
       }}>
-        <ArrangementGrid mode="voice" />
+        <ArrangementGrid views={viewsOf('voice')} />
       </Profiler>,
     );
 
@@ -2813,10 +2843,10 @@ describe('a voice lane is as tall as its rack measures', () => {
 
   it('stops watching a rack whose track leaves voice view', () => {
     const tracks = twoTracks();
-    const { rerender } = render(<ArrangementGrid mode="voice" />);
+    const { rerender } = render(<ArrangementGrid views={viewsOf('voice')} />);
     const box = measuredBox(tracks[0]);
 
-    rerender(<ArrangementGrid mode="pattern" />);
+    rerender(<ArrangementGrid />);
 
     for (const observer of FakeResizeObserver.live) {
       expect(observer.observed.has(box)).toBe(false);
@@ -2827,7 +2857,7 @@ describe('a voice lane is as tall as its rack measures', () => {
     // `CompositionPage` unmounts on every visit to the pattern page, so a leaked
     // observer here is one PER NAVIGATION rather than one per session.
     twoTracks();
-    const { unmount } = render(<ArrangementGrid mode="voice" />);
+    const { unmount } = render(<ArrangementGrid views={viewsOf('voice')} />);
     expect(FakeResizeObserver.live.some((observer) => !observer.disconnected)).toBe(true);
 
     unmount();
@@ -2843,7 +2873,7 @@ describe('a voice lane is as tall as its rack measures', () => {
     // otherwise open at whatever its rack measured before, with nothing on
     // screen having been measured.
     const tracks = twoTracks();
-    render(<ArrangementGrid mode="voice" />);
+    render(<ArrangementGrid views={viewsOf('voice')} />);
 
     measure([[measuredBox(tracks[1]), 700]]);
     expect(row(tracks[1]).style.height).toBe('700px');
@@ -2866,7 +2896,16 @@ describe('a voice lane is as tall as its rack measures', () => {
 // -------------------------------------------------------- what must survive ---
 
 const nav = () => within(screen.getByRole('navigation', { name: 'Editor' }));
-const modes = () => within(screen.getByRole('group', { name: 'Composition mode' }));
+/**
+ * A track's view button, in its own header.
+ *
+ * ⚠ THIS REPLACES THE MODE BAR. COMPS-TRACK-TABS milestone 4 deleted the page's
+ * three-button `Composition mode` group: the view is per track now, so "go to
+ * voice mode" is "put THIS track in Voice view", and the press selects the track
+ * as well as setting it (§2).
+ */
+const viewButton = (label: string, trackName: string) =>
+  screen.getByRole('button', { name: `${label} view, ${trackName}` });
 
 describe('unsaved tone survives the things that unmount it', () => {
   /** Go to the composition page and into voice mode.
@@ -2878,7 +2917,7 @@ describe('unsaved tone survives the things that unmount it', () => {
   async function intoVoiceMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
     if (getTracks().length === 0) openBlankComposition('Song');
     await user.click(nav().getByRole('button', { name: 'Composition' }));
-    await user.click(modes().getByRole('button', { name: 'Voice mode' }));
+    await user.click(viewButton('Voice', getTracks()[0].name));
   }
 
   it('survives a mode switch and a page round trip', async () => {
@@ -2892,10 +2931,11 @@ describe('unsaved tone survives the things that unmount it', () => {
     fireEvent.keyDown(knob(track, 'Level', 'Volume'), { key: 'ArrowUp' });
     expect(volumeOf(getTracks()[0])).toBe(tuned);
 
-    // (1) A mode switch. Every lane is replaced, so every rack unmounts.
-    await user.click(modes().getByRole('button', { name: 'Pattern mode' }));
+    // (1) A view switch on this track. Its lane is replaced, so its rack
+    // unmounts.
+    await user.click(viewButton('Pattern', track.name));
     expect(screen.queryByRole('region', { name: `${track.name} Level` })).toBeNull();
-    await user.click(modes().getByRole('button', { name: 'Voice mode' }));
+    await user.click(viewButton('Voice', track.name));
     expect(volumeOf(getTracks()[0])).toBe(tuned);
     expect(knob(getTracks()[0], 'Level', 'Volume')).toHaveAttribute(
       'aria-valuenow',
@@ -2909,12 +2949,10 @@ describe('unsaved tone survives the things that unmount it', () => {
     await user.click(nav().getByRole('button', { name: 'Pattern' }));
     await user.click(nav().getByRole('button', { name: 'Composition' }));
 
-    // The mode came back too, which is `App`'s existing rule and the reason a
-    // rack is on screen to assert against at all.
-    expect(modes().getByRole('button', { name: 'Voice mode' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
+    // The track's VIEW came back too — `App` owns the per-composition map for
+    // the reason it owned the mode, and that is the reason a rack is on screen
+    // to assert against at all.
+    expect(viewButton('Voice', track.name)).toHaveAttribute('aria-pressed', 'true');
     expect(volumeOf(getTracks()[0])).toBe(tuned);
     expect(knob(getTracks()[0], 'Level', 'Volume')).toHaveAttribute(
       'aria-valuenow',
@@ -2931,8 +2969,8 @@ describe('unsaved tone survives the things that unmount it', () => {
     await user.click(screen.getByRole('button', { name: `Voice rack for ${track.name}` }));
     expect(screen.queryByRole('region', { name: `${track.name} Amp` })).toBeNull();
 
-    await user.click(modes().getByRole('button', { name: 'Pattern mode' }));
-    await user.click(modes().getByRole('button', { name: 'Voice mode' }));
+    await user.click(viewButton('Pattern', track.name));
+    await user.click(viewButton('Voice', track.name));
     expect(screen.queryByRole('region', { name: `${track.name} Amp` })).toBeNull();
 
     await user.click(nav().getByRole('button', { name: 'Pattern' }));
@@ -2953,9 +2991,9 @@ describe('unsaved tone survives the things that unmount it', () => {
     await user.click(amp());
     expect(amp()).toHaveAttribute('aria-expanded', 'false');
 
-    // (1) A mode switch — every row is replaced, so every rack unmounts.
-    await user.click(modes().getByRole('button', { name: 'Pattern mode' }));
-    await user.click(modes().getByRole('button', { name: 'Voice mode' }));
+    // (1) A view switch — this track's row is replaced, so its rack unmounts.
+    await user.click(viewButton('Pattern', track.name));
+    await user.click(viewButton('Voice', track.name));
     expect(amp()).toHaveAttribute('aria-expanded', 'false');
 
     // (2) A page round trip — `CompositionPage` unmounts outright. The rack's
@@ -3006,7 +3044,7 @@ describe('unsaved tone survives the things that unmount it', () => {
     const rulerContent = () => screen.getByTestId('arrangement-ruler-content');
     const headerStack = () => screen.getByTestId('track-header-stack');
 
-    const view = render(<ArrangementGrid mode="pattern" />);
+    const view = render(<ArrangementGrid />);
     const before = screen.getByTestId('arrangement-lanes-scroller');
     before.scrollLeft = 480;
     before.scrollTop = 176;
@@ -3014,7 +3052,7 @@ describe('unsaved tone survives the things that unmount it', () => {
     expect(rulerContent().style.transform).toBe('translateX(-480px)');
     expect(headerStack().style.transform).toBe('translateY(-176px)');
 
-    view.rerender(<ArrangementGrid mode="voice" />);
+    view.rerender(<ArrangementGrid views={viewsOf('voice')} />);
     // The SAME element, which is the milestone-2 change: it is no longer
     // replaced. That does not make either axis safe — see the docblock.
     const during = screen.getByTestId('arrangement-lanes-scroller');
@@ -3031,7 +3069,7 @@ describe('unsaved tone survives the things that unmount it', () => {
     // against: an all-voice stack has no time axis, so it is not on screen.)
     expect(headerStack().style.transform).toBe('translateY(-612px)');
 
-    view.rerender(<ArrangementGrid mode="pattern" />);
+    view.rerender(<ArrangementGrid />);
 
     const after = screen.getByTestId('arrangement-lanes-scroller');
     expect(after).toBe(before);
@@ -3170,20 +3208,26 @@ describe('a rack edit reaches the engine', () => {
     expect(getAtPath(lib.builtFromPreset[0], VOLUME_PATH)).toBe(-6);
   });
 
-  it('draws no playhead in voice mode, and one in a mode that has an axis', async () => {
+  it('draws no playhead in an all-voice stack, and one where there is an axis', async () => {
     twoPlayableTracks();
     render(<CompositionProbe />);
     await start();
 
+    // ⚠ `getAllBy`, NOT `getBy`. The head is drawn ONE SEGMENT PER CONTIGUOUS
+    // TIMED BAND (milestone 2), so `arrangement-playhead` stopped being a unique
+    // testid the moment a stack could be mixed — which is milestone 4. Under a
+    // uniform view there is still at most one, and asserting the count is what
+    // keeps that true rather than assuming it.
+    //
     // Driven rather than asserted against a stopped transport: `ArrangementPlayhead`
     // returns null whenever `useHeadTick()` is null, so with nothing playing the
     // absence proves nothing and an unconditional playhead would pass.
-    const timed = render(<ArrangementGrid mode="pattern" />);
-    expect(await screen.findByTestId('arrangement-playhead')).toBeInTheDocument();
+    const timed = render(<ArrangementGrid />);
+    expect(await screen.findAllByTestId('arrangement-playhead')).toHaveLength(1);
     timed.unmount();
 
-    render(<ArrangementGrid mode="voice" />);
-    expect(screen.queryByTestId('arrangement-playhead')).toBeNull();
+    render(<ArrangementGrid views={viewsOf('voice')} />);
+    expect(screen.queryAllByTestId('arrangement-playhead')).toHaveLength(0);
     // And no BLOCK either. A voice lane's spacer draws nothing: both tracks
     // carry a placement here, and drawing them would put a `PlacementBlock`
     // inside the 360 px spacer with only the opaque rack above it to hide it —
@@ -3192,6 +3236,52 @@ describe('a rack edit reaches the engine', () => {
     // at all, so this is the one render that can tell the branch from a
     // coincidence.
     expect(document.querySelectorAll('[data-placement]')).toHaveLength(0);
+  });
+
+  /**
+   * ⚠ THE CASE THAT BREAKS A SINGULAR QUERY (COMPS-TRACK-TABS milestone 4).
+   *
+   * A voice lane BETWEEN two timed ones splits the stack into two bands, and one
+   * playhead is drawn per band — so `getByTestId('arrangement-playhead')` throws
+   * on multiple matches from the first mixed stack onwards. Mixed stacks were
+   * unreachable until this milestone, which is why nothing caught it before.
+   *
+   * The segments are what the rule is FOR: a line sweeping across a rack's
+   * faceplates points at nothing and lands on its controls, and the rack's
+   * opaque background is not a reason to draw something untrue underneath it.
+   */
+  it('draws one playhead per timed band, not one across the rack between them', async () => {
+    const tracks = twoPlayableTracks();
+    addTrack('Third');
+    const patternId = seedPattern('Tail');
+    place(patternId, getTracks()[2].id, 0);
+    const composition = getEditingComposition()!;
+    render(<CompositionProbe />);
+    await start();
+
+    // Voice in the MIDDLE: timed, rack, timed.
+    render(
+      <ArrangementGrid
+        views={{ [composition.id]: { [tracks[1].id]: 'voice' } }}
+      />,
+    );
+
+    const heads = await screen.findAllByTestId('arrangement-playhead');
+    expect(heads).toHaveLength(2);
+    // Both at the same tick — two segments of ONE head, not two heads.
+    const ticks = heads.map((head) => head.getAttribute('data-head-tick'));
+    expect(new Set(ticks).size).toBe(1);
+    // And neither of them covers the rack's lane.
+    const rackLane = document.querySelector<HTMLElement>(
+      `[data-voice-lane-track="${tracks[1].id}"]`,
+    )!;
+    const rackTop = Number.parseFloat(rackLane.style.top);
+    const rackBottom = rackTop + Number.parseFloat(rackLane.style.height);
+    for (const head of heads) {
+      const top = Number.parseFloat(head.style.top);
+      const bottom = top + Number.parseFloat(head.style.height);
+      expect(bottom <= rackTop || top >= rackBottom).toBe(true);
+    }
   });
 
   it('puts the track back on its stored voice when the edit is discarded', async () => {
@@ -3247,7 +3337,7 @@ describe('ONE editor, two pages', () => {
    *  by the caller — CP-17 stopped the page creating one on arrival. */
   async function intoVoiceMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
     await user.click(nav().getByRole('button', { name: 'Composition' }));
-    await user.click(modes().getByRole('button', { name: 'Voice mode' }));
+    await user.click(viewButton('Voice', getTracks()[0].name));
   }
 
   it('draws the same control for the same schema row on both pages, driven the same way', async () => {
@@ -3466,7 +3556,7 @@ describe('the pattern page’s voice pane is untouched', () => {
 
     render(<App />);
     await user.click(nav().getByRole('button', { name: 'Composition' }));
-    await user.click(modes().getByRole('button', { name: 'Voice mode' }));
+    await user.click(viewButton('Voice', getTracks()[0].name));
     openStage(getTracks()[0], 'Level');
     fireEvent.keyDown(knob(getTracks()[0], 'Level', 'Volume'), { key: 'ArrowUp' });
     expect(dirtyOf(getTracks()[0])).toBe(true);
