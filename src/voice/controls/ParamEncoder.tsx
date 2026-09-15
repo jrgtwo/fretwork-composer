@@ -57,9 +57,12 @@
  * two effects, and the only real difference is that this one converts pixels to DETENTS
  * while `Knob` converts pixels to a FRACTION of its span. The one thing the two DO share
  * is the {@link WheelPolicy} union — and it is declared in neither of them, precisely so
- * this separation stays literally true. Tracked in `docs/FOLLOW-UPS.md` §5, with the third
- * copy in `rack/CabinetGraphic.tsx` and with `Knob`'s stale-closure defect, which this
- * file fixes for itself (see `latest`) and therefore now differs on.
+ * this separation stays literally true. Tracked in `.claude/docs/tasks/BACKLOG.md` — "Merge the
+ * three copies of the pointer-drag transport in the voice controls", added 2026-09-15, with the
+ * third copy in `rack/CabinetGraphic.tsx` and with `Knob`'s stale-closure defect, which this file
+ * fixes for itself (see `latest`) and therefore now differs on. (The older pointer here read
+ * `docs/FOLLOW-UPS.md` §5 and was dead: that section is a stub saying its contents moved to the
+ * backlog, where no row existed until the one above.)
  */
 import { useCallback, useEffect, useId, useRef } from 'react';
 // The ONE thing shared with `Knob`, and deliberately the only one: a two-value
