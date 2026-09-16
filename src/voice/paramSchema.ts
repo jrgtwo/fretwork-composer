@@ -1393,8 +1393,15 @@ const CABINET_SECTION: ParamSection = {
       step: 0.5,
       unit: 'dB',
       precision: 1,
-      // The lib runs the convolver with `normalize: false` and documents 0 dB as
-      // the default, so an absent makeup is unity.
+      // Zero is the right fallback and it no longer means unity for the STAGE.
+      // The lib runs the convolver with `normalize: false`, so a peak-normalised
+      // IR file applies at whatever gain it carries — 12 to 16 dB across the
+      // bundled set — and each registered IR now declares a measured `trimDb`
+      // that the cab stage applies underneath this control (`cabMakeupGainDb`,
+      // lib `cabinet-irs.ts`). So the stage is level-neutral at 0 and this knob
+      // is taste on top of that, which is what makes switching cabs a tone
+      // change. An unregistered custom URL gets no trim and behaves as every IR
+      // did before.
       fallback: 0,
     },
   ],
