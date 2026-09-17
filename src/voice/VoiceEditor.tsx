@@ -1090,7 +1090,7 @@ export function VoiceEditor({
           <span className="flex-1" />
           <button
             type="button"
-            // Two sub-branches × up to eight racks, and every button says "Add" —
+            // Three sub-branches × up to eight racks, and every button says "Add" —
             // the name carries the branch, and the holder where there is more
             // than one.
             aria-label={forScope(`${present ? 'Remove' : 'Add'} ${sub.label}`)}

@@ -394,23 +394,41 @@ describe('the rack, wired into the pane', () => {
     render(<Host />);
     // The stock acoustic guitar has no `effects` at all, so both stages start absent.
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
+    // The room is the cabinet section's SUB-BRANCH, added by its own gesture:
+    // `addVoiceSection` skips every row under a section's sub-branch outright, so
+    // Add Cabinet alone can never create one however the preset looks. Without
+    // this click the loop below would walk three rows that are legitimately
+    // absent.
+    await userEvent.click(screen.getByRole('button', { name: 'Add Room' }));
 
     for (const section of [AMP_SECTION, CABINET_SECTION]) {
       for (const param of section.params) {
+        // A sub-branch's rows are named for the BRANCH, not the section:
+        // `renderParam`'s `nameScope`, which is what keeps "Size" and "Mix" from
+        // being ambiguous against a second stage that has them. The section's own
+        // rows carry no scope on the pattern page, where there is one holder.
+        const sub = section.subBranch;
+        const inSub = sub ? param.path.startsWith(`${sub.branch}.`) : false;
+        const scoped = (label: string) =>
+          inSub ? `${sub!.label} ${label}` : `${section.label} ${label}`;
         switch (param.kind) {
           case 'slider':
             // A knob, not a range row — but still one `role="slider"` with the
             // descriptor's label as its name.
-            expect(screen.getByRole('slider', { name: param.label })).toBeInTheDocument();
+            expect(
+              screen.getByRole('slider', { name: inSub ? scoped(param.label) : param.label }),
+            ).toBeInTheDocument();
             break;
           case 'toggle':
             expect(
-              screen.getByRole('switch', { name: `${section.label} ${param.label}` }),
+              screen.getByRole('switch', { name: scoped(param.label) }),
             ).toBeInTheDocument();
             break;
           case 'enum':
-            expect(screen.getByLabelText(param.label)).toBeInTheDocument();
+            expect(
+              screen.getByLabelText(inSub ? scoped(param.label) : param.label),
+            ).toBeInTheDocument();
             break;
           case 'sample-pack':
             throw new Error('unexpected sample-pack param in an amp/cabinet section');
@@ -433,7 +451,7 @@ describe('the rack, wired into the pane', () => {
 
   it('drives the cabinet from the mic dot, and keeps the select as the text route', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
 
     // Seeded from the schema fallback: the first registered IR.
     const picker = screen.getByLabelText('Cabinet') as HTMLSelectElement;
@@ -454,7 +472,7 @@ describe('the rack, wired into the pane', () => {
 
   it('picks a cabinet from the select as well, with the dot following', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
 
     // The brief's text-level fallback has to work in the direction that makes it a
     // fallback: selectable without ever touching the graphic.

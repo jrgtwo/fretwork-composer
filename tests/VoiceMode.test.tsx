@@ -66,6 +66,7 @@ import {
   voicePreset,
   removeVoicePedal,
 } from '../src/voice/voiceDrafts';
+import { SEED_VOICE_REVERB } from '../src/voice/pedalDefaults';
 import { clearPendingWarms } from '../src/voice/sampleWarm';
 import { playComposition, useCompositionPlayback } from '../src/audio/playbackService';
 import { getAtPath } from '../src/voice/presetPaths';
@@ -524,19 +525,28 @@ describe('the per-track voice draft seam', () => {
     // with no pointer hands over whatever it computed, which is the case this
     // guard exists for.
     const tooLoud = setVoiceParam('track', tracks[0].id, VOLUME_PATH, 900);
-    const notAParam = setVoiceParam('track', tracks[0].id, 'effects.reverb.wet', 0.5);
+    const notAParam = setVoiceParam('track', tracks[0].id, 'effects.finalEq.low', 3);
     const wrongKind = setVoiceParam('track', tracks[0].id, VOLUME_PATH, 'loud');
     const noTrack = setVoiceParam('track', 'not-a-track', VOLUME_PATH, 0);
     const noSuchPack = setVoiceParam('track', tracks[0].id, 'source.samples', 'nope');
+    // The OTHER refusal, now that `effects.reverb.wet` is a real row: declared,
+    // so `PARAM_BY_PATH` finds it, but gated on a branch this holder does not
+    // carry. Asserted here because the comment below names it as the distinction
+    // and a named distinction with no test is a claim.
+    const noRoom = setVoiceParam('track', tracks[0].id, 'effects.reverb.wet', 0.5);
 
     expect(tooLoud).toEqual({ ok: false, reason: expect.stringContaining('Volume') });
-    // Per-voice reverb is deliberately undeclared in `paramSchema`, so the path
-    // is refused rather than silently widening the preset with a field the
-    // editor cannot honour.
+    // The post-cab mastering EQ is deliberately undeclared in `paramSchema`, so
+    // the path is refused rather than silently widening the preset with a field
+    // the editor cannot honour. It stands in for `effects.reverb.wet`, which was
+    // this example until 2026-09-16 and is now a real row on the Cabinet section
+    // — a declared-but-gated path, which is a DIFFERENT refusal (`paramApplies`,
+    // "not a setting of this voice's source") and not the one this asserts.
     expect(notAParam).toEqual({ ok: false, reason: expect.stringContaining('not an editable') });
     expect(wrongKind).toEqual({ ok: false, reason: expect.stringContaining('number') });
     expect(noTrack).toEqual({ ok: false, reason: 'No such track.' });
     expect(noSuchPack).toEqual({ ok: false, reason: expect.stringContaining('sample pack') });
+    expect(noRoom).toEqual({ ok: false, reason: expect.stringContaining('not a setting') });
     expect(presetOf(getTracks()[0])).toBe(before);
     expect(dirtyOf(getTracks()[0])).toBe(false);
   });
@@ -1037,7 +1047,7 @@ describe('the rack in a lane', () => {
         screen.getByRole('button', { name: `Voice rack for ${track.name}` }),
       ).toBeInTheDocument();
       // Every stage of every track is its own landmark, named for the track.
-      for (const section of ['Source', 'Amp', 'Cabinet', 'Level']) {
+      for (const section of ['Source', 'Amp', 'Cabinet + room', 'Level']) {
         expect(
           screen.getByRole('region', { name: `${track.name} ${section}` }),
         ).toBeInTheDocument();
@@ -1066,8 +1076,8 @@ describe('the rack in a lane', () => {
     // the first with nameless toggles and selects — and every other query in
     // this file goes through a region name or an `ariaLabel` and would not
     // notice. Asked of the SECOND rack, by label text, inside its own landmark.
-    const first = stage(getTracks()[0], 'Cabinet');
-    const second = stage(getTracks()[1], 'Cabinet');
+    const first = stage(getTracks()[0], 'Cabinet + room');
+    const second = stage(getTracks()[1], 'Cabinet + room');
     expect(second.getByLabelText('Cabinet')).toBe(
       second.getByRole('combobox', { name: 'Cabinet' }),
     );
@@ -1080,6 +1090,74 @@ describe('the rack in a lane', () => {
     );
     expect(second.getByRole('combobox', { name: 'Cabinet' }).id).toContain(
       getTracks()[1].id,
+    );
+  });
+
+  it('gives each track its own room, inside its own cabinet stage', async () => {
+    // ⚠ TWO TRACKS, and that is the assertion. The per-voice reverb is the room
+    // around THIS track's speaker — one `Tone.JCReverb` per voice, wired after
+    // the cab — so eight racks hold eight of them. The other reverb
+    // (`useVoiceStore.reverb` on `MasterBus`) is one for the whole app and is
+    // deliberately nowhere in a rack; see `TrackVoiceRack`'s header.
+    //
+    // jsdom cannot hear either of them. What it can say is that the two branches
+    // are separate drafts on separate holders, which is the half a shared working
+    // copy would have got wrong.
+    const tracks = twoTracks();
+    // `Acoustic Guitar` has no `effects` at all, so both go on a voice with a
+    // real cabinet before anything asks about the room inside it.
+    const cabbed = voiceNamed('Crunch');
+    getTracks().forEach((track) => selectVoice('track', track.id, cabbed.ref));
+
+    render(<VoiceGrid />);
+
+    const first = stage(getTracks()[0], 'Cabinet + room');
+    const second = stage(getTracks()[1], 'Cabinet + room');
+    // Absent on both to start: `Crunch` carries a cab and no reverb, and adding
+    // the section never adds the sub-branch.
+    expect(presetOf(getTracks()[0]).effects?.reverb).toBeUndefined();
+    expect(
+      first.queryByRole('slider', { name: `${tracks[0].name} Room Size` }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(
+      first.getByRole('button', { name: `Add Room for ${tracks[0].name}` }),
+    );
+
+    // One track gained a room. The other did not — the whole point of the
+    // per-holder draft.
+    expect(presetOf(getTracks()[0]).effects?.reverb).toEqual(SEED_VOICE_REVERB);
+    expect(presetOf(getTracks()[1]).effects?.reverb).toBeUndefined();
+    expect(
+      second.queryByRole('slider', { name: `${tracks[1].name} Room Size` }),
+    ).not.toBeInTheDocument();
+
+    // The rows are named for the TRACK and the BRANCH, which is both axes: eight
+    // racks, and a "Size" that must not collide with another branch's.
+    const size = first.getByRole('slider', { name: `${tracks[0].name} Room Size` });
+    expect(size).toHaveAttribute('aria-valuenow', String(SEED_VOICE_REVERB.roomSize));
+    fireEvent.keyDown(size, { key: 'ArrowUp' });
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.reverb.roomSize')).toBeGreaterThan(
+      SEED_VOICE_REVERB.roomSize,
+    );
+    expect(presetOf(getTracks()[1]).effects?.reverb).toBeUndefined();
+
+    // Bypass is the room's own, not the cabinet's — two `.enabled` toggles in one
+    // stage, which is why `enabledParamOf` takes the FIRST and why the room's
+    // rows are declared after the cabinet's.
+    await userEvent.click(
+      first.getByRole('switch', { name: `${tracks[0].name} Room Enabled` }),
+    );
+    expect(presetOf(getTracks()[0]).effects?.reverb?.enabled).toBe(false);
+    expect(presetOf(getTracks()[0]).effects?.cabIR?.enabled).toBeUndefined();
+
+    // …and removing it takes the room alone, leaving the cabinet selected.
+    await userEvent.click(
+      first.getByRole('button', { name: `Remove Room for ${tracks[0].name}` }),
+    );
+    expect(presetOf(getTracks()[0]).effects?.reverb).toBeUndefined();
+    expect(presetOf(getTracks()[0]).effects?.cabIR?.url).toEqual(
+      expect.stringMatching(/^https?:/),
     );
   });
 

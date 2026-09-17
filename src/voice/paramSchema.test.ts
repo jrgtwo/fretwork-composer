@@ -25,12 +25,14 @@ import {
   type VoiceLayer,
   type VoiceLevel,
   type VoicePreset,
+  type VoiceReverbParams,
   type VoiceSource,
 } from '@fretwork/lib';
 import {
   PARAM_SECTIONS,
   PEDALS,
   branchParams,
+  enabledParamOf,
   ownParams,
   paramApplies,
   sectionApplies,
@@ -48,6 +50,7 @@ import {
   SEED_LAYER,
   SOURCE_KINDS,
 } from './sourceDefaults';
+import { SEED_VOICE_REVERB } from './pedalDefaults';
 import { circuitAmpControlPath } from './circuitAmpDefaults';
 import { getAtPath, hasPath, removeAtPath, setAtPath } from './presetPaths';
 
@@ -270,6 +273,12 @@ const POPULATED_CHASSIS: Omit<VoicePreset, 'id' | 'name' | 'source'> = {
       outputDb: 0,
     },
     cabIR: { enabled: false, url: CABINET_IRS[0].url, makeupDb: 1.5 },
+    // The room the cabinet stands in. On every fixture for the reason the pedals
+    // are: its three rows are gated on `effects.reverb` and nothing else, so a
+    // fixture without the branch is three rows this file walks over and skips.
+    // Values deliberately off `SEED_VOICE_REVERB` — a fixture equal to the seed
+    // cannot tell "the row reads the preset" from "the row fell back".
+    reverb: { enabled: false, roomSize: 0.72, wet: 0.33 },
     // The experimental circuit amp, on every fixture for the same reason the
     // pedals are: no SHIPPED preset carries one and none is meant to, so a
     // fixture is the only thing that walks its rows. `enabled: false` because
@@ -434,6 +443,13 @@ const AMP_LEAVES: Record<keyof AmpParams, true> = {
   outputDb: true,
 };
 const CAB_IR_LEAVES: Record<keyof CabIRParams, true> = { enabled: true, url: true, makeupDb: true };
+/** The room, which hangs off the Cabinet section as a sub-branch rather than
+ *  under `effects.cabIR` — hence its own table and its own assertion. */
+const VOICE_REVERB_LEAVES: Record<keyof VoiceReverbParams, true> = {
+  enabled: true,
+  roomSize: true,
+  wet: true,
+};
 
 /**
  * The pedals, same trick and the same reason. `Tone.Compressor` and the five
@@ -1111,6 +1127,11 @@ const CONDITIONAL_ROW_COUNT =
   sectionAt('source').params.length -
   1 +
   branchParams(FULLY_POPULATED_FM, sectionAt('body-filter')).length +
+  // The room, the second sub-branch whose rows are gated on their own branch.
+  // Derived the same way, off a fixture that carries `effects.reverb`, so a row
+  // added to the room is counted without editing this file and a row that loses
+  // its `requiresBranch` fails here.
+  branchParams(FULLY_POPULATED_FM, sectionAt('cabinet')).length +
   // `bodyFilter.cutoff`, the one row gated the other way round: it exists only
   // while the envelope does NOT, because the envelope overrides the Signal it
   // writes to. Counted separately because it is not under the sub-branch.
@@ -1348,6 +1369,9 @@ describe('descriptor invariants', () => {
 
     expect(leavesUnder(ALL_PARAMS, 'effects.amp')).toEqual(Object.keys(AMP_LEAVES).sort());
     expect(leavesUnder(ALL_PARAMS, 'effects.cabIR')).toEqual(Object.keys(CAB_IR_LEAVES).sort());
+    expect(leavesUnder(ALL_PARAMS, 'effects.reverb')).toEqual(
+      Object.keys(VOICE_REVERB_LEAVES).sort(),
+    );
     // The pedals, each against its own lib interface. Reached through `PEDALS` so
     // a pedal dropped from the section's flattened `params` fails here too.
     expect(leavesUnder(ALL_PEDAL_PARAMS, 'compressor')).toEqual(
@@ -1433,10 +1457,36 @@ describe('descriptor invariants', () => {
       const rows = branchParams(seeded, section);
       expect(rows.length, sub.id).toBeGreaterThan(0);
       // Every row the seed brings into view resolves, and holds a legal value.
-      const missing = rows.filter((row) => !hasPath(seeded, row.path)).map((row) => row.path);
+      //
+      // OPTIONAL rows excepted, and for the reason `addVoiceSection` skips them:
+      // the lib documents its own default for each, so writing our guess turns
+      // "unspecified" into a value the user never chose. The room's `enabled` is
+      // the first sub-branch row this applies to — `undefined` there means "in
+      // the chain", which is what an Add should mean.
+      const missing = rows
+        .filter((row) => !row.optional && !hasPath(seeded, row.path))
+        .map((row) => row.path);
       expect(missing, sub.id).toEqual([]);
       expect(rows.flatMap((row) => violationsFor(seeded, row)), sub.id).toEqual([]);
     }
+  });
+
+  it('agrees with itself about the room — the seed and the rows` fallbacks', () => {
+    // Two declarations of the same numbers, in two files: `SEED_VOICE_REVERB` is
+    // what Add writes, and each row's `fallback` is what the control reads back
+    // when the value is absent. Drift and a freshly added room shows one number
+    // while holding another, with nothing failing — the same disagreement the
+    // layer's `kindRow.fallback` check exists to catch.
+    const roomSize = paramAt('effects.reverb.roomSize');
+    const wet = paramAt('effects.reverb.wet');
+    expect(roomSize.kind === 'slider' && roomSize.fallback).toBe(SEED_VOICE_REVERB.roomSize);
+    expect(wet.kind === 'slider' && wet.fallback).toBe(SEED_VOICE_REVERB.wet);
+    // `enabled` is the third row and is deliberately NOT in the seed: it is
+    // optional, and `undefined` means "in the chain" — which is what the row's
+    // `fallback: true` says too.
+    expect(SEED_VOICE_REVERB).not.toHaveProperty('enabled');
+    const enabled = paramAt('effects.reverb.enabled');
+    expect(enabled.kind === 'toggle' && enabled.fallback).toBe(true);
   });
 
   it('seeds a layer that is a whole VoiceSource, which no row fallback could be', () => {
@@ -1507,14 +1557,56 @@ describe('descriptor invariants', () => {
     expect(kindRow.options.some((option) => option.value === kindRow.fallback)).toBe(true);
   });
 
-  it('keeps every section param under its removable branch', () => {
-    // Removing the branch has to remove the whole section; a param declared outside
-    // it would survive the removal as an orphan.
+  it('keeps every section param under the branch that owns it', () => {
+    // Removing a branch has to remove the rows that live on it; a param declared
+    // outside every branch of its section would survive the removal as an orphan.
+    //
+    // ⚠ TWO BRANCHES, not one, and the Cabinet section is why. Its rows split
+    // between `effects.cabIR` (the speaker) and the `effects.reverb` sub-branch
+    // (the room), which is the whole point of a sub-branch: one section, two
+    // things the user adds and removes independently. Every other sub-branch
+    // happens to sit UNDER its section's removable branch
+    // (`bodyFilter.envelope`), so this rule read as one branch until the room.
+    //
+    // Widening it to two owners is safe only because the REMOVAL takes both:
+    // `voiceDrafts.removeVoiceSection` deletes `section.removableBranch` and
+    // `section.subBranch.branch`, so neither list of rows can outlive the
+    // gesture. `tests/VoicePane.test.tsx` pins that ("takes the room with it when
+    // the whole stage is removed"); without it this rule would license an orphan
+    // rather than forbid one.
     for (const section of PARAM_SECTIONS) {
+      // A section with no removable branch is exempt exactly as before — there is
+      // no removal for a row to be orphaned by.
       if (section.removableBranch === null) continue;
+      const owners = [section.removableBranch, section.subBranch?.branch].filter(
+        (branch): branch is string => typeof branch === 'string',
+      );
       for (const param of section.params) {
-        expect(param.path.startsWith(`${section.removableBranch}.`)).toBe(true);
+        expect(
+          owners.some((branch) => param.path.startsWith(`${branch}.`)),
+          `${param.path} is under none of ${owners.join(', ')}`,
+        ).toBe(true);
       }
+    }
+  });
+
+  it('lights a section`s lamp from the section, never from its sub-branch', () => {
+    // `enabledParamOf` returns the FIRST `toggle` whose path ends `.enabled`, and
+    // `sectionPresence` reads the lamp off that one row. Declare a sub-branch's
+    // bypass ahead of the section's and the stage starts reporting the wrong
+    // thing — a cabinet switched out would read as lit, and a preset carrying no
+    // room at all would read `undefined` and so `active` for ever.
+    //
+    // ⚠ NOTHING ELSE CATCHES A REORDER. It is invisible to every range, path and
+    // containment rule in this file: the same rows in a different order. The
+    // Cabinet is named outright because it is the only section today whose
+    // sub-branch carries an `.enabled` of its own.
+    expect(enabledParamOf(sectionAt('cabinet'))?.path).toBe('effects.cabIR.enabled');
+
+    for (const { section, sub } of SUB_BRANCHES) {
+      const power = enabledParamOf(section);
+      if (!power) continue;
+      expect(power.path.startsWith(`${sub.branch}.`), `${section.id} / ${sub.id}`).toBe(false);
     }
   });
 
@@ -1663,11 +1755,15 @@ describe('scope', () => {
     // `layer` and `bodyFilter` came off with this one; and the whole pedalboard —
     // `compressor` and the five under `effects` — came off with the Pedals section.
     //
-    // What is left is the post-fx slice, and both of them are genuinely deferred
-    // rather than forgotten: the per-voice reverb is wired between the amp and the
-    // cab rather than after it, so where it belongs in the pane is a decision the
-    // plan has not made yet, and the final EQ sits after the cab.
-    const deferred = ['effects.reverb', 'effects.finalEq'];
+    // `effects.reverb` came OFF this list on 2026-09-16, with the lib change that
+    // moved it after the cab. What deferred it was that a stage between the amp
+    // and the cab had no obvious home in the pane; post-cab it has one — it is the
+    // room the cabinet stands in, and it is declared on the Cabinet section.
+    //
+    // The final EQ is the whole of what is left, and it is genuinely deferred
+    // rather than forgotten: it sits after the room, and nothing has decided
+    // whether a per-voice mastering EQ is a control a user should have at all.
+    const deferred = ['effects.finalEq'];
     for (const param of ALL_PARAMS) {
       for (const prefix of deferred) {
         expect(param.path.startsWith(prefix), `${param.path} reaches deferred ${prefix}`).toBe(

@@ -1,12 +1,14 @@
 /**
- * What each pedal is made of when the user has just added it.
+ * What an effect branch is made of when the user has just added it — every
+ * pedal, and the cabinet's room.
  *
- * The pedalboard counterpart of `sourceDefaults.ts`, and it follows that file's
- * rule exactly: **the numbers are Tone's own defaults**, so a pedal makes a
- * sound the moment it is switched on and before a single control is turned.
- * They are not taken from any shipped preset — those are preselected settings,
- * and a default derived from one means "sound like the ambient patch" rather
- * than "sound like a chorus".
+ * The effects counterpart of `sourceDefaults.ts`, and it follows that file's
+ * rule as far as the rule goes: **the numbers are Tone's own defaults**, so a
+ * branch makes a sound the moment it is switched on and before a single control
+ * is turned. They are not taken from any shipped preset — those are preselected
+ * settings, and a default derived from one means "sound like the ambient patch"
+ * rather than "sound like a chorus". TWO seeds deviate, both below, and each
+ * says so at its own declaration.
  *
  * ── WHERE THE CITATION COMES FROM, and why it is not the docs site ───────────
  *
@@ -18,13 +20,22 @@
  * seed names it. A dependency bump that changes a default is then a diff in a
  * file this repo can read, rather than a claim about a web page.
  *
- * ── THE ONE SEED THAT IS OURS, and it says so ────────────────────────────────
+ * ── THE TWO SEEDS THAT DEVIATE, and they say so ──────────────────────────────
  *
- * The graphic EQ is not a Tone node. The lib composes it from seven
- * `Tone.Filter` peaking bands and a `Tone.Gain`, so there is no `getDefaults()`
- * to cite and no neutral Tone ever published. Flat — every band at 0 dB, level
- * at 0 dB — is the app's choice, stated as the app's, the same honesty
+ * They deviate for different reasons and neither is a taste import.
+ *
+ * The GRAPHIC EQ has nothing to cite. It is not a Tone node — the lib composes
+ * it from seven `Tone.Filter` peaking bands and a `Tone.Gain` — so there is no
+ * `getDefaults()` and no neutral Tone ever published. Flat (every band at 0 dB,
+ * level at 0 dB) is the app's choice, stated as the app's, the same honesty
  * `paramSchema`'s `layer.octaveOffset` floor uses for the same absence.
+ *
+ * The ROOM has one and refuses it on ONE field. `JCReverb`'s `roomSize: 0.5` is
+ * kept verbatim; `wet` inherits `1` from `StereoEffect`, which is the dry signal
+ * gone entirely. Every other seed here keeps Tone's `wet` because a pedal at
+ * `wet: 0` would be an inaudible lit stage — a reverb is the opposite case,
+ * where Tone's default is the unusable end. The replacement is provisional and
+ * marked as such at the seed.
  *
  * ── WHY A WHOLE VALUE RATHER THAN ROW FALLBACKS ──────────────────────────────
  *
@@ -43,6 +54,7 @@ import type {
   DelayParams,
   DistortionParams,
   GraphicEqParams,
+  VoiceReverbParams,
 } from '@fretwork/lib';
 
 /**
@@ -143,4 +155,28 @@ export const SEED_GRAPHIC_EQ: GraphicEqParams = {
   band3_2kHz: 0,
   band6_4kHz: 0,
   levelDb: 0,
+};
+
+/**
+ * The room the speaker is standing in — the per-voice reverb, wired after the
+ * cabinet (lib `Voice.wireChain`), which is why it is seeded from the Cabinet
+ * section rather than from a pedal.
+ *
+ * ⚠ ONE OF THE TWO SEEDS THAT IS NOT TONE'S DEFAULT, and the deviation is on
+ * `wet` alone. `tone/build/esm/effect/JCReverb.js` `getDefaults()` (15.1.22)
+ * gives `roomSize: 0.5` and that is kept verbatim; `wet` is inherited from
+ * `effect/StereoEffect.js` `getDefaults()` — `JCReverb extends StereoEffect`,
+ * not `Effect` — which is 1, a fully wet room, i.e. the
+ * dry signal gone entirely. Every other seed in this file keeps Tone's `wet`
+ * because a pedal at `wet: 0` would be an inaudible lit stage; a reverb is the
+ * opposite case, where Tone's default is the unusable end.
+ *
+ * 0.25 is PROVISIONAL — a modest room, deliberately not the 0.9/0.55 the Surf
+ * and Ambient built-ins carry, because a preset is a preselected setting and
+ * not a source for a default. To be tuned by ear once the post-cab position is
+ * something to listen to.
+ */
+export const SEED_VOICE_REVERB: VoiceReverbParams = {
+  roomSize: 0.5,
+  wet: 0.25,
 };

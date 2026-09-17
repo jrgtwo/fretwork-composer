@@ -477,6 +477,16 @@ function sectionById(id: string) {
  * optional ones are left out deliberately: the lib documents its own default for
  * each, and writing our guess would turn "unspecified" into a value the user
  * never chose.
+ *
+ * ⚠ THE SUB-BRANCH IS NOT PART OF THE SECTION'S SEED. A sub-branch is created
+ * only by {@link addVoiceSubBranch}, from its own `seed`, so its rows are skipped
+ * here even when `paramApplies` says they apply. Without the skip, a section
+ * whose sub-branch sits OUTSIDE its removable branch — the Cabinet's room, at
+ * `effects.reverb` while the section removes `effects.cabIR` — would have the
+ * user's tuning overwritten by row fallbacks the moment the section was added
+ * back, silently and with no refusal. Every other sub-branch happens to nest
+ * under its section's branch, so it goes absent with it and never reaches this
+ * loop; the rule is written for the general case rather than that accident.
  */
 export function addVoiceSection(kind: HolderKind, id: string, sectionId: SectionId): Result {
   const holder = holderOf(kind, id);
@@ -486,7 +496,9 @@ export function addVoiceSection(kind: HolderKind, id: string, sectionId: Section
 
   let next = holder.preset;
   if (sectionApplies(next, section)) return { ok: true, value: undefined };
+  const sub = section.subBranch;
   for (const param of section.params) {
+    if (sub && param.path.startsWith(`${sub.branch}.`)) continue;
     if (param.optional) continue;
     if (!paramApplies(next, param)) continue;
     // Exhaustive: `source-kind` and `sample-pack` are the two rows whose value is
@@ -516,6 +528,14 @@ export function addVoiceSection(kind: HolderKind, id: string, sectionId: Section
  * Bypass (`enabled: false`) keeps the user's tuning for when they switch the
  * stage back on; this throws it away, which is why only sections the schema
  * marks `removableBranch` can be removed at all.
+ *
+ * ⚠ AND ITS SUB-BRANCH WITH IT. The button says "Remove Cabinet + room", and
+ * `sectionApplies` takes the sub-branch off screen along with the section, so a
+ * sub-branch left behind is a stage still wired, still audible, and with no
+ * control anywhere to reach it — `effects.reverb` surviving a removed
+ * `effects.cabIR` is exactly that, because the room is the one sub-branch that
+ * does not nest under its section's removable branch. For every other one this
+ * second `removeAtPath` is a no-op the first already did.
  */
 export function removeVoiceSection(kind: HolderKind, id: string, sectionId: SectionId): Result {
   const holder = holderOf(kind, id);
@@ -525,7 +545,9 @@ export function removeVoiceSection(kind: HolderKind, id: string, sectionId: Sect
   if (!section.removableBranch) {
     return { ok: false, reason: `${section.label} cannot be removed from a voice.` };
   }
-  return commit(kind, id, holder, removeAtPath(holder.preset, section.removableBranch));
+  let next = removeAtPath(holder.preset, section.removableBranch);
+  if (section.subBranch) next = removeAtPath(next, section.subBranch.branch);
+  return commit(kind, id, holder, next);
 }
 
 /**
@@ -545,12 +567,19 @@ function subBranchById(
 }
 
 /**
- * Add one nested optional branch — the second source, or the body filter's
- * cutoff envelope.
+ * Add one nested optional branch — the second source, the body filter's cutoff
+ * envelope, or the cabinet's room.
  *
  * Path-addressed rather than `SectionId`-keyed, because a sub-branch is not a
- * section: it lives INSIDE one, has no bypass of its own, and is created in a
- * single write from `ParamSubBranch.seed` rather than row by row from fallbacks.
+ * section: it is a SECOND optional branch under a section that already carries
+ * one `presenceProbe` and one `removableBranch`, and it is created in a single
+ * write from `ParamSubBranch.seed` rather than row by row from fallbacks.
+ *
+ * ⚠ "HAS NO BYPASS OF ITS OWN" USED TO BE PART OF THAT RULE AND IS NOT ANY MORE.
+ * The room is a real stage of the chain and carries `effects.reverb.enabled`, so
+ * it has all three states a section has. What still separates the two is purely
+ * mechanical — the count of branches a `ParamSection` can declare — and
+ * `paramSchema`'s header carries the same correction in full.
  * A `VoiceLayer` contains a whole `VoiceSource`, and no amount of row fallbacks
  * produces one — which is the entire reason `seed` exists (see `ParamSubBranch`).
  *
@@ -578,9 +607,14 @@ export function addVoiceSubBranch(kind: HolderKind, id: string, subBranchId: str
 /**
  * Delete one nested optional branch, tuning and all.
  *
- * ABSENT, not bypassed, and a sub-branch has no third state to offer: it has no
- * `enabled` flag, so this is the only way back and it throws the branch's
- * settings away. Both editors' Remove says the same thing in words.
+ * ABSENT, not bypassed, and it throws the branch's settings away. Both editors'
+ * Remove says the same thing in words.
+ *
+ * For the layer and the cutoff envelope this is the ONLY way back, because
+ * neither has an `enabled` flag to switch instead. The room does — bypassing it
+ * with `effects.reverb.enabled` keeps its size and mix, and this deletes them —
+ * so the two gestures are genuinely different there rather than one standing in
+ * for the other.
  */
 export function removeVoiceSubBranch(kind: HolderKind, id: string, subBranchId: string): Result {
   const holder = holderOf(kind, id);

@@ -72,13 +72,23 @@
  * home for — `TrackHeader`'s and `TrackControls`' writes, which are about the
  * track rather than about its voice.
  *
- * ── ⚠ There is no reverb here, and that is deliberate ────────────────────────
+ * ── ⚠ ONE of the two reverbs is here, and which one matters ──────────────────
  *
- * A `VoicePreset` has its own reverb and `paramSchema` does not declare it, so it
- * is out of scope. The OTHER reverb — `useVoiceStore.reverb` — is a single
- * `Tone.Reverb` send on `MasterBus` that every voice passes through, with one
- * `setReverb` for the whole store. A per-track rack showing "reverb" would show
- * eight controls that are secretly one, so it shows none.
+ * The VOICE's reverb is here, inside the Cabinet + room stage, and it is this
+ * track's own: a `Tone.JCReverb` per voice, wired after the cabinet (lib
+ * `Voice.wireChain`), so it is the room around THIS track's speaker. Eight racks
+ * hold eight of them and turning one moves one track. That is new — it was out
+ * of scope until 2026-09-16, when the lib moved it post-cab and `paramSchema`
+ * declared it on `CABINET_SECTION` as the `effects.reverb` sub-branch.
+ *
+ * The OTHER reverb — `useVoiceStore.reverb` — is still absent from here and
+ * still deliberately so. It is a single `Tone.Reverb` send on `MasterBus` that
+ * every voice passes through, with one `setReverb` for the whole store, so a
+ * per-track control for it would be eight controls that are secretly one.
+ * Nothing in `src/` has ever called `setReverb`; if it is ever surfaced it wants
+ * a name of its own and one place to live, not a row in a rack. Rowed in
+ * `.claude/docs/tasks/DEFERRED.md` as "Two different things are both called
+ * 'reverb'".
  */
 import type { Track } from '@fretwork/lib';
 import type { SectionId } from '../voice/paramSchema';

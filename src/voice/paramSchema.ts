@@ -31,10 +31,13 @@
  * finding rather than allowed for. (It has happened once — the ten samplers'
  * `source.release` — and it was fixed in the lib; FOLLOW-UPS row 24.)
  *
- * SCOPE: Source (with its second source), Body filter, Amp, Cabinet, Level. The
- * lib exposes ~95 tunable params; the compressor, the pedals, the EQs and
- * per-voice reverb are a later slice and are deliberately NOT declared here.
- * Declaring a param the pane cannot honour is worse than omitting it.
+ * SCOPE: Source (with its second source), Body filter, Amp, Cabinet — including
+ * the room the cabinet stands in — and Level. The lib exposes ~95 tunable
+ * params; the final EQ is still a later slice and is deliberately NOT declared
+ * here. Declaring a param the pane cannot honour is worse than omitting it.
+ * (The per-voice reverb WAS on that deferred list, for a reason that has since
+ * gone: it used to sit between the amp and the cab, so where it belonged in the
+ * pane was undecided. It is post-cab now, and it belongs with the cabinet.)
  *
  * CONDITIONAL ROWS — the mechanism the Source section needed. A section's
  * presence is one probe for the whole section (`presenceProbe`), which cannot say
@@ -62,14 +65,26 @@
  * declaring it is enough; nothing has to remember to check.
  *
  * SUB-BRANCHES — an optional branch INSIDE a section, which `ParamSection` cannot
- * express: a section has one probe and one removable branch. A second source is
- * part of what makes the sound (it is not a stage of the chain and has no bypass
- * of its own), and a cutoff envelope is part of the body filter, so neither is a
- * section. `ParamSection.subBranch` is that: a label, the branch, and the
+ * express: a section carries exactly ONE `presenceProbe` and ONE
+ * `removableBranch`, so a second independently-removable branch has nowhere else
+ * to go. `ParamSection.subBranch` is that: a label, the branch, and the
  * well-formed value the Add gesture writes. Its ROWS stay in `section.params`,
  * gated by `requiresBranch`, because `voiceDrafts.PARAM_BY_PATH` is built
  * from `section.params` and a row outside it is a control the composition page
  * cannot write at all.
+ *
+ * ⚠ THE RULE THIS USED TO STATE IS NOT THE RULE. It said a sub-branch is for
+ * something that "is not a stage of the chain and has no bypass of its own",
+ * which held for the two it was written from: a second source is part of what
+ * makes the sound, and a cutoff envelope is part of the body filter. The
+ * per-voice reverb is neither — it IS a stage of `wireChain` and it DOES carry
+ * its own `enabled` bypass — and it is a sub-branch anyway. The reason is not
+ * mechanical convenience: the pane is deliberately presenting one physical idea,
+ * a speaker and the room it is standing in, as one unit, and a sub-branch is the
+ * only mechanism that lets one section hold two branches the user can add and
+ * remove independently. So the real rule is the mechanical one — a second
+ * optional branch under a section is a sub-branch — and what belongs in a given
+ * section is a judgement about what the thing IS, made per section.
  *
  * ABSENT vs BYPASSED. Both states are reachable from a stock built-in and they are
  * not the same: `ACOUSTIC_GUITAR_PRESET` has no `effects` object at all, while a
@@ -103,6 +118,7 @@ import {
   SEED_DELAY,
   SEED_DISTORTION,
   SEED_GRAPHIC_EQ,
+  SEED_VOICE_REVERB,
 } from './pedalDefaults';
 import {
   SEED_BODY_FILTER,
@@ -431,9 +447,11 @@ export interface ParamSubBranch {
   readonly branch: string;
   /**
    * The complete, well-formed starting value, built for the preset it is about to
-   * join. Typed at its declaration in `sourceDefaults` (as a `VoiceLayer`, a
-   * `BodyFilterEnvelope`), which is where `tsc` checks its shape — `object` here
-   * only because a descriptor table has no one type for "a branch of a preset".
+   * join. Typed at its own declaration as the lib's interface for that branch —
+   * a `VoiceLayer` and a `BodyFilterEnvelope` in `sourceDefaults`, a
+   * `VoiceReverbParams` in `pedalDefaults` — which is where `tsc` checks its
+   * shape. `object` here only because a descriptor table has no one type for
+   * "a branch of a preset".
    *
    * A FUNCTION OF THE PRESET rather than a constant, and one branch genuinely
    * needs it: a layer's mix level is only meaningful relative to the primary it
@@ -1355,9 +1373,22 @@ const AMP_SECTION: ParamSection = {
   ],
 };
 
+/**
+ * The speaker and the room it is standing in.
+ *
+ * TWO branches, which is why the reverb is a `subBranch` and not a section of
+ * its own: `presenceProbe` and `removableBranch` are the CABINET's, and
+ * `effects.reverb` is added and removed independently underneath them. The
+ * header's SUB-BRANCHES note carries the argument for pairing them at all.
+ *
+ * The pairing is a claim about the signal chain and it is only true while the
+ * chain says so: the lib wires `cabIR → cabIRMakeup → voiceReverb → finalEq`,
+ * so the room hears what the cabinet radiates. `tests/circuit-amp-chain.test.ts`
+ * in the lib pins that order.
+ */
 const CABINET_SECTION: ParamSection = {
   id: 'cabinet',
-  label: 'Cabinet',
+  label: 'Cabinet + room',
   presenceProbe: 'effects.cabIR',
   removableBranch: 'effects.cabIR',
   params: [
@@ -1404,7 +1435,79 @@ const CABINET_SECTION: ParamSection = {
       // did before.
       fallback: 0,
     },
+
+    // ---- the room (`effects.reverb`) ---------------------------------------
+    // ⚠ THESE THREE STAY LAST. `enabledParamOf` returns the FIRST row whose kind
+    // is `toggle` and whose path ends `.enabled`, and that row is what lights the
+    // stage lamp. Moved above `effects.cabIR.enabled`, the reverb's bypass would
+    // become the lamp for the whole section — the cabinet switched out would read
+    // as lit. `paramSchema.test.ts` pins it directly ("lights a section's lamp
+    // from the section, never from its sub-branch") and `VoicePane.test.tsx`
+    // reads the lamp back through the rendered stage; nothing about the ORDER of
+    // this array says so on its own, which is why it is written here too.
+    //
+    // Gated on the BRANCH, like the body filter's envelope: a `VoiceReverbParams`
+    // is two numbers and an optional flag, with no discriminant for an
+    // `appliesWhen` to read. See `requiresBranch`.
+    {
+      kind: 'toggle',
+      path: 'effects.reverb.enabled',
+      // Bare, like every other stage's bypass: `renderParam` prefixes a
+      // sub-branch row's accessible name with the branch's label, so this reads
+      // "Room Enabled" and the cabinet's own reads "Cabinet + room Enabled".
+      label: 'Enabled',
+      requiresBranch: 'effects.reverb',
+      optional: true,
+      fallback: true,
+    },
+    {
+      kind: 'slider',
+      path: 'effects.reverb.roomSize',
+      label: 'Size',
+      requiresBranch: 'effects.reverb',
+      // The bound is published by Tone through the TYPE rather than a `Min:`/
+      // `Max:` line: `effect/JCReverb.d.ts` (15.1.22) declares
+      // `readonly roomSize: Signal<"normalRange">`, and `core/type/Units.d.ts`
+      // defines `NormalRange` as "A number that is between [0, 1]". A typed
+      // bound is still Tone's statement about the node, so this is a slider and
+      // not an encoder — the same standing the body filter's `Q` floor has,
+      // which comes from `Signal<"positive">` on the same kind of declaration.
+      min: 0,
+      max: 1,
+      step: 0.01,
+      precision: 2,
+      fallback: SEED_VOICE_REVERB.roomSize,
+    },
+    {
+      kind: 'slider',
+      path: 'effects.reverb.wet',
+      label: 'Mix',
+      requiresBranch: 'effects.reverb',
+      // `effect/StereoEffect.d.ts` (15.1.22) — NOT `effect/Effect.d.ts`, which is
+      // not in this node's ancestry: `JCReverb extends StereoEffect`, and that is
+      // where `readonly wet: Signal<"normalRange">` is declared. Same
+      // `core/type/Units.d.ts` `[0, 1]` as above, and the same bound every other
+      // `wet` row in this table rests on.
+      min: 0,
+      max: 1,
+      step: 0.01,
+      precision: 2,
+      fallback: SEED_VOICE_REVERB.wet,
+    },
   ],
+  subBranch: {
+    id: 'cabinet-room',
+    label: 'Room',
+    branch: 'effects.reverb',
+    absentNote:
+      'No room — the cabinet is heard dry, close-miked. Adding one puts the speaker in a space and lets it decay into it.',
+    // The whole branch in one write, for the reason `ParamSubBranch.seed`
+    // exists: an Add has to leave behind a value the engine can read, and
+    // `isStageEnabled` plus `buildChain` would hand Tone an `undefined`
+    // `roomSize` out of a half-built one. The preset argument is ignored —
+    // a room's size and mix are nothing to do with the rest of the voice.
+    seed: () => SEED_VOICE_REVERB,
+  },
 };
 
 /**
