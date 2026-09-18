@@ -102,7 +102,9 @@ import {
   branchParams,
   enabledParamOf,
   ownParams,
+  removableBranchPresent,
   sectionPresence,
+  stageBypassed,
   subBranchApplies,
   visibleParams,
   type EnumParam,
@@ -894,12 +896,27 @@ export function VoiceEditor({
     </div>
   );
 
-  const stageActions = (section: ParamSection, present: boolean) =>
-    section.removableBranch ? (
+  /**
+   * The stage header's Add / Remove.
+   *
+   * ⚠ IT ACTS ON `section.removableBranch`, SO IT IS NAMED AFTER IT AND ASKS
+   * ABOUT IT — not about the section's presence, and not about the section's
+   * label. The two part company on the Cabinet: its pane is on screen while
+   * EITHER the speaker or the room exists, so a room-only voice would otherwise
+   * be offered "Remove Cabinet + room" for a cabinet that is already gone, and
+   * pressing it would remove neither. `removableLabel` is the schema saying what
+   * the button really touches; the room's own Add and Remove are inside
+   * `renderSubBranch`.
+   */
+  const stageActions = (section: ParamSection) => {
+    if (!section.removableBranch) return null;
+    const present = removableBranchPresent(preset, section);
+    const label = section.removableLabel ?? section.label;
+    return (
       <button
         type="button"
         // Two removable stages, × up to eight racks, so the name carries both.
-        aria-label={forScope(`${present ? 'Remove' : 'Add'} ${section.label}`)}
+        aria-label={forScope(`${present ? 'Remove' : 'Add'} ${label}`)}
         onClick={() =>
           report(
             present
@@ -911,16 +928,28 @@ export function VoiceEditor({
       >
         {present ? 'Remove' : 'Add'}
       </button>
-    ) : null;
+    );
+  };
 
   /**
    * "Use suggested cab" — ours entirely. Every amp model names a cab pairing and
    * the lib's own comment calls the suggestion *documentary*: nothing in the
    * engine applies it. Offered only when it would change something.
    *
-   * Writes the URL and nothing else, so it creates a cabinet branch on a preset
-   * with no cabinet (valid — `url` is `CabIRParams`' only required field)
-   * without un-bypassing one the user switched off on purpose.
+   * ⚠ TWO CALLS, EXACTLY ONE COMMIT, and both halves are load-bearing. The cab
+   * rows are gated on `effects.cabIR` (see the Cabinet section), so on the voice
+   * this button is most useful for — one with no cabinet at all — a bare `write`
+   * is refused by `setVoiceParam` and the press does nothing; hence the add. But
+   * adding and THEN writing over the seed is two draft commits, and
+   * `playbackService` rebuilds off each: a `cabIR.url` change is not an in-place
+   * retune (the lib's `sameEffectsShape` compares it), so that tore the chain
+   * down twice and fetched the seed IR — the first registered cab, not the
+   * suggestion — on the way past. Handing the URL to `addVoiceSection` as its
+   * seed makes the branch arrive correct, and the `write` below is then a no-op
+   * by value: `setAtPath` returns the preset unchanged and `commit` compares by
+   * reference. On a voice that already HAS a cabinet the two swap roles — the add
+   * is the no-op and the write does the work. Neither writes `enabled`, so a
+   * cabinet the user switched off on purpose stays switched off.
    *
    * It also UNFOLDS Cabinet: the button lives in the Amp stage but every visible
    * consequence of pressing it is in another one, so with Cabinet folded the
@@ -940,6 +969,7 @@ export function VoiceEditor({
         // interpolate a null scope into a string it then throws away.
         aria-label={scope ? `Use suggested cab for ${scope} · ${suggested.label}` : undefined}
         onClick={() => {
+          report(addVoiceSection(kind, id, 'cabinet', { [CAB_URL_PATH]: suggested.url }));
           write(CAB_URL_PATH, suggested.url);
           if (collapsedSections.includes('cabinet')) {
             onCollapsedSectionsChange?.(
@@ -999,7 +1029,11 @@ export function VoiceEditor({
    *  `<select>` stays as the text-level route to the same value and as the only
    *  place the registry's description of a capture is readable. */
   const renderCabinet = (section: ParamSection) => {
-    // `ownParams` for the reason `renderAmp` states.
+    // `ownParams` for the reason `renderAmp` states — and here it also carries
+    // the speaker's presence. Every cab row is gated on `effects.cabIR`, so on a
+    // voice that has only the room this list is EMPTY, no `cab` enum is found,
+    // and neither the graphic nor a cab knob is drawn. Nothing below branches on
+    // that; it falls out of the gate.
     const rows = ownParams(preset, section);
     const cab = rows.find(
       (param): param is EnumParam => param.kind === 'enum' && param.path === CAB_URL_PATH,
@@ -1010,10 +1044,24 @@ export function VoiceEditor({
           <CabinetGraphic
             url={cab.resolve(getAtPath(preset, cab.path))}
             onChange={(url) => write(cab.path, url)}
-            bypassed={sectionPresence(preset, section) === 'bypassed'}
+            /* The SPEAKER's own switch, asked with the speaker's own rows — not
+               `sectionPresence`, which answers for the PANE and reads active
+               while a bypassed cabinet stands in a room that is on. The graphic
+               IS the speaker, so it greys out with it. */
+            bypassed={stageBypassed(preset, rows)}
           />
         ) : null}
         <div className="flex min-w-[190px] flex-1 flex-col gap-1">
+          {rows.length === 0 ? (
+            /* The pane is open for the ROOM and the speaker is not on this voice.
+               Said rather than left as a gap, for the reason every absent stage
+               here says something: the header's Add is the affordance and this is
+               what it would do. */
+            <p className="w-full font-mono text-[8.5px] leading-snug text-ink-mut">
+              No speaker cabinet on this voice — what the room hears is the amp
+              direct. Add puts a cab in front of it.
+            </p>
+          ) : null}
           {rows
             .filter((param): param is SliderParam => param.kind === 'slider')
             .map((param) => renderKnob(param, scale.small))}
@@ -1160,7 +1208,7 @@ export function VoiceEditor({
         status={presence}
         open={!collapsedSections.includes(section.id)}
         onToggle={() => toggleSection(section.id)}
-        actions={stageActions(section, presence !== 'absent')}
+        actions={stageActions(section)}
       >
         {presence === 'absent' ? (
           /* Only a removable stage can be absent: Source and Level both have a
@@ -1181,7 +1229,17 @@ export function VoiceEditor({
             {ownParams(preset, section).map((param) => renderParam(section, param))}
           </div>
         )}
-        {presence !== 'absent' ? renderSubBranch(section) : null}
+        {/* An INDEPENDENT sub-branch is drawn even through an absent section, and
+            only an independent one. `renderSubBranch` already handles an absent
+            branch — the label, the Add and the `absentNote` — so with both of the
+            Cabinet's branches gone the pane reads: no cabinet stage, Add the
+            speaker, Add the room. Without the `independent` guard the body
+            filter's cutoff envelope would offer itself under "No body filter
+            stage on this voice", which is a control for something that is not
+            there. */}
+        {presence !== 'absent' || section.subBranch?.independent
+          ? renderSubBranch(section)
+          : null}
       </VoiceSection>
     );
   };

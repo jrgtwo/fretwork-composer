@@ -32,17 +32,23 @@ import {
   PARAM_SECTIONS,
   PEDALS,
   branchParams,
+  enabledParamIn,
   enabledParamOf,
   ownParams,
   paramApplies,
+  probePaths,
+  removableBranchPresent,
   sectionApplies,
   sectionPresence,
+  stageBypassed,
   subBranchApplies,
   visibleParams,
   type Param,
   type ParamSection,
+  type ParamStage,
   type ParamSubBranch,
   type SectionId,
+  type SectionPresence,
 } from './paramSchema';
 import {
   SEED_BODY_FILTER,
@@ -52,7 +58,7 @@ import {
 } from './sourceDefaults';
 import { SEED_VOICE_REVERB } from './pedalDefaults';
 import { circuitAmpControlPath } from './circuitAmpDefaults';
-import { getAtPath, hasPath, removeAtPath, setAtPath } from './presetPaths';
+import { getAtPath, hasBranchAtPath, hasPath, removeAtPath, setAtPath } from './presetPaths';
 
 /**
  * This is the test the descriptor-table approach exists for: it walks every path
@@ -1013,7 +1019,11 @@ describe('schema vs. every built-in VoicePreset', () => {
     // `makeupDb` present on exactly one built-in and absent on the rest is what
     // makes the absent-vs-bypassed distinction load-bearing rather than theoretical.
     const makeupDb = paramAt('effects.cabIR.makeupDb').path;
-    const withCab = VOICE_PRESETS.filter((p) => sectionApplies(p, sectionAt('cabinet')));
+    // The SPEAKER's branch, not `sectionApplies`: the Cabinet pane applies to a
+    // voice carrying only a room, and a room has no makeup gain to have set or
+    // left unset. Asking the pane would put a preset in this set that cannot
+    // witness either half of the assertion.
+    const withCab = VOICE_PRESETS.filter((p) => hasBranchAtPath(p, 'effects.cabIR'));
     expect(withCab.some((p) => hasPath(p, makeupDb))).toBe(true);
     expect(withCab.some((p) => !hasPath(p, makeupDb))).toBe(true);
   });
@@ -1099,6 +1109,86 @@ describe('section presence', () => {
       expect(sectionApplies(preset, sectionAt('source')), preset.id).toBe(true);
     }
   });
+
+  it('gives every removable section a row `addVoiceSection` can actually seed', () => {
+    // `addVoiceSection` writes the branch in EMPTY and then fills it from its rows'
+    // `fallback`s. A section whose rows were all optional, all of a kind the seed
+    // loop skips, or all gated on something the loop has not written yet would
+    // commit `effects.<x> = {}` — and the lib reads a present-but-empty branch as
+    // an ENABLED stage (`isStageEnabled`), handing a convolver a URL of
+    // `undefined`. Today every removable section has at least one such row; the
+    // failure is silent at the seam and audible much later, which is why it is
+    // pinned here rather than left to the four that happen to be fine.
+    for (const section of PARAM_SECTIONS) {
+      const branch = section.removableBranch;
+      if (branch === null) continue;
+      const seedable = section.params.filter(
+        (param) =>
+          param.path.startsWith(`${branch}.`) &&
+          !param.optional &&
+          // The two kinds the seed loop deliberately writes nothing for.
+          param.kind !== 'sample-pack' &&
+          param.kind !== 'source-kind' &&
+          param.appliesWhen === undefined &&
+          param.absentBranch === undefined &&
+          // A gate naming the section's OWN branch is satisfied by the time the
+          // loop reaches the row — that branch went in first. A gate naming
+          // anything else is not, and would seed nothing.
+          (param.requiresBranch === undefined || param.requiresBranch === branch),
+      );
+      expect(seedable.map((p) => p.path), section.id).not.toHaveLength(0);
+    }
+  });
+
+  it('lists two probes on the Cabinet and one everywhere else', () => {
+    // ⚠ THE PIN ON THE WIDENING. `presenceProbe` accepts a list so that ONE pane
+    // can hold two stages a user has separately — the speaker and the room. It is
+    // not a general shape: a second listed section would silently acquire a pane
+    // that stays on screen over branches its rows are not gated on, which is the
+    // exact failure the Cabinet's `requiresBranch` rows exist to prevent. So the
+    // array is named here, and everything else is asserted to be a plain string.
+    expect(sectionAt('cabinet').presenceProbe).toEqual(['effects.cabIR', 'effects.reverb']);
+    // Both halves are real branches of this section: its own removable one, and
+    // its sub-branch's. A listed path nothing creates would be a pane that never
+    // opens for it.
+    expect(probePaths(sectionAt('cabinet'))).toContain(sectionAt('cabinet').removableBranch);
+    expect(probePaths(sectionAt('cabinet'))).toContain(sectionAt('cabinet').subBranch?.branch);
+
+    for (const section of PARAM_SECTIONS) {
+      if (section.id === 'cabinet') continue;
+      expect(
+        section.presenceProbe === null || typeof section.presenceProbe === 'string',
+        section.id,
+      ).toBe(true);
+    }
+    for (const pedal of PEDALS) {
+      expect(typeof pedal.presenceProbe, pedal.id).toBe('string');
+    }
+  });
+
+  it('marks exactly one sub-branch independent, and gives it a listed probe', () => {
+    // The room stands outside its section's removable branch; the other two nest
+    // inside theirs and go absent with the section, which is what makes an
+    // envelope-with-no-filter unreachable rather than merely unlikely.
+    const independent = SUB_BRANCHES.filter(({ sub }) => sub.independent);
+    expect(independent.map(({ sub }) => sub.id)).toEqual(['cabinet-room']);
+
+    for (const { section, sub } of SUB_BRANCHES) {
+      const owner = section.removableBranch;
+      const nested = owner !== null && sub.branch.startsWith(`${owner}.`);
+      // The flag answers "does this survive the section's Remove", so it is set
+      // exactly when there IS a Remove and the branch sits outside what it
+      // deletes. The two must not drift: a nested branch declared independent
+      // would have its Add offered under a section that cannot hold it, and an
+      // outside branch left dependent is a stage the pane loses track of the
+      // moment the section goes. A section with no removable branch has no
+      // gesture to survive — the Source section's layer — so the flag stays off.
+      expect(sub.independent === true, sub.id).toBe(owner !== null && !nested);
+      // An independent branch has to be REACHABLE with the section's own branch
+      // gone, which is what listing it in the probe buys.
+      if (sub.independent) expect(probePaths(section), sub.id).toContain(sub.branch);
+    }
+  });
 });
 
 /**
@@ -1123,6 +1213,19 @@ const CIRCUIT_AMP_CONTROL_PARAMS = sectionAt('circuit-amp').params.filter(
   (p) => p.path.startsWith('effects.circuitAmp.controls.'),
 );
 
+/**
+ * The Cabinet's own rows — the speaker's, as opposed to the room's.
+ *
+ * By PATH PREFIX rather than through `ownParams`, deliberately: `ownParams`
+ * filters by `paramApplies`, which is the very gate the rules below are checking,
+ * so deriving the allowed set from it would permit whatever gate a future cab row
+ * happened to carry. The branch is what makes a row the speaker's; the GATE is
+ * asserted, not assumed.
+ */
+const CAB_OWN_PARAMS = sectionAt('cabinet').params.filter((p) =>
+  p.path.startsWith('effects.cabIR.'),
+);
+
 const CONDITIONAL_ROW_COUNT =
   sectionAt('source').params.length -
   1 +
@@ -1132,6 +1235,12 @@ const CONDITIONAL_ROW_COUNT =
   // added to the room is counted without editing this file and a row that loses
   // its `requiresBranch` fails here.
   branchParams(FULLY_POPULATED_FM, sectionAt('cabinet')).length +
+  // The Cabinet's OWN rows, which are gated too, and alone among the sections'
+  // own rows. Its probe LISTS two branches — the speaker and the room — so it
+  // answers "is this pane on screen" and no longer "is there a speaker"; each
+  // cab row has to carry the gate the probe stopped supplying, or it would
+  // render and be writable on a voice that has only the room.
+  CAB_OWN_PARAMS.length +
   // `bodyFilter.cutoff`, the one row gated the other way round: it exists only
   // while the envelope does NOT, because the envelope overrides the Signal it
   // writes to. Counted separately because it is not under the sub-branch.
@@ -1151,19 +1260,39 @@ const CONDITIONAL_ROW_COUNT =
 
 
 /**
- * Every branch some gesture in this app can actually create — a section's
- * sub-branch, or a pedal — and therefore the only branches a `requiresBranch` or
- * an `absentBranch` may name.
+ * Every branch some gesture in this app can actually create — a section's own
+ * removable branch, a sub-branch, or a pedal — and therefore the only branches a
+ * `requiresBranch` or an `absentBranch` may name.
  *
  * The test that reads this explains why "some row lives under it" is the wrong
  * check; what makes a gate legitimate is that something can OPEN it. A pedal
  * qualifies for exactly the reason a sub-branch does: it carries a seed and the
  * seams add and remove it by id.
+ *
+ * `removableBranch` joined the list with the Cabinet's own rows, and it is the
+ * same rule rather than a relaxation of it: `voiceDrafts.addVoiceSection` creates
+ * exactly that branch, by id, from the section's row fallbacks.
+ *
+ * ⚠ IT DOES COST THE LIST ONE THING, and the test below buys it back rather than
+ * living without it. `bodyFilter` is now creatable, so membership alone would let
+ * `bodyFilter.envelope.attack` be gated on `bodyFilter` — the gate one level too
+ * loose that the old comment named as the mistake worth catching. The check is
+ * therefore the INNERMOST creatable branch the row sits in, not any of them.
  */
 const creatableBranches = [
+  ...PARAM_SECTIONS.flatMap((section) =>
+    section.removableBranch === null ? [] : [section.removableBranch],
+  ),
   ...SUB_BRANCHES.map(({ sub }) => sub.branch),
   ...PEDALS.map((pedal) => pedal.branch),
 ];
+
+/** The deepest creatable branch `path` sits inside, or `undefined` for a row in
+ *  no optional branch at all. */
+const innermostBranchOf = (path: string): string | undefined =>
+  creatableBranches
+    .filter((branch) => path.startsWith(`${branch}.`))
+    .sort((a, b) => b.length - a.length)[0];
 
 describe('row conditions', () => {
   it('conditions only on a path the table itself declares', () => {
@@ -1192,7 +1321,12 @@ describe('row conditions', () => {
       // thing that makes a branch addable and removable, so that is the check: a
       // row gated on a branch no gesture can create is invisible for good.
       if (param.requiresBranch) {
-        expect(creatableBranches, param.path).toContain(param.requiresBranch);
+        // The INNERMOST creatable branch the row lives in — see
+        // `creatableBranches`. `bodyFilter` and `bodyFilter.envelope` are both
+        // creatable and both prefixes of `bodyFilter.envelope.attack`; only the
+        // second is that row's gate, and the first would leave the row rendering
+        // over a filter with no envelope.
+        expect(innermostBranchOf(param.path), param.path).toBe(param.requiresBranch);
       }
       // The complement, and here the row is never under the branch at all — a row
       // inside a branch cannot be gated on that branch's absence.
@@ -1229,9 +1363,9 @@ describe('row conditions', () => {
   });
 
   it('conditions a row only where a branch it lives under is optional', () => {
-    // Amp, Cabinet and Level are governed by their section probe, and a row-level
-    // condition there would be a second, quieter presence rule. What may carry one:
-    // the Source section (whose rows differ by source kind, and which holds the
+    // Amp and Level are governed by their section probe, and a row-level condition
+    // there would be a second, quieter presence rule. What may carry one: the
+    // Source section (whose rows differ by source kind, and which holds the
     // layer) and a sub-branch's rows.
     const conditional = ALL_PARAMS.filter(isConditional).map((p) => p.path);
     const allowed = new Set([
@@ -1254,10 +1388,29 @@ describe('row conditions', () => {
       // because WHICH amp decides which knobs exist. A Princeton declares
       // Volume and Tone; the section cannot know that, and the row can.
       ...CIRCUIT_AMP_CONTROL_PARAMS.map((p) => p.path),
+      // The Cabinet's own rows — the fifth case, and the reason this rule is
+      // stated as "a section whose probe ANSWERS presence must not also gate
+      // rows" rather than "a section must not". The Cabinet's probe lists the
+      // speaker and the room, so it answers presence for the PANE and for
+      // neither stage in it; the cab rows carry what it cannot say. No other
+      // section may join them without listing a second branch first.
+      ...CAB_OWN_PARAMS.map((p) => p.path),
     ]);
     // `[].every(…)` is `true`, so the count comes first here too.
     expect(conditional).toHaveLength(CONDITIONAL_ROW_COUNT);
     expect(conditional.every((path) => allowed.has(path))).toBe(true);
+
+    // ⚠ AND THE CAB ROWS' EXEMPTION IS NARROWER THAN THE OTHERS'. Every row above
+    // is allowed to carry any row-level condition; these three are allowed exactly
+    // ONE — `requiresBranch` naming the speaker. An `appliesWhen` here would be
+    // the second quiet presence rule this test is named after, deciding whether a
+    // speaker control exists from something other than whether the speaker does.
+    expect(CAB_OWN_PARAMS).toHaveLength(3);
+    for (const param of CAB_OWN_PARAMS) {
+      expect(param.requiresBranch, param.path).toBe('effects.cabIR');
+      expect(param.appliesWhen, param.path).toBeUndefined();
+      expect(param.absentBranch, param.path).toBeUndefined();
+    }
   });
 
   it('gates every sub-branch row on its own branch, one way or the other', () => {
@@ -1568,12 +1721,13 @@ describe('descriptor invariants', () => {
     // happens to sit UNDER its section's removable branch
     // (`bodyFilter.envelope`), so this rule read as one branch until the room.
     //
-    // Widening it to two owners is safe only because the REMOVAL takes both:
-    // `voiceDrafts.removeVoiceSection` deletes `section.removableBranch` and
-    // `section.subBranch.branch`, so neither list of rows can outlive the
-    // gesture. `tests/VoicePane.test.tsx` pins that ("takes the room with it when
-    // the whole stage is removed"); without it this rule would license an orphan
-    // rather than forbid one.
+    // Two owners is safe because each list of rows goes with the gesture that
+    // removes ITS branch, not because one gesture takes both. Removing the
+    // cabinet deletes `effects.cabIR` and the three rows gated on it; the room's
+    // three go when the room does. What makes the survivor visible rather than
+    // orphaned is the section's listed probe — `tests/VoicePane.test.tsx` pins
+    // that ("leaves the room standing when the cabinet is removed"). A row under
+    // NEITHER branch would be the real orphan, and that is what this forbids.
     for (const section of PARAM_SECTIONS) {
       // A section with no removable branch is exempt exactly as before — there is
       // no removal for a row to be orphaned by.
@@ -1590,17 +1744,25 @@ describe('descriptor invariants', () => {
     }
   });
 
-  it('lights a section`s lamp from the section, never from its sub-branch', () => {
+  it('finds a section`s own bypass in the section, never in its sub-branch', () => {
     // `enabledParamOf` returns the FIRST `toggle` whose path ends `.enabled`, and
-    // `sectionPresence` reads the lamp off that one row. Declare a sub-branch's
-    // bypass ahead of the section's and the stage starts reporting the wrong
-    // thing — a cabinet switched out would read as lit, and a preset carrying no
-    // room at all would read `undefined` and so `active` for ever.
-    //
-    // ⚠ NOTHING ELSE CATCHES A REORDER. It is invisible to every range, path and
-    // containment rule in this file: the same rows in a different order. The
+    // is documented as "the stage's OWN switch" — which, for a section holding a
+    // sub-branch with an `.enabled` of its own, is only true while the
+    // sub-branch's rows come last. This is the pin on that contract, and the
     // Cabinet is named outright because it is the only section today whose
-    // sub-branch carries an `.enabled` of its own.
+    // sub-branch carries an `.enabled` at all. Nothing else in this file catches a
+    // reorder: it is invisible to every range, path and containment rule, being
+    // the same rows in a different order.
+    //
+    // ⚠ WHAT THIS DOES NOT GUARD ANY MORE, and the reason is worth having in
+    // writing: NO caller that draws the pane depends on the order. Both readers
+    // split these rows by BRANCH PREFIX and ask each stage with its own rows —
+    // `sectionPresence` through `underBranch` (the two tests below), the cab
+    // graphic through `ownParams` + `stageBypassed`. Reorder these rows and the
+    // lamp and the graphic keep answering about the stage they mean. What the pin
+    // buys is that `enabledParamOf` stays honest for the caller that eventually
+    // asks it about a section with a sub-branch; the `sectionPresence` tests below
+    // are what stand behind the pane.
     expect(enabledParamOf(sectionAt('cabinet'))?.path).toBe('effects.cabIR.enabled');
 
     for (const { section, sub } of SUB_BRANCHES) {
@@ -1901,6 +2063,210 @@ describe('the pedalboard', () => {
       const off = setAtPath(seeded, `${pedal.branch}.enabled`, false);
       expect(sectionPresence(off, pedal), pedal.id).toBe('bypassed');
       expect(sectionPresence(NO_PEDALS, pedal), pedal.id).toBe('absent');
+    }
+  });
+});
+
+/**
+ * THE CABINET IS ONE PANE OVER TWO STAGES — a speaker and the room it is standing
+ * in — and either one can be there without the other.
+ *
+ * ⚠ WHY THIS BLOCK EXISTS. Every state below was reachable in the preset before
+ * it was reachable on screen: `effects.cabIR` and `effects.reverb` are two
+ * independent optional branches in the lib and nothing in the chain couples them.
+ * What coupled them was the pane — one `presenceProbe`, so removing the speaker
+ * took the whole section off screen and left the room wired, audible and with no
+ * control anywhere to reach it. The shipped workaround deleted the room along
+ * with the speaker, which threw the user's tuning away to hide a state they were
+ * allowed to be in. These four assertions are what replaced it.
+ */
+describe('the cabinet and the room, as two stages of one pane', () => {
+  const cabinet = sectionAt('cabinet');
+  const CAB = 'effects.cabIR';
+  const ROOM = 'effects.reverb';
+
+  /** The four states, built by removal from a fixture that carries both, so a
+   *  branch that stops being optional in the lib fails the first assertion here
+   *  rather than quietly making three of these the same preset. */
+  // Switched ON explicitly: the fixture writes `enabled: false` on every stage it
+  // populates (that is what makes it reach the bypassed arm elsewhere in this
+  // file), and these assertions need a starting point where both stages are in
+  // the chain.
+  const BOTH = setAtPath(
+    setAtPath(FULLY_POPULATED_FM, `${CAB}.enabled`, true),
+    `${ROOM}.enabled`,
+    true,
+  );
+  const SPEAKER_ONLY = removeAtPath(BOTH, ROOM);
+  const ROOM_ONLY = removeAtPath(BOTH, CAB);
+  const NEITHER = removeAtPath(SPEAKER_ONLY, CAB);
+
+  it('builds four genuinely different presets to ask about', () => {
+    expect([hasBranchAtPath(BOTH, CAB), hasBranchAtPath(BOTH, ROOM)]).toEqual([true, true]);
+    expect([hasBranchAtPath(SPEAKER_ONLY, CAB), hasBranchAtPath(SPEAKER_ONLY, ROOM)]).toEqual([
+      true,
+      false,
+    ]);
+    expect([hasBranchAtPath(ROOM_ONLY, CAB), hasBranchAtPath(ROOM_ONLY, ROOM)]).toEqual([
+      false,
+      true,
+    ]);
+    expect([hasBranchAtPath(NEITHER, CAB), hasBranchAtPath(NEITHER, ROOM)]).toEqual([false, false]);
+  });
+
+  it('keeps the pane on screen for either branch, and takes it away only for neither', () => {
+    // The whole change in one assertion. `ROOM_ONLY` used to answer false here,
+    // which is what made a room with no speaker unreachable.
+    expect(sectionApplies(BOTH, cabinet)).toBe(true);
+    expect(sectionApplies(SPEAKER_ONLY, cabinet)).toBe(true);
+    expect(sectionApplies(ROOM_ONLY, cabinet)).toBe(true);
+    expect(sectionApplies(NEITHER, cabinet)).toBe(false);
+  });
+
+  it('shows each stage`s rows only on a voice that has that stage', () => {
+    // The gate that a two-path probe makes mandatory: with the pane on screen for
+    // the room, the cabinet's own rows would otherwise render — and be writable —
+    // over a branch that is not there.
+    const own = (preset: VoicePreset) => ownParams(preset, cabinet).map((p) => p.path);
+    const room = (preset: VoicePreset) => branchParams(preset, cabinet).map((p) => p.path);
+
+    expect(own(BOTH)).toEqual(['effects.cabIR.enabled', 'effects.cabIR.url', 'effects.cabIR.makeupDb']);
+    expect(room(BOTH)).toEqual([
+      'effects.reverb.enabled',
+      'effects.reverb.roomSize',
+      'effects.reverb.wet',
+    ]);
+    expect(own(ROOM_ONLY)).toEqual([]);
+    expect(room(ROOM_ONLY)).toEqual(room(BOTH));
+    expect(own(SPEAKER_ONLY)).toEqual(own(BOTH));
+    expect(room(SPEAKER_ONLY)).toEqual([]);
+    expect([...own(NEITHER), ...room(NEITHER)]).toEqual([]);
+  });
+
+  it('refuses every cabinet row on a voice that has only the room', () => {
+    // `paramApplies` is the seam's gate as well as the pane's
+    // (`voiceDrafts.setVoiceParam`), so this is also the statement that a headless
+    // caller cannot write `effects.cabIR.makeupDb` into a missing cabinet and mint
+    // a `CabIRParams` with no `url`.
+    for (const param of cabinet.params) {
+      if (!param.path.startsWith(`${CAB}.`)) continue;
+      expect(paramApplies(ROOM_ONLY, param), param.path).toBe(false);
+      expect(paramApplies(NEITHER, param), param.path).toBe(false);
+      expect(paramApplies(BOTH, param), param.path).toBe(true);
+    }
+  });
+
+  /** One stage switched out, by path — `enabled` is optional everywhere, so
+   *  writing `false` is the only way to say bypassed. */
+  const bypass = (preset: VoicePreset, branch: string): VoicePreset =>
+    setAtPath(preset, `${branch}.enabled`, false);
+
+  it('reads the lamp from every stage the voice actually has', () => {
+    // ⚠ THE UNDER-REPORT THIS REPLACES: the lamp used to come off the FIRST
+    // `.enabled` row alone, so a switched-out cabinet printed "Bypassed" over a
+    // room that was plainly audible. Bypassed now means every stage that is there
+    // is switched out.
+    expect(sectionPresence(BOTH, cabinet)).toBe('active');
+    expect(sectionPresence(bypass(BOTH, CAB), cabinet)).toBe('active');
+    expect(sectionPresence(bypass(BOTH, ROOM), cabinet)).toBe('active');
+    expect(sectionPresence(bypass(bypass(BOTH, CAB), ROOM), cabinet)).toBe('bypassed');
+
+    // One stage present: the pane says what that stage says, which is the same
+    // answer a single-probe section gives.
+    expect(sectionPresence(SPEAKER_ONLY, cabinet)).toBe('active');
+    expect(sectionPresence(bypass(SPEAKER_ONLY, CAB), cabinet)).toBe('bypassed');
+    expect(sectionPresence(ROOM_ONLY, cabinet)).toBe('active');
+    expect(sectionPresence(bypass(ROOM_ONLY, ROOM), cabinet)).toBe('bypassed');
+
+    // Absent beats bypassed, and a stored `enabled: false` under a branch that is
+    // gone says nothing at all.
+    expect(sectionPresence(NEITHER, cabinet)).toBe('absent');
+  });
+
+  it('asks the speaker`s Add/Remove about the speaker, never about the pane', () => {
+    // `removableBranchPresent` is the one evaluator behind `VoiceEditor`'s stage
+    // header button AND `voiceDrafts.addVoiceSection`'s "already there" check.
+    // Reading `sectionApplies` instead — which is what both used to do — offers
+    // "Remove Cabinet" on a room-only voice for a cabinet that is already gone,
+    // and makes Add Cabinet a silent no-op on the one voice it is for.
+    expect(removableBranchPresent(BOTH, cabinet)).toBe(true);
+    expect(removableBranchPresent(SPEAKER_ONLY, cabinet)).toBe(true);
+    expect(removableBranchPresent(ROOM_ONLY, cabinet)).toBe(false);
+    expect(removableBranchPresent(NEITHER, cabinet)).toBe(false);
+    // The disagreement, stated: the pane applies and the speaker is not there.
+    expect(sectionApplies(ROOM_ONLY, cabinet)).toBe(true);
+
+    // `hasBranchAtPath`, never `hasPath`. The lib builds
+    // `cabIR: getCabinetIR(id) ? {…} : undefined`, so the KEY can be present with
+    // nothing under it; the button has to read "Add" and the seed has to run.
+    const guarded: VoicePreset = { ...FULLY_POPULATED_FM, effects: { cabIR: undefined } };
+    expect(hasPath(guarded, 'effects.cabIR')).toBe(true);
+    expect(removableBranchPresent(guarded, cabinet)).toBe(false);
+
+    // A stage that cannot be removed has no branch to be present, so the header
+    // draws no button at all rather than an "Add" for nothing.
+    expect(removableBranchPresent(BOTH, sectionAt('level'))).toBe(false);
+    expect(removableBranchPresent(BOTH, sectionAt('source'))).toBe(false);
+  });
+
+  it('greys the speaker graphic from the speaker`s own switch, not from the lamp', () => {
+    // What `VoiceEditor.renderCabinet` asks, through the same evaluator the lamp
+    // uses — `stageBypassed`, given the rows of the stage it means. The graphic IS
+    // the speaker: a cabinet switched out inside a live room leaves the PANE
+    // active (above) and still has to go grey.
+    const cabOff = bypass(BOTH, CAB);
+    expect(sectionPresence(cabOff, cabinet)).toBe('active');
+    expect(stageBypassed(cabOff, ownParams(cabOff, cabinet))).toBe(true);
+    expect(stageBypassed(cabOff, branchParams(cabOff, cabinet))).toBe(false);
+
+    // And the other way: a bypassed ROOM must not grey the speaker.
+    const roomOff = bypass(BOTH, ROOM);
+    expect(stageBypassed(roomOff, ownParams(roomOff, cabinet))).toBe(false);
+    expect(stageBypassed(roomOff, branchParams(roomOff, cabinet))).toBe(true);
+
+    // No `.enabled` row among the rows asked about — which is what a room-only
+    // voice hands the graphic — is "this stage has no bypass", not "bypassed".
+    expect(ownParams(ROOM_ONLY, cabinet)).toEqual([]);
+    expect(stageBypassed(ROOM_ONLY, ownParams(ROOM_ONLY, cabinet))).toBe(false);
+  });
+
+  it('leaves the lamp of every other stage exactly as it was', () => {
+    // ⚠ THE REGRESSION PIN FOR THE WIDENING. `sectionPresence` gained a second
+    // path; every stage without an `independent` sub-branch has to keep taking the
+    // first, and "has to" is not a comment. The old definition is restated here in
+    // full and the two are compared over every preset this file has — including
+    // the pedalboard, whose six `.enabled` rows would be read very differently by
+    // a rule that looked at all the applicable toggles instead of the first.
+    const legacy = (preset: VoicePreset, stage: ParamStage): SectionPresence => {
+      if (!sectionApplies(preset, stage)) return 'absent';
+      const toggle = enabledParamIn(stage.params);
+      return toggle && getAtPath(preset, toggle.path) === false ? 'bypassed' : 'active';
+    };
+
+    const stages: readonly ParamStage[] = [
+      ...PARAM_SECTIONS.filter((section) => section.subBranch?.independent !== true),
+      ...PEDALS,
+    ];
+    // The Cabinet is the one stage left out, and nothing else may be: a second
+    // independent sub-branch has to come here and argue for itself.
+    expect(
+      PARAM_SECTIONS.filter((section) => !stages.includes(section)).map((s) => s.id),
+    ).toEqual(['cabinet']);
+
+    // Every preset in the file, plus one variant per stage with its own switch
+    // off — no built-in writes `enabled`, so without those the comparison would
+    // never reach the bypassed arm at all.
+    const corpus: readonly VoicePreset[] = [...VOICE_PRESETS, ...ALL_FIXTURES];
+    for (const stage of stages) {
+      const toggle = enabledParamIn(stage.params);
+      const presets = corpus.flatMap((preset) =>
+        toggle ? [preset, setAtPath(preset, toggle.path, false)] : [preset],
+      );
+      for (const preset of presets) {
+        expect(sectionPresence(preset, stage), `${stage.label} / ${preset.id}`).toBe(
+          legacy(preset, stage),
+        );
+      }
     }
   });
 });

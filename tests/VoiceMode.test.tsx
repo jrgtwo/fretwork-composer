@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
+  CABINET_IRS,
   DEFAULT_PATTERNS_STATE,
   PPQ,
   useMetronomeStore,
@@ -63,6 +64,7 @@ import {
   removeVoiceSubBranch,
   setVoiceParam,
   setVoiceSubBranchKind,
+  subscribeVoiceDrafts,
   voicePreset,
   removeVoicePedal,
 } from '../src/voice/voiceDrafts';
@@ -608,6 +610,41 @@ describe('the per-track voice draft seam', () => {
     expect(getAtPath(amp, 'effects.amp.enabled')).toBeUndefined();
   });
 
+  it('seeds a stage from a caller’s value in one commit, and refuses an unseedable path', () => {
+    // The seam behind "Use suggested cab". Two commits — add, then write over the
+    // seed — is two draft notifications, and `playbackService` rebuilds the effects
+    // chain off each one, so on the pattern arm that fetched a cab IR nobody asked
+    // for before replacing it. One call, one notification, the caller's value.
+    const tracks = twoTracks();
+    expect(removeVoiceSection('track', tracks[0].id, 'cabinet').ok).toBe(true);
+    const url = CABINET_IRS[CABINET_IRS.length - 1].url;
+
+    let commits = 0;
+    const stop = subscribeVoiceDrafts(() => {
+      commits += 1;
+    });
+    try {
+      expect(
+        addVoiceSection('track', tracks[0].id, 'cabinet', { 'effects.cabIR.url': url }).ok,
+      ).toBe(true);
+    } finally {
+      stop();
+    }
+
+    expect(commits).toBe(1);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.cabIR.url')).toBe(url);
+    // The second track is untouched — a voice write takes its holder first.
+    expect(dirtyOf(getTracks()[1])).toBe(false);
+
+    // A seed can only reach where the fallback loop would have. A room row is not
+    // seedable here: a sub-branch is created by `addVoiceSubBranch` alone, and a
+    // dropped key would be a caller believing it set something.
+    expect(
+      addVoiceSection('track', tracks[1].id, 'cabinet', { 'effects.reverb.wet': 0.4 }),
+    ).toEqual({ ok: false, reason: expect.stringContaining('not a seedable parameter') });
+    expect(getAtPath(presetOf(getTracks()[1]), 'effects.reverb')).toBeUndefined();
+  });
+
   it('refuses to remove a stage the schema does not mark removable', () => {
     const tracks = twoTracks();
 
@@ -1143,8 +1180,8 @@ describe('the rack in a lane', () => {
     expect(presetOf(getTracks()[1]).effects?.reverb).toBeUndefined();
 
     // Bypass is the room's own, not the cabinet's — two `.enabled` toggles in one
-    // stage, which is why `enabledParamOf` takes the FIRST and why the room's
-    // rows are declared after the cabinet's.
+    // stage, which is why the section's own switch is the FIRST and why the
+    // room's rows are declared after the cabinet's.
     await userEvent.click(
       first.getByRole('switch', { name: `${tracks[0].name} Room Enabled` }),
     );
@@ -1159,6 +1196,71 @@ describe('the rack in a lane', () => {
     expect(presetOf(getTracks()[0]).effects?.cabIR?.url).toEqual(
       expect.stringMatching(/^https?:/),
     );
+  });
+
+  it('keeps one track`s room when its cabinet goes, on screen and in the draft', async () => {
+    // ⚠ TWO TRACKS AGAIN, and for the reason every assertion on this page carries
+    // them: the cabinet and the room are two branches of ONE holder's draft, and
+    // a remove that reached the wrong holder — or both — would look correct with
+    // one rack on screen.
+    //
+    // The state under test could not be seen at all until the Cabinet's probe
+    // listed both branches: removing the speaker took the pane off screen and the
+    // seam deleted the room to stop it sounding out of reach. It keeps its
+    // tuning now, and the pane stays up for it.
+    const tracks = twoTracks();
+    const cabbed = voiceNamed('Crunch');
+    getTracks().forEach((track) => selectVoice('track', track.id, cabbed.ref));
+
+    render(<VoiceGrid />);
+
+    const first = stage(getTracks()[0], 'Cabinet + room');
+    const second = stage(getTracks()[1], 'Cabinet + room');
+    await userEvent.click(
+      first.getByRole('button', { name: `Add Room for ${tracks[0].name}` }),
+    );
+    const size = first.getByRole('slider', { name: `${tracks[0].name} Room Size` });
+    fireEvent.keyDown(size, { key: 'ArrowUp' });
+    const tuned = presetOf(getTracks()[0]).effects?.reverb;
+    expect(tuned?.roomSize).toBeGreaterThan(SEED_VOICE_REVERB.roomSize);
+
+    // The button names the SPEAKER, not the pane: it acts on `effects.cabIR` and
+    // a label naming the room as well would be a button lying about what it does.
+    await userEvent.click(
+      first.getByRole('button', { name: `Remove Cabinet for ${tracks[0].name}` }),
+    );
+
+    // This track: speaker gone, room exactly as it was tuned, still on screen and
+    // still adjustable.
+    expect(presetOf(getTracks()[0]).effects?.cabIR).toBeUndefined();
+    expect(presetOf(getTracks()[0]).effects?.reverb).toEqual(tuned);
+    expect(
+      first.getByRole('slider', { name: `${tracks[0].name} Room Size` }),
+    ).toHaveAttribute('aria-valuenow', String(tuned?.roomSize));
+    expect(
+      // Named by its own `<label htmlFor>` rather than by the holder — the id is
+      // what is scoped here; see the id test above.
+      first.queryByRole('combobox', { name: 'Cabinet' }),
+    ).not.toBeInTheDocument();
+    expect(
+      first.getByRole('button', { name: `Add Cabinet for ${tracks[0].name}` }),
+    ).toBeInTheDocument();
+
+    // The other track was not touched by any of it — it still has its cabinet and
+    // it still has no room.
+    expect(presetOf(getTracks()[1]).effects?.cabIR?.url).toEqual(expect.stringMatching(/^https?:/));
+    expect(presetOf(getTracks()[1]).effects?.reverb).toBeUndefined();
+    expect(
+      second.getByRole('combobox', { name: 'Cabinet' }),
+    ).toBeInTheDocument();
+
+    // And the speaker comes back around the room without disturbing it — the
+    // `addVoiceSection` skip that keeps a sub-branch out of the section's seed.
+    await userEvent.click(
+      first.getByRole('button', { name: `Add Cabinet for ${tracks[0].name}` }),
+    );
+    expect(presetOf(getTracks()[0]).effects?.cabIR?.url).toEqual(expect.stringMatching(/^https?:/));
+    expect(presetOf(getTracks()[0]).effects?.reverb).toEqual(tuned);
   });
 
   it('draws a track`s second source as its own group, and turns its knobs', () => {

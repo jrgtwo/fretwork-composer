@@ -40,7 +40,7 @@
  * pane was undecided. It is post-cab now, and it belongs with the cabinet.)
  *
  * CONDITIONAL ROWS — the mechanism the Source section needed. A section's
- * presence is one probe for the whole section (`presenceProbe`), which cannot say
+ * presence is one answer for the whole section (`presenceProbe`), which cannot say
  * "this row only when the source is an FM synth": the Source section is present
  * on every preset and it is the ROWS that differ, thirteen of them for `fm-synth`
  * against two for `sampler`. So `ParamCommon.appliesWhen` is a per-row condition,
@@ -65,9 +65,9 @@
  * declaring it is enough; nothing has to remember to check.
  *
  * SUB-BRANCHES — an optional branch INSIDE a section, which `ParamSection` cannot
- * express: a section carries exactly ONE `presenceProbe` and ONE
- * `removableBranch`, so a second independently-removable branch has nowhere else
- * to go. `ParamSection.subBranch` is that: a label, the branch, and the
+ * express: a section carries exactly ONE `removableBranch`, so a second
+ * independently-removable branch has nowhere else to go.
+ * `ParamSection.subBranch` is that: a label, the branch, and the
  * well-formed value the Add gesture writes. Its ROWS stay in `section.params`,
  * gated by `requiresBranch`, because `voiceDrafts.PARAM_BY_PATH` is built
  * from `section.params` and a row outside it is a control the composition page
@@ -86,13 +86,27 @@
  * optional branch under a section is a sub-branch — and what belongs in a given
  * section is a judgement about what the thing IS, made per section.
  *
+ * TWO KINDS OF SUB-BRANCH, and `ParamSubBranch.independent` is the difference.
+ * The second source and the cutoff envelope NEST under their section's own
+ * branch: remove the body filter and its envelope goes with it, which is right —
+ * an envelope with no filter to sweep is not a state worth being in. The room
+ * does not nest. It sits at `effects.reverb` while the Cabinet removes
+ * `effects.cabIR`, so it can outlive the speaker, and everything that follows
+ * from `independent` exists to keep that state VISIBLE rather than to prevent it:
+ * the section's `presenceProbe` lists both branches so the pane stays on screen,
+ * every one of the section's own rows declares `requiresBranch` so none of them
+ * renders over a missing speaker, `sectionPresence` lights the lamp from both
+ * stages, and `voiceDrafts.removeVoiceSection` deletes the section's branch
+ * alone. The alternative was tried for a day: Remove took both branches, which
+ * threw away the user's room tuning to hide a state the pane could not draw.
+ *
  * ABSENT vs BYPASSED. Both states are reachable from a stock built-in and they are
  * not the same: `ACOUSTIC_GUITAR_PRESET` has no `effects` object at all, while a
  * preset with `effects.amp.enabled === false` keeps a fully tuned amp out of the
  * chain. `ParamSection.presenceProbe` is what the pane tests for absence; the
- * `enabled` toggle inside a section's params is bypass. `removableBranch` is
- * separate again — a section can be absent-able without being removable (you
- * cannot delete a preset's source).
+ * `enabled` toggle inside a stage's params is bypass, one per stage rather than
+ * one per pane. `removableBranch` is separate again — a section can be
+ * absent-able without being removable (you cannot delete a preset's source).
  */
 
 import {
@@ -399,17 +413,34 @@ export type SectionId =
 export interface ParamStage {
   readonly label: string;
   /**
-   * Path that must resolve to an object or array for this stage to apply at all.
-   * `null` means the stage reads always-present parts of the preset, so it is
-   * never absent. Evaluate it with `sectionApplies` (below) — never with `hasPath`,
-   * which answers key presence and would call a `cabIR: undefined` preset "has a
-   * cabinet".
+   * Path — or paths — that must resolve to an object or array for this stage to
+   * apply at all. `null` means the stage reads always-present parts of the preset,
+   * so it is never absent. Evaluate it with `sectionApplies` (below) — never with
+   * `hasPath`, which answers key presence and would call a `cabIR: undefined`
+   * preset "has a cabinet".
+   *
+   * A LIST MEANS ANY OF THEM, and exactly one stage needs it. The Cabinet pane
+   * holds two things a user can have separately — the speaker (`effects.cabIR`)
+   * and the room it stands in (`effects.reverb`) — and one probe for both took the
+   * whole pane off screen the moment the speaker went, leaving the room wired,
+   * audible and with no control anywhere to reach it. Every other section and all
+   * six pedals declare a plain string, and `paramSchema.test.ts` pins that: a list
+   * is the answer to "one pane, two independent stages", not a general widening.
+   *
+   * ⚠ A LISTED STAGE HAS TO GATE ITS OWN ROWS. With one path a row could lean on
+   * the section vanishing with the branch; with two it cannot, so every row of
+   * such a section declares `requiresBranch` naming the branch it lives in.
    */
-  readonly presenceProbe: string | null;
+  readonly presenceProbe: string | readonly string[] | null;
   /**
-   * Branch `removeAtPath` deletes to take the stage back to absent. `null` = the
-   * stage cannot be removed. Every param in the stage lives under it when set,
-   * because removing the branch has to remove the whole stage.
+   * The ONE branch `removeAtPath` deletes to take the stage back to absent.
+   * `null` = the stage cannot be removed.
+   *
+   * Where a section holds two branches this is its OWN — the speaker, never the
+   * room: an `independent` sub-branch carries its own Add and Remove, and
+   * `voiceDrafts.removeVoiceSection` touches nothing but this path. Every param
+   * of the stage lives under this branch or under the sub-branch's, which is
+   * what stops a row outliving the gesture that removes what it edits.
    */
   readonly removableBranch: string | null;
   readonly params: readonly Param[];
@@ -417,6 +448,18 @@ export interface ParamStage {
 
 export interface ParamSection extends ParamStage {
   readonly id: SectionId;
+  /**
+   * What the stage's own Add/Remove button NAMES, when the section's label covers
+   * more than `removableBranch` does. Defaults to `label`.
+   *
+   * One section needs it: "Cabinet + room" names a pane holding two stages, and
+   * its header button adds and removes the speaker alone. A button reading
+   * "Remove Cabinet + room" beside a Room that it does not remove is a button
+   * lying about what it does — and on a room-only voice it would offer to remove
+   * a cabinet that is already gone. Data rather than a branch in the renderer,
+   * for the reason every other field here is.
+   */
+  readonly removableLabel?: string;
   /**
    * One optional branch nested INSIDE this section, added and removed on its own.
    * See the header. Its rows are the members of `params` living under
@@ -445,6 +488,25 @@ export interface ParamSubBranch {
   readonly label: string;
   /** Probe AND removal target. `hasBranchAtPath` here is "the user has one". */
   readonly branch: string;
+  /**
+   * Set when this branch does NOT nest under its section's `removableBranch`: it
+   * survives the section's Remove, it can exist while the section's own branch
+   * does not, and the section's probe therefore has to list it.
+   *
+   * The room is the only one, and the other two are deliberately not it. A second
+   * source is part of the source and a cutoff envelope is part of the filter it
+   * sweeps — an envelope with no filter is not a state worth being in, so those
+   * two go absent with their section and their rows are never rendered over a
+   * missing parent. The room is a stage of the chain in its own right; a speaker
+   * and the space around it are two things, and either one alone is a sound
+   * someone wants.
+   *
+   * Three things read it, and together they are the whole of what it means:
+   * `sectionPresence` counts the branch as a stage of its own when lighting the
+   * lamp, `VoiceEditor.renderStage` draws the branch's Add even while the section
+   * is absent, and `voiceDrafts.removeVoiceSection` leaves it alone.
+   */
+  readonly independent?: true;
   /**
    * The complete, well-formed starting value, built for the preset it is about to
    * join. Typed at its own declaration as the lib's interface for that branch —
@@ -1374,12 +1436,23 @@ const AMP_SECTION: ParamSection = {
 };
 
 /**
- * The speaker and the room it is standing in.
+ * The speaker and the room it is standing in — ONE pane, TWO stages, each of
+ * which the user can have without the other.
  *
- * TWO branches, which is why the reverb is a `subBranch` and not a section of
- * its own: `presenceProbe` and `removableBranch` are the CABINET's, and
- * `effects.reverb` is added and removed independently underneath them. The
- * header's SUB-BRANCHES note carries the argument for pairing them at all.
+ * The reverb is a `subBranch` rather than a section of its own because the pane
+ * is deliberately presenting one physical idea; the header's SUB-BRANCHES note
+ * carries that argument. What makes the pairing honest is that it costs the user
+ * nothing: `presenceProbe` LISTS both branches, so the pane is on screen while
+ * EITHER exists, and `removableBranch` is the speaker's alone, so the header's
+ * Remove takes the speaker and leaves the room standing. Four states, all
+ * reachable and all visible: speaker only, room only, both, neither.
+ *
+ * ⚠ THE CABINET'S OWN THREE ROWS DECLARE `requiresBranch`, and the two-path probe
+ * is exactly why. They used to carry none, which was safe only while the pane
+ * vanished with `effects.cabIR`; on a room-only voice they would now render — and
+ * be writable — over a branch that is not there. The gate is `paramApplies`, so
+ * it hides them in both editors AND refuses the write at `setVoiceParam` from the
+ * same declaration.
  *
  * The pairing is a claim about the signal chain and it is only true while the
  * chain says so: the lib wires `cabIR → cabIRMakeup → voiceReverb → finalEq`,
@@ -1389,13 +1462,18 @@ const AMP_SECTION: ParamSection = {
 const CABINET_SECTION: ParamSection = {
   id: 'cabinet',
   label: 'Cabinet + room',
-  presenceProbe: 'effects.cabIR',
+  // The speaker OR the room — see `ParamStage.presenceProbe`. The only listed
+  // probe in the table.
+  presenceProbe: ['effects.cabIR', 'effects.reverb'],
   removableBranch: 'effects.cabIR',
+  // What the header's Add/Remove acts on, which is not what the pane is called.
+  removableLabel: 'Cabinet',
   params: [
     {
       kind: 'toggle',
       path: 'effects.cabIR.enabled',
       label: 'Enabled',
+      requiresBranch: 'effects.cabIR',
       optional: true,
       fallback: true,
     },
@@ -1403,6 +1481,7 @@ const CABINET_SECTION: ParamSection = {
       kind: 'enum',
       path: 'effects.cabIR.url',
       label: 'Cabinet',
+      requiresBranch: 'effects.cabIR',
       options: CABINET_OPTIONS,
       // `url` is required inside `CabIRParams`, so the only way this is reached is
       // the pane creating the branch — and a cabinet section with no cabinet is not
@@ -1418,6 +1497,7 @@ const CABINET_SECTION: ParamSection = {
       kind: 'slider',
       path: 'effects.cabIR.makeupDb',
       label: 'Makeup',
+      requiresBranch: 'effects.cabIR',
       optional: true,
       min: -24,
       max: 24,
@@ -1437,14 +1517,18 @@ const CABINET_SECTION: ParamSection = {
     },
 
     // ---- the room (`effects.reverb`) ---------------------------------------
-    // ⚠ THESE THREE STAY LAST. `enabledParamOf` returns the FIRST row whose kind
-    // is `toggle` and whose path ends `.enabled`, and that row is what lights the
-    // stage lamp. Moved above `effects.cabIR.enabled`, the reverb's bypass would
-    // become the lamp for the whole section — the cabinet switched out would read
-    // as lit. `paramSchema.test.ts` pins it directly ("lights a section's lamp
-    // from the section, never from its sub-branch") and `VoicePane.test.tsx`
-    // reads the lamp back through the rendered stage; nothing about the ORDER of
-    // this array says so on its own, which is why it is written here too.
+    // ⚠ THESE THREE STAY LAST, AND THE REASON IS NARROWER THAN IT WAS. Nothing
+    // that draws this pane depends on the order any more: `sectionPresence` and
+    // `VoiceEditor.renderCabinet` both split these rows by BRANCH PREFIX
+    // (`underBranch` / `ownParams`) and ask each stage with its own rows, so the
+    // speaker's bypass and the room's cannot be confused however they are
+    // declared. What the order still decides is `enabledParamOf`'s answer — it
+    // returns the FIRST `.enabled` toggle and is documented as "the stage's OWN
+    // switch", which for a section with a sub-branch is only true while the
+    // sub-branch's rows come last. No production caller asks it about this
+    // section today; `paramSchema.test.ts` pins it ("finds a section`s own bypass
+    // in the section, never in its sub-branch") so the documented contract stays
+    // true for the one that eventually does.
     //
     // Gated on the BRANCH, like the body filter's envelope: a `VoiceReverbParams`
     // is two numbers and an optional flag, with no discriminant for an
@@ -1499,6 +1583,11 @@ const CABINET_SECTION: ParamSection = {
     id: 'cabinet-room',
     label: 'Room',
     branch: 'effects.reverb',
+    // Outside `removableBranch`, so it survives the speaker's Remove and can
+    // stand alone — the reason this section's probe lists two paths. See
+    // `ParamSubBranch.independent`; the other two sub-branches deliberately do
+    // not set it.
+    independent: true,
     absentNote:
       'No room — the cabinet is heard dry, close-miked. Adding one puts the speaker in a space and lets it decay into it.',
     // The whole branch in one write, for the reason `ParamSubBranch.seed`
@@ -1568,8 +1657,10 @@ const LEVEL_SECTION: ParamSection = {
  * ── WHY A SECOND TABLE AND NOT SIX MORE SECTIONS ─────────────────────────────
  *
  * Every pedal is independently present, bypassable and removable, and a
- * `ParamSection` carries exactly one `presenceProbe` and one `removableBranch`.
- * Six sections would express that and would put six more stages in a rack the
+ * `ParamSection` carries one `removableBranch`. Six sections would express that —
+ * a listed `presenceProbe` would not, since it says which branches put the pane
+ * on screen and nothing about removing them — and would put six more stages in a
+ * rack the
  * composition page already argues should show TWO TRACKS at once. So the
  * pedalboard is ONE section whose body is a list, and this is the list.
  *
@@ -1580,7 +1671,9 @@ const LEVEL_SECTION: ParamSection = {
  * own presence fields. `sectionApplies`, `enabledParamOf` and `sectionPresence`
  * all take a stage, so a pedal's lamp is lit by the same function that lights
  * the amp's. Two definitions of "bypassed" is a rack whose lamp disagrees with
- * the ear, and that reasoning is already written on `sectionPresence`.
+ * the ear, and that reasoning is already written on `sectionPresence`. Having no
+ * sub-branch, a pedal takes that function's single-stage path — one probe, one
+ * `.enabled` row — which is what it has always done.
  *
  * The seed is `ParamSubBranch.seed`'s argument, not `addSection`'s: a pedal
  * arrives as one branch in one write, so it has to be well-formed the instant it
@@ -2378,25 +2471,76 @@ export function branchParams(preset: VoicePreset, section: ParamSection): readon
 const underBranch = (param: Param, sub: ParamSubBranch): boolean =>
   param.path.startsWith(`${sub.branch}.`);
 
+/** `presenceProbe` as a list, whatever shape it was declared in. One place, so
+ *  the string and the array cases cannot acquire two readings of "present". */
+export function probePaths(stage: ParamStage): readonly string[] {
+  if (stage.presenceProbe === null) return [];
+  return typeof stage.presenceProbe === 'string' ? [stage.presenceProbe] : stage.presenceProbe;
+}
+
 /**
  * Whether `section` has anything to edit on `preset` — i.e. its branch is really
  * there, as opposed to bypassed (`enabled: false`) or removable-but-removed. The one
  * evaluator for `presenceProbe`, so the pane and the schema test cannot drift into
  * two different definitions of "present".
+ *
+ * ANY of the listed paths, for the reason `presenceProbe` gives: a pane holding
+ * two independent stages is on screen while either one exists. With one path
+ * declared — every section but the Cabinet, and all six pedals — this is the same
+ * single `hasBranchAtPath` it always was.
  */
 export function sectionApplies(preset: VoicePreset, section: ParamStage): boolean {
-  return section.presenceProbe === null || hasBranchAtPath(preset, section.presenceProbe);
+  return (
+    section.presenceProbe === null ||
+    probePaths(section).some((path) => hasBranchAtPath(preset, path))
+  );
 }
 
 /**
- * The stage's `enabled` param, if it has one — bypass is a param, not a section
- * flag, which is why it is found in the table rather than declared beside it.
+ * Whether the stage's OWN removable branch is really on the preset — the question
+ * its Add/Remove button asks, and the question {@link addVoiceSection} asks before
+ * it seeds anything.
+ *
+ * Not {@link sectionApplies}. The two part company the moment a probe lists more
+ * than one branch: on a voice with a room and no speaker the Cabinet pane APPLIES
+ * while the branch its button acts on is missing, so presence would offer "Remove
+ * Cabinet" for a cabinet that is already gone and would make Add a silent no-op.
+ * `hasBranchAtPath`, never `hasPath`, for the reason `presenceProbe` gives: a
+ * `cabIR: undefined` preset does not have a cabinet.
+ *
+ * `false` for a stage that cannot be removed — there is no branch to be present.
  */
-export function enabledParamOf(section: ParamStage): ToggleParam | undefined {
-  return section.params.find(
+export function removableBranchPresent(preset: VoicePreset, stage: ParamStage): boolean {
+  return stage.removableBranch !== null && hasBranchAtPath(preset, stage.removableBranch);
+}
+
+/**
+ * The `enabled` param among `params`, if there is one — bypass is a param, not a
+ * section flag, which is why it is found in the table rather than declared beside
+ * it.
+ *
+ * Takes ROWS rather than a stage because a section can hold two bypassable stages
+ * (the Cabinet's speaker and its room), and each one's switch is found the same
+ * way from its own rows. {@link enabledParamOf} is the whole-stage case.
+ */
+export function enabledParamIn(params: readonly Param[]): ToggleParam | undefined {
+  return params.find(
     (param): param is ToggleParam =>
       param.kind === 'toggle' && param.path.endsWith('.enabled'),
   );
+}
+
+/**
+ * The stage's own `enabled` param — the FIRST `.enabled` toggle it declares.
+ *
+ * ⚠ FOR A SECTION WITH AN `independent` SUB-BRANCH THIS IS THE SECTION'S, NOT THE
+ * PANE'S: the sub-branch's rows are declared last precisely so this finds the
+ * section's switch and not the room's. `sectionPresence` no longer reads the lamp
+ * off this one row alone — it asks each present stage separately — so a caller
+ * wanting "is THIS stage switched out" should ask with the rows it means.
+ */
+export function enabledParamOf(section: ParamStage): ToggleParam | undefined {
+  return enabledParamIn(section.params);
 }
 
 /**
@@ -2407,14 +2551,71 @@ export function enabledParamOf(section: ParamStage): ToggleParam | undefined {
  * second definition of "bypassed" is a rack whose lamp disagrees with the ear.
  * `absent` beats `bypassed`: a preset with no `effects` branch at all has no
  * `enabled` flag to be false.
+ *
+ * ⚠ A PANE CAN HOLD TWO STAGES, and the lamp has to answer for both. The Cabinet
+ * carries a speaker and a room, each present or not and each bypassable on its
+ * own; reading one flag would under-report — a switched-out cabinet with the room
+ * still on would print "Bypassed" over something plainly audible. So: absent when
+ * no listed branch is there, bypassed when EVERY stage that IS there is switched
+ * out, active otherwise.
+ *
+ * For every stage without an `independent` sub-branch — every other section, and
+ * all six pedals — that reduces to exactly the single `enabledParamOf` read it has
+ * always been, and `paramSchema.test.ts` asserts the equivalence rather than
+ * trusting this paragraph.
  */
 export type SectionPresence = 'active' | 'bypassed' | 'absent';
+
+/**
+ * Whether the stage those rows describe is switched out. No `.enabled` row at all
+ * means the stage has no bypass, which is not the same as being bypassed.
+ *
+ * Exported because a pane can hold two stages and a renderer sometimes has to ask
+ * about ONE of them — `VoiceEditor.renderCabinet` greys the speaker graphic from
+ * the speaker's own rows, not from the lamp. The whole point of one evaluator is
+ * that it is this one: a component re-deriving `enabled === false` by hand is the
+ * second definition of "bypassed" this module exists to prevent.
+ */
+export function stageBypassed(preset: VoicePreset, rows: readonly Param[]): boolean {
+  const toggle = enabledParamIn(rows);
+  return toggle !== undefined && getAtPath(preset, toggle.path) === false;
+}
+
+/**
+ * The stage's `independent` sub-branch, if it has one.
+ *
+ * The parameter is "a stage that MAY carry a sub-branch" rather than
+ * `ParamSection`, so a `Pedal` — a stage with no sub-branch to declare, see the
+ * pedal table's header — passes on its own terms. An optional member is satisfied
+ * by its absence, so this needs no assertion to read a field the narrower type
+ * does not have.
+ */
+function independentSubOf(
+  stage: ParamStage & { readonly subBranch?: ParamSubBranch },
+): ParamSubBranch | undefined {
+  return stage.subBranch?.independent ? stage.subBranch : undefined;
+}
 
 export function sectionPresence(
   preset: VoicePreset,
   section: ParamStage,
 ): SectionPresence {
   if (!sectionApplies(preset, section)) return 'absent';
-  const toggle = enabledParamOf(section);
-  return toggle && getAtPath(preset, toggle.path) === false ? 'bypassed' : 'active';
+
+  const sub = independentSubOf(section);
+  if (!sub) return stageBypassed(preset, section.params) ? 'bypassed' : 'active';
+
+  // Two stages under one pane. The section's own rows are everything outside the
+  // sub-branch, and its own presence is whichever probes are not the sub-branch's
+  // — for the Cabinet, `effects.cabIR` alone. A section that listed no probe of
+  // its own would be always-present, exactly as `sectionApplies` reads it.
+  const ownProbes = probePaths(section).filter((path) => path !== sub.branch);
+  const present: boolean[] = [];
+  if (ownProbes.length === 0 || ownProbes.some((path) => hasBranchAtPath(preset, path))) {
+    present.push(stageBypassed(preset, section.params.filter((param) => !underBranch(param, sub))));
+  }
+  if (subBranchApplies(preset, sub)) {
+    present.push(stageBypassed(preset, section.params.filter((param) => underBranch(param, sub))));
+  }
+  return present.length > 0 && present.every(Boolean) ? 'bypassed' : 'active';
 }

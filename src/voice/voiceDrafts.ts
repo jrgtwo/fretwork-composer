@@ -106,6 +106,7 @@ import {
   PARAM_SECTIONS,
   PEDALS,
   paramApplies,
+  removableBranchPresent,
   sectionApplies,
   subBranchApplies,
   type Param,
@@ -484,22 +485,72 @@ function sectionById(id: string) {
  * whose sub-branch sits OUTSIDE its removable branch — the Cabinet's room, at
  * `effects.reverb` while the section removes `effects.cabIR` — would have the
  * user's tuning overwritten by row fallbacks the moment the section was added
- * back, silently and with no refusal. Every other sub-branch happens to nest
- * under its section's branch, so it goes absent with it and never reaches this
- * loop; the rule is written for the general case rather than that accident.
+ * back, silently and with no refusal. That is not hypothetical: a room CAN
+ * outlive its cabinet, and adding the cabinet around a room the user has already
+ * tuned is an ordinary gesture. Every other sub-branch nests under its section's
+ * branch, so it goes absent with it and never reaches this loop.
+ *
+ * ⚠ WHAT COUNTS AS "ALREADY THERE" IS THE BRANCH THIS CREATES, not the section's
+ * presence — {@link removableBranchPresent}, which carries that argument. A
+ * section with no removable branch has nothing to add and stays the no-op it
+ * always was.
+ *
+ * `seed` overrides a row's `fallback` for this one call, and exists so a caller
+ * that knows the value it wants does not have to add the section and then write
+ * over it. "Use suggested cab" is the case: two commits meant two draft
+ * notifications, and a `cabIR.url` change is not an in-place retune in the lib
+ * (`sameEffectsShape` compares it), so the first commit rebuilt the whole effects
+ * chain and fetched an IR nobody asked for before the second replaced it. Keys are
+ * row PATHS this loop would have written anyway — anything else is refused rather
+ * than dropped, so a seed can never reach somewhere the fallbacks could not. A seeded row is written even when it
+ * is `optional`: an explicit value is a value the caller chose, which is exactly
+ * what the optional skip is protecting.
  */
-export function addVoiceSection(kind: HolderKind, id: string, sectionId: SectionId): Result {
+export function addVoiceSection(
+  kind: HolderKind,
+  id: string,
+  sectionId: SectionId,
+  seed?: Readonly<Record<string, unknown>>,
+): Result {
   const holder = holderOf(kind, id);
   if (!holder) return noHolder(kind);
   const section = sectionById(sectionId);
   if (!section) return { ok: false, reason: `“${sectionId}” is not a voice section.` };
+  // Refused, not ignored, for anything the loop below would not have written
+  // anyway: a path outside the section, a sub-branch row (a sub-branch is created
+  // only by `addVoiceSubBranch`, from its own seed), or one of the two kinds the
+  // loop deliberately writes nothing for. A silently dropped seed is a caller
+  // believing it set something.
+  for (const path of Object.keys(seed ?? {})) {
+    const row = section.params.find((param) => param.path === path);
+    const seedable =
+      row !== undefined &&
+      row.kind !== 'sample-pack' &&
+      row.kind !== 'source-kind' &&
+      !(section.subBranch && path.startsWith(`${section.subBranch.branch}.`));
+    if (!seedable) {
+      return { ok: false, reason: `“${path}” is not a seedable parameter of ${section.label}.` };
+    }
+  }
 
   let next = holder.preset;
-  if (sectionApplies(next, section)) return { ok: true, value: undefined };
+  const branch = section.removableBranch;
+  if (branch === null || removableBranchPresent(next, section)) {
+    return { ok: true, value: undefined };
+  }
+  // ⚠ THE BRANCH GOES IN EMPTY FIRST, and the rows below fill it. A section whose
+  // presence probe lists more than its own branch has to gate its own rows on
+  // that branch (`requiresBranch: 'effects.cabIR'`), or they would render over a
+  // voice that has only the room — and `paramApplies` would then refuse every one
+  // of them here, seeding nothing at all. Writing the branch first is what makes
+  // the gate true for the section being built; `setAtPath` merges into it, so the
+  // result is the same object the row fallbacks alone used to produce.
+  next = setAtPath(next, branch, {});
   const sub = section.subBranch;
   for (const param of section.params) {
     if (sub && param.path.startsWith(`${sub.branch}.`)) continue;
-    if (param.optional) continue;
+    const seeded = seed !== undefined && Object.hasOwn(seed, param.path);
+    if (param.optional && !seeded) continue;
     if (!paramApplies(next, param)) continue;
     // Exhaustive: `source-kind` and `sample-pack` are the two rows whose value is
     // not what `setAtPath(path, fallback)` would write, and a bare
@@ -511,7 +562,7 @@ export function addVoiceSection(kind: HolderKind, id: string, sectionId: Section
       case 'encoder':
       case 'enum':
       case 'toggle':
-        next = setAtPath(next, param.path, param.fallback);
+        next = setAtPath(next, param.path, seeded ? seed[param.path] : param.fallback);
         break;
       case 'sample-pack':
       case 'source-kind':
@@ -529,13 +580,15 @@ export function addVoiceSection(kind: HolderKind, id: string, sectionId: Section
  * stage back on; this throws it away, which is why only sections the schema
  * marks `removableBranch` can be removed at all.
  *
- * ⚠ AND ITS SUB-BRANCH WITH IT. The button says "Remove Cabinet + room", and
- * `sectionApplies` takes the sub-branch off screen along with the section, so a
- * sub-branch left behind is a stage still wired, still audible, and with no
- * control anywhere to reach it — `effects.reverb` surviving a removed
- * `effects.cabIR` is exactly that, because the room is the one sub-branch that
- * does not nest under its section's removable branch. For every other one this
- * second `removeAtPath` is a no-op the first already did.
+ * ⚠ ONE BRANCH, AND ONLY ONE — `section.removableBranch`. An `independent`
+ * sub-branch is NOT removed with the section: the Cabinet's button says "Remove
+ * Cabinet", it takes the speaker, and the room it was standing in stays, tuning
+ * and all. That is safe because the room stays REACHABLE — `CABINET_SECTION`
+ * lists `effects.reverb` in its `presenceProbe`, so the pane is still on screen
+ * with the room's own rows and its own Remove in it. This used to delete the
+ * sub-branch too, which threw away the user's room to avoid drawing a state the
+ * pane could not yet show. Every other sub-branch nests under the removable
+ * branch and goes with it in the one `removeAtPath` below.
  */
 export function removeVoiceSection(kind: HolderKind, id: string, sectionId: SectionId): Result {
   const holder = holderOf(kind, id);
@@ -545,9 +598,7 @@ export function removeVoiceSection(kind: HolderKind, id: string, sectionId: Sect
   if (!section.removableBranch) {
     return { ok: false, reason: `${section.label} cannot be removed from a voice.` };
   }
-  let next = removeAtPath(holder.preset, section.removableBranch);
-  if (section.subBranch) next = removeAtPath(next, section.subBranch.branch);
-  return commit(kind, id, holder, next);
+  return commit(kind, id, holder, removeAtPath(holder.preset, section.removableBranch));
 }
 
 /**
@@ -580,6 +631,12 @@ function subBranchById(
  * it has all three states a section has. What still separates the two is purely
  * mechanical — the count of branches a `ParamSection` can declare — and
  * `paramSchema`'s header carries the same correction in full.
+ *
+ * An `independent` sub-branch can be added to a holder whose section is absent,
+ * and the room is: this never consults the section, and the Cabinet pane draws
+ * the room's Add even with no speaker on the voice. That is the state the
+ * `independent` flag exists to keep visible rather than the accident it used to
+ * be.
  * A `VoiceLayer` contains a whole `VoiceSource`, and no amount of row fallbacks
  * produces one — which is the entire reason `seed` exists (see `ParamSubBranch`).
  *
@@ -615,6 +672,10 @@ export function addVoiceSubBranch(kind: HolderKind, id: string, subBranchId: str
  * with `effects.reverb.enabled` keeps its size and mix, and this deletes them —
  * so the two gestures are genuinely different there rather than one standing in
  * for the other.
+ *
+ * For the room it is also the only thing that deletes it at all: the Cabinet's
+ * own Remove takes the speaker and leaves the room standing, so nothing but this
+ * call throws a room away.
  */
 export function removeVoiceSubBranch(kind: HolderKind, id: string, subBranchId: string): Result {
   const holder = holderOf(kind, id);

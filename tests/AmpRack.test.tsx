@@ -394,7 +394,7 @@ describe('the rack, wired into the pane', () => {
     render(<Host />);
     // The stock acoustic guitar has no `effects` at all, so both stages start absent.
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
     // The room is the cabinet section's SUB-BRANCH, added by its own gesture:
     // `addVoiceSection` skips every row under a section's sub-branch outright, so
     // Add Cabinet alone can never create one however the preset looks. Without
@@ -451,7 +451,7 @@ describe('the rack, wired into the pane', () => {
 
   it('drives the cabinet from the mic dot, and keeps the select as the text route', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
 
     // Seeded from the schema fallback: the first registered IR.
     const picker = screen.getByLabelText('Cabinet') as HTMLSelectElement;
@@ -472,7 +472,7 @@ describe('the rack, wired into the pane', () => {
 
   it('picks a cabinet from the select as well, with the dot following', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
 
     // The brief's text-level fallback has to work in the direction that makes it a
     // fallback: selectable without ever touching the graphic.

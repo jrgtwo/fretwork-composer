@@ -23,6 +23,7 @@ import {
   isVoiceDirty,
   readVoiceDraft,
   setVoiceParam,
+  subscribeVoiceDrafts,
 } from '../src/voice/voiceDrafts';
 import { SEED_VOICE_REVERB } from '../src/voice/pedalDefaults';
 import { readVoiceRef } from '../src/voice/voiceService';
@@ -232,7 +233,7 @@ describe('VoicePane', () => {
     expect(screen.getAllByText(/stage on this voice\./)).toHaveLength(4);
     expect(screen.queryByText('Not on this preset')).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
     const toggle = screen.getByRole('switch', { name: 'Cabinet + room Enabled' });
     expect(toggle).toHaveAttribute('aria-checked', 'true');
 
@@ -247,9 +248,9 @@ describe('VoicePane', () => {
     expect(screen.getAllByText('Bypassed')).toHaveLength(3);
     expect(screen.getByLabelText('Cabinet')).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: 'Remove Cabinet + room' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Cabinet' }));
     expect(screen.queryByLabelText('Cabinet')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Add Cabinet + room' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add Cabinet' })).toBeInTheDocument();
   });
 
   it('names every bypass switch after its own stage', async () => {
@@ -258,7 +259,7 @@ describe('VoicePane', () => {
     // already solve, and a test that adds only one section cannot see it.
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
 
     expect(screen.getByRole('switch', { name: 'Amp Enabled' })).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Cabinet + room Enabled' })).toBeInTheDocument();
@@ -281,7 +282,7 @@ describe('VoicePane', () => {
      *  the one every assertion below starts from. */
     const withCabinet = async () => {
       render(<Host />);
-      await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
     };
 
     it('adds the room as its own branch, seeded whole', async () => {
@@ -315,6 +316,20 @@ describe('VoicePane', () => {
 
     it('removes the room without taking the cabinet with it', async () => {
       await withCabinet();
+      // The absent-speaker note is the ROOM-ONLY pane's, and says so by not being
+      // here: with a cabinet on the voice it would sit directly beside the cab
+      // select it contradicts. Made unconditional, nothing else in this file or
+      // the schema's would notice.
+      expect(screen.queryByText(/No speaker cabinet/i)).not.toBeInTheDocument();
+      // The other side of the room-only assertions further down: with a speaker
+      // on the voice the graphic IS drawn, so those negatives are about the gate
+      // rather than about a query that never matches anything.
+      expect(
+        screen.getByRole('radiogroup', { name: 'Cabinet mic position' }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryAllByText('In chain').filter((node) => node.tagName === 'P'),
+      ).toHaveLength(1);
       await userEvent.click(screen.getByRole('button', { name: 'Add Room' }));
 
       await userEvent.click(screen.getByRole('button', { name: 'Remove Room' }));
@@ -331,10 +346,10 @@ describe('VoicePane', () => {
       await withCabinet();
       await userEvent.click(screen.getByRole('button', { name: 'Add Room' }));
 
-      // Two switches now, and the names are the thing under test: the section's
-      // own lamp reads `effects.cabIR.enabled` (`enabledParamOf` returns the
-      // FIRST `.enabled` toggle in the section, which is why the room's three
-      // rows are declared last).
+      // Two switches now, and the names are the thing under test: each stage's
+      // bypass is found among that stage's OWN rows (`ownParams` for the speaker,
+      // `branchParams` for the room), so the two switches cannot be confused for
+      // one another however the schema declares them.
       await userEvent.click(screen.getByRole('switch', { name: 'Room Enabled' }));
 
       expect(draftPreset().effects?.reverb?.enabled).toBe(false);
@@ -346,9 +361,9 @@ describe('VoicePane', () => {
         'true',
       );
       // AND THE STAGE ITSELF IS STILL LIT — the half a switch's own `aria-checked`
-      // cannot say. `sectionPresence` reads `enabledParamOf`, which takes the
-      // FIRST `.enabled` row in the section; declared ahead of the cabinet's, the
-      // room's bypass would darken the whole stage and both assertions above would
+      // cannot say. `sectionPresence` asks every stage the voice HAS and calls the
+      // pane bypassed only when all of them are switched out; a rule that read one
+      // row would darken the whole stage here, and both assertions above would
       // still pass.
       //
       // ONE "Bypassed" on the page, and it is the room's own switch reading back
@@ -360,37 +375,179 @@ describe('VoicePane', () => {
       expect(bypassed[0]).toHaveAttribute('aria-label', 'Room Enabled');
     });
 
-    it('takes the room with it when the whole stage is removed', async () => {
+    it('leaves the room standing when the cabinet is removed, tuning and all', async () => {
+      // ⚠ THE ONE THIS BLOCK WAS WRITTEN AROUND. Remove used to delete
+      // `effects.reverb` along with `effects.cabIR`, because the pane went off
+      // screen with the speaker and a room it could not draw was a stage still
+      // wired and still sounding with nothing to reach it. The fix is the pane,
+      // not the deletion: `CABINET_SECTION` lists both branches in its probe, so
+      // the room stays on screen and the user's tuning is theirs to keep.
       await withCabinet();
       await userEvent.click(screen.getByRole('button', { name: 'Add Room' }));
+      // Tuned away from the seed, so "unchanged" is a real claim rather than a
+      // second reading of the same default.
+      const size = screen.getByRole('slider', { name: 'Room Size' });
+      size.focus();
+      await userEvent.keyboard('{ArrowUp}{ArrowUp}{ArrowUp}');
+      const tuned = draftPreset().effects?.reverb;
+      expect(tuned?.roomSize).toBeGreaterThan(SEED_VOICE_REVERB.roomSize);
+
+      await userEvent.click(screen.getByRole('button', { name: 'Remove Cabinet' }));
+
+      // The speaker went. The room did not, and it did not move either.
+      expect(draftPreset().effects?.cabIR).toBeUndefined();
+      expect(draftPreset().effects?.reverb).toEqual(tuned);
+      // Still on screen, still adjustable: the pane is present for the room alone.
+      expect(screen.getByRole('slider', { name: 'Room Size' })).toHaveAttribute(
+        'aria-valuenow',
+        String(tuned?.roomSize),
+      );
+      expect(screen.getByRole('button', { name: 'Remove Room' })).toBeInTheDocument();
+      // And nothing of the cabinet is drawn over the branch that is gone — not
+      // the graphic, not the select, not the makeup knob. Every cab row is gated
+      // on `effects.cabIR`, so `ownParams` returns none of them.
+      //
+      // THE GRAPHIC IS ASSERTED, not implied. It is `CabinetGraphic`'s mic-position
+      // `radiogroup` and its own state line; both are gated on the same `cab` enum
+      // lookup as the select, but "no cabinet graphic" is the brief's words and a
+      // shared gate is a reason to believe the assertion, not a reason to skip it.
+      expect(
+        screen.queryByRole('radiogroup', { name: 'Cabinet mic position' }),
+      ).not.toBeInTheDocument();
+      // The graphic's own state line — a `<p>`, filtered for because a switch
+      // reads back "In chain" as ITS label too and the room's is on this pane.
+      expect(
+        screen.queryAllByText('In chain').filter((node) => node.tagName === 'P'),
+      ).toEqual([]);
+      expect(screen.queryByLabelText('Cabinet')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Makeup')).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('switch', { name: 'Cabinet + room Enabled' }),
+      ).not.toBeInTheDocument();
+      // The offer is the speaker's, and it reads as the speaker's — with a line
+      // saying why the half of the pane above the room is empty, because an
+      // unexplained gap is the defect this rack's absent states exist to avoid.
+      expect(screen.getByRole('button', { name: 'Add Cabinet' })).toBeInTheDocument();
+      expect(screen.getByText(/No speaker cabinet on this voice/i)).toBeInTheDocument();
+    });
+
+    it('keeps the room writable through the seam with no cabinet on the voice', async () => {
+      // The other half of "on screen": a control that renders and cannot be
+      // written is the same dead end in slower motion. `setVoiceParam` gates on
+      // `PARAM_BY_PATH` and then on `paramApplies`, and the room's rows are gated
+      // on the room — not on the cabinet — so this is the assertion that the two
+      // branches really are independent all the way to the seam.
+      await withCabinet();
+      await userEvent.click(screen.getByRole('button', { name: 'Add Room' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Remove Cabinet' }));
+
+      const mix = screen.getByRole('slider', { name: 'Room Mix' });
+      mix.focus();
+      await userEvent.keyboard('{ArrowUp}');
+      expect(draftPreset().effects?.reverb?.wet).toBeGreaterThan(SEED_VOICE_REVERB.wet);
+
+      // And the cabinet's own rows are refused from the same gate, which is what
+      // stops a headless caller minting a `CabIRParams` with no `url` in it.
+      const patternId = getEditingPattern()!.id;
+      expect(setVoiceParam('pattern', patternId, 'effects.cabIR.makeupDb', 3).ok).toBe(false);
+      expect(draftPreset().effects?.cabIR).toBeUndefined();
+    });
+
+    it('offers both Adds when the voice has neither', async () => {
+      // The fourth state, and the one that used to be undrawable: an absent
+      // section still draws its INDEPENDENT sub-branch, so the pane reads "no
+      // cabinet stage", Add the speaker, Add the room. Only an independent one —
+      // the body filter's cutoff envelope stays hidden under its own absent
+      // section, because an envelope with no filter is not a state worth offering.
+      render(<Host />);
+      expect(screen.getByRole('button', { name: 'Add Cabinet' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add Room' })).toBeInTheDocument();
+      expect(screen.getByText(/the cabinet is heard dry/i)).toBeInTheDocument();
+      // `hidden: true` throughout, because the body filter stage is FOLDED by
+      // default and a query that skipped hidden nodes would be passing on the
+      // fold rather than on the guard.
+      expect(
+        screen.queryByRole('button', { name: 'Add Cutoff envelope', hidden: true }),
+      ).not.toBeInTheDocument();
+      // …and that absence is about the guard, not about the name: add the body
+      // filter and the same button appears. Without this the assertion above
+      // would pass on a typo.
+      await userEvent.click(screen.getByRole('button', { name: 'Add Body filter' }));
+      expect(
+        screen.getByRole('button', { name: 'Add Cutoff envelope', hidden: true }),
+      ).toBeInTheDocument();
+
+      // And the room can be added from there — no cabinet required, at the seam
+      // or on screen.
+      await userEvent.click(screen.getByRole('button', { name: 'Add Room' }));
+      expect(draftPreset().effects?.reverb).toEqual(SEED_VOICE_REVERB);
+      expect(draftPreset().effects?.cabIR).toBeUndefined();
+      expect(screen.getByRole('slider', { name: 'Room Size' })).toBeInTheDocument();
+    });
+
+    it('collapses the pane to two Adds when the room goes last', async () => {
+      // THE REVERSE TRANSITION, and the only route to the both-absent pane from a
+      // voice the user built rather than from a stock preset: take the speaker
+      // first, then the room. The Remove Room button is on a pane whose section is
+      // ABSENT here — it is drawn by `renderStage`'s `independent` arm — so this
+      // is also the assertion that the arm's controls work and are not merely
+      // painted.
+      await withCabinet();
+      await userEvent.click(screen.getByRole('button', { name: 'Add Room' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Remove Cabinet' }));
       expect(draftPreset().effects?.reverb).toEqual(SEED_VOICE_REVERB);
 
-      await userEvent.click(screen.getByRole('button', { name: 'Remove Cabinet + room' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Remove Room' }));
 
-      // The button says "Remove Cabinet + room" and it has to mean both. The room
-      // is the ONE sub-branch that does not nest under its section's removable
-      // branch (`effects.reverb` against `effects.cabIR`), so left behind it would
-      // be a stage the lib still wires and still sounds, with nothing on screen to
-      // reach it — `sectionApplies` hides a sub-branch along with its section.
+      // Both branches gone — and `removeAtPath` prunes the emptied ancestor, so
+      // there is no hollow `effects` left behind to read as a present stage.
       expect(draftPreset().effects?.reverb).toBeUndefined();
       expect(draftPreset().effects?.cabIR).toBeUndefined();
+      // The pane is the fourth state now: absent, saying so, with both offers.
+      expect(screen.getByText(/No Cabinet \+ room stage on this voice/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add Cabinet' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add Room' })).toBeInTheDocument();
       expect(screen.queryByRole('slider', { name: 'Room Size' })).not.toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Remove Room' })).not.toBeInTheDocument();
+      expect(screen.queryByText(/No speaker cabinet/i)).not.toBeInTheDocument();
+    });
+
+    it('reads the stage lamp from both stages, not from the cabinet alone', async () => {
+      // ⚠ THE UNDER-REPORT. `sectionPresence` used to read the FIRST `.enabled`
+      // row in the section — the cabinet's — so switching the speaker out printed
+      // "Bypassed" across a pane whose room was plainly audible.
+      await withCabinet();
+      await userEvent.click(screen.getByRole('button', { name: 'Add Room' }));
+
+      await userEvent.click(screen.getByRole('switch', { name: 'Cabinet + room Enabled' }));
+
+      // TWO, not three: the cabinet's own switch reading back its state, and the
+      // cab graphic greying out with it. The third would be the section header,
+      // and the header is what this test says must NOT say it — the room is on.
+      const bypassed = screen.getAllByText('Bypassed');
+      expect(bypassed).toHaveLength(2);
+      expect(bypassed.map((node) => node.getAttribute('aria-label'))).toContain(
+        'Cabinet + room Enabled',
+      );
+
+      // Switch the room out as well and the pane really is bypassed: three now,
+      // the third being the header's status.
+      await userEvent.click(screen.getByRole('switch', { name: 'Room Enabled' }));
+      expect(screen.getAllByText('Bypassed')).toHaveLength(4);
     });
 
     it('does not overwrite a room`s tuning when the cabinet is added around it', async () => {
       // A holder can carry a room with no cabinet: `addVoiceSubBranch` writes the
-      // branch outright and never consults the section. Reached here through the
-      // seam because no button offers it — the Add Room button only exists while
-      // the cabinet is there — and it is exactly the state a preset authored
-      // elsewhere arrives in.
+      // branch outright and never consults the section. Reached through the seam
+      // here rather than through the Add Room button that now offers it, because
+      // the two rows below have to be at values the fallbacks would visibly
+      // overwrite — which is the whole assertion.
       render(<Host />);
       const patternId = getEditingPattern()!.id;
       expect(addVoiceSubBranch('pattern', patternId, 'cabinet-room').ok).toBe(true);
       expect(setVoiceParam('pattern', patternId, 'effects.reverb.roomSize', 0.9).ok).toBe(true);
       expect(setVoiceParam('pattern', patternId, 'effects.reverb.wet', 0.6).ok).toBe(true);
 
-      await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet + room' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
 
       // `addVoiceSection` seeds a section's required rows from their `fallback`s,
       // and both room sliders are required and now pass `paramApplies` — their
@@ -476,6 +633,39 @@ describe('VoicePane', () => {
     expect(section('Cabinet + room')).toHaveAttribute('aria-expanded', 'true');
     expect((screen.getByLabelText('Cabinet') as HTMLSelectElement).value).toMatch(/^https?:/);
     expect(screen.queryByRole('button', { name: /Use suggested cab/ })).not.toBeInTheDocument();
+  });
+
+  it('applies the suggested cab in ONE draft commit, never touching the seed IR', async () => {
+    // ⚠ WHAT THIS IS ABOUT IS THE AUDIO, not the preset. `playbackService`
+    // subscribes to this store and rebuilds per commit, and the lib's
+    // `sameEffectsShape` compares `cabIR.url` — so a `url` change is a full chain
+    // teardown plus a `loadAudioBuffer`, not a retune. Adding the section and THEN
+    // writing the URL was two commits: the first built the branch from the row's
+    // `fallback` (the FIRST registered IR, which nobody asked for), fetched it,
+    // and the second tore it down again. The seed override exists for this.
+    render(<Host />);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+
+    const seen: VoicePreset[] = [];
+    const stop = subscribeVoiceDrafts(() => {
+      seen.push(draftPreset());
+    });
+    try {
+      await userEvent.click(screen.getByRole('button', { name: /Use suggested cab/ }));
+    } finally {
+      stop();
+    }
+
+    // One commit, and the URL it carries is the suggestion.
+    expect(seen).toHaveLength(1);
+    expect(seen[0].effects?.cabIR?.url).toBe(draftPreset().effects?.cabIR?.url);
+    // The seed IR never appears — in the committed state or on the way there.
+    // Guarded, because the suggestion for the default amp could one day BE the
+    // first registered cab and this assertion would then be vacuous.
+    const seedUrl = CABINET_IRS[0].url;
+    if (draftPreset().effects?.cabIR?.url !== seedUrl) {
+      expect(seen.map((preset) => preset.effects?.cabIR?.url)).not.toContain(seedUrl);
+    }
   });
 
   it('keeps the edit that drags a knob away from a value and back', async () => {
