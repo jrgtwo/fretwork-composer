@@ -74,7 +74,13 @@ import {
   subscribeVoiceDrafts,
   voicePreset,
 } from '../voice/voiceDrafts';
-import { clearTrackVoices, registerTrackVoice, setTrackFaders } from './levelMeters';
+import {
+  clearTrackVoices,
+  registerPatternVoice,
+  registerTrackVoice,
+  setTrackFaders,
+  unregisterPatternVoice,
+} from './levelMeters';
 import { audibleTransportTicks, wrapToDuration } from './transportClock';
 
 /** No capo UI yet; the scheduler still needs a value. */
@@ -265,6 +271,10 @@ function ensureEngine(pattern: Pattern): Engine | null {
         engine.voice.dispose();
         engine.voice = voice;
         engine.voiceKey = voiceKey;
+        // The meters follow the voice the engine HOLDS, so the registration moves
+        // with every rebuild — the same reason `buildTrackVoice` registers on the
+        // lib's live swap and not only on the first build.
+        registerPatternVoice(voice);
       }
       return engine;
     }
@@ -307,6 +317,10 @@ function ensureEngine(pattern: Pattern): Engine | null {
         scheduler.onComplete(stop),
       ],
     };
+    // After the engine exists, not inside `buildVoice`: a throw from the scheduler
+    // above would otherwise leave the registry pointing at a voice no engine holds,
+    // and the meter would read a graph that is not playing.
+    registerPatternVoice(voice);
     return engine;
   } catch {
     // No audio graph available — playback stays silent rather than taking the
@@ -330,6 +344,10 @@ function disposeEngine(): void {
   if (!current) return;
 
   cancelPendingRebuild();
+  // Before the disposes below rather than after: a read against a disposed voice
+  // would take `readSource`'s catch and report silence anyway, but the registry
+  // must not outlive the engine that owns the voice.
+  unregisterPatternVoice();
   current.unsubscribes.forEach((unsubscribe) => unsubscribe());
   // The metronome owns the transport and `scheduler.dispose()` only cancels the
   // scheduler's own events, so tearing down mid-playback without this leaves the

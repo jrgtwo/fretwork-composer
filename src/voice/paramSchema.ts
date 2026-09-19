@@ -32,9 +32,13 @@
  * `source.release` — and it was fixed in the lib; FOLLOW-UPS row 24.)
  *
  * SCOPE: Source (with its second source), Body filter, Amp, Cabinet — including
- * the room the cabinet stands in — and Level. The lib exposes ~95 tunable
- * params; the final EQ is still a later slice and is deliberately NOT declared
- * here. Declaring a param the pane cannot honour is worse than omitting it.
+ * the room the cabinet stands in — and the final EQ, plus the two rows of the
+ * IN/OUT bar, which are declared here and are deliberately NOT a section
+ * ({@link LEVEL_BAR_PARAMS}). The lib exposes ~95 tunable params. The final EQ
+ * was the last stage held back — it is a section as of 2026-09-18
+ * (`docs/PLAN-level-pane.md`), and `paramSchema.test.ts`'s deferred-path walk is
+ * where anything still undeclared has to be named. Declaring a param the pane
+ * cannot honour is worse than omitting it.
  * (The per-voice reverb WAS on that deferred list, for a reason that has since
  * gone: it used to sit between the amp and the cab, so where it belonged in the
  * pane was undecided. It is post-cab now, and it belongs with the cabinet.)
@@ -120,6 +124,7 @@ import {
   SAMPLE_PACKS,
   detectCabinetIR,
   getAmpModel,
+  type EQParams,
   type OscillatorType,
   type VoicePreset,
 } from '@fretwork/lib';
@@ -397,7 +402,7 @@ export type SectionId =
   | 'amp'
   | 'circuit-amp'
   | 'cabinet'
-  | 'level';
+  | 'final-eq';
 
 /**
  * What a section and a pedal have in common: a label, the two branch paths that
@@ -460,6 +465,16 @@ export interface ParamSection extends ParamStage {
    * for the reason every other field here is.
    */
   readonly removableLabel?: string;
+  /**
+   * What the ABSENT-stage sentence calls the stage, when lowercasing the label
+   * mangles it. Defaults to `label.toLowerCase()`.
+   *
+   * One section needs it: "Final EQ" is the first label in this table carrying an
+   * acronym, and the sentence would read "No final eq stage on this voice." Data
+   * rather than a branch in the renderer, for the reason {@link removableLabel}
+   * is.
+   */
+  readonly absentLabel?: string;
   /**
    * One optional branch nested INSIDE this section, added and removed on its own.
    * See the header. Its rows are the members of `params` living under
@@ -1600,54 +1615,63 @@ const CABINET_SECTION: ParamSection = {
 };
 
 /**
- * Level. No probe and no removable branch — `level` is required on every preset and
- * `inputGainDb` lives at the root, so this section is always present.
+ * The two ends of the chain — the IN/OUT bar's rows, and NOT A SECTION.
+ *
+ * ⚠ THESE ARE NOT IN {@link PARAM_SECTIONS} AND THAT IS THE POINT. They were the
+ * Level section until 2026-09-18, folded away at the bottom of the rack with the
+ * pan; `docs/PLAN-level-pane.md` moved them into a bar across the top of the
+ * editor that stays visible whatever is folded, because the input trim and the
+ * voice's own volume are the two ends of one chain and a control you cannot see
+ * is a control you do not use. A stage that is never folded is not a stage, so
+ * the section went with them and `SectionId` lost `'level'`.
+ *
+ * ⚠ `level.pan` IS DELETED OUTRIGHT, with no replacement. Panning is the TRACK's,
+ * in the track header (`Track.pan`, `composition/TrackControls.tsx`); two pans in
+ * series was the duplication the bar exists to untangle. The consequence is
+ * accepted rather than overlooked: the pattern page has no pan control at all,
+ * and `level.pan` is no longer reachable from this app. The field stays in the
+ * lib's `VoiceLevel` and a preset that carries one still pans — nothing here
+ * writes it.
+ *
+ * ⚠ STILL DECLARED, because declaring them is what makes them WRITABLE.
+ * `voiceDrafts.PARAM_BY_PATH` refuses any path the schema does not name, so a row
+ * that lives nowhere is a control neither the bar nor the agent can set — see the
+ * note on sub-branches in this file's header, which is the same rule from the
+ * other end. `voiceDrafts` unions this list into that map explicitly.
  */
-const LEVEL_SECTION: ParamSection = {
-  id: 'level',
-  label: 'Level',
-  presenceProbe: null,
-  removableBranch: null,
-  params: [
-    {
-      kind: 'slider',
-      path: 'inputGainDb',
-      label: 'Input gain',
-      optional: true,
-      // The lib's own doc comment names these bounds: -80 dB grounds the signal,
-      // +24 dB is hot boost into the saturators.
-      min: -80,
-      max: 24,
-      step: 0.5,
-      unit: 'dB',
-      precision: 1,
-      fallback: 0,
-    },
-    {
-      kind: 'slider',
-      path: 'level.volumeDb',
-      label: 'Volume',
-      // Wider than the lib's "-24..+12 is sensible" so the floor mutes the voice,
-      // matching Sound Lab's shipped fader.
-      min: -80,
-      max: 12,
-      step: 0.5,
-      unit: 'dB',
-      precision: 1,
-      fallback: 0,
-    },
-    {
-      kind: 'slider',
-      path: 'level.pan',
-      label: 'Pan',
-      min: -1,
-      max: 1,
-      step: 0.05,
-      precision: 2,
-      fallback: 0,
-    },
-  ],
+export const INPUT_GAIN_PARAM: SliderParam = {
+  kind: 'slider',
+  path: 'inputGainDb',
+  label: 'Input gain',
+  optional: true,
+  // The lib's own doc comment names these bounds: -80 dB grounds the signal,
+  // +24 dB is hot boost into the saturators.
+  min: -80,
+  max: 24,
+  step: 0.5,
+  unit: 'dB',
+  precision: 1,
+  fallback: 0,
 };
+
+export const VOLUME_PARAM: SliderParam = {
+  kind: 'slider',
+  path: 'level.volumeDb',
+  label: 'Volume',
+  // Wider than the lib's "-24..+12 is sensible" so the floor mutes the voice,
+  // matching Sound Lab's shipped fader.
+  min: -80,
+  max: 12,
+  step: 0.5,
+  unit: 'dB',
+  precision: 1,
+  fallback: 0,
+};
+
+/** Both bar rows, in signal order: what arrives, then what leaves. The list is
+ *  what `voiceDrafts` and `paramSchema.test.ts` walk, so neither has to name the
+ *  two rows one at a time. */
+export const LEVEL_BAR_PARAMS: readonly SliderParam[] = [INPUT_GAIN_PARAM, VOLUME_PARAM];
 
 // ------------------------------------------------------------------ pedals ---
 
@@ -1738,8 +1762,9 @@ export interface Pedal extends ParamStage {
    * Stated once and spread into the two `ParamStage` fields by {@link definePedal},
    * because a pedal whose probe and removable branch disagreed would be a stage
    * the pane can see and cannot delete. A section may legitimately have one
-   * without the other — Level has neither, Source has no removable branch — so
-   * the collapse belongs here rather than on `ParamStage`.
+   * without the other — Cabinet probes two branches and removes one — and two
+   * have neither: Source and the pedalboard are always present and cannot be
+   * removed. So the collapse belongs here rather than on `ParamStage`.
    */
   readonly branch: string;
   /**
@@ -1817,26 +1842,37 @@ const normalRangeSlider = (
 });
 
 /**
- * A graphic-EQ band. Seven of them, differing only in path, label and centre
- * frequency, so writing them out longhand would be seven chances to mistype a
- * bound that is identical by construction.
+ * An EQ GAIN BAND — the graphic EQ's seven, and the final EQ's three. Ten rows
+ * differing only in path, label and starting value, so writing them out
+ * longhand would be ten chances to mistype a bound that is identical by
+ * construction. Parameterised the way {@link normalRangeSlider} is, and for the
+ * same reason: one shape shared by rows in more than one stage is one helper, not
+ * a copy per stage.
  *
- * An encoder because `Tone.Filter` publishes no `Min:`/`Max:` for `gain` — the
- * same silence the body filter's cutoff and resonance already answer this way.
- * The lib's type comment says "typical range ±15", which is a description of
- * how the control is usually used and not a statement about what the node
- * accepts.
+ * An encoder because NEITHER node publishes a bound for a band gain. The graphic
+ * EQ's bands are `Tone.Filter`s, whose page gives no `Min:`/`Max:` for `gain`;
+ * the final EQ's three are `Param<"decibels">` on
+ * `tone/build/esm/component/filter/EQ3.d.ts` (15.1.22), which carries no `@min`
+ * or `@max` either, and `core/type/Units.d.ts` defines `Decibels` as a plain
+ * `number`. It is the same silence the body filter's cutoff and resonance already
+ * answer this way. Both lib type comments give a "typical range" (±15 for a band,
+ * -12..+12 for the final EQ's low shelf); that is a description of how the
+ * control is usually used and not a statement about what the node accepts.
  */
-const eqBand = (path: string, label: string): EncoderParam => ({
+const eqBand = (path: string, label: string, fallback: number): EncoderParam => ({
   kind: 'encoder',
   path,
   label,
-  requiresBranch: 'effects.graphicEq',
+  // DERIVED, not passed. The gate is the row's own parent branch on all ten of
+  // these and there is no reason it would ever not be, so taking it as a third
+  // adjacent string was a transposed pair away from a row gated on a branch that
+  // does not exist — which typechecks, and renders nowhere, silently.
+  requiresBranch: path.slice(0, path.lastIndexOf('.')),
   // 0.5 dB per detent is the increment, not a claim about what the filter takes.
   step: 0.5,
   precision: 1,
   unit: 'dB',
-  fallback: 0,
+  fallback,
 });
 
 const COMPRESSOR_PEDAL: Pedal = definePedal({
@@ -2155,13 +2191,13 @@ const GRAPHIC_EQ_PEDAL: Pedal = definePedal({
   seed: SEED_GRAPHIC_EQ,
   params: [
     pedalBypass('effects.graphicEq'),
-    eqBand('effects.graphicEq.band100Hz', '100 Hz'),
-    eqBand('effects.graphicEq.band200Hz', '200 Hz'),
-    eqBand('effects.graphicEq.band400Hz', '400 Hz'),
-    eqBand('effects.graphicEq.band800Hz', '800 Hz'),
-    eqBand('effects.graphicEq.band1_6kHz', '1.6 kHz'),
-    eqBand('effects.graphicEq.band3_2kHz', '3.2 kHz'),
-    eqBand('effects.graphicEq.band6_4kHz', '6.4 kHz'),
+    eqBand('effects.graphicEq.band100Hz', '100 Hz', SEED_GRAPHIC_EQ.band100Hz),
+    eqBand('effects.graphicEq.band200Hz', '200 Hz', SEED_GRAPHIC_EQ.band200Hz),
+    eqBand('effects.graphicEq.band400Hz', '400 Hz', SEED_GRAPHIC_EQ.band400Hz),
+    eqBand('effects.graphicEq.band800Hz', '800 Hz', SEED_GRAPHIC_EQ.band800Hz),
+    eqBand('effects.graphicEq.band1_6kHz', '1.6 kHz', SEED_GRAPHIC_EQ.band1_6kHz),
+    eqBand('effects.graphicEq.band3_2kHz', '3.2 kHz', SEED_GRAPHIC_EQ.band3_2kHz),
+    eqBand('effects.graphicEq.band6_4kHz', '6.4 kHz', SEED_GRAPHIC_EQ.band6_4kHz),
     {
       kind: 'encoder',
       path: 'effects.graphicEq.levelDb',
@@ -2362,6 +2398,134 @@ export const CIRCUIT_AMP_SECTION: ParamSection = {
   params: CIRCUIT_AMP_SECTION_PARAMS,
 };
 
+/**
+ * The LAST stage of the voice — a `Tone.EQ3` sitting after the cabinet and the
+ * room and before the volume (`Voice.wireChain`:
+ * `cabIR → cabIRMakeup → voiceReverb → finalEq → volume`). Nine of the fourteen
+ * built-ins carry one, and until 2026-09-18 nothing in this app could reach it,
+ * so it coloured those nine at values no control could show.
+ * `docs/PLAN-level-pane.md` is the change.
+ *
+ * REMOVABLE, like the amp and the cabinet, for the two reasons that decide it:
+ * `EffectsConfig.finalEq` is optional, so a voice without one is a real shape and
+ * not a broken preset, and `EQParams` carries its own `enabled?`, so ABSENT and
+ * BYPASSED are different states the pane has to draw differently.
+ *
+ * ⚠ ALL FIVE VALUE ROWS ARE ENCODERS, and the header's standing rule is the whole
+ * of why. `tone/build/esm/component/filter/EQ3.d.ts` (15.1.22) declares `low`,
+ * `mid` and `high` as `Param<"decibels">` and the two crossovers as
+ * `Signal<"frequency">`. Neither that file nor
+ * `tone/build/esm/component/channel/MultibandSplit.d.ts` — the node the EQ splits
+ * its bands with, which declares the same two crossover signals — carries a
+ * `@min` or a `@max` for any of them, and the unit types supply none
+ * either: `core/type/Units.d.ts` has `Decibels = number` and `Frequency` a
+ * string-or-number union, against the `NormalRange` and `Positive` that ARE the
+ * bounds the room's two faders and the two resonance rows rest on. The lib's own
+ * comment on `EQParams.low` ("Range typically -12..+12") is a description of how
+ * the control is usually used, not a statement about what the node accepts — the
+ * argument {@link eqBand} already makes for the graphic EQ's seven bands, which
+ * is why the three gain rows here ARE `eqBand`.
+ *
+ * ⚠ EVERY ROW DECLARES `requiresBranch`, though this probe is a single path and
+ * the Amp — the same shape — declares none. The difference is not the pane, which
+ * draws neither section's body while its branch is absent; it is the SEAM. All
+ * five value fields of `EQParams` are required, and `setVoiceParam` writes one
+ * path at a time, so an ungated row is a path the seam ACCEPTS on a voice that
+ * has no EQ — minting `{low: 3}`, which `isStageEnabled` reads as a live stage
+ * and which `buildChain` then hands to `Tone.EQ3` with four `undefined`s. The
+ * gate is what leaves `addVoiceSection` as the only way this branch is born.
+ * `AmpParams` has the same eight required numbers and the same hole; this section
+ * declines to copy it rather than claiming a distinction.
+ */
+const SEED_FINAL_EQ: EQParams = {
+  // Flat, at Tone's own crossovers: `EQ3.getDefaults()` (15.1.22) returns
+  // `low`/`mid`/`high` 0, `lowFrequency` 400, `highFrequency` 2500. An Add
+  // therefore puts the stage in the chain INAUDIBLE, which is the only starting
+  // point that cannot change a voice at the moment it is added.
+  //
+  // Typed `EQParams` so `tsc` checks the shape in one place — the service
+  // `pedalDefaults` performs for the pedals, which is where this would live if
+  // the final EQ were one. It is a section, so what an Add actually writes is the
+  // rows' `fallback`s (`addVoiceSection`); reading them from here is what stops
+  // the seed and the rows from drifting apart.
+  low: 0,
+  mid: 0,
+  high: 0,
+  lowFrequency: 400,
+  highFrequency: 2500,
+};
+
+const FINAL_EQ_SECTION: ParamSection = {
+  id: 'final-eq',
+  label: 'Final EQ',
+  // The absent sentence reads "No final EQ stage on this voice." — see
+  // `absentLabel`. The default would lowercase the acronym.
+  absentLabel: 'final EQ',
+  presenceProbe: 'effects.finalEq',
+  removableBranch: 'effects.finalEq',
+  params: [
+    {
+      kind: 'toggle',
+      path: 'effects.finalEq.enabled',
+      label: 'Enabled',
+      requiresBranch: 'effects.finalEq',
+      optional: true,
+      fallback: true,
+    },
+    eqBand('effects.finalEq.low', 'Low', SEED_FINAL_EQ.low),
+    eqBand('effects.finalEq.mid', 'Mid', SEED_FINAL_EQ.mid),
+    eqBand('effects.finalEq.high', 'High', SEED_FINAL_EQ.high),
+    {
+      kind: 'encoder',
+      path: 'effects.finalEq.lowFrequency',
+      label: 'Low/mid',
+      requiresBranch: 'effects.finalEq',
+      // 10 Hz a detent. `ParamEncoder` moves one detent per 8 px of drag and ten
+      // per detent with Shift, so the span these actually live in across the
+      // built-ins — 150 Hz to 4 kHz — is a couple of hundred pixels of the coarse
+      // gesture, while a plain drag still lands on round numbers.
+      step: 10,
+      precision: 0,
+      unit: 'Hz',
+      // ZERO, NOT THE 20 Hz the body filter's cutoff and the auto-wah's base
+      // frequency use. Those two are the app's floor against SILENCE, which is
+      // what `EncoderParam.floor` is for, and a crossover is not that case: at
+      // 20 Hz — or at 0 — it empties one band and the other two still pass.
+      //
+      // What zero fences off is a value the node cannot hold at all. This is the
+      // one floor here that comes from WEB AUDIO rather than from Tone or from
+      // us: `MultibandSplit` splits with `Tone.Filter`s, whose `frequency` is a
+      // `BiquadFilterNode.frequency` `AudioParam` bounded `[0, nyquist]` by the
+      // platform. A negative crossover is accepted by the seam, shown in the
+      // readout and then clamped on the way to the node — a control reading a
+      // number the voice is not using, which is the same disagreement the
+      // `slider` arm's range check exists to prevent. The encoder still has no
+      // end stop; only the seams enforce it. See `EncoderParam.floor`.
+      //
+      // The ordering — `lowFrequency` below `highFrequency` — is deliberately NOT
+      // fenced. Crossing them collapses the mid band rather than breaking the
+      // node, and no per-row bound can express a relation between two rows;
+      // `setVoiceParam` writes one path at a time and would have to read the
+      // other to check it.
+      floor: 0,
+      fallback: SEED_FINAL_EQ.lowFrequency,
+    },
+    {
+      kind: 'encoder',
+      path: 'effects.finalEq.highFrequency',
+      label: 'Mid/high',
+      requiresBranch: 'effects.finalEq',
+      // The other end of the same split, so the same detent and the same floor;
+      // see the row above.
+      step: 10,
+      precision: 0,
+      unit: 'Hz',
+      floor: 0,
+      fallback: SEED_FINAL_EQ.highFrequency,
+    },
+  ],
+};
+
 export const PARAM_SECTIONS: readonly ParamSection[] = [
   SOURCE_SECTION,
   BODY_FILTER_SECTION,
@@ -2369,11 +2533,11 @@ export const PARAM_SECTIONS: readonly ParamSection[] = [
   AMP_SECTION,
   CIRCUIT_AMP_SECTION,
   CABINET_SECTION,
-  LEVEL_SECTION,
+  FINAL_EQ_SECTION,
 ];
 
 /**
- * Signal-chain order: source → body filter → amp → cabinet → output.
+ * Signal-chain order: source → body filter → amp → cabinet → final EQ → output.
  *
  * The body filter sits where `Voice.wireChain` puts it — immediately after the
  * input gain and before the compressor, so ahead of the amp and everything the
@@ -2382,8 +2546,9 @@ export const PARAM_SECTIONS: readonly ParamSection[] = [
  */
 /**
  * Which stages a voice editor opens on: Amp and Cabinet — the two you actually
- * turn. The source and the output trim are tuned once and left, so they start
- * folded.
+ * turn. The source is tuned once and left, so it starts folded. The output trim
+ * used to be the other one named here; it is in the bar now and folds with
+ * nothing.
  *
  * Here rather than in either editor because BOTH render `PARAM_SECTIONS` and the
  * two must not drift: the pattern page's `VoicePane` shipped with this default,

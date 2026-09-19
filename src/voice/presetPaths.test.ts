@@ -2,10 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { getAtPath, hasBranchAtPath, hasPath, removeAtPath, setAtPath } from './presetPaths';
 
 /** Shaped like the parts of a `VoicePreset` these functions actually walk, but a
- *  plain object — the module is deliberately lib-free, so the tests are too. */
+ *  plain object — the module is deliberately lib-free, so the tests are too.
+ *
+ *  `level.pan` was the bipolar path here until 2026-09-18 and is gone with the
+ *  Level section: the app writes no pan into a voice any more (panning is the
+ *  track's), so the fixture no longer carries a path nothing can produce.
+ *  `level.volumeDb` is the bipolar dB leaf these assertions use instead. */
 const preset = {
   id: 'test',
-  level: { volumeDb: 3, pan: 0 },
+  level: { volumeDb: 3 },
   source: { kind: 'sampler', samples: [{ A2: '/a2.mp3' }], release: 2.5 },
 } as const;
 
@@ -37,7 +42,7 @@ describe('getAtPath', () => {
 
 describe('hasPath', () => {
   it('distinguishes present from absent', () => {
-    expect(hasPath(preset, 'level.pan')).toBe(true);
+    expect(hasPath(preset, 'level.volumeDb')).toBe(true);
     expect(hasPath(preset, 'effects')).toBe(false);
     expect(hasPath(preset, 'effects.amp')).toBe(false);
   });
@@ -76,8 +81,8 @@ describe('hasBranchAtPath', () => {
 
 describe('setAtPath', () => {
   it('round-trips through getAtPath', () => {
-    const next = setAtPath(preset, 'level.pan', -0.5);
-    expect(getAtPath(next, 'level.pan')).toBe(-0.5);
+    const next = setAtPath(preset, 'level.volumeDb', -0.5);
+    expect(getAtPath(next, 'level.volumeDb')).toBe(-0.5);
   });
 
   it('does not mutate its input', () => {
@@ -85,17 +90,20 @@ describe('setAtPath', () => {
     // keys whose value is `undefined` — precisely the shape this module handles
     // specially, so a stringify comparison would miss a mutation that added one.
     const snapshot = structuredClone(preset);
-    setAtPath(preset, 'level.pan', -0.5);
+    setAtPath(preset, 'level.volumeDb', -0.5);
     setAtPath(preset, 'effects.amp.preDrive', 0.4);
     setAtPath(preset, 'inputGainDb', undefined);
     expect(preset).toStrictEqual(snapshot);
   });
 
   it('leaves untouched siblings by reference', () => {
-    const next = setAtPath(preset, 'level.pan', -0.5);
-    expect(next.source).toBe(preset.source);
-    expect(next.level).not.toBe(preset.level);
-    expect(next.level.volumeDb).toBe(3);
+    // A sibling BRANCH and a sibling LEAF, which are two different things to get
+    // wrong: `level` must come through as the same object, and the samples array
+    // must not be rebuilt by a write to the key beside it.
+    const next = setAtPath(preset, 'source.release', 1);
+    expect(next.level).toBe(preset.level);
+    expect(next.source).not.toBe(preset.source);
+    expect(next.source.samples).toBe(preset.source.samples);
   });
 
   it('creates every absent intermediate branch', () => {
@@ -111,11 +119,16 @@ describe('setAtPath', () => {
     expect(setAtPath(preset, 'source.release', 2.5)).toBe(preset);
   });
 
-  it('treats -0 as 0, so a fader crossing centre is not an edit', () => {
-    expect(setAtPath(preset, 'level.pan', -0)).toBe(preset);
-    const panned = setAtPath(preset, 'level.pan', 0.5);
+  it('treats -0 as 0, so a knob crossing unity is not an edit', () => {
+    // Written for the pan fader crossing centre; it outlived it. Every dB knob in
+    // the IN/OUT bar is bipolar around 0, and a drag through unity produces -0 on
+    // the way past.
+    const unity = setAtPath(preset, 'level.volumeDb', 0);
+    expect(setAtPath(unity, 'level.volumeDb', -0)).toBe(unity);
     // And it normalises on the way in, so no preset ends up carrying -0.
-    expect(Object.is(getAtPath(setAtPath(panned, 'level.pan', -0), 'level.pan'), 0)).toBe(true);
+    expect(Object.is(getAtPath(setAtPath(preset, 'level.volumeDb', -0), 'level.volumeDb'), 0)).toBe(
+      true,
+    );
   });
 
   it('returns a new reference when writing a key that was absent, even as undefined', () => {

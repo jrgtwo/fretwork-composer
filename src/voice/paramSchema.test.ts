@@ -15,6 +15,8 @@ import {
   type CompressorParams,
   type DelayParams,
   type DistortionParams,
+  type EQParams,
+  type EffectsConfig,
   type GraphicEqParams,
   type BodyFilterEnvelope,
   type BodyFilterParams,
@@ -29,6 +31,7 @@ import {
   type VoiceSource,
 } from '@fretwork/lib';
 import {
+  LEVEL_BAR_PARAMS,
   PARAM_SECTIONS,
   PEDALS,
   branchParams,
@@ -92,7 +95,19 @@ import { getAtPath, hasBranchAtPath, hasPath, removeAtPath, setAtPath } from './
  * path lands on one of them.
  */
 
-const ALL_PARAMS: readonly Param[] = PARAM_SECTIONS.flatMap((section) => section.params);
+/**
+ * Every row the table declares — the sections' AND the IN/OUT bar's.
+ *
+ * ⚠ THE BAR'S TWO ROWS ARE NOT IN ANY SECTION and they are still rows: the bar is
+ * not a foldable stage, so `PARAM_SECTIONS` does not carry them, and everything
+ * this file checks about a row (its path resolves on a fixture, its range holds,
+ * its value type is guarded, nothing declares it twice) has to reach them anyway.
+ * `voiceDrafts.PARAM_BY_PATH` unions them in for the same reason.
+ */
+const ALL_PARAMS: readonly Param[] = [
+  ...PARAM_SECTIONS.flatMap((section) => section.params),
+  ...LEVEL_BAR_PARAMS,
+];
 
 /**
  * The pedalboard's rows, reached through {@link PEDALS} rather than through the
@@ -285,6 +300,13 @@ const POPULATED_CHASSIS: Omit<VoicePreset, 'id' | 'name' | 'source'> = {
     // Values deliberately off `SEED_VOICE_REVERB` — a fixture equal to the seed
     // cannot tell "the row reads the preset" from "the row fell back".
     reverb: { enabled: false, roomSize: 0.72, wet: 0.33 },
+    // The last stage of the chain. On every fixture for the reason the room and
+    // the pedals are: its six rows are gated on `effects.finalEq` and nothing
+    // else, so a fixture without the branch is six rows this file walks over and
+    // skips. Values deliberately off `SEED_FINAL_EQ`, which is flat at Tone's own
+    // crossovers — a fixture equal to the seed cannot tell "the row reads the
+    // preset" from "the row fell back".
+    finalEq: { enabled: false, low: 2, mid: -1.5, high: 3, lowFrequency: 320, highFrequency: 3200 },
     // The experimental circuit amp, on every fixture for the same reason the
     // pedals are: no SHIPPED preset carries one and none is meant to, so a
     // fixture is the only thing that walks its rows. `enabled: false` because
@@ -503,6 +525,16 @@ const AUTO_WAH_LEAVES: Record<keyof AutoWahParams, true> = {
   gain: true,
   wet: true,
 };
+/** The final EQ — a section of its own, after the cabinet and the room. Its own
+ *  table for the same reason the room has one: it hangs off no other stage. */
+const FINAL_EQ_LEAVES: Record<keyof EQParams, true> = {
+  enabled: true,
+  low: true,
+  mid: true,
+  high: true,
+  lowFrequency: true,
+  highFrequency: true,
+};
 const GRAPHIC_EQ_LEAVES: Record<keyof GraphicEqParams, true> = {
   enabled: true,
   band100Hz: true,
@@ -514,7 +546,15 @@ const GRAPHIC_EQ_LEAVES: Record<keyof GraphicEqParams, true> = {
   band6_4kHz: true,
   levelDb: true,
 };
-const LEVEL_LEAVES: Record<keyof VoiceLevel, true> = { volumeDb: true, pan: true };
+/**
+ * ⚠ `pan` IS DELETED RATHER THAN DEFERRED, which is why this is an `Omit` and not
+ * a full `Record`. The voice's pan went with the Level section on 2026-09-18:
+ * panning is the TRACK's, in the track header, and two pans in series was the
+ * duplication the IN/OUT bar exists to untangle. The `Omit` still bites the way
+ * every other one here does — a lib rename makes it a no-op and the `Record` then
+ * demands the new field.
+ */
+const LEVEL_LEAVES: Record<keyof Omit<VoiceLevel, 'pan'>, true> = { volumeDb: true };
 
 /**
  * The source arms, same trick. The `Omit`s name what is DEFERRED rather than
@@ -664,9 +704,12 @@ describe('violationsFor itself', () => {
   });
 
   it('catches the wrong type in each numeric row', () => {
-    expect(only(setAtPath(FULLY_POPULATED_SAMPLER, 'level.pan', 'centre'), 'level.pan')).toContain(
-      'expected a number',
-    );
+    // `level.volumeDb` stands in for what `level.pan` used to check here: pan is
+    // no longer a declared row, so nothing can hand `violationsFor` a descriptor
+    // for it.
+    expect(
+      only(setAtPath(FULLY_POPULATED_SAMPLER, 'level.volumeDb', 'loud'), 'level.volumeDb'),
+    ).toContain('expected a number');
     // An encoder has no range to fail, so its type guard is the only check it has.
     const nan = setAtPath(FULLY_POPULATED_FM, 'source.params.harmonicity', Number.NaN);
     expect(only(nan, 'source.params.harmonicity')).toContain('expected a finite number');
@@ -829,6 +872,18 @@ describe('documented bounds', () => {
       'bodyFilter.envelope.sustain',
       'bodyFilter.envelope.baseFrequency',
       'bodyFilter.envelope.octaves',
+      // The final EQ's five, off `component/filter/EQ3.d.ts` (15.1.22) and the
+      // `component/channel/MultibandSplit.d.ts` it splits with: `low`/`mid`/`high`
+      // are `Param<"decibels">` and the two crossovers `Signal<"frequency">`, and
+      // neither file carries a `@min` or a `@max` for any of them. Listed here
+      // because the lib's own "Range typically -12..+12" comment is exactly the
+      // invitation this test exists to refuse — turning one of these into a
+      // `slider` fenced at ±12 otherwise breaks nothing in this file.
+      'effects.finalEq.low',
+      'effects.finalEq.mid',
+      'effects.finalEq.high',
+      'effects.finalEq.lowFrequency',
+      'effects.finalEq.highFrequency',
     ];
     expect(unbounded.map((path) => paramAt(path).kind)).toEqual(unbounded.map(() => 'encoder'));
   });
@@ -885,9 +940,18 @@ describe('schema vs. every built-in VoicePreset', () => {
   // more. Every other shipped voice is still walked.
   for (const preset of VOICE_PRESETS.filter((p) => p.id !== 'electric-guitar')) {
     it(`${preset.id}: every applicable path resolves and every value is in range`, () => {
-      const violations = PARAM_SECTIONS.filter((section) => sectionApplies(preset, section))
-        .flatMap((section) => section.params)
-        .flatMap((param) => violationsFor(preset, param));
+      // `LEVEL_BAR_PARAMS` is appended by hand, and it has to be: the two bar rows
+      // left `PARAM_SECTIONS` when the Level section was deleted, and a walk built
+      // from the sections alone stopped range-checking them against a shipped
+      // preset without failing — which is exactly the silence this loop exists to
+      // break. They apply to every preset, as the old section's null probe did.
+      const rows = [
+        ...PARAM_SECTIONS.filter((section) => sectionApplies(preset, section)).flatMap(
+          (section) => section.params,
+        ),
+        ...LEVEL_BAR_PARAMS,
+      ];
+      const violations = rows.flatMap((param) => violationsFor(preset, param));
 
       expect(violations).toEqual([]);
     });
@@ -1100,13 +1164,16 @@ describe('section presence', () => {
   });
 
   it('never calls a probe-less section absent', () => {
-    // Level has no probe because `level` is required on every preset; Source has
-    // none because a voice always has one.
-    expect(sectionAt('level').presenceProbe).toBeNull();
-    expect(sectionAt('source').presenceProbe).toBeNull();
+    // Source has no probe because a voice always has one, and the pedalboard has
+    // none because the stage is always there — it is the six pedals inside it that
+    // come and go. Level was the third and is not a section any more: its two rows
+    // are the IN/OUT bar, which nothing can fold or remove.
+    expect(PARAM_SECTIONS.filter((section) => section.presenceProbe === null).map((s) => s.id)).toEqual(
+      ['source', 'pedals'],
+    );
     for (const preset of VOICE_PRESETS) {
-      expect(sectionApplies(preset, sectionAt('level')), preset.id).toBe(true);
       expect(sectionApplies(preset, sectionAt('source')), preset.id).toBe(true);
+      expect(sectionApplies(preset, sectionAt('pedals')), preset.id).toBe(true);
     }
   });
 
@@ -1138,6 +1205,45 @@ describe('section presence', () => {
       );
       expect(seedable.map((p) => p.path), section.id).not.toHaveLength(0);
     }
+  });
+
+  it('seeds a COMPLETE `EQParams` when the final EQ is added', () => {
+    // The test above asks every removable section for at least one seedable row.
+    // This stage needs all five: `EQParams` has no optional value field, and
+    // `buildChain` passes whatever the branch holds straight into `new Tone.EQ3`,
+    // where a missing one is an `undefined` on a `Param`. A row that quietly
+    // acquired `optional: true` — or a field the lib adds that this table does not
+    // declare — would leave the Add writing a partial branch that reads as a live
+    // stage, which no other assertion here can see.
+    const seeded = FINAL_EQ_OWN_PARAMS.filter((param) => !param.optional).map((param) =>
+      param.path.slice('effects.finalEq.'.length),
+    );
+    const required = Object.keys(FINAL_EQ_LEAVES).filter((leaf) => leaf !== 'enabled');
+    expect([...seeded].sort()).toEqual([...required].sort());
+  });
+
+  it('agrees with itself about the final EQ — the seed and the rows` fallbacks', () => {
+    // The same check the room gets above, and for the same reason: `SEED_FINAL_EQ`
+    // is what the rows read their `fallback`s from, so pinning the fallbacks pins
+    // the seed — and an Add writes the fallbacks, so these five numbers ARE the
+    // stage a user gets.
+    //
+    // They are Tone's own: `EQ3.getDefaults()` (15.1.22) returns `low`/`mid`/`high`
+    // 0 and `lowFrequency`/`highFrequency` 400/2500. Flat at Tone's crossovers is
+    // the only starting point that cannot change a voice at the moment the stage
+    // is added, and nothing else here would notice if one drifted — an encoder
+    // has no range for a fallback to violate.
+    const flat = { low: 0, mid: 0, high: 0, lowFrequency: 400, highFrequency: 2500 };
+    for (const [leaf, value] of Object.entries(flat)) {
+      const row = paramAt(`effects.finalEq.${leaf}`);
+      expect(row.kind === 'encoder' && row.fallback, leaf).toBe(value);
+    }
+    // `enabled` is deliberately outside that list: it is optional, `addVoiceSection`
+    // skips it, and `undefined` means "in the chain" — which is what the row's
+    // `fallback: true` says too.
+    const enabled = paramAt('effects.finalEq.enabled');
+    expect(enabled.optional).toBe(true);
+    expect(enabled.kind === 'toggle' && enabled.fallback).toBe(true);
   });
 
   it('lists two probes on the Cabinet and one everywhere else', () => {
@@ -1199,7 +1305,8 @@ describe('section presence', () => {
  *
  * Every Source row except the primary's kind picker is conditional — the picker
  * is how you leave a kind, so it applies always. Everything under a sub-branch is
- * conditional. Amp, Cabinet, Level and the body filter's own three rows are not.
+ * conditional. Amp, Cabinet, the bar's two rows and the body filter's own three
+ * are not.
  */
 const isConditional = (param: Param): boolean =>
   param.appliesWhen !== undefined ||
@@ -1224,6 +1331,17 @@ const CIRCUIT_AMP_CONTROL_PARAMS = sectionAt('circuit-amp').params.filter(
  */
 const CAB_OWN_PARAMS = sectionAt('cabinet').params.filter((p) =>
   p.path.startsWith('effects.cabIR.'),
+);
+
+/**
+ * The final EQ's rows — all six of them, the stage's bypass included.
+ *
+ * By PATH PREFIX for the reason `CAB_OWN_PARAMS` is: the gate is what the rules
+ * below are checking, so deriving the set from anything that already reads the
+ * gate would permit whatever a future row happened to carry.
+ */
+const FINAL_EQ_OWN_PARAMS = sectionAt('final-eq').params.filter((p) =>
+  p.path.startsWith('effects.finalEq.'),
 );
 
 const CONDITIONAL_ROW_COUNT =
@@ -1256,7 +1374,12 @@ const CONDITIONAL_ROW_COUNT =
   // so the row is the only place "this control belongs to that amp" can live.
   // The section's own three rows (enabled / ampId / inputGainDb) are ungated,
   // because every circuit amp has them whatever its topology.
-  CIRCUIT_AMP_CONTROL_PARAMS.length;
+  CIRCUIT_AMP_CONTROL_PARAMS.length +
+  // Every final-EQ row. Its probe is a single path and answers presence for the
+  // pane, so the gate here is the seam's rather than the pane's — the section's
+  // own comment in `paramSchema` carries the argument, and the rule below names
+  // it as the sixth case.
+  FINAL_EQ_OWN_PARAMS.length;
 
 
 /**
@@ -1363,8 +1486,9 @@ describe('row conditions', () => {
   });
 
   it('conditions a row only where a branch it lives under is optional', () => {
-    // Amp and Level are governed by their section probe, and a row-level condition
-    // there would be a second, quieter presence rule. What may carry one: the
+    // Amp and Cabinet are governed by their section probe, and a row-level
+    // condition there would be a second, quieter presence rule — and the bar's two
+    // rows apply to every preset there is. What may carry one: the
     // Source section (whose rows differ by source kind, and which holds the
     // layer) and a sub-branch's rows.
     const conditional = ALL_PARAMS.filter(isConditional).map((p) => p.path);
@@ -1392,9 +1516,19 @@ describe('row conditions', () => {
       // stated as "a section whose probe ANSWERS presence must not also gate
       // rows" rather than "a section must not". The Cabinet's probe lists the
       // speaker and the room, so it answers presence for the PANE and for
-      // neither stage in it; the cab rows carry what it cannot say. No other
-      // section may join them without listing a second branch first.
+      // neither stage in it; the cab rows carry what it cannot say. A section
+      // joins this list by ARGUING for it — at the section and here — and the
+      // final EQ is the one that has, on entirely different grounds.
       ...CAB_OWN_PARAMS.map((p) => p.path),
+      // The final EQ's six — the sixth case, and the first whose probe is a
+      // single path that answers presence perfectly well. The gate is not the
+      // pane's, it is the SEAM's: every value field of `EQParams` is required and
+      // `setVoiceParam` writes one path at a time, so an ungated row is a path
+      // the seam would accept on a voice with no EQ, minting a partial `EQParams`
+      // that `isStageEnabled` reads as live and `buildChain` hands to `Tone.EQ3`
+      // with `undefined`s. `AmpParams` has the identical hole and keeps it; the
+      // section's comment says so rather than claiming a distinction.
+      ...FINAL_EQ_OWN_PARAMS.map((p) => p.path),
     ]);
     // `[].every(…)` is `true`, so the count comes first here too.
     expect(conditional).toHaveLength(CONDITIONAL_ROW_COUNT);
@@ -1408,6 +1542,17 @@ describe('row conditions', () => {
     expect(CAB_OWN_PARAMS).toHaveLength(3);
     for (const param of CAB_OWN_PARAMS) {
       expect(param.requiresBranch, param.path).toBe('effects.cabIR');
+      expect(param.appliesWhen, param.path).toBeUndefined();
+      expect(param.absentBranch, param.path).toBeUndefined();
+    }
+
+    // The final EQ's exemption is the same narrow one, and narrow for a sharper
+    // reason: its rows are gated to keep a HALF-BUILT branch unreachable, so a
+    // gate on anything but its own branch would not do that job — and an
+    // `appliesWhen` would be the quiet presence rule this test is named after.
+    expect(FINAL_EQ_OWN_PARAMS).toHaveLength(6);
+    for (const param of FINAL_EQ_OWN_PARAMS) {
+      expect(param.requiresBranch, param.path).toBe('effects.finalEq');
       expect(param.appliesWhen, param.path).toBeUndefined();
       expect(param.absentBranch, param.path).toBeUndefined();
     }
@@ -1524,6 +1669,9 @@ describe('descriptor invariants', () => {
     expect(leavesUnder(ALL_PARAMS, 'effects.cabIR')).toEqual(Object.keys(CAB_IR_LEAVES).sort());
     expect(leavesUnder(ALL_PARAMS, 'effects.reverb')).toEqual(
       Object.keys(VOICE_REVERB_LEAVES).sort(),
+    );
+    expect(leavesUnder(ALL_PARAMS, 'effects.finalEq')).toEqual(
+      Object.keys(FINAL_EQ_LEAVES).sort(),
     );
     // The pedals, each against its own lib interface. Reached through `PEDALS` so
     // a pedal dropped from the section's flattened `params` fails here too.
@@ -1905,13 +2053,31 @@ describe('scope', () => {
       'amp',
       'circuit-amp',
       'cabinet',
-      'level',
+      'final-eq',
     ]);
   });
 
+  it('keeps the bar’s two rows declared, and outside every section', () => {
+    // ⚠ WHAT THE LEVEL SECTION BECAME. The rows are still the schema's — the bar
+    // reads its ranges, its steps and its labels from here, and `voiceDrafts`
+    // refuses a path nothing declares, so a row outside this list is a control
+    // neither a knob nor the agent can write. What they are not is a STAGE: the
+    // bar never folds, and `SectionId` has no `'level'` for anything to name.
+    expect(LEVEL_BAR_PARAMS.map((p) => p.path)).toEqual(['inputGainDb', 'level.volumeDb']);
+    const sectionPaths = PARAM_SECTIONS.flatMap((s) => s.params.map((p) => p.path));
+    for (const param of LEVEL_BAR_PARAMS) {
+      expect(sectionPaths, param.path).not.toContain(param.path);
+    }
+
+    // The deletion, pinned: `level.pan` is reachable from nothing here. Panning is
+    // the track's, in the track header — see `LEVEL_LEAVES`.
+    expect(ALL_PARAMS.map((p) => p.path)).not.toContain('level.pan');
+  });
+
   it('touches nothing that belongs to a later slice', () => {
-    // The lib has ~95 tunable params. Anything reached from here that is not
-    // Source / Amp / Cabinet / Level is scope creep, and the pane cannot render it.
+    // The lib has ~95 tunable params. Anything reached from here that is not a
+    // declared stage or one of the bar's two rows is scope creep, and the pane
+    // cannot render it.
     //
     // `source.kind` and `source.params` came OFF this list with the Source panel;
     // `layer` and `bodyFilter` came off with this one; and the whole pedalboard —
@@ -1922,16 +2088,54 @@ describe('scope', () => {
     // and the cab had no obvious home in the pane; post-cab it has one — it is the
     // room the cabinet stands in, and it is declared on the Cabinet section.
     //
-    // The final EQ is the whole of what is left, and it is genuinely deferred
-    // rather than forgotten: it sits after the room, and nothing has decided
-    // whether a per-voice mastering EQ is a control a user should have at all.
-    const deferred = ['effects.finalEq'];
-    for (const param of ALL_PARAMS) {
-      for (const prefix of deferred) {
-        expect(param.path.startsWith(prefix), `${param.path} reaches deferred ${prefix}`).toBe(
-          false,
-        );
-      }
+    // `effects.finalEq` came off on 2026-09-18 with the Final EQ section, and the
+    // list is now EMPTY.
+    //
+    // ⚠ SO THE WALK GOES THE OTHER WAY ROUND, off the lib's type. An empty
+    // allowlist checked row by row asserts NOTHING — the loop body never runs, and
+    // the "tripwire for the next one" it claimed to be would have tripped only if
+    // the person adding a stage also remembered to list it, which is the thing it
+    // was meant to detect. `EFFECTS_STAGES` is a `Record` over
+    // `keyof EffectsConfig`, so a stage the LIB adds fails to compile here; the
+    // assertion then says each one is either reached by a declared row or named on
+    // `deferred` as deliberately not yet honoured.
+    const EFFECTS_STAGES: Record<keyof EffectsConfig, true> = {
+      distortion: true,
+      chorus: true,
+      delay: true,
+      autoWah: true,
+      graphicEq: true,
+      amp: true,
+      circuitAmp: true,
+      cabIR: true,
+      reverb: true,
+      finalEq: true,
+    };
+    const deferred: readonly (keyof EffectsConfig)[] = [];
+    const paths = [...ALL_PARAMS, ...ALL_PEDAL_PARAMS].map((p) => p.path);
+    for (const stage of Object.keys(EFFECTS_STAGES) as (keyof EffectsConfig)[]) {
+      const reached = paths.some((path) => path.startsWith(`effects.${stage}.`));
+      expect(reached, `effects.${stage}`).toBe(!deferred.includes(stage));
+    }
+
+    // The other half of the same rule, and the half the old walk was actually
+    // written for: nothing declared here reaches OUTSIDE the preset's known
+    // branches. `source.kind` and `source.params` came off with the Source panel,
+    // `layer` and `bodyFilter` with this one, `compressor` with the Pedals section.
+    const known = [
+      'source.',
+      'layer.',
+      'bodyFilter.',
+      'compressor.',
+      'effects.',
+      'level.',
+      'inputGainDb',
+    ];
+    for (const path of paths) {
+      expect(
+        known.some((prefix) => path.startsWith(prefix)),
+        `${path} reaches outside the declared branches`,
+      ).toBe(true);
     }
   });
 
@@ -2205,7 +2409,6 @@ describe('the cabinet and the room, as two stages of one pane', () => {
 
     // A stage that cannot be removed has no branch to be present, so the header
     // draws no button at all rather than an "Add" for nothing.
-    expect(removableBranchPresent(BOTH, sectionAt('level'))).toBe(false);
     expect(removableBranchPresent(BOTH, sectionAt('source'))).toBe(false);
   });
 

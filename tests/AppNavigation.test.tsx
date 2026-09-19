@@ -228,11 +228,12 @@ describe('state that outlives the page swap', () => {
   it('preserves the amp pane unsaved voice and its open sections', async () => {
     render(<App />);
 
-    // `Level` starts folded, so opening it is a change to the folded-sections
-    // list `App` holds; the knob edit inside it is draft state the pane never
-    // persists. A `Knob`, not a range input — the pattern page draws the
-    // composition page's controls now.
-    await userEvent.click(screen.getByRole('button', { name: 'Level' }));
+    // Two different pieces of state in one test. `Source` starts folded, so
+    // opening it is a change to the folded-sections list `App` holds; the Volume
+    // knob is in the IN/OUT bar, which folds with nothing, and turning it is draft
+    // state the pane never persists. A `Knob`, not a range input — the pattern
+    // page draws the composition page's controls now.
+    await userEvent.click(screen.getByRole('button', { name: 'Source' }));
     const volume = screen.getByRole('slider', { name: 'Volume' });
     const before = Number(volume.getAttribute('aria-valuenow'));
     fireEvent.keyDown(volume, { key: 'ArrowUp' });
@@ -243,7 +244,7 @@ describe('state that outlives the page swap', () => {
     await goTo('Composition');
     await goTo('Pattern');
 
-    expect(screen.getByRole('button', { name: 'Level' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: 'Source' })).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByRole('slider', { name: 'Volume' })).toHaveAttribute(
       'aria-valuenow',
       String(edited),

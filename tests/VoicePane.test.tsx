@@ -161,17 +161,36 @@ describe('VoicePane', () => {
 
     // Section disclosures carry the label alone — no status text folded into the
     // accessible name, which is why the status note sits outside the button.
-    for (const name of ['Source', 'Body filter', 'Pedals', 'Amp', 'Cabinet + room', 'Level']) {
+    for (const name of ['Source', 'Body filter', 'Pedals', 'Amp', 'Cabinet + room']) {
       expect(section(name)).toBeInTheDocument();
     }
+    // `Level` is NOT among them any more, and nothing replaced it in the fold
+    // list: its two rows are the IN/OUT bar, which no disclosure controls.
+    expect(screen.queryByRole('button', { name: 'Level' })).toBeNull();
 
-    const level = section('Level');
-    expect(level).toHaveAttribute('aria-expanded', 'false');
-    await userEvent.click(level);
-    expect(level).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByLabelText('Input gain')).toBeInTheDocument();
-    expect(screen.getByLabelText('Volume')).toBeInTheDocument();
-    expect(screen.getByLabelText('Pan')).toBeInTheDocument();
+    // The bar itself — drawn with nothing unfolded, because that is the whole
+    // reason it exists. One group, the input end and the output end.
+    const bar = within(screen.getByRole('group', { name: 'Voice levels' }));
+    expect(bar.getByLabelText('Input gain')).toBeInTheDocument();
+    expect(bar.getByLabelText('Volume')).toBeInTheDocument();
+    // Each knob has the meter for its own end of the chain beside it. The bar is
+    // written to from a subscription rather than rendered, so what a test can see
+    // is that the meter is MOUNTED and pointed somewhere — its clip button is the
+    // one part of it that is not `aria-hidden`. WHERE it is pointed is the other
+    // half and it cannot be asked here: it needs `audio/levelMeters` mocked before
+    // the import, so it lives in `tests/VoiceLevelBar.test.tsx` with the track
+    // arm's.
+    expect(
+      bar.getByRole('button', { name: /Voice input level — clip indicator/ }),
+    ).toBeInTheDocument();
+    expect(
+      bar.getByRole('button', { name: /Voice output level — clip indicator/ }),
+    ).toBeInTheDocument();
+
+    // ⚠ THE DELETION, and it is deliberate: the voice's pan is gone with no
+    // replacement, so the pattern page has no pan control at all. Panning is the
+    // track's, in the track header.
+    expect(screen.queryByLabelText('Pan')).toBeNull();
   });
 
   it('folds a section without unmounting it — aria-controls needs the region to exist', async () => {
@@ -196,8 +215,8 @@ describe('VoicePane', () => {
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
 
-    // Scoped to the section's own region: 'Volume' is also a Level row, and a
-    // bare query would pass on the wrong control.
+    // Scoped to the section's own region: 'Volume' and 'Input gain' are also the
+    // IN/OUT bar's two knobs, and a bare query would pass on the wrong control.
     const stageRegion = screen.getByRole('region', { name: 'Amp (circuit) stage' });
     expect(within(stageRegion).getByLabelText('Amp')).toBeInTheDocument();
     expect(within(stageRegion).getByLabelText('Volume')).toBeInTheDocument();
@@ -223,14 +242,19 @@ describe('VoicePane', () => {
     expect(ACOUSTIC_GUITAR_PRESET.effects).toBeUndefined();
     expect(ACOUSTIC_GUITAR_PRESET.bodyFilter).toBeUndefined();
     render(<Host />);
-    // Four, not three: the experimental circuit amp is a section of its own and no
+    // Five, not three: the experimental circuit amp is a section of its own and no
     // shipped preset carries one, by design — `wireChain` builds one amp or the
-    // other, so a built-in voiced on the classic amp must not also carry a circuit.
+    // other, so a built-in voiced on the classic amp must not also carry a circuit
+    // — and the final EQ is a fifth stage, absent here with the rest of `effects`.
     // The rack's terse sentence, which is now both surfaces': the pane used to
     // print an explanatory paragraph here and the composition page a lamp and a
     // line. One editor, one wording — and the dark lamp beside it is the other
     // half, which jsdom cannot read.
-    expect(screen.getAllByText(/stage on this voice\./)).toHaveLength(4);
+    expect(screen.getAllByText(/stage on this voice\./)).toHaveLength(5);
+    // The acronym, pinned. `Final EQ` is the first label in the table that does
+    // not lowercase cleanly, and the sentence reads it off `absentLabel` rather
+    // than off `label.toLowerCase()` — which would say "No final eq stage".
+    expect(screen.getByText('No final EQ stage on this voice.')).toBeInTheDocument();
     expect(screen.queryByText('Not on this preset')).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
@@ -707,7 +731,7 @@ describe('VoicePane', () => {
     // `role="slider"`, which is what this query and every other one in the file
     // still reaches.
     render(<Host />);
-    await userEvent.click(section('Level'));
+    // No fold in front of it: the bar is above everything that folds.
     const volume = screen.getByLabelText('Volume');
     expect(volume).toHaveAttribute('role', 'slider');
 
@@ -734,7 +758,7 @@ describe('VoicePane', () => {
     const { unmount } = render(
       <VoicePane collapsedSections={undefined} onCollapsedSectionsChange={() => {}} />,
     );
-    for (const name of ['Source', 'Level']) {
+    for (const name of ['Source', 'Body filter', 'Pedals']) {
       expect(section(name)).toHaveAttribute('aria-expanded', 'false');
     }
     for (const name of ['Amp', 'Cabinet + room']) {
@@ -743,7 +767,7 @@ describe('VoicePane', () => {
     unmount();
 
     render(<VoicePane collapsedSections={[]} onCollapsedSectionsChange={() => {}} />);
-    for (const name of ['Source', 'Body filter', 'Pedals', 'Amp', 'Cabinet + room', 'Level']) {
+    for (const name of ['Source', 'Body filter', 'Pedals', 'Amp', 'Cabinet + room']) {
       expect(section(name)).toHaveAttribute('aria-expanded', 'true');
     }
   });
@@ -752,12 +776,12 @@ describe('VoicePane', () => {
     const folded: (readonly SectionId[])[] = [];
     render(<VoicePane collapsedSections={undefined} onCollapsedSectionsChange={(next) => folded.push(next)} />);
 
-    // Unfolding Level — folded by default — is a REMOVAL from the folded list,
-    // which is the half "Use suggested cab" also writes. What travels is the
+    // Unfolding the pedalboard — folded by default — is a REMOVAL from the folded
+    // list, which is the half "Use suggested cab" also writes. What travels is the
     // WHOLE list, so the stages nobody touched are still in it.
-    await userEvent.click(section('Level'));
+    await userEvent.click(section('Pedals'));
     expect(folded).toHaveLength(1);
-    expect(folded[0]).not.toContain('level');
+    expect(folded[0]).not.toContain('pedals');
     expect(folded[0]).toContain('source');
   });
 
@@ -983,7 +1007,6 @@ describe('VoicePane', () => {
     // button; it is in the shared editor's row now, so the pane has one too and
     // nothing was asserting it.
     render(<Host />);
-    await userEvent.click(section('Level'));
     const before = screen.getByLabelText('Volume').getAttribute('aria-valuenow');
     fireEvent.keyDown(screen.getByLabelText('Volume'), { key: 'ArrowUp' });
     expect(isVoiceDirty('pattern', getEditingPattern()!.id)).toBe(true);

@@ -281,9 +281,13 @@ describe('subscribeMeter', () => {
 });
 
 describe('the OUT reading is post-fader', () => {
-  /** Only the fields `setTrackFaders` reads. */
-  function track(id: string, fields: Partial<{ volumeDb: number; muted: boolean; soloed: boolean }> = {}) {
-    return { id, volumeDb: 0, muted: false, soloed: false, ...fields } as unknown as import('@fretwork/lib').Track;
+  /** Only the fields `setTrackFaders` reads — which is exactly what it takes, so
+   *  this needs no cast. */
+  function track(
+    id: string,
+    fields: Partial<{ volumeDb: number; muted: boolean; soloed: boolean }> = {},
+  ) {
+    return { id, volumeDb: 0, muted: false, soloed: false, ...fields };
   }
 
   function outOf(trackId: string): number {
@@ -345,8 +349,16 @@ describe('the OUT reading is post-fader', () => {
     meters.registerTrackVoice('t1', fakeVoice(-Infinity, -Infinity));
     meters.setTrackFaders([track('t1', { volumeDb: 6 })]);
 
-    // Without the guard this is `-Infinity + 6`, which is NaN territory for the
-    // bar maths and draws as a full-scale meter on a silent track.
+    expect(outOf('t1')).toBe(meters.SILENCE_DB);
+  });
+
+  it('stays silent for a NaN out reading, whatever the fader says', () => {
+    meters.registerTrackVoice('t1', fakeVoice(-30, NaN));
+    meters.setTrackFaders([track('t1', { volumeDb: 6 })]);
+
+    // `readTap` collapses it before the fader is added. Without that the meter
+    // reads `NaN + 6`, which draws empty — indistinguishable from silence on a
+    // voice that is producing signal.
     expect(outOf('t1')).toBe(meters.SILENCE_DB);
   });
 
@@ -359,6 +371,117 @@ describe('the OUT reading is post-fader', () => {
     meters.registerTrackVoice('t1', fakeVoice(-30, -12));
 
     expect(outOf('t1')).toBe(-12);
+  });
+});
+
+describe('the pattern page’s voice', () => {
+  /** Only the fields `setTrackFaders` reads. */
+  function track(id: string, volumeDb: number) {
+    return { id, volumeDb, muted: false, soloed: false };
+  }
+
+  it('reports its three taps once it is registered', () => {
+    meters.registerPatternVoice(fakeVoice(-3, -18, -9));
+    const seen: Record<string, number> = {};
+    meters.subscribeMeter({ kind: 'pattern-in' }, (db) => (seen.in = db));
+    meters.subscribeMeter({ kind: 'pattern-drive' }, (db) => (seen.drive = db));
+    meters.subscribeMeter({ kind: 'pattern-out' }, (db) => (seen.out = db));
+
+    flushFrame();
+
+    expect(seen.in).toBe(-3);
+    expect(seen.drive).toBe(-9);
+    expect(seen.out).toBe(-18);
+  });
+
+  it('reports silence before anything is registered', () => {
+    // The normal state of the pattern page until something asks for a sound: the
+    // engine is built on first use, so a meter mounted before that has no voice.
+    let db = 0;
+    meters.subscribeMeter({ kind: 'pattern-in' }, (value) => (db = value));
+
+    flushFrame();
+
+    expect(db).toBe(meters.SILENCE_DB);
+  });
+
+  it('stops reporting once the voice is unregistered', () => {
+    meters.registerPatternVoice(fakeVoice(-3, -18));
+    let db = 0;
+    meters.subscribeMeter({ kind: 'pattern-in' }, (value) => (db = value));
+    flushFrame();
+    expect(db).toBe(-3);
+
+    // This is the pattern engine's teardown. Without it the registry holds a
+    // disposed voice and every read takes the catch — a meter that looks the same
+    // as a silent one but costs a throw per frame.
+    meters.unregisterPatternVoice();
+    flushFrame();
+
+    expect(db).toBe(meters.SILENCE_DB);
+  });
+
+  it('meters the voice that replaced one rebuilt in place', () => {
+    meters.registerPatternVoice(fakeVoice(-30, -30));
+    meters.registerPatternVoice(fakeVoice(-2, -2));
+    let db = 0;
+    meters.subscribeMeter({ kind: 'pattern-in' }, (value) => (db = value));
+
+    flushFrame();
+
+    expect(db).toBe(-2);
+  });
+
+  it('reads the RAW out tap — there is no fader in front of it', () => {
+    // The fader arithmetic is a track's: a track's gain sits between its voice and
+    // the master, outside the voice's own taps. The pattern page's voice connects
+    // to `MasterBus` itself, so adding anything here would report a level that
+    // exists at no point in the graph.
+    //
+    // Both voices hand back the SAME raw -12 in the same frame, so the two OUT
+    // readings may differ by the fader and by nothing else. Route the pattern case
+    // through the arithmetic and they agree; collide their keys and they agree too.
+    meters.registerPatternVoice(fakeVoice(-30, -12));
+    meters.registerTrackVoice('t1', fakeVoice(-30, -12));
+    meters.setTrackFaders([track('t1', -6)]);
+    const seen: Record<string, number> = {};
+
+    meters.subscribeMeter({ kind: 'pattern-out' }, (db) => (seen.pattern = db));
+    meters.subscribeMeter({ kind: 'track-out', trackId: 't1' }, (db) => (seen.track = db));
+    flushFrame();
+
+    expect(seen.pattern).toBe(-12);
+    expect(seen.track).toBeCloseTo(-18, 5);
+  });
+
+  it('collapses a NaN out reading to silence', () => {
+    // `readTap`'s finiteness check, on the path that has no fader arithmetic to
+    // hide it. It is there for NaN specifically — -Infinity already IS silence —
+    // and without it the NaN reaches the bar and the readout.
+    meters.registerPatternVoice(fakeVoice(-30, NaN));
+    let db = 0;
+
+    meters.subscribeMeter({ kind: 'pattern-out' }, (value) => (db = value));
+    flushFrame();
+
+    expect(db).toBe(meters.SILENCE_DB);
+  });
+
+  it('survives the composition engine being torn down', () => {
+    // Two engines, two lifetimes. Leaving the composition page clears the track
+    // voices; the pattern page's voice is not one of them and its meter must not
+    // go dark because the other engine went away.
+    meters.registerPatternVoice(fakeVoice(-4, -4));
+    meters.registerTrackVoice('t1', fakeVoice(-3, -3));
+    const seen: Record<string, number> = {};
+    meters.subscribeMeter({ kind: 'pattern-in' }, (db) => (seen.pattern = db));
+    meters.subscribeMeter({ kind: 'track-in', trackId: 't1' }, (db) => (seen.track = db));
+
+    meters.clearTrackVoices();
+    flushFrame();
+
+    expect(seen.track).toBe(meters.SILENCE_DB);
+    expect(seen.pattern).toBe(-4);
   });
 });
 
@@ -387,17 +510,23 @@ describe('the voice registry', () => {
     expect(db).toBe(meters.SILENCE_DB);
   });
 
-  it('forgets a single track without disturbing the others', () => {
+  it('keeps two tracks apart, and forgets both on teardown', () => {
     meters.registerTrackVoice('t1', fakeVoice(-3, -3));
     meters.registerTrackVoice('t2', fakeVoice(-9, -9));
     const seen: Record<string, number> = {};
     meters.subscribeMeter({ kind: 'track-in', trackId: 't1' }, (db) => (seen.t1 = db));
     meters.subscribeMeter({ kind: 'track-in', trackId: 't2' }, (db) => (seen.t2 = db));
 
-    meters.unregisterTrackVoice('t1');
+    flushFrame();
+    // The id is in the key, not just in the registry: two strips watching the same
+    // tap on different tracks must not dedupe onto one reading.
+    expect(seen.t1).toBe(-3);
+    expect(seen.t2).toBe(-9);
+
+    meters.clearTrackVoices();
     flushFrame();
 
     expect(seen.t1).toBe(meters.SILENCE_DB);
-    expect(seen.t2).toBe(-9);
+    expect(seen.t2).toBe(meters.SILENCE_DB);
   });
 });

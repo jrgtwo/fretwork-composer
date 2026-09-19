@@ -55,7 +55,7 @@ export const VOICE_COMMIT_MS = 120;
  *
  * ⚠ NAMED FOR WHAT DECIDES THEM — the WIDTH the editor has been given — and not
  * for the page it is on. A rack lane has to fit eight amp knobs plus a cabinet
- * and a level stage across one track's row; the Instrument & Amp pane has a
+ * and an IN/OUT bar across one track's row; the Instrument & Amp pane has a
  * whole pane's column, which is what `Knob`'s and `ParamEncoder`'s own 56 px
  * default was drawn for. ONE RULE, passed in as a prop: a renderer that asked
  * which page it was on would be the branch the merged editor exists to delete,
@@ -64,7 +64,8 @@ export const VOICE_COMMIT_MS = 120;
 export interface KnobScale {
   /** The amp plate's knobs, which are the largest thing on any stage. */
   readonly amp: number;
-  /** Everything else — cabinet, pedals, source, level, and every encoder. */
+  /** Everything else — cabinet, pedals, source, the IN/OUT bar, and every
+   *  encoder. */
   readonly small: number;
 }
 

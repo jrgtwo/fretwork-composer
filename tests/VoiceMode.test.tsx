@@ -325,8 +325,9 @@ vi.mock('@fretwork/lib', async (importOriginal) => {
 const BAR = 4 * PPQ;
 
 /** The parameter every test turns. `level` is required on every preset, so this
- *  path resolves against any voice the lib hands back — no fixture can make the
- *  Level stage absent, which is what makes it the safe one to assert on. */
+ *  path resolves against any voice the lib hands back — and since 2026-09-18 it is
+ *  drawn in the IN/OUT bar, which no fold can hide, which is what makes it the
+ *  safe one to assert on. */
 const VOLUME_PATH = 'level.volumeDb';
 
 function twoTracks(): readonly Track[] {
@@ -377,6 +378,18 @@ const knob = (track: Track, section: string, name: string) =>
   stage(track, section).getByRole('slider', { name });
 
 /**
+ * One of the two knobs in a rack's IN/OUT bar.
+ *
+ * ⚠ NOT REACHED THROUGH A STAGE, and that is the point of the bar: it is above
+ * everything that folds, so there is no `openStage` in front of it and no region
+ * to scope the query by. The knob's own accessible name carries the track —
+ * `VoiceEditor` scopes it exactly as it scopes a stage's rows — which is what
+ * keeps eight racks' "Volume" knobs apart here and for a screen reader.
+ */
+const barKnob = (track: Track, name: string) =>
+  screen.getByRole('slider', { name: `${track.name} ${name}` });
+
+/**
  * A knob's drawn diameter, in px.
  *
  * ⚠ THE ONE PIECE OF GEOMETRY THIS FILE IS ALLOWED TO ASSERT. jsdom has no
@@ -401,10 +414,10 @@ const DEFAULT_FOLDED = PARAM_SECTIONS.filter(
  * Unfold one stage of one rack, idempotently.
  *
  * A rack opens on Amp and Cabinet, exactly as the pattern page's pane does, so
- * Source and Level start folded — and a folded stage's controls are `hidden`,
- * which puts them out of reach of a role query ON PURPOSE. `Level` is the stage
- * most of this file turns a knob on (it is the one no preset can be missing), so
- * most of them go through here first.
+ * Source, the body filter and the pedalboard start folded — and a folded stage's
+ * controls are `hidden`, which puts them out of reach of a role query ON PURPOSE.
+ * The knob most of this file turns is the bar's Volume, which is in no stage at
+ * all; see {@link barKnob}.
  *
  * `fireEvent` rather than `userEvent` because half the callers are synchronous:
  * this is a plain button and one click is the whole gesture.
@@ -527,7 +540,7 @@ describe('the per-track voice draft seam', () => {
     // with no pointer hands over whatever it computed, which is the case this
     // guard exists for.
     const tooLoud = setVoiceParam('track', tracks[0].id, VOLUME_PATH, 900);
-    const notAParam = setVoiceParam('track', tracks[0].id, 'effects.finalEq.low', 3);
+    const notAParam = setVoiceParam('track', tracks[0].id, 'level.pan', 0.5);
     const wrongKind = setVoiceParam('track', tracks[0].id, VOLUME_PATH, 'loud');
     const noTrack = setVoiceParam('track', 'not-a-track', VOLUME_PATH, 0);
     const noSuchPack = setVoiceParam('track', tracks[0].id, 'source.samples', 'nope');
@@ -538,11 +551,13 @@ describe('the per-track voice draft seam', () => {
     const noRoom = setVoiceParam('track', tracks[0].id, 'effects.reverb.wet', 0.5);
 
     expect(tooLoud).toEqual({ ok: false, reason: expect.stringContaining('Volume') });
-    // The post-cab mastering EQ is deliberately undeclared in `paramSchema`, so
-    // the path is refused rather than silently widening the preset with a field
-    // the editor cannot honour. It stands in for `effects.reverb.wet`, which was
-    // this example until 2026-09-16 and is now a real row on the Cabinet section
-    // — a declared-but-gated path, which is a DIFFERENT refusal (`paramApplies`,
+    // The voice's pan is deliberately undeclared in `paramSchema` — deleted
+    // outright on 2026-09-18, because panning is the TRACK's and two pans in
+    // series was a duplication — so the path is refused rather than silently
+    // widening the preset with a field the editor cannot honour. It stands in for
+    // the post-cab mastering EQ, which was this example until 2026-09-18 and is a
+    // real section now, and before that for `effects.reverb.wet`. Both are
+    // declared-but-gated paths, which is a DIFFERENT refusal (`paramApplies`,
     // "not a setting of this voice's source") and not the one this asserts.
     expect(notAParam).toEqual({ ok: false, reason: expect.stringContaining('not an editable') });
     expect(wrongKind).toEqual({ ok: false, reason: expect.stringContaining('number') });
@@ -608,6 +623,59 @@ describe('the per-track voice draft seam', () => {
     expect(getAtPath(amp, 'effects.amp.preDrive')).toBe(0.3);
     expect(getAtPath(amp, 'effects.amp.bass')).toBe(0);
     expect(getAtPath(amp, 'effects.amp.enabled')).toBeUndefined();
+  });
+
+  it('adds a COMPLETE final EQ, and removes the whole branch', () => {
+    // The round trip the Final EQ section's whole `requiresBranch` argument exists
+    // to protect. `EQParams` has five required value fields and `buildChain` passes
+    // the branch straight into `new Tone.EQ3`, so an Add that wrote four of them
+    // would hand Tone an `undefined` on a `Param` — and every gate in the schema is
+    // there so that `addVoiceSection` is the ONLY way this branch can be born.
+    // Asserted as a whole object rather than field by field, because a SIXTH field
+    // the seed did not write is the failure this is watching for.
+    const tracks = twoTracks();
+    expect(removeVoiceSection('track', tracks[0].id, 'final-eq').ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.finalEq')).toBeUndefined();
+
+    expect(addVoiceSection('track', tracks[0].id, 'final-eq').ok).toBe(true);
+
+    // Tone's own `EQ3.getDefaults()`: flat, at its own crossovers. `enabled` is
+    // absent on purpose — optional, and `undefined` already means "in the chain".
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.finalEq')).toEqual({
+      low: 0,
+      mid: 0,
+      high: 0,
+      lowFrequency: 400,
+      highFrequency: 2500,
+    });
+
+    // And back off again, whole — the branch, not just its values.
+    expect(removeVoiceSection('track', tracks[0].id, 'final-eq').ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.finalEq')).toBeUndefined();
+    // A voice write takes its holder first; the second track never had one.
+    expect(dirtyOf(getTracks()[1])).toBe(false);
+  });
+
+  it('refuses a crossover the filter cannot hold', () => {
+    // The `floor` arm, which nothing else in the suite reaches. An encoder has no
+    // end stop, so the gesture can walk a crossover below zero — 10 Hz a detent,
+    // ten detents a Shift-drag — and `BiquadFilterNode.frequency` is bounded
+    // `[0, nyquist]` by Web Audio. Accepted, the readout would show a number the
+    // node silently clamps away. Refused in words instead, exactly as the `slider`
+    // arm's range check does for a caller with no pointer.
+    const tracks = twoTracks();
+    expect(addVoiceSection('track', tracks[0].id, 'final-eq').ok).toBe(true);
+
+    expect(setVoiceParam('track', tracks[0].id, 'effects.finalEq.lowFrequency', -100)).toEqual({
+      ok: false,
+      reason: 'Low/mid is 0 Hz or more.',
+    });
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.finalEq.lowFrequency')).toBe(400);
+
+    // Zero itself is legal — it empties the low band and the other two still pass,
+    // which is a setting rather than the silence a floor exists to stop.
+    expect(setVoiceParam('track', tracks[0].id, 'effects.finalEq.lowFrequency', 0).ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.finalEq.lowFrequency')).toBe(0);
   });
 
   it('seeds a stage from a caller’s value in one commit, and refuses an unseedable path', () => {
@@ -1084,7 +1152,7 @@ describe('the rack in a lane', () => {
         screen.getByRole('button', { name: `Voice rack for ${track.name}` }),
       ).toBeInTheDocument();
       // Every stage of every track is its own landmark, named for the track.
-      for (const section of ['Source', 'Amp', 'Cabinet + room', 'Level']) {
+      for (const section of ['Source', 'Amp', 'Cabinet + room']) {
         expect(
           screen.getByRole('region', { name: `${track.name} ${section}` }),
         ).toBeInTheDocument();
@@ -1461,10 +1529,8 @@ describe('the rack in a lane', () => {
   it('turns a knob on one rack without moving the other', () => {
     const tracks = twoTracks();
     render(<VoiceGrid />);
-    openStage(tracks[0], 'Level');
-    openStage(tracks[1], 'Level');
-    const mine = knob(tracks[0], 'Level', 'Volume');
-    const theirs = knob(tracks[1], 'Level', 'Volume');
+    const mine = barKnob(tracks[0], 'Volume');
+    const theirs = barKnob(tracks[1], 'Volume');
     // Read rather than assumed: the built-in this fixture resolves to is the
     // lib's to change, and a hard-coded start would fail for a reason that has
     // nothing to do with the rack.
@@ -1478,11 +1544,11 @@ describe('the rack in a lane', () => {
     // One arrow key is one `step`, which the SCHEMA declares — the rack knows no
     // ranges of its own.
     expect(volumeOf(getTracks()[0])).toBe(before + 0.5);
-    expect(knob(getTracks()[0], 'Level', 'Volume')).toHaveAttribute(
+    expect(barKnob(getTracks()[0], 'Volume')).toHaveAttribute(
       'aria-valuenow',
       String(before + 0.5),
     );
-    expect(knob(getTracks()[1], 'Level', 'Volume')).toHaveAttribute(
+    expect(barKnob(getTracks()[1], 'Volume')).toHaveAttribute(
       'aria-valuenow',
       theirsBefore,
     );
@@ -1499,8 +1565,7 @@ describe('the rack in a lane', () => {
     selectPlacements([placementId]);
     render(<VoiceGrid />);
 
-    openStage(getTracks()[0], 'Level');
-    fireEvent.keyDown(knob(getTracks()[0], 'Level', 'Volume'), { key: 'ArrowUp' });
+    fireEvent.keyDown(barKnob(getTracks()[0], 'Volume'), { key: 'ArrowUp' });
 
     // ArrowUp transposes the selection a semitone in pattern mode. One press
     // doing two things is the bug `keyboardEnabled` exists to prevent, and the
@@ -1534,8 +1599,7 @@ describe('the rack in a lane', () => {
     const tracks = twoTracks();
     render(<VoiceGrid />);
 
-    openStage(tracks[0], 'Level');
-    fireEvent.keyDown(knob(tracks[0], 'Level', 'Volume'), { key: 'ArrowUp' });
+    fireEvent.keyDown(barKnob(tracks[0], 'Volume'), { key: 'ArrowUp' });
     const revert = await screen.findByRole('button', {
       name: `Discard voice changes for ${tracks[0].name}`,
     });
@@ -1615,6 +1679,13 @@ describe('the rack in a lane', () => {
     expect(screen.queryByRole('region', { name: `${tracks[0].name} Amp` })).toBeNull();
     // Per TRACK: the other rack is untouched by its neighbour folding.
     expect(screen.getByRole('region', { name: `${tracks[1].name} Amp` })).toBeInTheDocument();
+
+    // …AND THE STRIP IS NOT JUST THE HEADER ROW. The IN/OUT bar survives the
+    // rack's own fold, which is the whole reason it is a bar and not a stage:
+    // move it inside the `!collapsed` block and everything above still passes.
+    const bar = within(screen.getByRole('group', { name: `${tracks[0].name} levels` }));
+    expect(bar.getByLabelText(`${tracks[0].name} Input gain`)).toBeInTheDocument();
+    expect(bar.getByLabelText(`${tracks[0].name} Volume`)).toBeInTheDocument();
   });
 });
 
@@ -1985,8 +2056,7 @@ describe('saving a voice from the track’s own rack', () => {
     await user.click(rack(getTracks()[0]).getByRole('button', { name: 'Create' }));
     expect(notice(getTracks()[0])).toHaveTextContent('Give the variant a name.');
 
-    openStage(getTracks()[0], 'Level');
-    fireEvent.keyDown(knob(getTracks()[0], 'Level', 'Volume'), { key: 'ArrowUp' });
+    fireEvent.keyDown(barKnob(getTracks()[0], 'Volume'), { key: 'ArrowUp' });
 
     // One line says everything this rack has to say, so a refusal left standing
     // beside a control that has since worked reads as a refusal of THAT write.
@@ -2747,8 +2817,8 @@ describe('the stages stack, and the lane holds them', () => {
 
     // Unfolding the LAST folded stage reports an empty list, and empty is not
     // the same as absent: absent means "nobody has touched this rack" and opens
-    // on the default. Dropping the empty one would re-fold Source and Level the
-    // moment the user finished opening them.
+    // on the default. Dropping the empty one would re-fold Source and the
+    // pedalboard the moment the user finished opening them.
     for (const id of DEFAULT_FOLDED) {
       const label = PARAM_SECTIONS.find((section) => section.id === id)?.label;
       await user.click(
@@ -2795,9 +2865,9 @@ describe('the stages stack, and the lane holds them', () => {
     expect(document.getElementById(button.getAttribute('aria-controls') ?? '')).not.toBeNull();
     expect(within(region).queryByRole('slider', { name: 'Drive' })).toBeNull();
     // Per TRACK and per STAGE: the neighbour's amp is open, and this rack's own
-    // Level stage is untouched.
+    // IN/OUT bar — which folds with nothing — is untouched.
     expect(stage(getTracks()[1], 'Amp').getByRole('slider', { name: 'Drive' })).toBeInTheDocument();
-    expect(knob(getTracks()[0], 'Level', 'Volume')).toBeInTheDocument();
+    expect(barKnob(getTracks()[0], 'Volume')).toBeInTheDocument();
   });
 });
 
@@ -3111,17 +3181,16 @@ describe('unsaved tone survives the things that unmount it', () => {
     const track = getTracks()[0];
     const tuned = (volumeOf(track) as number) + 0.5;
 
-    openStage(track, 'Level');
-    fireEvent.keyDown(knob(track, 'Level', 'Volume'), { key: 'ArrowUp' });
+    fireEvent.keyDown(barKnob(track, 'Volume'), { key: 'ArrowUp' });
     expect(volumeOf(getTracks()[0])).toBe(tuned);
 
     // (1) A view switch on this track. Its lane is replaced, so its rack
     // unmounts.
     await user.click(viewButton('Pattern', track.name));
-    expect(screen.queryByRole('region', { name: `${track.name} Level` })).toBeNull();
+    expect(screen.queryByRole('region', { name: `${track.name} Amp` })).toBeNull();
     await user.click(viewButton('Voice', track.name));
     expect(volumeOf(getTracks()[0])).toBe(tuned);
-    expect(knob(getTracks()[0], 'Level', 'Volume')).toHaveAttribute(
+    expect(barKnob(getTracks()[0], 'Volume')).toHaveAttribute(
       'aria-valuenow',
       String(tuned),
     );
@@ -3138,7 +3207,7 @@ describe('unsaved tone survives the things that unmount it', () => {
     // to assert against at all.
     expect(viewButton('Voice', track.name)).toHaveAttribute('aria-pressed', 'true');
     expect(volumeOf(getTracks()[0])).toBe(tuned);
-    expect(knob(getTracks()[0], 'Level', 'Volume')).toHaveAttribute(
+    expect(barKnob(getTracks()[0], 'Volume')).toHaveAttribute(
       'aria-valuenow',
       String(tuned),
     );
@@ -3534,7 +3603,6 @@ describe('ONE editor, two pages', () => {
     const tracks = twoTracks();
     render(<App />);
 
-    await user.click(screen.getByRole('button', { name: /Level/ }));
     const paneVolume = screen.getByRole('slider', { name: 'Volume' });
     const patternBefore = Number(paneVolume.getAttribute('aria-valuenow'));
     // The knob's own gesture, which a range input does not answer in jsdom at
@@ -3547,8 +3615,7 @@ describe('ONE editor, two pages', () => {
     expect(patternAfter).toBeGreaterThan(patternBefore);
 
     await intoVoiceMode(user);
-    openStage(getTracks()[0], 'Level');
-    const rackVolume = knob(getTracks()[0], 'Level', 'Volume');
+    const rackVolume = barKnob(getTracks()[0], 'Volume');
     const trackBefore = volumeOf(getTracks()[0]) as number;
 
     // The same element type, the same role, the same keyboard contract — asked
@@ -3582,29 +3649,34 @@ describe('ONE editor, two pages', () => {
     // it. `inputGainDb` exists in two places: a preset carries one, and it is the
     // wrong one to put on a track — a preset is chosen and swapped, so a level
     // stored there is thrown away every time the user tries a different amp. The
-    // TRACK's survives the swap. A pattern has no track to hold one, so it shows
-    // the preset's row, which the rack filters out.
+    // TRACK's survives the swap. A pattern has no track to hold one, so its knob
+    // is the preset's row.
+    //
+    // Both arms are ONE KNOB IN THE IN/OUT BAR now, engraved with the same word
+    // and reached with no fold in front of it, which is what makes this test the
+    // only thing that can tell them apart: the engraving cannot, and neither can
+    // the range (`TRACK_INPUT_GAIN_RANGE_DB` is the preset row's own -80..+24).
+    // Where the value LANDS is the difference, and that is what is asserted.
     const user = userEvent.setup();
     const tracks = twoTracks();
     render(<App />);
 
-    await user.click(screen.getByRole('button', { name: /Level/ }));
-    const paneLevel = within(screen.getByRole('region', { name: 'Level stage' }));
-    // The preset's row, engraved as the schema names it.
-    expect(paneLevel.getByRole('slider', { name: 'Input gain' })).toBeInTheDocument();
-    expect(paneLevel.queryByRole('slider', { name: 'Input' })).toBeNull();
+    const paneInput = screen.getByRole('slider', { name: 'Input gain' });
+    const patternBefore = getAtPath(voicePreset('pattern', getEditingPattern()!.id)!, 'inputGainDb');
+    fireEvent.keyDown(paneInput, { key: 'ArrowUp' });
+    // The PATTERN arm writes the draft, and there is no track anywhere in it.
+    expect(
+      getAtPath(voicePreset('pattern', getEditingPattern()!.id)!, 'inputGainDb'),
+    ).not.toBe(patternBefore);
+    expect(getTracks()[0].inputGainDb).toBeUndefined();
 
     await intoVoiceMode(user);
-    openStage(getTracks()[0], 'Level');
-    const rackLevel = stage(getTracks()[0], 'Level');
-    // The track's own, and the preset's filtered out — two faders fighting over
-    // one job is exactly what this branch exists to prevent.
-    expect(rackLevel.queryByRole('slider', { name: 'Input gain' })).toBeNull();
-    const input = rackLevel.getByRole('slider', { name: 'Input' });
+    const input = barKnob(getTracks()[0], 'Input gain');
 
     // An untouched track reads as unity while the STORED value stays undefined:
     // `Track.inputGainDb` means "the preset decides" when absent and "unity
     // regardless" at 0.
+    expect(input).toHaveAttribute('aria-valuenow', '0');
     expect(getTracks()[0].inputGainDb).toBeUndefined();
     fireEvent.keyDown(input, { key: 'ArrowUp' });
 
@@ -3706,14 +3778,10 @@ describe('ONE editor, two pages', () => {
 });
 
 describe('the pattern page’s voice pane is untouched', () => {
-  it('still edits the pattern’s voice and marks itself unsaved', async () => {
-    const user = userEvent.setup();
+  it('still edits the pattern’s voice and marks itself unsaved', () => {
     twoTracks();
     render(<App />);
 
-    // `Level` starts folded on the pattern page — the same section the racks
-    // above edit, which is what makes this a real crossing test.
-    await user.click(screen.getByRole('button', { name: /Level/ }));
     // The same `Knob` the racks above draw — one editor, one control, and the
     // arrow is the gesture on both pages.
     const volume = screen.getByRole('slider', { name: 'Volume' });
@@ -3741,8 +3809,7 @@ describe('the pattern page’s voice pane is untouched', () => {
     render(<App />);
     await user.click(nav().getByRole('button', { name: 'Composition' }));
     await user.click(viewButton('Voice', getTracks()[0].name));
-    openStage(getTracks()[0], 'Level');
-    fireEvent.keyDown(knob(getTracks()[0], 'Level', 'Volume'), { key: 'ArrowUp' });
+    fireEvent.keyDown(barKnob(getTracks()[0], 'Volume'), { key: 'ArrowUp' });
     expect(dirtyOf(getTracks()[0])).toBe(true);
     // The same store, and the pattern holder is untouched by a track write.
     expect(isVoiceDirty('pattern', getEditingPattern()!.id)).toBe(false);
@@ -3755,7 +3822,6 @@ describe('the pattern page’s voice pane is untouched', () => {
 
     // …and the pattern page's own editor is where it was left.
     await user.click(nav().getByRole('button', { name: 'Pattern' }));
-    await user.click(screen.getByRole('button', { name: /Level/ }));
     expect(screen.queryByText('Unsaved')).toBeNull();
   });
 });
@@ -3824,10 +3890,9 @@ describe('the wheel belongs to the arrangement, not to a rack dial', () => {
     // is a sampler, whose rows are all bounded.
     setVoiceParam('track', tracks[0].id, 'source.kind', 'pluck-synth');
     render(<VoiceGrid />);
-    openStage(getTracks()[0], 'Level');
     openStage(getTracks()[0], 'Source');
 
-    const volume = knob(getTracks()[0], 'Level', 'Volume');
+    const volume = barKnob(getTracks()[0], 'Volume');
     const volumeBefore = volumeOf(getTracks()[0]);
     expect(fireEvent.wheel(volume, { deltaY: -100 })).toBe(true);
     expect(volumeOf(getTracks()[0])).toBe(volumeBefore);
@@ -3843,14 +3908,14 @@ describe('the wheel belongs to the arrangement, not to a rack dial', () => {
         .getAttribute('aria-valuenow'),
     ).toBe(resonanceBefore);
 
-    // ⚠ AND THE ONE DIAL THAT EXISTS ONLY HERE. `renderLevel`'s "Input" is the
-    // single `Knob` in `VoiceEditor` not drawn through `renderKnob`, so it takes
+    // ⚠ AND THE ONE DIAL THAT EXISTS ONLY HERE. The IN/OUT bar's track-arm input
+    // knob is the single `Knob` in `VoiceEditor` not drawn through `renderKnob`, so it takes
     // the policy by hand and nothing above catches it being dropped — and it is
     // on the composition surface BY CONSTRUCTION, which is exactly where this
     // milestone's bug lives. It also proves more than the preset rows do: it
     // writes through `setTrackInputGainDb`, so an unmoved value is the
     // COMPOSITION seam not being reached, not merely a draft not being made.
-    const input = stage(getTracks()[0], 'Level').getByRole('slider', { name: 'Input' });
+    const input = barKnob(getTracks()[0], 'Input gain');
     // Undefined means "the preset decides"; any wheel that landed would make it
     // a number.
     expect(getTracks()[0].inputGainDb).toBeUndefined();
@@ -3869,7 +3934,6 @@ describe('the wheel belongs to the arrangement, not to a rack dial', () => {
       setVoiceParam('pattern', patternId, 'source.kind', 'pluck-synth');
     });
 
-    await user.click(screen.getByRole('button', { name: /Level/ }));
     const volume = screen.getByRole('slider', { name: 'Volume' });
     const volumeBefore = Number(volume.getAttribute('aria-valuenow'));
     // False: the dial cancelled it, which is the half of today's behaviour that
@@ -3937,10 +4001,9 @@ describe('focus entering a rack belongs to its track', () => {
   it('selects the track whose dial takes focus', () => {
     const tracks = twoTracks();
     render(<VoiceGrid />);
-    openStage(getTracks()[1], 'Level');
     expect(getSelectedTrackId()).toBeNull();
 
-    act(() => knob(getTracks()[1], 'Level', 'Volume').focus());
+    act(() => barKnob(getTracks()[1], 'Volume').focus());
 
     expect(getSelectedTrackId()).toBe(tracks[1].id);
   });
@@ -3948,12 +4011,10 @@ describe('focus entering a rack belongs to its track', () => {
   it('moves the selection between two racks, and does not re-take one it already has', () => {
     const tracks = twoTracks();
     render(<VoiceGrid />);
-    openStage(getTracks()[0], 'Level');
-    openStage(getTracks()[1], 'Level');
 
-    act(() => knob(getTracks()[0], 'Level', 'Volume').focus());
+    act(() => barKnob(getTracks()[0], 'Volume').focus());
     expect(getSelectedTrackId()).toBe(tracks[0].id);
-    act(() => knob(getTracks()[1], 'Level', 'Volume').focus());
+    act(() => barKnob(getTracks()[1], 'Volume').focus());
     expect(getSelectedTrackId()).toBe(tracks[1].id);
 
     // A second control INSIDE the rack that already owns the selection leaves
@@ -3969,7 +4030,7 @@ describe('focus entering a rack belongs to its track', () => {
     // saving is a BROWSER-side property of a live pointer gesture and is item 25
     // of the final pass.
     act(() =>
-      stage(getTracks()[1], 'Level').getByRole('slider', { name: 'Input' }).focus(),
+      barKnob(getTracks()[1], 'Input gain').focus(),
     );
     expect(getSelectedTrackId()).toBe(tracks[1].id);
   });
@@ -4008,13 +4069,12 @@ describe('focus entering a rack belongs to its track', () => {
   it('says nothing and selects nothing while a job holds the document', () => {
     twoTracks();
     render(<VoiceGrid />);
-    openStage(getTracks()[1], 'Level');
     act(() => {
       const started = beginJob();
       if (!started.ok) throw new Error('job refused');
     });
 
-    act(() => knob(getTracks()[1], 'Level', 'Volume').focus());
+    act(() => barKnob(getTracks()[1], 'Volume').focus());
     // Both halves of the guard, because both handlers carry it.
     fireEvent.pointerDown(
       screen.getByRole('button', { name: `Voice rack for ${getTracks()[1].name}` }),
@@ -4033,9 +4093,8 @@ describe('focus entering a rack belongs to its track', () => {
   it('lets a wheel over a rack through to the scroller, taking neither the dial nor the selection', () => {
     const tracks = twoTracks();
     render(<VoiceGrid />);
-    openStage(getTracks()[1], 'Level');
     act(() => selectTrack(tracks[0].id));
-    const dial = knob(getTracks()[1], 'Level', 'Volume');
+    const dial = barKnob(getTracks()[1], 'Volume');
     const before = dial.getAttribute('aria-valuenow');
 
     // UNCANCELLED is the load-bearing half, and it is the half a mutation can
@@ -4052,7 +4111,7 @@ describe('focus entering a rack belongs to its track', () => {
       ),
     ).toBe(true);
 
-    expect(knob(getTracks()[1], 'Level', 'Volume').getAttribute('aria-valuenow')).toBe(
+    expect(barKnob(getTracks()[1], 'Volume').getAttribute('aria-valuenow')).toBe(
       before,
     );
     // And scrolling PAST a track is not reaching for it — the selection is

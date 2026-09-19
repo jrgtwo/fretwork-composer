@@ -2,7 +2,12 @@ import { createElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { PPQ, useMetronomeStore, usePatternsStore } from '@fretwork/lib';
-import { getEditingPattern, openBlankPattern, stampNote } from '../src/patterns/patternService';
+import {
+  getEditingPattern,
+  openBlankPattern,
+  setEditingPatternInstrument,
+  stampNote,
+} from '../src/patterns/patternService';
 import {
   play,
   previewNote,
@@ -135,6 +140,25 @@ const lib = vi.hoisted(() => {
   };
 });
 
+/**
+ * The meter registry, spied rather than exercised.
+ *
+ * `levelMeters` is tested on its own; what only this file can see is whether the
+ * engine ever TELLS it anything. Without these the three call sites in
+ * `ensureEngine`/`disposeEngine` can all be deleted with a green suite, and the
+ * pattern page's meters read -∞ forever.
+ */
+const meterSpies = vi.hoisted(() => ({
+  registerPatternVoice: vi.fn(),
+  unregisterPatternVoice: vi.fn(),
+}));
+
+vi.mock('../src/audio/levelMeters', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/audio/levelMeters')>()),
+  registerPatternVoice: meterSpies.registerPatternVoice,
+  unregisterPatternVoice: meterSpies.unregisterPatternVoice,
+}));
+
 // Only the audio surface is replaced — the pattern store stays real, so these
 // tests exercise the same path from editing pattern to stream that the app does.
 vi.mock('@fretwork/lib', async (importOriginal) => {
@@ -192,6 +216,12 @@ const start = () => act(async () => void (await play()));
 
 beforeEach(() => {
   lib.reset();
+  // MUST be cleared per test, and the unregister assertion is why: RTL unmounts
+  // every mounted `Probe` after each test, which tears the engine down and calls
+  // this. Left uncleared, "unregisters when the engine is torn down" is satisfied
+  // by the nineteen tests before it and passes with the call site deleted.
+  meterSpies.registerPatternVoice.mockClear();
+  meterSpies.unregisterPatternVoice.mockClear();
   renders.playing = 0;
   renders.head = 0;
   renders.active = 0;
@@ -425,6 +455,54 @@ describe('subscriptions', () => {
     expect(lib.order.indexOf('metronome.stop')).toBeLessThan(
       lib.order.indexOf('scheduler.dispose'),
     );
+  });
+});
+
+describe('the pattern page’s meters', () => {
+  /** The voice the registry was last pointed at. */
+  const registeredVoice = () => meterSpies.registerPatternVoice.mock.calls.at(-1)?.[0];
+
+  it('registers the voice the engine holds, so there is something to meter', async () => {
+    mount();
+
+    await start();
+
+    // Identity, not equality: the fake voices are structurally alike, so a deep
+    // compare would pass against the wrong one.
+    expect(registeredVoice()).toBe(lib.voices.at(-1));
+  });
+
+  it('re-registers the voice that replaced one rebuilt under it', async () => {
+    mount();
+    await start();
+    stop();
+
+    // A source-identity change is the one edit that REPLACES the object rather
+    // than retuning it, and `engine.voice.dispose()` kills the old one. A registry
+    // still pointing at that voice takes `readSource`'s catch every frame, so the
+    // meter goes dark and stays dark — the same reason the track path registers on
+    // the lib's live swap and not only on the first build.
+    setEditingPatternInstrument('bass');
+    await start();
+
+    const rebuilt = lib.voices.at(-1);
+    expect(lib.voices).toHaveLength(2);
+    expect(rebuilt).not.toBe(lib.voices[0]);
+    expect(registeredVoice()).toBe(rebuilt);
+  });
+
+  it('unregisters when the engine is torn down', async () => {
+    const view = mount();
+    await start();
+
+    // Asserted BEFORE the unmount as well as after, and by count: the teardown is
+    // the only thing that may call this, so "has been called" on its own is a
+    // claim any earlier test's cleanup can satisfy.
+    expect(meterSpies.unregisterPatternVoice).not.toHaveBeenCalled();
+
+    view.unmount();
+
+    expect(meterSpies.unregisterPatternVoice).toHaveBeenCalledTimes(1);
   });
 });
 

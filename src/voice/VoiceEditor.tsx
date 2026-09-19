@@ -54,11 +54,21 @@
  *                  someone reaching for track five. Required for `onRepointed`'s
  *                  reason — a third surface has to answer it.
  *
- * ⚠ THE ONE BRANCH ON `kind` IS THE LEVEL STAGE, and it is in `renderLevel`
- * alone — see the comment there. It is irreducible: it reads `track.inputGainDb`
- * and writes `setTrackInputGainDb`, a composition-seam call with no pattern
- * equivalent. That is also why this file, alone among `src/voice`'s components,
- * imports the composition seam.
+ * ⚠ THE ONE BRANCH ON `kind` IS THE IN/OUT BAR'S INPUT KNOB, and it is in
+ * `renderLevelBar` alone — see the comment there. It is irreducible: it reads
+ * `track.inputGainDb` and writes `setTrackInputGainDb`, a composition-seam call
+ * with no pattern equivalent. That is also why this file, alone among
+ * `src/voice`'s components, imports the composition seam. (The bar's meters
+ * branch on `kind` too, but only to name which point in the graph they watch —
+ * `levelMeters` has a source kind per surface.)
+ *
+ * ── The bar, and what is not a stage ─────────────────────────────────────────
+ *
+ * `PARAM_SECTIONS` is the foldable part of the editor and the bar is not in it.
+ * Input gain and the voice's volume were the Level section until 2026-09-18;
+ * they are now one strip above everything that folds, each beside its own end of
+ * the chain's meter, and `paramSchema.LEVEL_BAR_PARAMS` is where the two rows are
+ * declared. The voice's pan was deleted with the section.
  *
  * ── Where the edits go ───────────────────────────────────────────────────────
  *
@@ -97,8 +107,10 @@ import {
 } from '@fretwork/lib';
 import {
   DEFAULT_OPEN_SECTIONS,
+  INPUT_GAIN_PARAM,
   PARAM_SECTIONS,
   PEDALS,
+  VOLUME_PARAM,
   branchParams,
   enabledParamOf,
   ownParams,
@@ -160,11 +172,19 @@ import { VoiceSection } from './VoiceSection';
 import { AmpHead } from './rack/AmpHead';
 import { CabinetGraphic } from './rack/CabinetGraphic';
 import { Knob } from './controls/Knob';
+// The IN/OUT bar's two meters. `LevelMeter` is a `src/composition` file and this
+// is its first user outside that page: it draws no composition concept, it is the
+// only view of `audio/levelMeters`, and the bar needs it on BOTH pages. Left
+// where it is rather than moved because its other two callers (the transport
+// bar, the track strip) are on the composition page and a move is a rename
+// across three files that changes nothing about what this draws — see its own
+// header for where it goes if a fourth surface appears.
+import { LevelMeter } from '../composition/LevelMeter';
 import { ParamEnum } from './controls/ParamEnum';
 import { ParamToggle } from './controls/ParamToggle';
 import { ParamEncoder } from './controls/ParamEncoder';
 // ⚠ The one import of the composition seam by a component in `src/voice`, and it
-// is the Level stage's (see `renderLevel`). `voiceService` and `voiceDrafts`
+// is the IN/OUT bar's input knob (see `renderLevelBar`). `voiceService` and `voiceDrafts`
 // already depend on this module for the track arm of every write, so this adds a
 // user rather than a direction.
 import {
@@ -287,7 +307,7 @@ export function VoiceEditor({
   const preset = useVoiceWorkingPreset(kind, id);
   const dirty = useVoiceDirty(kind, id);
   const voices = useSelectableVoices(instrumentId);
-  // For the Level stage alone — see `renderLevel`. Subscribed rather than read
+  // For the IN/OUT bar's input knob alone — see `renderLevelBar`. Subscribed rather than read
   // through `findTrack` so the input knob follows a write made anywhere else,
   // including the agent's; resolves to undefined for a pattern holder, whose id
   // names no track.
@@ -611,8 +631,19 @@ export function VoiceEditor({
    *
    * No `id`: `Knob` names itself through `aria-labelledby`, so there is no
    * `<label htmlFor>` to point anywhere.
+   *
+   * `format` overrides the descriptor's own rendering of the number and exists
+   * for ONE caller: the IN/OUT bar draws input gain from the preset on a pattern
+   * and from the track on a track, and the two arms must read the same. Passing
+   * it here rather than branching inside is what keeps that true — see
+   * `renderLevelBar`.
    */
-  const renderKnob = (param: SliderParam, size: number, nameScope?: string) => {
+  const renderKnob = (
+    param: SliderParam,
+    size: number,
+    nameScope?: string,
+    format?: (value: number) => string,
+  ) => {
     const raw = getAtPath(preset, param.path);
     return (
       <Knob
@@ -628,7 +659,9 @@ export function VoiceEditor({
         max={param.max}
         step={param.step}
         defaultValue={param.fallback}
-        formatValue={(v) => `${v.toFixed(param.precision)}${param.unit ? ` ${param.unit}` : ''}`}
+        formatValue={
+          format ?? ((v) => `${v.toFixed(param.precision)}${param.unit ? ` ${param.unit}` : ''}`)
+        }
         onChange={(value) => write(param.path, value)}
       />
     );
@@ -774,56 +807,129 @@ export function VoiceEditor({
   };
 
   /**
-   * The Level stage — ⚠ THE ONE BRANCH ON HOLDER KIND IN THIS FILE, and it is
-   * irreducible.
+   * The IN/OUT bar — the two ends of the chain, across the top of the editor.
    *
-   * `inputGainDb` exists in two places and they are NOT both shown. The preset
-   * carries one, and it is the wrong one to put on a track: a preset is chosen
-   * and swapped, so an input level stored there is thrown away every time the
-   * user tries a different amp. The TRACK's value overrides it and survives the
-   * swap, so a track shows the track's and hides the preset's rather than
-   * offering two faders that fight over one job.
+   * ⚠ IT IS NOT A STAGE AND IT NEVER FOLDS. It was the Level section until
+   * 2026-09-18 (`docs/PLAN-level-pane.md`): input gain, volume and pan, folded
+   * away at the bottom of a rack. The trim you set before the amp and the volume
+   * the voice leaves at are the two ends of ONE chain, and a control that is
+   * folded is a control nobody turns — so they sit above everything that folds,
+   * each beside the meter for its own end of the chain, and they stay there with
+   * the whole rack collapsed. `level.pan` went with the section and has no
+   * replacement: panning is the TRACK's, in the track header, and two pans in
+   * series was the duplication this bar exists to untangle.
    *
-   * A pattern has no track to hold one, so it shows the preset's — which is also
-   * why this filters here rather than removing the param from `paramSchema`.
-   * `setTrackInputGainDb` is a composition-seam call with no pattern equivalent;
-   * there is no prop that makes it one.
+   * ⚠ THE ONE BRANCH ON HOLDER KIND IN THIS FILE IS THE INPUT KNOB, and it is
+   * irreducible. `inputGainDb` exists in two places and they are NOT both shown.
+   * The preset carries one, and it is the wrong one to put on a track: a preset
+   * is chosen and swapped, so an input level stored there is thrown away every
+   * time the user tries a different amp. The TRACK's value overrides it and
+   * survives the swap, so a track shows the track's and hides the preset's rather
+   * than offering two faders that fight over one job. A pattern has no track to
+   * hold one, so it shows the preset's row — which is why the branch is here and
+   * not in `paramSchema`: `setTrackInputGainDb` is a composition-seam call with no
+   * pattern equivalent, and there is no prop that makes it one.
+   *
+   * ⚠ THE TWO METERS ARE NOT SYMMETRICAL ON A TRACK, and reading them as if they
+   * were is the mistake to avoid. `track-in` and `pattern-in` are both the raw
+   * front of the voice, but `track-out` has the track's fader, mute and solo
+   * added in dB (`levelMeters.setTrackFaders`) while `pattern-out` is the voice's
+   * own last node — because a pattern's voice reaches `MasterBus` with no fader in
+   * between. So on a track OUT says what leaves the TRACK, which is what a meter
+   * beside a mixer has to say, and moving the track fader moves it while this
+   * knob stays put. ITS NAME CARRIES THAT — see `outTitle`; the asymmetry is
+   * invisible otherwise, and a muted track pins the bar at the floor however far
+   * the knob beside it is turned.
    */
-  const renderLevel = (section: ParamSection) => {
-    const rows = ownParams(preset, section);
-    if (kind !== 'track' || !track) {
-      return (
-        <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
-          {rows.map((param) => renderParam(section, param))}
-        </div>
-      );
-    }
+  const renderLevelBar = () => {
+    // The KNOB's branch needs the track object; the METERS' needs only the holder
+    // kind, and the two are kept apart deliberately. A track whose row has gone
+    // from the composition for a render still has a rack on screen, and pointing
+    // its meters at the PATTERN page's voice — the only other thing
+    // `levelMeters` can watch — would be a reading of something else entirely.
+    // Silence is the honest answer there, which is what `track-*` gives once the
+    // voice is unregistered.
+    const onTrack = kind === 'track' && track !== undefined;
+    const trackMeters = kind === 'track';
+    /** The meter's spoken name. "voice" is in it deliberately: a track already
+     *  has an "<name> input level" meter in its header strip, and two meters on
+     *  one page answering to one name is a name that identifies nothing.
+     *
+     *  The track's OUT says so IN THE NAME, because the asymmetry above is not
+     *  something a listener can see: that meter is post-fader, so muting the
+     *  track or soloing another pins it at the floor while the knob beside it
+     *  does nothing. A meter whose name promised the voice's own output and
+     *  then read the track's would simply be wrong. The wording matches
+     *  `TrackControls`' own OUT meter, which reads the same point. */
+    const meterTitle = (end: string) => (scope ? `${scope} voice ${end} level` : `Voice ${end} level`);
+    const outTitle = trackMeters ? `${meterTitle('output')}, after the fader` : meterTitle('output');
+
+    /** Signed, on BOTH arms — a trim reads as an amount of boost or cut, and the
+     *  sign is the first thing about it. Hoisted rather than written on the track
+     *  arm alone, which is what made the two arms disagree about one control. */
+    const formatInputGain = (v: number) =>
+      `${v > 0 ? '+' : ''}${v.toFixed(INPUT_GAIN_PARAM.precision)} ${INPUT_GAIN_PARAM.unit ?? 'dB'}`;
+
     return (
-      <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
-        <Knob
-          label="Input"
-          // No override: "Input" is unique inside its stage, and the stage is a
-          // landmark named for the track — which is the disambiguation the rest
-          // of this file's names defer to as well.
-          size={scale.small}
-          // The one `Knob` in this file that does NOT go through `renderKnob`,
-          // so it needs the policy passed by hand — see `wheel`.
-          wheel={wheel}
-          // `?? 0` reads an untouched track as unity. Note the STORED value stays
-          // undefined until the knob is turned — see `Track.inputGainDb`, where
-          // undefined means "the preset decides" and 0 means "unity regardless".
-          value={track.inputGainDb ?? 0}
-          min={TRACK_INPUT_GAIN_RANGE_DB.min}
-          max={TRACK_INPUT_GAIN_RANGE_DB.max}
-          step={0.5}
-          defaultValue={0}
-          formatValue={(v) => `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`}
-          onChange={(value) => report(setTrackInputGainDb(track.id, value))}
-        />
-        {/* `ownParams` for the reason `renderAmp` states. */}
-        {rows
-          .filter((param) => param.path !== 'inputGainDb')
-          .map((param) => renderParam(section, param))}
+      <div
+        // A group rather than a landmark: it is one strip of two controls, not a
+        // stage, and `VoiceSection`'s regions are what a listener navigates
+        // between. The name still carries the holder — eight racks put eight of
+        // these on the page — and the knobs inside carry it too, because a
+        // group's name is announced on entry and is NOT folded into its
+        // descendants' (see `renderParam`).
+        role="group"
+        aria-label={scope ? `${scope} levels` : 'Voice levels'}
+        className="control flex flex-none flex-wrap items-center gap-x-3 gap-y-1 rounded-lg px-2 py-1"
+      >
+        <div className="flex min-w-[9rem] flex-1 items-center gap-1.5">
+          {onTrack ? (
+            <Knob
+              // Engraved as the schema names the row it replaces, on both arms,
+              // and formatted by the same function — the two differ in where the
+              // value lives and where it is written, and nowhere a user can see.
+              // A different word or a different readout on each would read as two
+              // different controls.
+              label={INPUT_GAIN_PARAM.label}
+              ariaLabel={scope ? `${scope} ${INPUT_GAIN_PARAM.label}` : undefined}
+              size={scale.small}
+              // The one `Knob` in this file that does NOT go through
+              // `renderKnob`, so it needs the policy passed by hand — see
+              // `wheel`.
+              wheel={wheel}
+              // `?? 0` reads an untouched track as unity. Note the STORED value
+              // stays undefined until the knob is turned — see
+              // `Track.inputGainDb`, where undefined means "the preset decides"
+              // and 0 means "unity regardless".
+              value={track.inputGainDb ?? 0}
+              min={TRACK_INPUT_GAIN_RANGE_DB.min}
+              max={TRACK_INPUT_GAIN_RANGE_DB.max}
+              step={INPUT_GAIN_PARAM.step}
+              defaultValue={0}
+              formatValue={formatInputGain}
+              onChange={(value) => report(setTrackInputGainDb(track.id, value))}
+            />
+          ) : (
+            renderKnob(INPUT_GAIN_PARAM, scale.small, scope ?? undefined, formatInputGain)
+          )}
+          <div className="min-w-0 flex-1">
+            <LevelMeter
+              source={trackMeters ? { kind: 'track-in', trackId: id } : { kind: 'pattern-in' }}
+              label="IN"
+              title={meterTitle('input')}
+            />
+          </div>
+        </div>
+        <div className="flex min-w-[9rem] flex-1 items-center gap-1.5">
+          {renderKnob(VOLUME_PARAM, scale.small, scope ?? undefined)}
+          <div className="min-w-0 flex-1">
+            <LevelMeter
+              source={trackMeters ? { kind: 'track-out', trackId: id } : { kind: 'pattern-out' }}
+              label="OUT"
+              title={outTitle}
+            />
+          </div>
+        </div>
       </div>
     );
   };
@@ -1211,17 +1317,15 @@ export function VoiceEditor({
         actions={stageActions(section)}
       >
         {presence === 'absent' ? (
-          /* Only a removable stage can be absent: Source and Level both have a
-             null probe, so they apply to every preset there is. */
+          /* Only a removable stage can be absent: Source and the pedalboard both
+             have a null probe, so they apply to every preset there is. */
           <p className="max-w-[26ch] font-mono text-[8.5px] leading-snug text-ink-mut">
-            {`No ${section.label.toLowerCase()} stage on this voice.`}
+            {`No ${section.absentLabel ?? section.label.toLowerCase()} stage on this voice.`}
           </p>
         ) : section.id === 'amp' ? (
           renderAmp(section)
         ) : section.id === 'cabinet' ? (
           renderCabinet(section)
-        ) : section.id === 'level' ? (
-          renderLevel(section)
         ) : section.id === 'pedals' ? (
           renderPedals()
         ) : (
@@ -1389,6 +1493,13 @@ export function VoiceEditor({
           </button>
         )}
       </div>
+
+      {/* ---- the two ends of the chain, above everything that folds ----------
+          Drawn whatever is collapsed — the rack's own fold included — because
+          that is what makes it the place these two live: see `renderLevelBar`.
+          It sits under the saving row rather than above it so the first thing in
+          the box stays "which voice is this and is it saved". */}
+      {renderLevelBar()}
 
       {/* Said BEFORE the button is pressed, not after: a voice is a SHARED asset
           and Save retunes every holder of it. That is settled behaviour rather

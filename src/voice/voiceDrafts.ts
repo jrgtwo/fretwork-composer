@@ -103,6 +103,7 @@ import {
   type HolderKind,
 } from './voiceService';
 import {
+  LEVEL_BAR_PARAMS,
   PARAM_SECTIONS,
   PEDALS,
   paramApplies,
@@ -325,10 +326,18 @@ function commit(
 
 /** Every param the schema declares, by path — so a write can be refused for
  *  addressing something the editor cannot honour, rather than quietly widening
- *  the preset with a field nothing reads. */
-const PARAM_BY_PATH: ReadonlyMap<string, Param> = new Map(
-  PARAM_SECTIONS.flatMap((section) => section.params.map((param) => [param.path, param])),
-);
+ *  the preset with a field nothing reads.
+ *
+ *  ⚠ THE BAR'S TWO ROWS ARE UNIONED IN BY HAND, and they have to be: they are
+ *  declared outside `PARAM_SECTIONS` because the IN/OUT bar is not a foldable
+ *  stage (see `paramSchema.LEVEL_BAR_PARAMS`), and a row this map has never heard
+ *  of is a row no knob and no agent can write. */
+const PARAM_BY_PATH: ReadonlyMap<string, Param> = new Map<string, Param>([
+  ...PARAM_SECTIONS.flatMap((section) =>
+    section.params.map((param): [string, Param] => [param.path, param]),
+  ),
+  ...LEVEL_BAR_PARAMS.map((param): [string, Param] => [param.path, param]),
+]);
 
 /**
  * Set one voice parameter on one holder — the capability every knob, switch and

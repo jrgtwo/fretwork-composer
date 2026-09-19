@@ -46,7 +46,7 @@
  *   - a `scope` — the track's name. Up to eight racks are on screen at once and
  *     the TRACK is what tells eight "Drive" knobs apart, for a screen reader and
  *     for the tests that scope their queries by landmark.
- *   - lane-width knobs. Eight amp knobs plus a cabinet and a level stage have to
+ *   - lane-width knobs. Eight amp knobs plus a cabinet and the IN/OUT bar have to
  *     fit one lane; the pane has a whole column. One rule, two values, named for
  *     the width that decides them.
  *   - refusal sentences that name a TRACK where the pane's name a pattern.

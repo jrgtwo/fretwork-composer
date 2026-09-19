@@ -25,6 +25,28 @@
  *    {@link CLIP_DB} and stays lit for {@link CLIP_HOLD_MS} after the last one,
  *    because the event worth seeing lasts one frame and looking away must not
  *    mean missing it. Click it to clear.
+ *
+ * ── It is no longer only a track strip's, and it did not change to suit that ──
+ *
+ * Three surfaces draw it now: the transport bar's master, a track strip's three
+ * taps, and — since the IN/OUT bar of 2026-09-18 — the voice editor's two, on
+ * BOTH pages. Nothing about the drawing is per-surface: the label column is a
+ * fixed 26 px and everything else is `flex-1`, so beside a knob it takes the
+ * width the bar gives it and stays legible at a rack lane's. A `compact` prop was
+ * considered and rejected — it would be a second set of proportions to keep in
+ * step for a difference nobody can see, and jsdom has no layout, so no test could
+ * hold it.
+ *
+ * ⚠ IT STAYS IN `src/composition/` AND THE VOICE EDITOR REACHES ACROSS FOR IT.
+ * That was questioned when the bar landed, so here is the answer rather than a
+ * deferral: `src/voice` already imports `src/composition` in that same file, and
+ * deliberately — `VoiceEditor` calls `compositionService` for the track arm of
+ * the input knob. This import adds a user to an accepted direction rather than
+ * opening a new one, so it buys nothing to move. It draws no composition concept
+ * and it is the only view of `audio/levelMeters`, but that folder holds services
+ * and no components at all, so moving it there would trade this edge for a new
+ * one. It moves when there is somewhere for a shared control to live — not
+ * before, and not into `audio/` as the only component in it.
  */
 import { useEffect, useRef } from 'react';
 import { subscribeMeter, type MeterSource } from '../audio/levelMeters';
@@ -86,15 +108,34 @@ export function LevelMeter({ source, label, title }: LevelMeterProps) {
 
   // `source` is an object literal at every call site, so a new identity each
   // render. Depending on it directly would resubscribe on every parent render;
-  // the two fields are what actually identify the tap.
+  // the kind and the id (only a TRACK source carries one — the master and the
+  // pattern page's voice are each a single point in the graph) are what actually
+  // identify the tap.
+  //
+  // The subscription is handed the source object itself through a ref rather than
+  // a copy rebuilt from those two fields: a rebuild means a list of kinds to widen
+  // every time one is added, and the meter would silently watch the wrong point
+  // for the one nobody added to the list.
   const kind = source.kind;
-  const trackId = source.kind === 'master' ? '' : source.trackId;
+  const trackId = 'trackId' in source ? source.trackId : '';
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
 
   useEffect(() => {
-    const watched: MeterSource =
-      kind === 'master' ? { kind: 'master' } : { kind, trackId };
+    return subscribeMeter(sourceRef.current, (db) => {
+      // NOTHING TO DRAW, so nothing is written. A meter with no signal behind it
+      // is the steady state on the pattern page — the IN/OUT bar mounts two of
+      // these whether or not an engine has ever been built — and writing
+      // `clipPath`, `left` and `opacity` 30 times a second to set them to the
+      // values they already hold is layout work for a bar nobody can see move.
+      // The peak has already fallen to the floor and the clip lamp is out, so
+      // there is no held state left to advance either.
+      const idle =
+        (!Number.isFinite(db) || db <= METER_MIN_DB) &&
+        heldPeakDb.current === METER_MIN_DB &&
+        performance.now() >= clipUntilMs.current;
+      if (idle) return;
 
-    return subscribeMeter(watched, (db) => {
       const now = performance.now();
       const elapsedSec = lastFrameMs.current ? (now - lastFrameMs.current) / 1000 : 0;
       lastFrameMs.current = now;

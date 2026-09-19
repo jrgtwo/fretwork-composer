@@ -15,11 +15,13 @@ import { render, screen, cleanup, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const listeners: ((db: number) => void)[] = [];
+const watched: unknown[] = [];
 const unsubscribe = vi.fn();
 
 vi.mock('../audio/levelMeters', () => ({
   SILENCE_DB: -Infinity,
-  subscribeMeter: (_source: unknown, listener: (db: number) => void) => {
+  subscribeMeter: (source: unknown, listener: (db: number) => void) => {
+    watched.push(source);
     listeners.push(listener);
     return unsubscribe;
   },
@@ -60,6 +62,7 @@ function scale(): number {
 
 beforeEach(() => {
   listeners.length = 0;
+  watched.length = 0;
   unsubscribe.mockClear();
   vi.spyOn(performance, 'now').mockReturnValue(1000);
 });
@@ -154,6 +157,28 @@ describe('LevelMeter', () => {
     emit(-Infinity, 1030);
     const readout = screen.getByTitle('Master output level').querySelector('span:last-child');
     expect(readout?.textContent).not.toBe('-∞');
+  });
+
+  it('watches the source it was given, id and all', () => {
+    // The only place a prop becomes a subscription, and its failure mode is a
+    // plausible number rather than a blank meter: a track kind that lost its id
+    // reads the wrong track, and a pattern kind that fell through to the master
+    // arm shows the bus level, which moves and looks alive.
+    render(
+      <LevelMeter
+        source={{ kind: 'track-in', trackId: 't1' }}
+        label="IN"
+        title="Rhythm Guitar input level"
+      />,
+    );
+    render(<LevelMeter source={{ kind: 'pattern-out' }} label="OUT" title="Voice output level" />);
+    render(<LevelMeter source={{ kind: 'master' }} label="MSTR" title="Master output level" />);
+
+    expect(watched).toEqual([
+      { kind: 'track-in', trackId: 't1' },
+      { kind: 'pattern-out' },
+      { kind: 'master' },
+    ]);
   });
 
   it('unsubscribes on unmount', () => {
