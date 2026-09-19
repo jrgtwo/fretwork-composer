@@ -519,6 +519,23 @@ const barList = (bars: readonly number[]): string => {
 const SCHEMA_BY_INSTRUMENT = new Map<string, JsonSchema>();
 
 /**
+ * The most attacks one part may carry.
+ *
+ * A ceiling on a RUNAWAY, not a budget: this run has the tool-free completion
+ * cap (`agentService.MAX_COMPLETION_TOKENS_TOOL_FREE`), and at the ~3.06
+ * chars/token this app's JSON measures, a strummed event with a six-note chord
+ * costs ~65 tokens — so 256 of them is ~16k, half that cap, leaving the other
+ * half for the reasoning that precedes it. Above this the answer could not be
+ * written inside the budget whatever the model intended, and a refusal it can
+ * read beats a truncation it cannot.
+ *
+ * What it does NOT refuse: 12 bars at eight attacks to the bar is 96, and 32
+ * bars is 256 exactly. A form longer than that wants writing a section at a
+ * time, which is a different change.
+ */
+const MAX_TRACK_EVENTS = 256;
+
+/**
  * The top fret this part may use: the shorter of the app's ceiling and THIS
  * instrument's neck.
  *
@@ -646,6 +663,11 @@ export function irTrackSchema(instrumentId: string): JsonSchema {
                 ['string', 'fret'],
               ),
               'The notes YOU compose at this instant — a line, a melody, a fill. A string can only ring one note at a time, so a note still ringing on a string one of these lands on is cut short there, and of two of these on the same string only the last one sounds. Leave it out and write `strum` instead to play a chord: never copy a shape out by hand.',
+              // One attack cannot sound more notes than the neck has strings.
+              // Not a policy number like the two above it — it is the same fact
+              // `string`'s own range states, from the other end, so it moves
+              // with the instrument rather than with a decision.
+              strings,
             ),
             strum: str(
               `Play the chord already in force at this tick, filled in for you from its shape on this neck — write this INSTEAD of \`notes\` and you never copy a string, a fret or the chord's name. An entry that writes both keeps the strum, and the \`notes\` on it are thrown away. Which strings of the shape it hits: "all" every string the shape uses, "bottom-2"/"bottom-3" the 2 or 3 lowest-numbered strings of it, "top-2"/"top-3" the 2 or 3 highest-numbered.`,
@@ -665,6 +687,7 @@ export function irTrackSchema(instrumentId: string): JsonSchema {
           ['atTick', 'durationTicks'],
         ),
         'The part, one entry per attack, in time order.',
+        MAX_TRACK_EVENTS,
       ),
     },
     ['events'],
@@ -2132,14 +2155,22 @@ export async function runIRTrack(
 
   const events = asTrackEvents(run.value.structured);
   if (events === null) {
-    // ⚠ THE SENTENCE BRANCHES ON THE STOP REASON, because the two ways to get here
-    // need different repairs and only one of them is a mistake. `answered` means
-    // the model wrote prose or fenced its JSON. Anything else — `aborted` above
-    // all, which is what `runAgentTask` reports for a run the USER stopped — means
-    // it never got to answer, and telling someone who pressed stop about code
-    // fences is telling them they did something wrong.
-    const detail =
-      run.value.stoppedReason === 'answered'
+    // ⚠ THE SENTENCE BRANCHES ON HOW THE RUN ENDED, because the three ways to get
+    // here need different repairs and only one of them is a mistake.
+    //
+    // TRUNCATED is checked FIRST and beats the stop reason, because a run cut off
+    // at the completion ceiling still reports `answered` — see
+    // `AgentRunSummary.truncated`. This branch existed without it until
+    // 2026-09-18 and therefore told the user about a code fence on three runs
+    // that had written nothing at all to fence.
+    //
+    // `answered` means the model wrote prose or fenced its JSON. Anything else —
+    // `aborted` above all, which is what `runAgentTask` reports for a run the
+    // USER stopped — means it never got to answer, and telling someone who
+    // pressed stop about code fences is telling them they did something wrong.
+    const detail = run.value.truncated
+      ? 'it was cut off at the token ceiling before it finished writing, so what came back is a fragment at best. Nothing is wrong with the part it was writing — ask for a shorter one, or a section at a time.'
+      : run.value.stoppedReason === 'answered'
         ? 'it stopped with "answered" and its answer is not an object with a list of events in it. The answer is parsed whole, so a code fence or a sentence in front of the JSON leaves nothing to read.'
         : `it stopped with "${run.value.stoppedReason}" before it answered. Nothing was written, so there is nothing to fix in the part — run it again.`;
     return {

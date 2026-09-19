@@ -58,6 +58,7 @@ export interface JsonSchema {
   readonly additionalProperties?: boolean;
   readonly items?: JsonSchema;
   readonly minItems?: number;
+  readonly maxItems?: number;
   readonly minimum?: number;
   readonly maximum?: number;
   readonly minLength?: number;
@@ -127,12 +128,71 @@ export const nullable = (schema: JsonSchema): JsonSchema => ({
   ...(schema.enum === undefined ? {} : { enum: [...schema.enum, null] }),
 });
 
-export const arr = (items: JsonSchema, description: string): JsonSchema => ({
+/**
+ * A list, with both ends bound.
+ *
+ * ⚠ `maxItems` is REQUIRED, and that is the point of it. Every array here was
+ * unbounded until 2026-09-18, which is the surface a runaway tool call is
+ * written on: one `pattern_stamp_notes` carrying 800 notes is tens of thousands
+ * of argument tokens, and the model only finds out it went too far when the
+ * provider truncates it mid-JSON — malformed, unparseable, and reported as
+ * nothing more useful than "unexpected end of input". A default here would let
+ * the next array added slip back through, so there isn't one.
+ *
+ * A ceiling is the opposite kind of bound in two ways that matter. It is in the
+ * schema, so the model reads it BEFORE it writes rather than discovering it
+ * after; and the harness compiles these with `ajv` and checks every call against
+ * them (`agent-harness/src/agent/loop.ts`), so going over comes back as a
+ * validation error the model can act on — send fewer, or split the work — while
+ * the pattern is left untouched.
+ *
+ * Picking one: it is a bound on a RUNAWAY, not a budget for normal work. Set it
+ * where a legitimate call cannot reach and an absurd one cannot pass. Refusing
+ * work the app invites is the expensive mistake — `agentRules.ts` tells the
+ * model to send one call per kind of edit carrying the whole list, so a ceiling
+ * under that is the app contradicting itself, and the user meets it as a command
+ * that fails for no reason they can see.
+ */
+export const arr = (items: JsonSchema, description: string, maxItems: number): JsonSchema => ({
   type: 'array',
   description,
   items,
   minItems: 1,
+  maxItems,
 });
+
+/**
+ * The three ceilings, in one place so a new tool picks one rather than inventing
+ * a fourth. Settled 2026-09-18; the reasoning for each is below, and
+ * `arr`'s header says how to think about a ceiling at all.
+ *
+ * NOTES — one call may carry 256 notes. A stamped note costs ~19 tokens
+ * (`{"stringIndex":2,"fret":5,"tick":480,"durationTicks":240}` at the ~3.06
+ * chars/token this app's JSON measures), so 256 is ~4900 tokens of arguments:
+ * the largest call that still leaves a tool run room to reason inside its own
+ * ceiling. The only real shape it refuses is four bars of sixteenths across six
+ * strings (384), which `pattern_stamp_notes`'s `repeat` expresses better anyway.
+ *
+ * The EDIT lists share it rather than taking a smaller number of their own.
+ * They address notes that are already in the pattern, so a stamp is what put
+ * them there and the stamp ceiling already bounds them upstream; and
+ * `agentRules.ts` tells the model to send one call per kind of edit carrying the
+ * whole list, so a lower ceiling would refuse the agent re-voicing a pattern it
+ * had just written. Matching numbers mean one call can always address a pattern
+ * the size of one stamp.
+ *
+ * PLACEMENTS — 64. One block per bar over a 64-bar form, which is longer than
+ * anything the app is used for; `agentRules.ts` has the model place a chord's
+ * pattern at every bar that chord covers, so this is the list that most wants
+ * headroom.
+ *
+ * CHORD SYMBOLS — 32. A progression, not a form: `read_chord_voicings` is told
+ * in its own description to ask for the whole progression in one call, and a
+ * twelve-bar blues is six.
+ */
+export const MAX_NOTES_PER_CALL = 256;
+export const MAX_PLACEMENTS_PER_CALL = 64;
+export const MAX_CHORD_SYMBOLS_PER_CALL = 32;
 
 /**
  * An object schema. `additionalProperties: false` on every one of them, so a

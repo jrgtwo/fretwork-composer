@@ -88,7 +88,7 @@ function rig(answer: Result<AgentRunSummary>): Rig {
 /** A finished run that answered with `structured`. */
 const answered = (structured: unknown): Result<AgentRunSummary> => ({
   ok: true,
-  value: { content: '', stoppedReason: 'answered', toolCalls: [], structured },
+  value: { content: '', stoppedReason: 'answered', toolCalls: [], truncated: false, structured },
 });
 
 const refusal = async (chart: unknown): Promise<string> => {
@@ -572,11 +572,32 @@ describe('the parts', () => {
 // -------------------------------------------------------------- narrowing ---
 
 describe('what comes back from the run', () => {
+  it('says a run was cut off at the ceiling, instead of blaming a code fence', async () => {
+    // The chart run survived the 2026-09-18 failure with 6916 of its 8192
+    // tokens spent, 98% of them reasoning — it was the next one to go. Same
+    // shape as the part-writers': `answered`, and nothing written.
+    const result = await runArrangementChart('a blues', {
+      deps: rig({
+        ok: true,
+        value: { content: '', stoppedReason: 'answered', toolCalls: [], truncated: true },
+      }).deps,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toMatch(/cut off/i);
+    expect(result.reason).not.toMatch(/code fence/i);
+  });
+
   it('refuses a run that answered prose, naming the stop reason', async () => {
     const result = await runArrangementChart('a blues', {
       deps: rig({
         ok: true,
-        value: { content: 'Here is a blues!', stoppedReason: 'answered', toolCalls: [] },
+        value: {
+          content: 'Here is a blues!',
+          stoppedReason: 'answered',
+          toolCalls: [],
+          truncated: false,
+        },
       }).deps,
     });
     expect(result.ok).toBe(false);

@@ -446,6 +446,80 @@ describe('what the seam hands the harness', () => {
     expect(options.maxIters).toBe(2);
   });
 
+  it('gives a TOOL-FREE spec the larger cap, because it cannot make a tool call', async () => {
+    // The 8192 bounds a tool call plus its reasoning. A spec with no tools has
+    // no tool call to bound and writes its whole answer as content — and on
+    // 2026-09-18 three such runs spent the entire 8192 on reasoning and returned
+    // nothing at all. Numbers written out rather than imported for the reason
+    // the test above gives: changing one should cost an edit against its
+    // justification in the seam.
+    const toolFree: AgentSpec = { name: 'chart', systemPrompt: 'write a chart', tools: [] };
+    await runAgentTask(toolFree, INPUT);
+    expect(harness.profiles[0]).toMatchObject({ maxTokens: 32768 });
+  });
+
+  it('keeps the tight cap on a spec that HAS tools', async () => {
+    // The pair matters more than either number: the whole change is that these
+    // two are no longer one constant.
+    expect(PATTERN_AGENT.tools.length).toBeGreaterThan(0);
+    await runAgentTask(PATTERN_AGENT, INPUT);
+    expect(harness.profiles[0]).toMatchObject({ maxTokens: 8192 });
+  });
+
+  it('reports a reply cut off at the ceiling as truncated', async () => {
+    // ⚠ The stop reason is `answered` here ON PURPOSE. That is exactly what the
+    // harness reports for a turn the provider cut off at `length`, which is why
+    // the two were indistinguishable before this field and why three runs that
+    // never wrote a character were reported to the user as JSON formatting
+    // mistakes.
+    harness.runAgent.mockImplementation(
+      async (
+        _agent: unknown,
+        _input: unknown,
+        options: { onEvent?: (event: { type: string; finishReason?: string }) => void },
+      ) => {
+        options.onEvent?.({ type: 'model.call.finished', finishReason: 'length' });
+        return runResult({ content: '' });
+      },
+    );
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
+    expect(result.ok && result.value.truncated).toBe(true);
+    expect(result.ok && result.value.stoppedReason).toBe('answered');
+  });
+
+  it('does not call an ordinary reply truncated', async () => {
+    harness.runAgent.mockImplementation(
+      async (
+        _agent: unknown,
+        _input: unknown,
+        options: { onEvent?: (event: { type: string; finishReason?: string }) => void },
+      ) => {
+        options.onEvent?.({ type: 'model.call.finished', finishReason: 'stop' });
+        return runResult();
+      },
+    );
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
+    expect(result.ok && result.value.truncated).toBe(false);
+  });
+
+  it('reads the LAST turn, so an earlier iteration that recovered is not a truncated answer', async () => {
+    // A run may hit the ceiling on one iteration, be told so, and finish cleanly
+    // on the next. The field reports on the ANSWER, not on the worst moment.
+    harness.runAgent.mockImplementation(
+      async (
+        _agent: unknown,
+        _input: unknown,
+        options: { onEvent?: (event: { type: string; finishReason?: string }) => void },
+      ) => {
+        options.onEvent?.({ type: 'model.call.finished', finishReason: 'length' });
+        options.onEvent?.({ type: 'model.call.finished', finishReason: 'stop' });
+        return runResult();
+      },
+    );
+    const result = await runAgentTask(PATTERN_AGENT, INPUT);
+    expect(result.ok && result.value.truncated).toBe(false);
+  });
+
   it('reports the tools that ran, in order', async () => {
     harness.runAgent.mockImplementation(
       async (

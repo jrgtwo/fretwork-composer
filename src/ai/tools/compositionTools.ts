@@ -99,6 +99,7 @@ import {
   fail,
   fromResult,
   int,
+  MAX_PLACEMENTS_PER_CALL,
   name as nameOf,
   namedRefusals,
   num,
@@ -851,10 +852,12 @@ const placePattern = defineTool<{
       atTicks: arr(
         int(`Where the block starts. ${TICKS}`, { min: 0 }),
         'One entry per copy, for starts that are not on barlines — use atBars for the ones that are. The block starts exactly here; it is never nudged aside to avoid a block already there, so a start that would land on one is refused along with the whole call.',
+        MAX_PLACEMENTS_PER_CALL,
       ),
       atBars: arr(
         int('Which bar the block starts on, counted FROM 1.', { min: 1 }),
         'One entry per copy — the bars this pattern STARTS on, which for a pattern longer than a bar is not every bar it covers. A two-bar pattern filling bars 1 to 8 is [1, 3, 5, 7]; sending [1, 2, 3, 4] would stack four two-bar blocks a bar apart, so the whole call is refused and nothing is placed.',
+        MAX_PLACEMENTS_PER_CALL,
       ),
     },
     ['patternId', 'trackId'],
@@ -1103,7 +1106,11 @@ const duplicatePlacementsTool = defineTool<{
     'Copy blocks to a later (or earlier) point, as one undo step — how a section is repeated. UNLIKE composition_place_pattern, a copy does not necessarily land at `startTick + deltaTicks`: copies never overlap, so one that would lands in the nearest free slot instead. Each new block therefore comes back in `copies` with the start and end it ACTUALLY has — check them against the offset you asked for. They arrive in the arrangement\'s own order (track by track, then by time) rather than the order you listed the originals in, so pair them by position and not by index.',
   parameters: obj(
     {
-      placementIds: arr(str('A block id from read_composition.'), 'The blocks to copy.'),
+      placementIds: arr(
+        str('A block id from read_composition.'),
+        'The blocks to copy.',
+        MAX_PLACEMENTS_PER_CALL,
+      ),
       deltaTicks: int(`How far to offset the copies. ${TICKS}`),
       trackId: str('Send every copy to this track. Omit to copy each within its own track.'),
     },
@@ -1134,7 +1141,13 @@ const removePlacementsTool = defineTool<{ placementIds: readonly string[] }>({
   name: 'composition_remove_placements',
   description: 'Delete blocks from the arrangement, as one undo step.',
   parameters: obj(
-    { placementIds: arr(str('A block id from read_composition.'), 'The blocks to delete.') },
+    {
+      placementIds: arr(
+        str('A block id from read_composition.'),
+        'The blocks to delete.',
+        MAX_PLACEMENTS_PER_CALL,
+      ),
+    },
     ['placementIds'],
   ),
   run: ({ placementIds }) =>

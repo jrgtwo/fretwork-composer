@@ -146,6 +146,7 @@ import {
   fail,
   fromResult,
   int,
+  MAX_NOTES_PER_CALL,
   name as nameOf,
   namedRefusals,
   nullable,
@@ -620,6 +621,7 @@ const stampNotes = defineTool<StampArgs>({
           ['stringIndex', 'fret', 'tick', 'durationTicks'],
         ),
         'The notes to add. With a repeat this is ONE pass and nothing more — a single copy of the phrase, which repeat then lays down again and again; do not write the other copies out here as well.',
+        MAX_NOTES_PER_CALL,
       ),
       repeat: obj(
         {
@@ -809,6 +811,7 @@ const moveNotesTool = defineTool<{ moves: readonly MoveEdit[] }>({
           ['noteId', 'tick'],
         ),
         'The moves to make.',
+        MAX_NOTES_PER_CALL,
       ),
     },
     ['moves'],
@@ -843,6 +846,7 @@ const resizeNotesTool = defineTool<{ resizes: readonly ResizeEdit[] }>({
           'durationTicks',
         ]),
         'The new lengths.',
+        MAX_NOTES_PER_CALL,
       ),
     },
     ['resizes'],
@@ -875,6 +879,7 @@ const setNoteFretsTool = defineTool<{ frets: readonly FretEdit[] }>({
           'fret',
         ]),
         'The frets to set.',
+        MAX_NOTES_PER_CALL,
       ),
     },
     ['frets'],
@@ -894,7 +899,7 @@ const deleteNotesTool = defineTool<{ noteIds: readonly string[] }>({
   description:
     'Delete notes from the open pattern, as one undo step. All or nothing: if any id names no note, nothing is deleted.',
   parameters: obj(
-    { noteIds: arr(str('A note id from read_pattern.'), 'The notes to delete.') },
+    { noteIds: arr(str('A note id from read_pattern.'), 'The notes to delete.', MAX_NOTES_PER_CALL) },
     ['noteIds'],
   ),
   run: ({ noteIds }) =>
@@ -964,6 +969,7 @@ const setArticulationsTool = defineTool<{ notes: readonly ArticulationEdit[] }>(
           ['noteId'],
         ),
         'The notes to mark, one entry each.',
+        MAX_NOTES_PER_CALL,
       ),
     },
     ['notes'],
@@ -1001,6 +1007,7 @@ const setDynamicsTool = defineTool<{ dynamics: readonly DynamicEdit[] }>({
           ['noteId', 'dynamic'],
         ),
         'The dynamics to set.',
+        MAX_NOTES_PER_CALL,
       ),
     },
     ['dynamics'],
@@ -1059,6 +1066,7 @@ const setPitchesTool = defineTool<{ pitches: readonly PitchEdit[] }>({
           ['noteId'],
         ),
         'The movements to set, one entry per note.',
+        MAX_NOTES_PER_CALL,
       ),
     },
     ['pitches'],

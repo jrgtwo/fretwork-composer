@@ -76,7 +76,7 @@ const EVENTS = [
 
 const answered = (structured: unknown): Result<AgentRunSummary> => ({
   ok: true,
-  value: { content: '', stoppedReason: 'answered', toolCalls: [], structured },
+  value: { content: '', stoppedReason: 'answered', toolCalls: [], truncated: false, structured },
 });
 
 /** A run the harness could not make at all — the shape `runAgentTask` refuses

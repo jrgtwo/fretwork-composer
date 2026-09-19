@@ -53,6 +53,7 @@ import {
   arr,
   defineTool,
   fail,
+  MAX_CHORD_SYMBOLS_PER_CALL,
   namedRefusals,
   noArgs,
   obj,
@@ -469,6 +470,7 @@ const readChordVoicings = defineTool<{ symbols: readonly string[]; instrumentId:
       symbols: arr(
         str('A chord symbol — a root and a quality, like "A7", "Cmaj7", "F#m7b5", "G/B".'),
         'The chords to look up, in the order you want them back.',
+        MAX_CHORD_SYMBOLS_PER_CALL,
       ),
       instrumentId: str(
         `Which neck to answer about: ${INSTRUMENT_LIST}. One per call — ask again with a different instrument for the same chords on a different neck.`,

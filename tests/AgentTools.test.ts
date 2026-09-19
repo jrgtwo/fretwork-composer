@@ -18,6 +18,11 @@ import { AGENT_TOOLS, findTool } from '../src/ai/tools';
 // The read half of the registry, so "this one cannot write" can be asserted as a
 // property of the SET rather than of one tool's name.
 import { READ_TOOLS } from '../src/ai/tools/readTools';
+import {
+  MAX_CHORD_SYMBOLS_PER_CALL,
+  MAX_NOTES_PER_CALL,
+  MAX_PLACEMENTS_PER_CALL,
+} from '../src/ai/tools/types';
 import type { JsonPrimitive, JsonSchema, JsonValue, ToolResult } from '../src/ai/tools/types';
 import {
   BEND_KINDS,
@@ -347,6 +352,84 @@ const entryOf = (name: string, key: string): JsonSchema => {
   if (!property?.items) throw new Error(`${name}.${key} is not an array of entries`);
   return property.items;
 };
+
+describe('every array a tool takes is bounded at both ends', () => {
+  /** Every array schema reachable from a tool's parameters, `name.path` and all,
+   *  so a nested one cannot hide behind a bounded parent. */
+  const arraysIn = (schema: JsonSchema, path: string): { path: string; schema: JsonSchema }[] => {
+    const found: { path: string; schema: JsonSchema }[] = [];
+    if (schema.type === 'array') found.push({ path, schema });
+    if (schema.items) found.push(...arraysIn(schema.items, `${path}[]`));
+    for (const [key, property] of Object.entries(schema.properties ?? {})) {
+      found.push(...arraysIn(property, `${path}.${key}`));
+    }
+    return found;
+  };
+
+  const everyArray = AGENT_TOOLS.flatMap((tool) => arraysIn(tool.parameters, tool.name));
+
+  it('finds arrays to check at all, so an empty sweep cannot pass', () => {
+    // The guard this file's own style asks for: a traversal that silently found
+    // nothing would make every assertion below vacuously true.
+    expect(everyArray.length).toBeGreaterThanOrEqual(12);
+  });
+
+  it('gives each one a maxItems, because an unbounded list is where a runaway is written', () => {
+    // ⚠ NOT a style rule. Until 2026-09-18 every one of these was open at the
+    // top, so one `pattern_stamp_notes` carrying 800 notes was tens of thousands
+    // of argument tokens and the model learned it had gone too far only by being
+    // truncated mid-JSON — unparseable, and reported as nothing more useful than
+    // "unexpected end of input". `maxItems` is checked by the harness's `ajv`
+    // BEFORE the call runs, so going over comes back as something the model can
+    // act on instead.
+    const open = everyArray.filter(({ schema }) => schema.maxItems === undefined);
+    expect(open.map(({ path }) => path)).toEqual([]);
+  });
+
+  it('keeps every ceiling above its floor', () => {
+    for (const { path, schema } of everyArray) {
+      expect(`${path}: ${schema.minItems}`).toBe(`${path}: 1`);
+      expect(schema.maxItems!).toBeGreaterThan(1);
+    }
+  });
+
+  it('holds the notes ceiling and the edit ceilings to one number', () => {
+    // They are one number on purpose: an edit list addresses notes a stamp put
+    // there, and `agentRules` tells the model to send one call per kind of edit
+    // carrying the whole list. A lower ceiling on the edits would refuse the
+    // agent re-voicing a pattern it had just written.
+    const ceiling = (name: string, key: string): number | undefined =>
+      schemaOf(name).properties?.[key]?.maxItems;
+
+    expect(ceiling('pattern_stamp_notes', 'notes')).toBe(MAX_NOTES_PER_CALL);
+    for (const [name, key] of [
+      ['pattern_move_notes', 'moves'],
+      ['pattern_resize_notes', 'resizes'],
+      ['pattern_set_note_frets', 'frets'],
+      ['pattern_delete_notes', 'noteIds'],
+      ['pattern_set_articulations', 'notes'],
+      ['pattern_set_dynamics', 'dynamics'],
+      ['pattern_set_pitches', 'pitches'],
+    ] as const) {
+      expect(`${name}.${key}: ${ceiling(name, key)}`).toBe(`${name}.${key}: ${MAX_NOTES_PER_CALL}`);
+    }
+  });
+
+  it('bounds the placement lists and the chord lookup by their own numbers', () => {
+    for (const [name, key] of [
+      ['composition_place_pattern', 'atTicks'],
+      ['composition_place_pattern', 'atBars'],
+      ['composition_duplicate_placements', 'placementIds'],
+      ['composition_remove_placements', 'placementIds'],
+    ] as const) {
+      expect(`${name}.${key}`).toBe(`${name}.${key}`);
+      expect(schemaOf(name).properties?.[key]?.maxItems).toBe(MAX_PLACEMENTS_PER_CALL);
+    }
+    expect(schemaOf('read_chord_voicings').properties?.symbols?.maxItems).toBe(
+      MAX_CHORD_SYMBOLS_PER_CALL,
+    );
+  });
+});
 
 describe('schemas constrain values to the lib’s own lists', () => {
   it('offers exactly the instruments the lib has, and rejects one it has not', () => {

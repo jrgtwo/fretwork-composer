@@ -177,7 +177,7 @@ function rig(answer: Result<AgentRunSummary>): Rig {
 /** A finished run that answered with `structured`. */
 const answered = (structured: unknown): Result<AgentRunSummary> => ({
   ok: true,
-  value: { content: '', stoppedReason: 'answered', toolCalls: [], structured },
+  value: { content: '', stoppedReason: 'answered', toolCalls: [], truncated: false, structured },
 });
 
 /** The reasons a review gave, as one string — the shape a caller reads. */
@@ -2272,7 +2272,12 @@ describe('a run that did not', () => {
   it('says what a prose answer cost, and names the stop reason', async () => {
     const prose: Result<AgentRunSummary> = {
       ok: true,
-      value: { content: '```json\n{"events":[]}\n```', stoppedReason: 'answered', toolCalls: [] },
+      value: {
+        content: '```json\n{"events":[]}\n```',
+        stoppedReason: 'answered',
+        toolCalls: [],
+        truncated: false,
+      },
     };
     const track = await runIRTrack(oneBar(), { deps: rig(prose).deps });
 
@@ -2283,13 +2288,31 @@ describe('a run that did not', () => {
     expect(track.stopped).toBe('answer');
   });
 
+  it('says a run was cut off at the ceiling, instead of blaming a code fence', async () => {
+    // ⚠ THE REGRESSION THIS FILE EXISTS FOR, 2026-09-18. `stoppedReason` is
+    // `answered` and `content` is EMPTY — the exact shape of the three runs in
+    // `run-1 (22).json`, each of which spent all 8192 completion tokens on
+    // reasoning and wrote nothing. The old sentence told the user about a code
+    // fence in front of JSON that had never been written.
+    const cut: Result<AgentRunSummary> = {
+      ok: true,
+      value: { content: '', stoppedReason: 'answered', toolCalls: [], truncated: true },
+    };
+    const track = await runIRTrack(oneBar(), { deps: rig(cut).deps });
+
+    expect(track.ok).toBe(false);
+    if (track.ok) return;
+    expect(track.reason).toMatch(/cut off/i);
+    expect(track.reason).not.toMatch(/code fence/i);
+  });
+
   it('does not blame a run the user stopped for fencing its JSON', async () => {
     // `runAgentTask` reports an abort as `ok: true` with no `structured`, so this
     // is the path a user takes by pressing stop. Telling them about code fences is
     // telling them they did something wrong.
     const stopped: Result<AgentRunSummary> = {
       ok: true,
-      value: { content: '', stoppedReason: 'aborted', toolCalls: [] },
+      value: { content: '', stoppedReason: 'aborted', toolCalls: [], truncated: false },
     };
     const track = await runIRTrack(oneBar(), { deps: rig(stopped).deps });
 

@@ -141,12 +141,24 @@ const instrument = (what: string): JsonSchema =>
 const BPM_BOUNDS = { min: 20, max: 400 } as const;
 
 /**
+ * The most chord CHANGES a chart may carry.
+ *
+ * A change, not a bar: the schema's own description says a chord holds until the
+ * next entry, so a twelve-bar blues is six of these and a form that changed
+ * every bar for 64 bars is 64. That is the shape this refuses — nothing the app
+ * is used for reaches it, and past it the per-part briefs built from this chart
+ * stop fitting in the prompt of the runs that read them.
+ */
+const MAX_CHART_CHORDS = 64;
+
+/**
  * The chart, as JSON Schema — handed to the backend as a grammar.
  *
  * `additionalProperties: false` throughout (`obj` does it) so a field the model
  * invents is a decoding failure rather than a silently dropped instruction, and
- * every array is `minItems: 1` (`arr` does it) because a chart with no parts or
- * no chords is not a chart.
+ * every array is bounded at BOTH ends (`arr` does it): `minItems: 1` because a
+ * chart with no parts or no chords is not a chart, and a `maxItems` because an
+ * unbounded list is where a runaway answer is written.
  *
  * ⚠ THE SCHEMA IS NOT THE VALIDATION. It can say a bar is an integer ≥ 1; it
  * cannot say the bar is inside THIS form, that the entries ascend, that bar 1 is
@@ -177,6 +189,11 @@ export const ARRANGEMENT_CHART_SCHEMA: JsonSchema = obj(
         ['name', 'instrumentId', 'role'],
       ),
       'The parts. One per track: two things that sound at the same time cannot share one. Few and distinct.',
+      // The SAME bound {@link reviewChart} refuses by, and the same constant,
+      // so the grammar and the review cannot drift apart into two answers to
+      // one question. The review still checks it: a grammar is the provider's
+      // to honour and this app cannot assume an arbitrary backend does.
+      MAX_COMPOSITION_TRACKS,
     ),
     chords: arr(
       obj(
@@ -189,6 +206,7 @@ export const ARRANGEMENT_CHART_SCHEMA: JsonSchema = obj(
         ['bar', 'symbol'],
       ),
       'The progression. A chord holds until the next entry, so write each change ONCE, at the bar it arrives on. There must be one at bar 1 and they must ascend.',
+      MAX_CHART_CHORDS,
     ),
   },
   ['bars', 'bpm', 'tracks', 'chords'],
@@ -687,9 +705,22 @@ export async function runArrangementChart(
 
   const chart = asChart(run.value.structured);
   if (chart === null) {
-    // The stop reason is named because it separates the two ways to get here
-    // that need different repairs: `answered` means the model wrote prose or
-    // fenced its JSON, anything else means the run never got to answer at all.
+    // Truncation FIRST, and it beats the stop reason: a run cut off at the
+    // completion ceiling still reports `answered`, so without this the sentence
+    // below blames a code fence on an answer that was never finished. See
+    // `AgentRunSummary.truncated`.
+    //
+    // Otherwise the stop reason is named, because it separates the two ways to
+    // get here that need different repairs: `answered` means the model wrote
+    // prose or fenced its JSON, anything else means the run never got to answer
+    // at all.
+    if (run.value.truncated) {
+      return {
+        ok: false,
+        reason:
+          'The chart run was cut off at the token ceiling before it finished writing, so there is no chart to read. Nothing is wrong with what was asked for — ask for a shorter form, or fewer parts.',
+      };
+    }
     return {
       ok: false,
       reason: `The chart run produced no usable chart — it stopped with "${run.value.stoppedReason}" and its answer is not an object with bars, bpm, tracks and chords. The answer is parsed whole, so a code fence or a sentence in front of the JSON leaves nothing to read.`,

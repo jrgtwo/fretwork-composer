@@ -73,7 +73,9 @@ export type { AgentEvent };
 export const DEFAULT_MODEL_ID = 'local-model';
 
 /**
- * The ceiling on ONE model reply, in completion tokens.
+ * The ceiling on ONE model reply, in completion tokens, for an agent THAT HAS
+ * TOOLS. A tool-free agent gets {@link MAX_COMPLETION_TOKENS_TOOL_FREE}; see
+ * there for why the two cannot be one number.
  *
  * ── What it is a bound on ───────────────────────────────────────────────────
  *
@@ -113,9 +115,54 @@ export const DEFAULT_MODEL_ID = 'local-model';
  * refusing the impossible call up front, in the tool.
  *
  * Deliberately not a `RunAgentTaskOptions` field. It is a property of what this
- * app's tools can be asked for, not a per-caller preference.
+ * app's tools can be asked for, not a per-caller preference — which is also why
+ * the tool-free number below is derived from the SPEC rather than passed in.
  */
 const MAX_COMPLETION_TOKENS = 8192;
+
+/**
+ * The same ceiling for an agent that declares NO tools, which today is every
+ * run of the `composition-backing-track` route: the chart, and one per part.
+ *
+ * ── Why it cannot be the number above ───────────────────────────────────────
+ *
+ * The 8192 is a bound on a TOOL CALL plus its reasoning. A tool-free run has no
+ * tool call to bound — it writes its whole answer as content — and the two are
+ * not the same size. Measured, from the failed run of 2026-09-18 recorded in
+ * `.claude/docs/tasks/ai-commands-token-fix.md`: all three part-writers stopped
+ * at `finishReason: 'length'` on exactly 8192 completion tokens and returned
+ * EMPTY content, having spent the entire budget on reasoning. The transcript
+ * records `thinking` as one entry per reasoning token, so the split is exact
+ * rather than inferred — the chart run, which survived, was 6775 reasoning plus
+ * ~140 of answer.
+ *
+ * That is the failure the 8192's own header predicted: "a cap set tight enough
+ * to bite manufactures what it exists to bound". It bit a run that was working.
+ *
+ * ── Why 32768 ───────────────────────────────────────────────────────────────
+ *
+ * Two halves, and only one of them scales with the task.
+ *
+ * REASONING wants 7-10k on this model and does not shrink: 6775 went on the
+ * EASY job — name three parts and list six chords — so it is near-fixed and
+ * mostly independent of how long the answer is.
+ *
+ * CONTENT is proportional, and the busiest part sets it. At the ~3.06
+ * chars/token this run's JSON actually measured, a walking-bass event is ~25
+ * tokens (48 of them ≈ 1200) and a strummed event with a six-note chord is ~65
+ * (eight per bar over twelve bars ≈ 6300), doubling with the bars.
+ *
+ * 16384 would have left this run ~1500 tokens of content for a part that needed
+ * six thousand. 32768 clears both halves at realistic lengths and still halves
+ * the 65536 the original runaway died under.
+ *
+ * ⚠ This is NOT a licence for a bigger tool call. A tool-free run cannot make
+ * one — that is the whole reason it may have the larger number. What bounds a
+ * tool call is `maxItems` on the tool's own schema (`./tools/types.ts`), which
+ * is checked before the call runs and comes back as something the model can
+ * read, rather than a truncation it cannot.
+ */
+const MAX_COMPLETION_TOKENS_TOOL_FREE = 32768;
 
 /**
  * An agent, described WITHOUT naming a harness type.
@@ -146,6 +193,28 @@ export interface AgentRunSummary {
   readonly stoppedReason: string;
   /** Tool names in call order, including repeats. */
   readonly toolCalls: readonly string[];
+  /**
+   * The model's reply was CUT OFF at the completion ceiling — the provider's
+   * `finish_reason` on the last turn was `length`.
+   *
+   * ⚠ Read this before explaining an empty or unparseable `content`. A truncated
+   * turn arrives with `stoppedReason: 'answered'` like any other, because the
+   * harness does not treat `length` as a stop of its own, so the two are
+   * indistinguishable without it. That is not a hypothetical: the failure this
+   * field was added for (2026-09-18, `.claude/docs/tasks/ai-commands-token-fix.md`)
+   * was three runs that spent their whole budget on reasoning and returned
+   * `content: ''`, each reported to the user as a JSON formatting mistake it had
+   * not made.
+   *
+   * True here means the model never finished writing, so what `content` holds is
+   * a fragment at best. It says nothing about whether the fragment parses — a
+   * reply cut mid-array can still be nothing at all, as those three were.
+   *
+   * HARNESS-GAP(2): reconstructed from the event stream, like {@link toolCalls}
+   * and for the same reason — `RunResult` does not carry the finish reason. See
+   * `docs/FOLLOW-UPS.md`.
+   */
+  readonly truncated: boolean;
   /**
    * The final answer parsed and validated against {@link RunAgentTaskOptions
    * .outputSchema}, when the caller asked for one and the model produced JSON
@@ -247,20 +316,42 @@ export function toHarnessAgent(spec: AgentSpec): Agent {
  * that wants none will reject it.
  *
  * `maxTokens` is set unconditionally — see {@link MAX_COMPLETION_TOKENS} for the
- * number and what it is a bound on. VERIFIED, not assumed: it is declared on the
- * harness's `ModelProfile`, and `OpenAICompatibleClient.chat` writes
- * `body.max_tokens` from it when it is not null, so this reaches the provider
- * rather than sitting unread on the profile. Cited by symbol on purpose — the
- * dist file it lives in is content-hashed and renamed on every harness build.
+ * number and what it is a bound on, and {@link MAX_COMPLETION_TOKENS_TOOL_FREE}
+ * for the one a tool-free spec gets instead. VERIFIED, not assumed: it is
+ * declared on the harness's `ModelProfile`, and `OpenAICompatibleClient.chat`
+ * writes `body.max_tokens` from it when it is not null, so this reaches the
+ * provider rather than sitting unread on the profile. Cited by symbol on purpose
+ * — the dist file it lives in is content-hashed and renamed on every harness
+ * build.
+ *
+ * The caller passes the ceiling rather than the spec: a `ModelClient` is a
+ * connection, and which agent is about to use it is not its business.
  */
-function modelFor(settings: ConnectorSettings, modelId: string): ModelClient {
+function modelFor(
+  settings: ConnectorSettings,
+  modelId: string,
+  maxTokens: number,
+): ModelClient {
   const apiKey = settings.token.trim();
   return new OpenAICompatibleClient({
     baseUrl: normalizeBaseUrl(settings.baseUrl),
     model: modelId,
-    maxTokens: MAX_COMPLETION_TOKENS,
+    maxTokens,
     ...(apiKey === '' ? {} : { apiKey }),
   });
+}
+
+/**
+ * Which ceiling a spec gets. A spec with no tools cannot truncate a tool call,
+ * because it cannot make one — so the number that exists to bound a tool call
+ * has nothing to bound, and the run's whole output is the answer.
+ *
+ * Derived from the spec and never passed in, for the reason
+ * {@link MAX_COMPLETION_TOKENS} gives for not being a `RunAgentTaskOptions`
+ * field: it is a property of what the agent can be asked for.
+ */
+export function completionCapFor(spec: AgentSpec): number {
+  return spec.tools.length === 0 ? MAX_COMPLETION_TOKENS_TOOL_FREE : MAX_COMPLETION_TOKENS;
 }
 
 // -------------------------------------------------------------------- run ---
@@ -387,10 +478,19 @@ export async function runAgentTask(
   // A box rather than a `let`, because TypeScript's flow analysis does not model
   // a closure's writes and would type the read below as `null`.
   const failure = { error: '' };
+  // HARNESS-GAP(2), the same shape as `toolCalls` above: the finish reason
+  // reaches the app only on the event. The LAST turn's, overwritten each time —
+  // an earlier iteration that hit the ceiling and then recovered is not a
+  // truncated ANSWER, and the answer is what this reports on.
+  const finish = { reason: '' };
 
   try {
     const result = await runAgent(toHarnessAgent(spec), input, {
-      model: modelFor(settings, options.modelId ?? DEFAULT_MODEL_ID),
+      model: modelFor(
+        settings,
+        options.modelId ?? DEFAULT_MODEL_ID,
+        completionCapFor(spec),
+      ),
       signal: options.signal,
       maxIters: options.maxIters,
       // Handed over BY REFERENCE, not copied. The harness compiles the schema
@@ -411,6 +511,7 @@ export async function runAgentTask(
       onEvent: (event) => {
         if (event.type === 'tool.started') toolCalls.push(event.name);
         if (event.type === 'run.error') failure.error = event.error;
+        if (event.type === 'model.call.finished') finish.reason = event.finishReason;
         // A throw from a caller's view must not take down the run. The harness
         // swallows one from its own callback; this keeps that promise for the
         // callback we wrap.
@@ -440,6 +541,7 @@ export async function runAgentTask(
       content: result.content,
       stoppedReason: result.stoppedReason,
       toolCalls,
+      truncated: finish.reason === 'length',
       // Spread rather than assigned, so a run that asked for nothing structured
       // has no `structured` KEY at all — `'structured' in summary` then means
       // "the harness produced one", which is the question a caller asks.
