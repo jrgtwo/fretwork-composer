@@ -88,7 +88,35 @@ export interface ChartTrack {
    * something more specific than "bass".
    */
   readonly role: string;
+  /**
+   * Whether this part sounds ONE note at a time or several.
+   *
+   * ⚠ Not a description — it becomes a GRAMMAR. `irTrackSchema` builds a
+   * single-voiced part a schema with no `strum` in it and one note to an attack,
+   * so the run writing that part cannot produce a chord however it is prompted.
+   * It is here rather than inferred from the instrument because the instrument
+   * does not decide it: a guitar comps and a guitar plays fills, and on
+   * 2026-09-19 a part briefed "Single note fills, bends on 12th fret" answered
+   * with 14 strums under its own line.
+   */
+  readonly voicing: TrackVoicing;
 }
+
+/**
+ * What a part may sound at one instant.
+ *
+ * ⚠ THE TWO ARE NOT A PAIR OF STYLES — one is a RESTRICTION and the other is its
+ * absence. `single` is one note to an attack and no strums: a bass line, a
+ * melody, a fill. `mixed` is the full vocabulary, and it is called `mixed`
+ * rather than `chordal` for a reason that cost a rewrite: a part named for
+ * chords reads as a part that must play them, and a comping guitar that may not
+ * also walk between its chords is not a comping guitar. `mixed` may play a
+ * chord, a strum, or one note, attack by attack, in whatever mixture the bar
+ * wants — it is a SUPERSET of `single`, not its other half.
+ */
+export type TrackVoicing = 'single' | 'mixed';
+
+export const TRACK_VOICINGS: readonly TrackVoicing[] = ['single', 'mixed'];
 
 /**
  * A chord and the bar it ARRIVES on, counted from 1. It holds until the next
@@ -185,8 +213,12 @@ export const ARRANGEMENT_CHART_SCHEMA: JsonSchema = obj(
           role: nameField(
             'What this part DOES, in your own words and in a few — "walking bass, quarter notes", "off-beat comping", "lead fills over the changes". This is the whole brief the run that writes it gets.',
           ),
+          voicing: str(
+            'Whether this part is held to one note at a time. "single" means exactly that — one note to an attack, no chords and no strumming: a bass line, a melody, a fill, anything you described as single-note. "mixed" places no limit: that part may play a chord, strum, or play one note, in whatever mixture each bar wants, and a comping part that walks between its chords is "mixed" and not "single". THIS IS ENFORCED ONE WAY ONLY: a "single" part is given no way to write a chord at all, while a "mixed" part is never required to play one. Choose "single" when the role you just wrote is a line; otherwise "mixed".',
+            TRACK_VOICINGS,
+          ),
         },
-        ['name', 'instrumentId', 'role'],
+        ['name', 'instrumentId', 'role', 'voicing'],
       ),
       'The parts. One per track: two things that sound at the same time cannot share one. Few and distinct.',
       // The SAME bound {@link reviewChart} refuses by, and the same constant,
@@ -292,7 +324,7 @@ ANSWER WITH ONE JSON OBJECT AND NOTHING ELSE. No sentence before it, no code fen
 
 Exactly these keys, exactly these names, and nothing else:
 
-{"bars":12,"bpm":120,"tracks":[{"name":"Bass","instrumentId":"bass","role":"walking bass, quarter notes, root to root"}],"chords":[{"bar":1,"symbol":"C7"},{"bar":5,"symbol":"F7"}]}
+{"bars":12,"bpm":120,"tracks":[{"name":"Bass","instrumentId":"bass","role":"walking bass, quarter notes, root to root","voicing":"single"}],"chords":[{"bar":1,"symbol":"C7"},{"bar":5,"symbol":"F7"}]}
 
 # The form and the harmony
 
@@ -313,6 +345,16 @@ SO A PART IS THE INSTRUMENT IT IS ON. Pick the neck first, then say what THAT ne
 The run that writes the part is handed your \`name\`, your \`role\` and that neck, and it is told the name and the role are WHAT THE PART IS FOR. It reads them and writes notes. So "Piano" on a \`ukulele\` does not get a piano: it gets a player reading "Write Piano — light comping, inner voice fills — on Ukulele" and writing keyboard music onto four strings that have not got the range for it, and the piece is a part short. "Drums" on a \`bass\` is a second bass reading a drummer's brief.
 
 If the arrangement in your head wants a part there is no neck for, do not dress another instrument in its name. Give that job to the necks there are, or leave it out.
+
+EVERY PART ALSO SAYS WHETHER IT IS HELD TO ONE NOTE AT A TIME, and this one is not a description — it becomes a rule the writing run cannot break. \`voicing\` is "single" or "mixed".
+
+"single" is a LIMIT: one note to an attack, no chords, no strumming. The part is given no way to write one, so this is the choice you cannot take back.
+
+"mixed" is NO limit. It does not mean "plays chords" and it never demands one — a "mixed" part may strum a chord, play one note, or do both in the same bar, which is what a comping guitar walking between its chords actually does. If you are unsure, "mixed" is the safe answer: it takes nothing away.
+
+MATCH IT TO THE ROLE YOU JUST WROTE. A bass line is "single". A melody is "single". Fills, an answering line, a solo — "single". Comping, a strummed rhythm, anything whose job is the harmony — "mixed". If the role says single-note and the voicing says "mixed", the part will come back strumming underneath itself, which is the one thing you were asked to stop.
+
+ONE PART'S JOB IS NOT TWO JOBS. A part that both strums the changes and plays a line over them is two parts sharing one neck and one set of strings, and they fight: the strum is cut short wherever the line needs a string. If you want both, that is two entries in \`tracks\`, and the neck may be the same guitar.
 
 PARTS MAY SHARE A NECK, and that is how a band gets another voice rather than by reaching for a different instrument. Two guitars playing different jobs — one comping, one answering it — is the ordinary shape of a rhythm section, and three is not unusual. Pick a second guitar over a first ukulele every time, unless the piece asks for that ukulele: a neck chosen for variety, when the part could have been played on one already in the arrangement, is a colour nobody asked for.
 
@@ -618,6 +660,13 @@ const isPresent = <T,>(value: T | null): value is T => value !== null;
  * `additionalProperties: false` cannot smuggle an extra key into the chart the
  * rest of the job is built from.
  */
+/** ⚠ Checked in the PARSER, not only in the schema. A grammar is the provider's
+ *  to honour and this app cannot assume an arbitrary OpenAI-compatible backend
+ *  does — and an unreadable voicing must not quietly become `mixed`, which is
+ *  the permissive one. */
+const isVoicing = (value: unknown): value is TrackVoicing =>
+  TRACK_VOICINGS.includes(value as TrackVoicing);
+
 export function asChart(value: unknown): ArrangementChart | null {
   if (!isObject(value)) return null;
   const { bars, bpm, tracks, chords } = value;
@@ -625,8 +674,17 @@ export function asChart(value: unknown): ArrangementChart | null {
   if (!Array.isArray(tracks) || !Array.isArray(chords)) return null;
 
   const parts = tracks.map((track) =>
-    isObject(track) && isText(track.name) && isText(track.instrumentId) && isText(track.role)
-      ? { name: track.name, instrumentId: track.instrumentId, role: track.role }
+    isObject(track) &&
+    isText(track.name) &&
+    isText(track.instrumentId) &&
+    isText(track.role) &&
+    isVoicing(track.voicing)
+      ? {
+          name: track.name,
+          instrumentId: track.instrumentId,
+          role: track.role,
+          voicing: track.voicing,
+        }
       : null,
   );
   const progression = chords.map((chord) =>

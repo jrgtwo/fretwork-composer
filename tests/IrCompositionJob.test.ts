@@ -55,9 +55,9 @@ const CHART = {
   bars: BARS,
   bpm: 96,
   tracks: [
-    { name: 'Bass', instrumentId: 'bass', role: 'walking bass, quarter notes' },
-    { name: 'Rhythm Guitar', instrumentId: 'guitar', role: 'off-beat comping' },
-    { name: 'Uke', instrumentId: 'ukulele', role: 'straight strumming on the beat' },
+    { name: 'Bass', instrumentId: 'bass', role: 'walking bass, quarter notes', voicing: 'single' },
+    { name: 'Rhythm Guitar', instrumentId: 'guitar', role: 'off-beat comping', voicing: 'mixed' },
+    { name: 'Uke', instrumentId: 'ukulele', role: 'straight strumming on the beat', voicing: 'mixed' },
   ],
   chords: [{ bar: 1, symbol: 'C7' }],
 };
@@ -236,13 +236,50 @@ describe('a job that runs to the end', () => {
 
     await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
 
-    // The chart run gets the request; the parts get briefs, and never the
-    // request — see the job's header on why the parts are briefed from the
-    // chart alone.
+    // The chart run gets the request bare; each part gets a BRIEF, which carries
+    // its own role — and, since 2026-09-19, the request as well.
+    //
+    // ⚠ This comment used to say the parts never see the request, and that was a
+    // real decision rather than an oversight: a part is briefed from the chart so
+    // that what it plays is the chart's business. What it cost is measured — the
+    // job's own words "a part on top only if it has something of its own to say"
+    // and "leave the room somebody will need" reached the chart and stopped, so
+    // the run that decides how many notes to play had never been told anything
+    // about restraint and wrote 15.9 attacks to the bar. The request now travels
+    // as `TrackBrief.intent`, explicitly marked in the brief as being about the
+    // whole piece, with the role winning wherever the two disagree.
     expect(fake.inputs[0]).toBe('a two-bar blues');
     expect(fake.inputs[1]).toContain('walking bass, quarter notes');
     expect(fake.inputs[2]).toContain('off-beat comping');
     expect(fake.inputs[3]).toContain('straight strumming on the beat');
+  });
+
+  it('carries the request into every part brief, not just the chart', async () => {
+    const fake = rig();
+
+    await runIrCompositionJob('a two-bar blues, and leave room for a singer', {
+      deps: fake.deps,
+    });
+
+    for (const input of fake.inputs.slice(1)) {
+      expect(input).toContain('leave room for a singer');
+      expect(input).toMatch(/What the piece is for/i);
+    }
+  });
+
+  it('gives each part the voicing its chart entry declared', async () => {
+    // The chart says it, the brief carries it, and `irTrackSchema` turns it into
+    // a grammar. If it did not travel, every part would get the permissive one.
+    const fake = rig();
+
+    await runIrCompositionJob('a two-bar blues', { deps: fake.deps });
+
+    // Bass is `single` in CHART, the two others `mixed`.
+    // ⚠ CASE-SENSITIVE, and the case is what makes this test mean anything. Every
+    // brief contains "A string can only ring one note at a time", so the same
+    // words matched case-insensitively pass on all three and assert nothing.
+    const declaresSingle = (input: string) => input.includes('THIS PART PLAYS ONE NOTE AT A TIME');
+    expect(fake.inputs.slice(1).map(declaresSingle)).toEqual([true, false, false]);
   });
 
   it('builds the envelope itself, from the chart', async () => {
@@ -379,8 +416,8 @@ describe('the names the parts are filed under', () => {
       chart: answered({
         ...CHART,
         tracks: [
-          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping' },
-          { name: 'Guitar', instrumentId: 'guitar', role: 'single-note lead' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping', voicing: 'mixed' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'single-note lead', voicing: 'single' },
         ],
       }),
     });
@@ -396,9 +433,9 @@ describe('the names the parts are filed under', () => {
       chart: answered({
         ...CHART,
         tracks: [
-          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping' },
-          { name: 'Guitar 2', instrumentId: 'guitar', role: 'single-note lead' },
-          { name: 'Guitar', instrumentId: 'guitar', role: 'open-string drone' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping', voicing: 'mixed' },
+          { name: 'Guitar 2', instrumentId: 'guitar', role: 'single-note lead', voicing: 'single' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'open-string drone', voicing: 'single' },
         ],
       }),
     });
@@ -421,9 +458,9 @@ describe('the names the parts are filed under', () => {
       chart: answered({
         ...CHART,
         tracks: [
-          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping' },
-          { name: 'Guitar', instrumentId: 'guitar', role: 'single-note lead' },
-          { name: 'Guitar 2', instrumentId: 'guitar', role: 'open-string drone' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping', voicing: 'mixed' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'single-note lead', voicing: 'single' },
+          { name: 'Guitar 2', instrumentId: 'guitar', role: 'open-string drone', voicing: 'single' },
         ],
       }),
     });
@@ -446,8 +483,8 @@ describe('the names the parts are filed under', () => {
       chart: answered({
         ...CHART,
         tracks: [
-          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping' },
-          { name: 'guitar', instrumentId: 'guitar', role: 'single-note lead' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping', voicing: 'mixed' },
+          { name: 'guitar', instrumentId: 'guitar', role: 'single-note lead', voicing: 'single' },
         ],
       }),
     });
@@ -464,7 +501,7 @@ describe('the names the parts are filed under', () => {
     const fake = rig({
       chart: answered({
         ...CHART,
-        tracks: [CHART.tracks[0], { name: '  ', instrumentId: 'guitar', role: 'off-beat comping' }],
+        tracks: [CHART.tracks[0], { name: '  ', instrumentId: 'guitar', role: 'off-beat comping', voicing: 'mixed' }],
       }),
     });
 
@@ -482,8 +519,8 @@ describe('the names the parts are filed under', () => {
       chart: answered({
         ...CHART,
         tracks: [
-          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping' },
-          { name: 'Guitar', instrumentId: 'guitar', role: 'single-note lead' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'off-beat comping', voicing: 'mixed' },
+          { name: 'Guitar', instrumentId: 'guitar', role: 'single-note lead', voicing: 'single' },
         ],
       }),
     });
@@ -666,7 +703,7 @@ describe('a part that its own review refused', () => {
         ...CHART,
         tracks: [
           CHART.tracks[0],
-          { name: 'Rhythm Guitar', instrumentId: 'guitar', role: '  ' },
+          { name: 'Rhythm Guitar', instrumentId: 'guitar', role: '  ', voicing: 'mixed' },
           CHART.tracks[2],
         ],
       }),
@@ -1352,7 +1389,7 @@ describe('the transcript', () => {
     const fake = rig({
       chart: answered({
         ...CHART,
-        tracks: [{ name: 'Horns', instrumentId: 'trumpet', role: 'stabs' }],
+        tracks: [{ name: 'Horns', instrumentId: 'trumpet', role: 'stabs', voicing: 'mixed' }],
       }),
     });
     const seen = progress();
@@ -1372,7 +1409,7 @@ describe('the transcript', () => {
     const fake = rig({
       chart: answered({
         ...CHART,
-        tracks: [CHART.tracks[0], { name: 'Rhythm Guitar', instrumentId: 'guitar', role: '  ' }],
+        tracks: [CHART.tracks[0], { name: 'Rhythm Guitar', instrumentId: 'guitar', role: '  ', voicing: 'mixed' }],
       }),
     });
     const seen = progress();

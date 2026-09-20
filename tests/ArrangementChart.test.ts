@@ -19,6 +19,7 @@ import {
   asChart,
   reviewChart,
   runArrangementChart,
+  TRACK_VOICINGS,
   type ArrangementChart,
   type ChartRunDeps,
 } from '../src/ai/arrangementChart';
@@ -42,9 +43,19 @@ const blues = (): ArrangementChart => ({
   bars: 12,
   bpm: 120,
   tracks: [
-    { name: 'Bass', instrumentId: 'bass', role: 'walking bass, quarter notes, root to root' },
-    { name: 'Rhythm Guitar', instrumentId: 'guitar', role: 'off-beat comping, upper strings' },
-    { name: 'Lead', instrumentId: 'guitar', role: 'sparse fills in the gaps' },
+    {
+      name: 'Bass',
+      instrumentId: 'bass',
+      role: 'walking bass, quarter notes, root to root',
+      voicing: 'single',
+    },
+    {
+      name: 'Rhythm Guitar',
+      instrumentId: 'guitar',
+      role: 'off-beat comping, upper strings',
+      voicing: 'mixed',
+    },
+    { name: 'Lead', instrumentId: 'guitar', role: 'sparse fills in the gaps', voicing: 'single' },
   ],
   chords: [
     { bar: 1, symbol: 'C7' },
@@ -274,6 +285,7 @@ describe('the chart run is tool-free', () => {
       name,
       instrumentId: part.instrumentId,
       role: part.role,
+      voicing: part.voicing,
       bars: 12,
       chords: blues().chords,
     });
@@ -313,7 +325,7 @@ describe('the chart run is tool-free', () => {
     ]);
     expect(ARRANGEMENT_CHART_SCHEMA.additionalProperties).toBe(false);
     const track = ARRANGEMENT_CHART_SCHEMA.properties?.tracks.items?.properties ?? {};
-    expect(Object.keys(track)).toEqual(['name', 'instrumentId', 'role']);
+    expect(Object.keys(track)).toEqual(['name', 'instrumentId', 'role', 'voicing']);
     const chord = ARRANGEMENT_CHART_SCHEMA.properties?.chords.items?.properties ?? {};
     expect(Object.keys(chord)).toEqual(['bar', 'symbol']);
   });
@@ -506,7 +518,10 @@ describe('the parts', () => {
     const chart = blues();
     const reason = await refusal({
       ...chart,
-      tracks: [...chart.tracks, { name: 'Horns', instrumentId: 'trumpet', role: 'stabs' }],
+      tracks: [
+        ...chart.tracks,
+        { name: 'Horns', instrumentId: 'trumpet', role: 'stabs', voicing: 'mixed' as const },
+      ],
     });
     expect(reason).toContain('Horns');
     expect(reason).toContain('trumpet');
@@ -518,7 +533,10 @@ describe('the parts', () => {
     const chart = blues();
     const refusals = reviewChart({
       ...chart,
-      tracks: [...chart.tracks, { name: 'Horns', instrumentId: 'trumpet', role: 'stabs' }],
+      tracks: [
+        ...chart.tracks,
+        { name: 'Horns', instrumentId: 'trumpet', role: 'stabs', voicing: 'mixed' as const },
+      ],
     });
     expect(refusals).toHaveLength(1);
   });
@@ -548,9 +566,24 @@ describe('the parts', () => {
       reviewChart({
         ...blues(),
         tracks: [
-          { name: 'Drums', instrumentId: 'bass', role: 'percussive muted-string pulse' },
-          { name: 'Piano', instrumentId: 'ukulele', role: 'light comping, inner voices' },
-          { name: 'Muted Pulse', instrumentId: 'bass', role: 'dead-string sixteenths' },
+          {
+            name: 'Drums',
+            instrumentId: 'bass',
+            role: 'percussive muted-string pulse',
+            voicing: 'single',
+          },
+          {
+            name: 'Piano',
+            instrumentId: 'ukulele',
+            role: 'light comping, inner voices',
+            voicing: 'mixed',
+          },
+          {
+            name: 'Muted Pulse',
+            instrumentId: 'bass',
+            role: 'dead-string sixteenths',
+            voicing: 'single',
+          },
         ],
       }),
     ).toEqual([]);
@@ -561,6 +594,7 @@ describe('the parts', () => {
       name: `Part ${index}`,
       instrumentId: 'guitar',
       role: 'doubling everything else',
+      voicing: 'mixed' as const,
     });
     const tracks = Array.from({ length: MAX_COMPOSITION_TRACKS + 1 }, (_, i) => track(i));
     const refusals = reviewChart({ ...blues(), tracks });
@@ -570,6 +604,52 @@ describe('the parts', () => {
 });
 
 // -------------------------------------------------------------- narrowing ---
+
+describe('the chart declares how many notes each part sounds at once', () => {
+  it('offers exactly the two voicings and refuses a third', () => {
+    const voicing = ARRANGEMENT_CHART_SCHEMA.properties?.tracks.items?.properties?.voicing;
+    expect(voicing?.enum).toEqual([...TRACK_VOICINGS]);
+  });
+
+  it('will not read a chart whose part has no voicing', () => {
+    // ⚠ NOT defaulted to `mixed`. An unreadable voicing silently becoming the
+    // PERMISSIVE one would put the failure back exactly where it was — a part
+    // that may write chords because nobody said it may not.
+    const chart = blues();
+    const withoutVoicing: Record<string, unknown> = { ...chart.tracks[0] };
+    delete withoutVoicing.voicing;
+    expect(asChart({ ...chart, tracks: [withoutVoicing, ...chart.tracks.slice(1)] })).toBeNull();
+  });
+
+  it('will not read a voicing that is not one of the two', () => {
+    const chart = blues();
+    const tracks = [{ ...chart.tracks[0], voicing: 'polyphonic' }, ...chart.tracks.slice(1)];
+    expect(asChart({ ...chart, tracks })).toBeNull();
+  });
+
+  it('carries a readable voicing through', () => {
+    const read = asChart(blues());
+    expect(read?.tracks.map((track) => track.voicing)).toEqual(['single', 'mixed', 'single']);
+  });
+
+  it('tells the model that mixed takes nothing away', () => {
+    // The failure this prevents is the opposite one to the strumming lead: a
+    // part marked for chords that then plays ONLY chords, because the word told
+    // it to. `mixed` is the absence of a limit and the prompt has to say so.
+    const prompt = ARRANGEMENT_CHART_AGENT.systemPrompt;
+    expect(prompt).toContain('"mixed" is NO limit');
+    expect(prompt).toContain('never demands one');
+  });
+
+  it('tells the model the voicing is enforced, and that one part is not two jobs', () => {
+    // The prompt is where the CHOICE is taught; the schema only records it. A
+    // chart that marks a fills part `mixed` hands it a grammar that permits
+    // the strumming the role did not ask for.
+    const prompt = ARRANGEMENT_CHART_AGENT.systemPrompt;
+    expect(prompt).toMatch(/single/);
+    expect(prompt).toMatch(/ONE PART'S JOB IS NOT TWO JOBS/);
+  });
+});
 
 describe('what comes back from the run', () => {
   it('says a run was cut off at the ceiling, instead of blaming a code fence', async () => {

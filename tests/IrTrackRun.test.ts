@@ -67,6 +67,11 @@ const bassBrief = (overrides: Partial<TrackBrief> = {}): TrackBrief => ({
   name: 'Bass',
   instrumentId: 'bass',
   role: 'walking bass, quarter notes, root to root',
+  // CHORDAL, although a walking bass is not — deliberately the permissive one.
+  // It is what every brief in this file meant before voicing existed, so the
+  // fixture keeps each existing test asserting exactly what it asserted then;
+  // the single-voiced cases below opt in by name.
+  voicing: 'mixed',
   bars: 12,
   chords: [
     { bar: 1, symbol: 'C7' },
@@ -230,7 +235,7 @@ describe('the schema is the neck it was built for', () => {
     // string 5 on a four-string neck — which the pipeline then CLAMPS in silence,
     // sounding a pitch nobody wrote.
     const notesOf = (instrumentId: string) =>
-      irTrackSchema(instrumentId).properties?.events.items?.properties?.notes.items?.properties;
+      irTrackSchema(instrumentId, 'mixed').properties?.events.items?.properties?.notes.items?.properties;
 
     expect(notesOf('bass')?.string.maximum).toBe(3);
     expect(notesOf('guitar')?.string.maximum).toBe(5);
@@ -245,7 +250,7 @@ describe('the schema is the neck it was built for', () => {
     // the BOTTOM string (the low E on a guitar)" HERE while being briefed as a
     // bass, and put all 48 of its notes on the G.
     const stringOf = (instrumentId: string) =>
-      irTrackSchema(instrumentId).properties?.events.items?.properties?.notes.items?.properties
+      irTrackSchema(instrumentId, 'mixed').properties?.events.items?.properties?.notes.items?.properties
         ?.string.description ?? '';
 
     expect(stringOf('bass')).toContain('0 sounds E1');
@@ -257,7 +262,7 @@ describe('the schema is the neck it was built for', () => {
     // sentence did.
     expect(stringOf('bass')).not.toContain('sounds E4');
     expect(stringOf('guitar')).not.toContain('sounds E1');
-    expect(JSON.stringify(irTrackSchema('bass'))).not.toContain('low E on a guitar');
+    expect(JSON.stringify(irTrackSchema('bass', 'mixed'))).not.toContain('low E on a guitar');
 
     // And the reentrant neck is not told the falsehood the brief refuses to tell
     // it: these two sentences reach the model in the same request and must not
@@ -274,7 +279,7 @@ describe('the schema is the neck it was built for', () => {
     // dropped from playback by `flattenTrack` — docs/FOLLOW-UPS.md row 12 — with
     // nothing said anywhere. Asked of the seam so a revoiced catalog moves this.
     const fretOf = (instrumentId: string) =>
-      irTrackSchema(instrumentId).properties?.events.items?.properties?.notes.items?.properties
+      irTrackSchema(instrumentId, 'mixed').properties?.events.items?.properties?.notes.items?.properties
         ?.fret.maximum;
 
     expect(fretOf('guitar')).toBe(instrumentFretCount('guitar'));
@@ -288,7 +293,7 @@ describe('the schema is the neck it was built for', () => {
   });
 
   it('requires the time and nothing else, because what sounds has two shapes', () => {
-    const event = irTrackSchema('guitar').properties?.events.items;
+    const event = irTrackSchema('guitar', 'mixed').properties?.events.items;
 
     // `notes` OR `strum`, and this dialect has no `oneOf` to say so — the grammar
     // can only require what every entry carries. `reviewTrack` refuses an entry
@@ -307,7 +312,7 @@ describe('the schema is the neck it was built for', () => {
   });
 
   it('offers the strum as a closed list, so the model cannot invent a span', () => {
-    const strum = irTrackSchema('guitar').properties?.events.items?.properties?.strum;
+    const strum = irTrackSchema('guitar', 'mixed').properties?.events.items?.properties?.strum;
 
     expect(strum?.enum).toEqual([...STRUM_SPANS]);
     // The whole point of the field: it carries no string and no fret, so there is
@@ -319,19 +324,153 @@ describe('the schema is the neck it was built for', () => {
     // Not tidiness: `runAgentTask` passes the schema to the harness by reference
     // because `ajv`'s cache is keyed on the schema OBJECT and never evicted, so a
     // fresh object per run would leak a compiled validator per run.
-    expect(irTrackSchema('bass')).toBe(irTrackSchema('bass'));
-    expect(irTrackSchema('bass')).not.toBe(irTrackSchema('guitar'));
+    expect(irTrackSchema('bass', 'mixed')).toBe(irTrackSchema('bass', 'mixed'));
+    expect(irTrackSchema('bass', 'mixed')).not.toBe(irTrackSchema('guitar', 'mixed'));
   });
 
   it('does NOT memoize a neck the catalog has never heard of', () => {
     // The memo's whole justification is that it is bounded by a catalog with
     // three entries in it. `irTrackSchema` is exported, so caching an arbitrary id
     // would grow the map for the life of the tab — one entry per typo, forever.
-    expect(irTrackSchema('sitar')).not.toBe(irTrackSchema('sitar'));
+    expect(irTrackSchema('sitar', 'mixed')).not.toBe(irTrackSchema('sitar', 'mixed'));
   });
 });
 
 // ------------------------------------------------------------------ brief ---
+
+describe('a single-voiced part cannot write a chord', () => {
+  const eventProps = (voicing: 'single' | 'mixed') =>
+    irTrackSchema('guitar', voicing).properties?.events.items?.properties;
+
+  it('gives a single part no `strum` property AT ALL, not a discouraged one', () => {
+    // ⚠ `obj` sets `additionalProperties: false`, so absence is a REFUSAL rather
+    // than a field nobody filled in. A part briefed "Single note fills, bends on
+    // 12th fret" answered with 14 strums under its own line on 2026-09-19; prose
+    // had already asked it not to.
+    expect(eventProps('single')?.strum).toBeUndefined();
+    expect(eventProps('mixed')?.strum?.enum).toEqual([...STRUM_SPANS]);
+  });
+
+  it('holds a single part to ONE note an attack, and a mixed one to the neck', () => {
+    expect(eventProps('single')?.notes?.maxItems).toBe(1);
+    // Six, because a guitar has six strings — the mixed ceiling is the neck.
+    expect(eventProps('mixed')?.notes?.maxItems).toBe(6);
+  });
+
+  it('never forces a mixed part to play a chord — it is a superset, not the other style', () => {
+    // ⚠ THE NAME WAS `chordal` UNTIL 2026-09-20 and it read as a mandate. A
+    // comping guitar that may not also walk between its chords is not a comping
+    // guitar, so this pins the permission rather than the ceiling: one note is
+    // as legal on a mixed part as six.
+    const notes = eventProps('mixed')?.notes;
+    expect(notes?.minItems).toBe(1);
+    expect(notes?.maxItems).toBe(6);
+    // Neither `notes` nor `strum` is required — an attack chooses.
+    expect(irTrackSchema('guitar', 'mixed').properties?.events.items?.required).toEqual([
+      'atTick',
+      'durationTicks',
+    ]);
+  });
+
+  it('tells a mixed part it is under no obligation to write a chord', () => {
+    // BOTH surfaces, because both reach the model in the same request: the prose
+    // brief and the schema's own field description. The failure this guards is
+    // the opposite of the strumming lead — a part that plays nothing BUT chords
+    // because its label told it to.
+    expect(brief(guitarBar({ voicing: 'mixed' }))).toContain(
+      'THERE IS NO OBLIGATION TO WRITE MORE THAN ONE NOTE',
+    );
+    const description = irTrackSchema('guitar', 'mixed').properties?.events.items?.properties?.notes
+      ?.description;
+    expect(description).toContain('no obligation to write more than one');
+  });
+
+  it('keeps the two schemas apart in the cache, one neck or not', () => {
+    // The cache was keyed on the instrument alone. A guitar comping and a guitar
+    // playing a line are the same strings and different grammars, so that key
+    // served whichever was built first to both.
+    expect(irTrackSchema('guitar', 'single')).not.toBe(irTrackSchema('guitar', 'mixed'));
+    expect(irTrackSchema('guitar', 'single')).toBe(irTrackSchema('guitar', 'single'));
+  });
+
+  it('tells a single part so in its brief, and teaches it no strumming', () => {
+    const written = brief(oneBar({ voicing: 'single' }));
+    // ⚠ CASE-SENSITIVE. Every brief says "A string can only ring one note at a
+    // time" about the NECK; matched case-insensitively this passes on a mixed
+    // brief too and pins nothing.
+    expect(written).toContain('THIS PART PLAYS ONE NOTE AT A TIME');
+    expect(brief(guitarBar({ voicing: 'mixed' }))).not.toContain(
+      'THIS PART PLAYS ONE NOTE AT A TIME',
+    );
+    // The whole strum chapter is gone: teaching a key that is not on the form
+    // spends the attempt and earns a refusal.
+    expect(written).not.toMatch(/"strum"/);
+    expect(written).not.toMatch(/bottom-3/);
+  });
+
+  it('still teaches a mixed part to strum', () => {
+    const written = brief(guitarBar({ voicing: 'mixed' }));
+    expect(written).toMatch(/"strum"/);
+    expect(written).toMatch(/bottom-3/);
+  });
+
+  it('refuses a chord on a single part even if the grammar was not honoured', () => {
+    // A grammar is the PROVIDER's to honour and this app talks to an arbitrary
+    // OpenAI-compatible backend, so the review is what makes the voicing true
+    // rather than merely declared.
+    const stacked = reviewed(
+      [{ atTick: 0, durationTicks: PPQ, notes: [{ string: 0, fret: 8 }, { string: 1, fret: 7 }] }],
+      oneBar({ voicing: 'single' }),
+    );
+    expect(stacked).toMatch(/one note at a time/i);
+  });
+
+  it('says nothing about a chord on a mixed part', () => {
+    const stacked = reviewed(
+      [{ atTick: 0, durationTicks: PPQ, notes: [{ string: 0, fret: 8 }, { string: 1, fret: 7 }] }],
+      oneBar({ voicing: 'mixed' }),
+    );
+    expect(stacked).not.toMatch(/one note at a time/i);
+  });
+});
+
+describe('what the user asked for reaches the part writer', () => {
+  it('carries the intent into the brief, marked as the whole piece rather than the part', () => {
+    // It used to die at the chart: the part writer saw only its role, so nothing
+    // about restraint ever reached the run that decides how many notes to play.
+    const written = brief(oneBar({ intent: 'leave the room somebody will need' }));
+    expect(written).toContain('leave the room somebody will need');
+    expect(written).toMatch(/What the piece is for/i);
+  });
+
+  it('says the role wins where the two disagree', () => {
+    // Otherwise a whole-piece brief mentioning another instrument reads as an
+    // instruction to play it.
+    expect(brief(oneBar({ intent: 'a duet for two guitars' }))).toMatch(/your role wins/i);
+  });
+
+  it('writes no section at all when there is no intent', () => {
+    // Silence rather than a sentence about there being none.
+    expect(brief(oneBar())).not.toMatch(/What the piece is for/i);
+    expect(brief(oneBar({ intent: '   ' }))).not.toMatch(/What the piece is for/i);
+  });
+});
+
+describe('the brief asks for a release rather than a filled gap', () => {
+  it('says a duration meeting the next attack is a note with no release', () => {
+    // Measured, 2026-09-19: 47 of 47 bass pairs and 176 of 190 lead pairs had
+    // end == next start, because the duration contract promises trimming and
+    // nothing asked for space.
+    const written = brief(oneBar());
+    expect(written).toMatch(/NO release/i);
+    expect(written).toMatch(/WRITE THE LENGTH YOU WANT HEARD/i);
+  });
+
+  it('tells it that one dynamic everywhere is the same as none', () => {
+    // 239 markings across two parts, every one `mf`.
+    expect(brief(oneBar())).toMatch(/SAME MARK ON EVERY NOTE IS THE SAME AS NO MARKS/i);
+  });
+});
 
 describe('the brief does the arithmetic the model got wrong', () => {
   it('gives every chord its bars AND its ticks', () => {
@@ -460,7 +599,7 @@ describe('the brief is voiced for THIS neck', () => {
     // ...and the old rule it replaced is gone, not sitting beside it — in the
     // schema that ships with the brief as well as in the prose.
     expect(bass).not.toContain('low E on a guitar');
-    expect(JSON.stringify(irTrackSchema('bass'))).not.toContain('low E on a guitar');
+    expect(JSON.stringify(irTrackSchema('bass', 'mixed'))).not.toContain('low E on a guitar');
   });
 
   it('does not tell a ukulele player that string 0 is the lowest PITCH', () => {
@@ -564,7 +703,7 @@ describe('the brief says what the app will DO, where it used to say “refused�
   it('says all three in the schema too, which ships as the grammar', () => {
     // The descriptions reach the model in the same request as the prose and must
     // not contradict it — see `irTrackSchema`.
-    const schema = JSON.stringify(irTrackSchema('guitar'));
+    const schema = JSON.stringify(irTrackSchema('guitar', 'mixed'));
 
     expect(schema).toContain('LONGEST this attack will ring');
     expect(schema).toContain('cut short on any string a later attack needs');
@@ -2100,7 +2239,7 @@ describe('a run that answered with a part', () => {
     expect(run.calls).toHaveLength(1);
     expect(run.calls[0].spec.tools).toEqual([]);
     expect(run.calls[0].input).toBe(brief(oneBar()));
-    expect(run.calls[0].options?.outputSchema).toBe(irTrackSchema('bass'));
+    expect(run.calls[0].options?.outputSchema).toBe(irTrackSchema('bass', 'mixed'));
   });
 
   it('forwards the caller’s options, strips `deps`, and OVERWRITES `outputSchema`', async () => {
@@ -2111,12 +2250,12 @@ describe('a run that answered with a part', () => {
     await runIRTrack(oneBar(), {
       deps: run.deps,
       modelId: 'some-model',
-      outputSchema: irTrackSchema('guitar'),
+      outputSchema: irTrackSchema('guitar', 'mixed'),
     });
 
     expect(run.calls[0].options).toEqual({
       modelId: 'some-model',
-      outputSchema: irTrackSchema('bass'),
+      outputSchema: irTrackSchema('bass', 'mixed'),
     });
     // `deps` is this module's own parameter and is not part of the seam's shape.
     expect(run.calls[0].options).not.toHaveProperty('deps');

@@ -748,13 +748,24 @@ function partNames(tracks: readonly ChartTrack[]): ChartTrack[] {
  *  chart's own, which is what `TrackBrief` was shaped for. The ID is the only
  *  thing added, and it is the caller's precisely because a model must never be
  *  asked to keep one unique — as, after {@link partNames}, is the name. */
-const briefFor = (track: ChartTrack, index: number, chart: ArrangementChart): TrackBrief => ({
+const briefFor = (
+  track: ChartTrack,
+  index: number,
+  chart: ArrangementChart,
+  /** What the USER asked for, verbatim — the job's own `request`. It reaches the
+   *  part writer through here and nowhere else; see `TrackBrief.intent` for the
+   *  run this was added for, where every word about restraint died at the chart
+   *  and the part played 15.9 attacks to the bar. */
+  intent: string,
+): TrackBrief => ({
   id: `track-${index}`,
   name: track.name,
   instrumentId: track.instrumentId,
   role: track.role,
+  voicing: track.voicing,
   bars: chart.bars,
   chords: chart.chords,
+  ...(intent.trim() === '' ? {} : { intent }),
 });
 
 // --------------------------------------------------------------------- run ---
@@ -981,7 +992,7 @@ export async function runIrCompositionJob(
       previousRefusal?: string,
     ): Promise<{ readonly outcome: TrackRunOutcome; readonly runTranscriptId?: string }> => {
       let runId: string | undefined;
-      const outcome = await runIRTrack(briefFor(part, index, chart.value), {
+      const outcome = await runIRTrack(briefFor(part, index, chart.value, request), {
         ...(signal ? { signal } : {}),
         ...(previousRefusal === undefined ? {} : { previousRefusal }),
         deps: {

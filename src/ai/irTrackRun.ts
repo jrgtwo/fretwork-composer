@@ -290,6 +290,9 @@ import {
 import { runAgentTask } from './agentService';
 import { arr, int, namedRefusals, obj, str, type JsonSchema } from './tools/types';
 import type { AgentRunSummary, AgentSpec, RunAgentTaskOptions } from './agentService';
+// The chart owns the vocabulary; this module consumes it. A local copy would be
+// a second answer to "what may a part sound at once", and the two would drift.
+import type { TrackVoicing } from './arrangementChart';
 import type { Result } from '../patterns/patternService';
 
 // ----------------------------------------------------------------- shape ---
@@ -451,6 +454,26 @@ export interface TrackBrief {
   /** What this part DOES, in the chart's words — "walking bass, quarter notes".
    *  It is the ROLE, and the brief hands it to the model as one. */
   readonly role: string;
+  /** One note at a time, or several. The chart decides it; {@link irTrackSchema}
+   *  turns it into a grammar, so this is not advice the run can weigh. */
+  readonly voicing: TrackVoicing;
+  /**
+   * What the USER asked for, in their words — the whole-piece intent, the same
+   * text the chart run was given.
+   *
+   * ⚠ It reaches this run and no further, and it is here because it used not to
+   * reach it at all. The job's brief said "a part on top only if it has
+   * something of its own to say" and "leave the room somebody will need"; that
+   * text was consumed by the chart and the part writer saw only its role, so on
+   * 2026-09-19 a part briefed "Single note fills" answered with 15.9 attacks to
+   * the bar for twelve bars. Nothing about restraint had ever been said to the
+   * run that decides how many notes to play.
+   *
+   * Optional because a brief can be built without one — every test in this file
+   * does — and an absent intent is silence rather than a sentence about there
+   * being none.
+   */
+  readonly intent?: string;
   /** How long the form is, in bars: a whole number, at least 1. */
   readonly bars: number;
   /** The progression, ascending, with an entry at bar 1. */
@@ -610,9 +633,22 @@ function openStringSentences(
   ];
 }
 
-export function irTrackSchema(instrumentId: string): JsonSchema {
-  const cached = SCHEMA_BY_INSTRUMENT.get(instrumentId);
+export function irTrackSchema(instrumentId: string, voicing: TrackVoicing): JsonSchema {
+  // ⚠ THE KEY CARRIES THE VOICING. One neck has two schemas now — a guitar
+  // comping and a guitar playing a line are the same strings and different
+  // grammars — and keying on the instrument alone would serve whichever was
+  // built first to both.
+  const key = `${instrumentId}:${voicing}`;
+  const cached = SCHEMA_BY_INSTRUMENT.get(key);
   if (cached !== undefined) return cached;
+
+  // What a single-voiced part may not do, enforced rather than asked for. It
+  // gets no `strum` property at all and one note to an attack, so the run cannot
+  // write a chord however it reads its brief. The case this closes is measured:
+  // on 2026-09-19 a part briefed "Single note fills, bends on 12th fret" came
+  // back with 14 strums under its own line, and every one of the 15 notes the
+  // import reported cut short was that part colliding with itself.
+  const single = voicing === 'single';
 
   // 0 for an instrument the catalog has never heard of. `trackRunInput` refuses
   // that case before a run happens (through `chordGrip`), so what this produces
@@ -662,17 +698,29 @@ export function irTrackSchema(instrumentId: string): JsonSchema {
                 },
                 ['string', 'fret'],
               ),
-              'The notes YOU compose at this instant — a line, a melody, a fill. A string can only ring one note at a time, so a note still ringing on a string one of these lands on is cut short there, and of two of these on the same string only the last one sounds. Leave it out and write `strum` instead to play a chord: never copy a shape out by hand.',
-              // One attack cannot sound more notes than the neck has strings.
-              // Not a policy number like the two above it — it is the same fact
-              // `string`'s own range states, from the other end, so it moves
-              // with the instrument rather than with a decision.
-              strings,
+              single
+                ? 'The ONE note you compose at this instant. This part plays one note at a time — exactly one entry here, never two. A string can only ring one note at a time, so a note still ringing on the string this lands on is cut short there.'
+                : 'The notes YOU compose at this instant — one of them for a line, a melody or a fill, several for a double-stop. There is no obligation to write more than one: this part may play a chord where the bar wants one and a single note where it does not, and moving between the two is most of what playing sounds like. A string can only ring one note at a time, so a note still ringing on a string one of these lands on is cut short there, and of two of these on the same string only the last one sounds. Leave it out and write `strum` instead to play a chord: never copy a shape out by hand.',
+              // A single-voiced part is held to ONE, which is what makes the
+              // voicing a grammar rather than a request. Otherwise: one attack
+              // cannot sound more notes than the neck has strings — not a policy
+              // number like the two above it, but the same fact `string`'s own
+              // range states from the other end, so it moves with the instrument
+              // rather than with a decision.
+              single ? 1 : strings,
             ),
-            strum: str(
-              `Play the chord already in force at this tick, filled in for you from its shape on this neck — write this INSTEAD of \`notes\` and you never copy a string, a fret or the chord's name. An entry that writes both keeps the strum, and the \`notes\` on it are thrown away. Which strings of the shape it hits: "all" every string the shape uses, "bottom-2"/"bottom-3" the 2 or 3 lowest-numbered strings of it, "top-2"/"top-3" the 2 or 3 highest-numbered.`,
-              STRUM_SPANS,
-            ),
+            // ⚠ ABSENT on a single-voiced part, not merely discouraged. `obj`
+            // sets `additionalProperties: false`, so a `strum` written by a part
+            // that has not been given one is a validation failure rather than a
+            // chord nobody asked for.
+            ...(single
+              ? {}
+              : {
+                  strum: str(
+                    `Play the chord already in force at this tick, filled in for you from its shape on this neck — write this INSTEAD of \`notes\` and you never copy a string, a fret or the chord's name. An entry that writes both keeps the strum, and the \`notes\` on it are thrown away. Which strings of the shape it hits: "all" every string the shape uses, "bottom-2"/"bottom-3" the 2 or 3 lowest-numbered strings of it, "top-2"/"top-3" the 2 or 3 highest-numbered.`,
+                    STRUM_SPANS,
+                  ),
+                }),
             dynamic: str(`How hard it is played. Softest to loudest: ${DYNAMICS.join(', ')}.`, DYNAMICS),
           },
           // ⚠ `notes` IS NO LONGER REQUIRED, and it is not a loosening for its own
@@ -697,7 +745,7 @@ export function irTrackSchema(instrumentId: string): JsonSchema {
   // does not know would otherwise grow this map for the life of the tab — and the
   // memo's whole justification is that it is bounded by a catalog with three
   // entries in it.
-  if (strings > 0) SCHEMA_BY_INSTRUMENT.set(instrumentId, schema);
+  if (strings > 0) SCHEMA_BY_INSTRUMENT.set(key, schema);
   return schema;
 }
 
@@ -983,6 +1031,12 @@ export function trackRunInput(brief: TrackBrief, previousRefusal?: string): Resu
   const totalTicks = brief.bars * TICKS_PER_BAR;
   const strings = instrumentStringCount(brief.instrumentId);
   const frets = neckFrets(brief.instrumentId);
+  // The prose half of what `irTrackSchema` enforces. A single-voiced part has no
+  // `strum` in its grammar at all, so every sentence here that teaches strumming
+  // would be teaching a key that is not on the form — worse than useless, since
+  // the model would spend the attempt and be refused.
+  const single = brief.voicing === 'single';
+  const intent = brief.intent?.trim() ?? '';
 
   return {
     ok: true,
@@ -990,15 +1044,35 @@ export function trackRunInput(brief: TrackBrief, previousRefusal?: string): Resu
 
 Write "${name}" — ${role} — on ${instrument}, over the whole ${bars} of this piece. That is the whole run: one part, one instrument, the progression below, and nothing else to decide.
 
-Its name and that description are what the part is FOR, and the arrangement was planned around it. The other parts are being written to their own briefs, so play yours and leave theirs alone.
+Its name and that description are what the part is FOR, and the arrangement was planned around it. The other parts are being written to their own briefs, so play yours and leave theirs alone.${
+      intent === ''
+        ? ''
+        : `
+
+# What the piece is for
+
+This is what was asked for, in the words it was asked in. It is about the WHOLE piece and not about your part alone — read it for what the music is meant to do, then play your part as its share of that.
+
+${intent}
+
+It is context, not a second brief. Where it and your role disagree about what YOU play, your role wins; where it says something about the piece your role is silent on — how busy it should be, who it leaves room for, what it is for — it is the only thing that says so, and nothing else in this run will tell you.`
+    }
 
 # The shape of the answer
 
 One JSON object, exactly this shape and nothing else in it:
 
-{"events":[{"atTick":0,"durationTicks":${PPQ},"notes":[{"string":0,"fret":3}],"dynamic":"mf"},{"atTick":${PPQ},"durationTicks":${PPQ},"strum":"top-3"}]}
+${
+      single
+        ? `{"events":[{"atTick":0,"durationTicks":${PPQ},"notes":[{"string":0,"fret":3}],"dynamic":"mf"},{"atTick":${PPQ},"durationTicks":${PPQ / 2},"notes":[{"string":0,"fret":5}]}]}
 
-One entry of \`events\` is one attack: \`atTick\` is when it starts and \`durationTicks\` is how long it rings. What sounds on it is written one of the two ways above, and never both in the same entry — \`notes\` is the notes YOU compose at that instant, and \`strum\` plays the chord already in force at that tick, filled in for you. An entry that writes both is played as the strum and the \`notes\` on it are thrown away, so write the one you meant. \`dynamic\` is optional on either and says how hard it is played, from ${DYNAMICS[0]} to ${DYNAMICS[DYNAMICS.length - 1]}.
+One entry of \`events\` is one attack: \`atTick\` is when it starts and \`durationTicks\` is how long it rings, and \`notes\` is the note sounding on it. \`dynamic\` is optional and says how hard it is played, from ${DYNAMICS[0]} to ${DYNAMICS[DYNAMICS.length - 1]}.
+
+THIS PART PLAYS ONE NOTE AT A TIME. \`notes\` holds exactly one entry, every time — this is the form the answer is read against, not a preference, and an attack carrying two notes is refused along with the answer it was in. There is no strumming here and no chords: it is a line, and a line is one note deep.`
+        : `{"events":[{"atTick":0,"durationTicks":${PPQ},"notes":[{"string":0,"fret":3}],"dynamic":"mf"},{"atTick":${PPQ},"durationTicks":${PPQ},"strum":"top-3"}]}
+
+One entry of \`events\` is one attack: \`atTick\` is when it starts and \`durationTicks\` is how long it rings. What sounds on it is written one of the two ways above, and never both in the same entry — \`notes\` is the notes YOU compose at that instant, and \`strum\` plays the chord already in force at that tick, filled in for you. An entry that writes both is played as the strum and the \`notes\` on it are thrown away, so write the one you meant. \`dynamic\` is optional on either and says how hard it is played, from ${DYNAMICS[0]} to ${DYNAMICS[DYNAMICS.length - 1]}.`
+    }
 
 Write the events in time order, earliest first.
 
@@ -1009,6 +1083,10 @@ EVERY NUMBER IS A WHOLE NUMBER. A tick with a fraction in it is thrown away alon
 \`string\` counts from the BOTTOM string of the neck. This ${instrument} has ${strings}, so \`string\` runs from 0 to ${strings - 1}. ${openStringSentences(brief.instrumentId, { namePitches: true }).join(' ')} Write the part where it belongs on THIS neck, not where the same shape would sit on a guitar. \`fret\` runs from 0, the open string, up to ${frets} — that is where this neck ends, and a fret past it is a note nothing will draw and nothing will play.
 
 A string can only ring one note at a time, which is why \`durationTicks\` is the LONGEST a note rings rather than a promise that it will: when a later attack sounds a note on a string, whatever is ringing there is cut short at that attack, exactly as a player's finger cuts it. Nothing is refused for it and nothing is moved — but a note you want held is a note nothing else lands on, so write the lengths you actually mean. Two notes of the SAME event on one string are one instant with two answers, and only the last of them is kept.
+
+⚠ DO NOT LEAN ON THAT TRIMMING TO SET YOUR LENGTHS. A duration that reaches exactly to the next attack is a note with NO release — it stops in the same instant the next one starts, and a whole part written that way is one unbroken sound with no articulation anywhere in it. That is what it sounds like when every note is given the full space to the next: not legato, just typing.
+
+WRITE THE LENGTH YOU WANT HEARD, AND LET SILENCE BE PART OF IT. A quarter-note pulse is nearer ${Math.round(PPQ * 0.75)} than ${PPQ}; a walking line breathes at ${Math.round(PPQ * 0.6)} to ${Math.round(PPQ * 0.8)} of the space it has; a stab is much shorter than the gap after it. Notes MEANT to run together — a tie into the next bar, a held chord under a line — are the exception you write on purpose, not the default you get by filling every gap.
 
 # Time, already worked out
 
@@ -1028,7 +1106,16 @@ THERE IS NO CHORD LOOKUP IN THIS RUN. The above is that lookup's answer for this
 
 This is MATERIAL, not the part. You choose which of these notes get played, in what order, at which ticks, for how long and how hard — a bass line takes one at a time and walks between them, a comping part spreads them across the bar. Notes outside the shape are yours where the line asks for one: an approach note, a passing note, a chromatic step into the next bar. If you want a tone an octave away, the same string twelve frets up is the same note an octave higher — that is the only fret arithmetic here.
 
-# Playing a chord: ask for it, do not copy it
+${
+      single
+        ? `# One note at a time
+
+This part is a LINE. Every attack carries one note, and the shape above is where that note comes from rather than something to play all at once — you take one of its tones, or a passing note between two of them, and move on. A stack of notes on a downbeat is the thing this part is not.
+
+The shape doubles some tones and leaves others out, so pick by SOUND rather than by position in the list: the root under a change, the third or the seventh where the line wants colour, a chromatic step into the next bar.
+
+`
+        : `# Playing a chord: ask for it, do not copy it
 
 Never write a shape's strings and frets out into \`notes\`. When this part plays a chord, put \`"strum"\` on the attack instead and the shape above is filled in from the tick you gave — you do not name the chord, you do not copy a number, and you cannot get one wrong. One number wrong in a copied shape is a different chord for the whole bar, and it sounds like a mistake nobody made on purpose.
 
@@ -1044,7 +1131,10 @@ A strum holds every string it hits for the whole of its \`durationTicks\`, exact
 
 \`notes\` is for what you compose — the walking line, the melody, the fill, the note that leads into the next bar. Three or more notes written by hand at one instant are checked against the shape above, on the strings that shape uses, and refused if they are not it, because that is a chord you meant to copy.
 
-# What NOT to write
+THERE IS NO OBLIGATION TO WRITE MORE THAN ONE NOTE. This part may play a chord where the bar wants one and a single note where it does not, and moving between the two is most of what playing sounds like — a strum on the beat, a walk-up out of it, a held chord with one note answering over the top. A part that plays nothing but chords is as mechanical as one that plays nothing but quarter notes.
+
+`
+    }# What NOT to write
 
 Do not write the shape once at the top of the bar and stop. A stack of notes on beat 1 with silence behind it is not a part, it is the chord spelled out, and it is the exact failure this brief exists to prevent: the frets are right, the harmony is right, the length is right, and there is nothing to listen to.
 
@@ -1053,6 +1143,8 @@ A bar has more than one attack in it. Something lands off the downbeat as well a
 Over ${bars} the part goes somewhere: later bars answer earlier ones instead of repeating them note for note, and the bar a chord changes on is the one a listener is waiting for.
 
 Notes all at one volume read as typing, not as playing. Put a \`dynamic\` on what the rhythm leans on and leave the rest alone — a few marks in the right places say more than a mark on every note.
+
+THE SAME MARK ON EVERY NOTE IS THE SAME AS NO MARKS AT ALL, and it costs you a field on every attack to say nothing. If you find yourself writing \`"dynamic":"mf"\` on everything, write it on nothing instead and spend the marks where the bar actually leans.
 
 # Answer
 
@@ -1765,6 +1857,33 @@ export function reviewTrack(
   const frets = neckFrets(brief.instrumentId);
   const progression = shapeFinder(brief);
 
+  // ── THE VOICING CHECK ─────────────────────────────────────────────────────
+  // ⚠ A SECOND ANSWER TO WHAT THE GRAMMAR ALREADY SAYS, and deliberately so:
+  // `irTrackSchema` gives a single-voiced part one note to an attack and no
+  // `strum` at all, but a grammar is the PROVIDER's to honour and this app
+  // cannot assume an arbitrary OpenAI-compatible backend enforces one. Without
+  // this, a backend that ignores the schema turns the voicing back into a
+  // suggestion, which is the state this whole change exists to leave.
+  //
+  // Named per entry rather than counted, because the repair is per entry: the
+  // model has to thin a stack, not "write fewer chords".
+  //
+  // ⚠ IT CANNOT NAME A STRUM AS A STRUM, and does not try. This runs on RESOLVED
+  // events, after `expandStrums` has filled a strum's shape into real notes, so
+  // by here a strum is indistinguishable from a stack the model typed out — and
+  // it is caught as one, because a filled-in shape is two notes or more. The
+  // refusal below reads correctly for either: what the part has to do about it
+  // is the same, keep one note.
+  if (brief.voicing === 'single') {
+    for (const [index, event] of events.entries()) {
+      if (event.notes.length <= 1) continue;
+      refusals.push({
+        label: `event ${index + 1}`,
+        reason: `This part plays one note at a time, and this attack sounds ${event.notes.length}. Keep the one note the line wants at tick ${event.atTick} and drop the rest — if this was a strum, it is a chord once it is filled in, and this part does not play chords.`,
+      });
+    }
+  }
+
   // ── THE CHORD CHECK ───────────────────────────────────────────────────────
   // Three notes IN ONE ANSWER ENTRY claim to BE a chord; two are a double-stop
   // and carry no harmony of their own, and stacks spread over separate entries
@@ -2147,7 +2266,7 @@ export async function runIRTrack(
 
   const run = await deps.runTask(IR_TRACK_AGENT, input.value, {
     ...runOptions,
-    outputSchema: irTrackSchema(brief.instrumentId),
+    outputSchema: irTrackSchema(brief.instrumentId, brief.voicing),
   });
   if (!run.ok) {
     return { ok: false, stopped: 'run', reason: run.reason, resolutions: NOTHING_RESOLVED };
