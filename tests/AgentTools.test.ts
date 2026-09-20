@@ -329,6 +329,21 @@ function schemaViolations(schema: JsonSchema, args: Record<string, unknown>): st
     if (property.enum && !property.enum.includes(argument as JsonPrimitive)) {
       problems.push(`${key} is not one of ${property.enum.join(', ')}`);
     }
+    // ⚠ THE LIST BOUNDS, checked here for the same reason the enums are: the
+    // acceptance criterion is about the SCHEMA, and a ceiling nothing validates
+    // against is a number in a file rather than a refusal. Until 2026-09-19 the
+    // ceilings did not exist at all and an 800-note call was written in full and
+    // then truncated mid-JSON; this stand-in is what makes "refused before the
+    // handler runs" assertable without pulling `ajv` in, which is the harness's
+    // dependency and not resolvable from this app.
+    if (property.type === 'array' && Array.isArray(argument)) {
+      if (property.minItems !== undefined && argument.length < property.minItems) {
+        problems.push(`${key} has ${argument.length} items, fewer than ${property.minItems}`);
+      }
+      if (property.maxItems !== undefined && argument.length > property.maxItems) {
+        problems.push(`${key} has ${argument.length} items, more than ${property.maxItems}`);
+      }
+    }
   }
   return problems;
 }
@@ -390,6 +405,88 @@ describe('every array a tool takes is bounded at both ends', () => {
     for (const { path, schema } of everyArray) {
       expect(`${path}: ${schema.minItems}`).toBe(`${path}: 1`);
       expect(schema.maxItems!).toBeGreaterThan(1);
+    }
+  });
+
+  it('holds the three ceilings to the numbers that were argued for', () => {
+    // ⚠ WRITTEN OUT, NOT IMPORTED, and every other test in this block imports
+    // them — which is the point. Those tests check the schemas agree with the
+    // constants, so moving a constant moves both and they stay green; this one
+    // is what makes changing a ceiling cost an edit against its justification.
+    // Same reason `AgentService.test.ts` writes 8192 and 32768 out by hand.
+    //
+    // The numbers were settled by the user on 2026-09-18 and their reasoning is
+    // in `src/ai/tools/types.ts` beside each one. They bound a RUNAWAY, not
+    // normal work: `agentRules` tells the model to send one call per kind of
+    // edit carrying the whole list, so a ceiling under that is the app
+    // contradicting itself and the user meets it as a command that fails for no
+    // reason they can see.
+    expect(MAX_NOTES_PER_CALL).toBe(256);
+    expect(MAX_PLACEMENTS_PER_CALL).toBe(64);
+    expect(MAX_CHORD_SYMBOLS_PER_CALL).toBe(32);
+  });
+
+  it('REFUSES a list one over its ceiling, and accepts one exactly at it', () => {
+    // ⚠ THE BULLET THIS FILE OWES. The tests above pin that a ceiling EXISTS and
+    // what it is; this is the one that pins what it DOES. A ceiling nothing is
+    // validated against would let every assertion above pass while an 800-note
+    // call still went out in full and came back truncated mid-JSON.
+    //
+    // One over and exactly at, both: a bound tested only from the far side
+    // passes just as well when it is off by one, and an off-by-one here refuses
+    // a call the app's own rules told the model to make.
+    const notes = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        stringIndex: 0,
+        fret: 3,
+        tick: i * PPQ,
+        durationTicks: PPQ,
+      }));
+
+    expect(
+      schemaViolations(schemaOf('pattern_stamp_notes'), { notes: notes(MAX_NOTES_PER_CALL) }),
+    ).toEqual([]);
+    expect(
+      schemaViolations(schemaOf('pattern_stamp_notes'), { notes: notes(MAX_NOTES_PER_CALL + 1) }),
+    ).toHaveLength(1);
+
+    // An EMPTY list is refused too — `minItems: 1` predates the ceilings and is
+    // what stops a call that asks for nothing at all.
+    expect(schemaViolations(schemaOf('pattern_stamp_notes'), { notes: [] })).toHaveLength(1);
+  });
+
+  it('refuses an over-long list on every tool that takes one', () => {
+    // Driven off the ceilings rather than off a list of names, so a tool added
+    // with a ceiling nobody validates cannot pass by being forgotten here.
+    const ids = (count: number) => Array.from({ length: count }, (_, i) => `note-${i}`);
+
+    for (const [name, key, ceiling] of [
+      ['pattern_move_notes', 'moves', MAX_NOTES_PER_CALL],
+      ['pattern_resize_notes', 'resizes', MAX_NOTES_PER_CALL],
+      ['pattern_set_note_frets', 'frets', MAX_NOTES_PER_CALL],
+      ['pattern_delete_notes', 'noteIds', MAX_NOTES_PER_CALL],
+      ['pattern_set_articulations', 'notes', MAX_NOTES_PER_CALL],
+      ['pattern_set_dynamics', 'dynamics', MAX_NOTES_PER_CALL],
+      ['pattern_set_pitches', 'pitches', MAX_NOTES_PER_CALL],
+      ['composition_place_pattern', 'atTicks', MAX_PLACEMENTS_PER_CALL],
+      ['composition_place_pattern', 'atBars', MAX_PLACEMENTS_PER_CALL],
+      ['composition_duplicate_placements', 'placementIds', MAX_PLACEMENTS_PER_CALL],
+      ['composition_remove_placements', 'placementIds', MAX_PLACEMENTS_PER_CALL],
+      ['read_chord_voicings', 'symbols', MAX_CHORD_SYMBOLS_PER_CALL],
+    ] as const) {
+      // ⚠ ONLY THE LIST'S OWN COMPLAINT IS COUNTED. These calls are otherwise
+      // incomplete — `composition_place_pattern` also wants `patternId` and
+      // `trackId` — and counting every violation would measure the fixture
+      // rather than the ceiling.
+      const tooLong = (count: number) =>
+        schemaViolations(schemaOf(name), { [key]: ids(count) }).filter((problem) =>
+          problem.startsWith(`${key} has `),
+        );
+      // Labelled, so a failure names the tool rather than "expected 1, got 0".
+      expect(`${name}.${key} over: ${tooLong(ceiling + 1).length}`).toBe(
+        `${name}.${key} over: 1`,
+      );
+      expect(`${name}.${key} at: ${tooLong(ceiling).length}`).toBe(`${name}.${key} at: 0`);
     }
   });
 
