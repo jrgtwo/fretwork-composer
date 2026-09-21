@@ -889,7 +889,7 @@ Leave the mutes and solos exactly as you found them. A mix balanced with somethi
     // Which view: a track's Voice view is the one showing the rack this changes.
     mode: 'voice',
     label: 'Dial in a tone',
-    summary: 'Pick the voice for a track that suits the part it is playing.',
+    summary: 'Point a track at one of your saved voices, whichever suits the part it is playing.',
     slots: [
       {
         kind: 'choice',
@@ -913,9 +913,16 @@ Leave the mutes and solos exactly as you found them. A mix balanced with somethi
       },
     ],
     tools: ['read_composition', 'voice_list_for_track', 'voice_set_for_track'],
+    // ⚠ THE LIST CAN BE EMPTY, and the template has to say so. The app models no
+    // built-in voices (2026-09-20, `docs/PLAN-remove-presets.md`), so
+    // `voice_list_for_track` returns nothing at all until the user has saved one —
+    // which is the STARTING state, not a fault. Without this a model reads the empty
+    // list as a gap to fill and invents a voiceKey, which `voice_set_for_track`
+    // refuses; the tools offer no parameter write, so there is genuinely nothing else
+    // to try.
     template: `Give the track with id {track} a {tone} tone.
 
-List the voices available for that track first and pick the one that already comes closest — a stock voice that fits beats a tweaked one that nearly does. Set it on the track, then say which you chose and what it changes about the sound.`,
+List the voices saved for that track's instrument first and pick the one that already comes closest. If the list is empty the user has saved none yet: say so and change nothing rather than inventing a voice key. Otherwise set the closest one on the track, then say which you chose and what it changes about the sound.`,
   },
 ];
 

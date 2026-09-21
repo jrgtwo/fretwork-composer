@@ -8,7 +8,9 @@ import {
   getDefaultPresetForSlot,
   usePatternsStore,
   useVoiceStore,
+  type FretInstrumentId,
   type SamplePack,
+  type SlotId,
   type VoicePreset,
 } from '@fretwork/lib';
 import { getEditingPattern, openBlankPattern } from '../patterns/patternService';
@@ -18,6 +20,7 @@ import {
   getEditingVoicePreset,
   listSelectableVoices,
   parseVoiceKey,
+  variantIdFromKey,
   readVoiceRef,
   renameVoice,
   saveVoice,
@@ -27,6 +30,7 @@ import {
   useHolderVoicePreset,
   useSelectableVoices,
   voiceKey,
+  type UserVariantRef,
 } from './voiceService';
 import { previewNote, refreshVoice, usePlaybackEngine } from '../audio/playbackService';
 import {
@@ -219,6 +223,50 @@ const edit = (path: string, value: unknown): void => {
   if (!result.ok) throw new Error(result.reason);
 };
 
+/**
+ * A voice of the USER'S OWN, seeded into the store out of one of the lib's slot
+ * presets — the ref plus the preset the store now holds under it.
+ *
+ * The app stopped modelling those presets as pickable voices (2026-09-20,
+ * `docs/PLAN-remove-presets.md`): a holder points at a user variant or at nothing.
+ * They are still the cheapest source of a real, complete `VoicePreset` to build a
+ * variant OUT OF, and reaching for one as raw DATA is deliberately still allowed —
+ * what is not allowed is a ref naming one, which no longer type-checks.
+ *
+ * Through `addVariant` rather than `saveVoiceAs` so the instrument is a parameter
+ * and the OPEN pattern is left pointing wherever it was: `saveVoiceAs` repoints it,
+ * which several tests below are about.
+ *
+ * The preset is read BACK out of the store rather than returned from the argument,
+ * because the identity assertions here are the load-bearing ones — a resolution
+ * that started spreading is a render loop, not a failed equality.
+ */
+function savedVoice(
+  slotId: SlotId,
+  name = `Saved ${slotId}`,
+  instrumentId: FretInstrumentId = 'guitar',
+): { readonly ref: UserVariantRef; readonly preset: VoicePreset } {
+  const source = getDefaultPresetForSlot(slotId);
+  // ⚠ THE NECKS HAVE TO AGREE. `slotId` and `instrumentId` are separate arguments,
+  // so without this `savedVoice('metal-amp', 'Low', 'bass')` would seed a guitar
+  // preset as a bass variant and the bass picker would offer it. Wrong-neck refs are
+  // a state with its own refusal (`wrong-instrument`) and its own tests; reaching one
+  // by accident here would make those tests pass for the wrong reason.
+  if (source.instrumentId !== instrumentId) {
+    throw new Error(`${slotId} is a ${source.instrumentId} preset, not a ${instrumentId} one`);
+  }
+  const id = useVoiceStore.getState().addVariant({
+    name,
+    instrumentId,
+    family: source.family,
+    collectionId: null,
+    preset: { ...source, name },
+  });
+  const stored = useVoiceStore.getState().variants.find((variant) => variant.id === id);
+  if (!stored) throw new Error(`could not seed a variant from ${slotId}`);
+  return { ref: { kind: 'user', id }, preset: stored.preset };
+}
+
 /** What the engine will build for the open pattern: its draft, or the stored variant. */
 const draftPreset = (): VoicePreset => {
   const preset = voicePreset('pattern', openPatternId());
@@ -269,18 +317,18 @@ describe('listSelectableVoices', () => {
     expect(listSelectableVoices('bass').userVariants.map((o) => o.name)).toEqual(['Bass variant']);
     expect(listSelectableVoices('ukulele').userVariants).toEqual([]);
   });
-
-  it('flags user variants as not built-in, so a pane can tell what Save applies to', () => {
-    saveVoiceAs('pattern', openPatternId(), 'Mine', editingPreset());
-    expect(listSelectableVoices('guitar').userVariants[0].builtIn).toBe(false);
-  });
 });
 
 describe('voiceKey', () => {
   it('round-trips every offered option', () => {
+    savedVoice('clean-amp', 'Mine');
+    savedVoice('electric-bass', 'Low', 'bass');
     const options = (['guitar', 'bass', 'ukulele'] as const).flatMap(
-      (instrument) => listSelectableVoices(instrument).builtIns,
+      (instrument) => listSelectableVoices(instrument).userVariants,
     );
+    // Or the loop below proves nothing — the offer set is the user's library now, so
+    // an empty one is the DEFAULT state rather than an impossible one.
+    expect(options).toHaveLength(2);
     for (const option of options) {
       expect(parseVoiceKey(option.key)).toEqual(option.ref);
     }
@@ -290,10 +338,13 @@ describe('voiceKey', () => {
     });
   });
 
-  it('rejects a slot the lib does not know', () => {
-    // An unknown slot id resolves to the instrument's first default, so accepting one
-    // would leave the picker showing a selection that plays something else entirely.
-    // `test-clean-amp` is a real renamed id — the lib ships a migration map for it.
+  it("rejects anything that is not one of the user's own voices", () => {
+    // `default:<slotId>` is the key this app handed out until 2026-09-20 and is still
+    // what a stored ref can say. There is no such voice HERE any more, so it is not a
+    // voice key — including for `clean-amp`, a slot the lib really does ship. Read as
+    // null the holder falls through to the instrument's default, which is the whole
+    // migration (`docs/PLAN-remove-presets.md`).
+    expect(parseVoiceKey('default:clean-amp')).toBeNull();
     expect(parseVoiceKey('default:test-clean-amp')).toBeNull();
     expect(parseVoiceKey('default:')).toBeNull();
     expect(parseVoiceKey('acoustic-guitar')).toBeNull();
@@ -302,6 +353,23 @@ describe('voiceKey', () => {
 
   it('keeps a colon inside a variant id', () => {
     expect(parseVoiceKey('user:a:b')).toEqual({ kind: 'user', id: 'a:b' });
+  });
+
+  it('hands a key to a caller that wants an id, or refuses it in one code', () => {
+    // ⚠ THE FUNCTION THE AGENT'S RENAME AND DELETE GO THROUGH, and the one place
+    // where a wrong answer is nearly invisible: read a key's TAIL as a variant id and
+    // both tools still refuse, because `unknown-variant` catches the phantom id
+    // downstream. So the refusal is asserted HERE, at the parse, rather than only
+    // through a tool that would have refused either way.
+    const mine = savedVoice('clean-amp', 'Mine');
+    expect(variantIdFromKey(voiceKey(mine.ref))).toEqual({ ok: true, id: mine.ref.id });
+    for (const key of ['default:clean-amp', 'clean-amp', 'other:clean-amp', 'user:']) {
+      expect(variantIdFromKey(key)).toEqual({ ok: false, reason: 'unknown-variant' });
+    }
+    // An id that parses and names nothing is the SAME code, and deliberately: the
+    // caller's move is identical, and one sentence covers both (see `VoiceRefusal`).
+    expect(variantIdFromKey('user:gone')).toEqual({ ok: true, id: 'gone' });
+    expect(renameVoice('gone', 'Anything')).toEqual({ ok: false, reason: 'unknown-variant' });
   });
 });
 
@@ -318,10 +386,11 @@ describe('the reactive reads', () => {
     const { result, rerender } = renderHook(() => useEditingVoiceRef());
     expect(result.current).toBeNull();
 
-    act(() => selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'surf-amp' }));
+    const mine = savedVoice('surf-amp');
+    act(() => selectVoice('pattern', openPatternId(), mine.ref));
     rerender();
 
-    expect(result.current).toEqual({ kind: 'default', slotId: 'surf-amp' });
+    expect(result.current).toEqual(mine.ref);
   });
 
   it('resolve a preset stably across renders, and re-resolve when the store changes', () => {
@@ -351,7 +420,6 @@ describe('the reactive reads', () => {
 
   it('list what can be picked, memoised, and follow a new variant', () => {
     const { result, rerender } = renderHook(() => useSelectableVoices('guitar'));
-    expect(result.current.builtIns).toEqual(listSelectableVoices('guitar').builtIns);
     expect(result.current.userVariants).toEqual([]);
 
     const first = result.current;
@@ -370,7 +438,7 @@ describe('the reactive reads', () => {
 
 describe('readVoiceRef', () => {
   it('reads a valid ref back as the stored object', () => {
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'metal-amp' });
+    selectVoice('pattern', openPatternId(), savedVoice('metal-amp').ref);
     const pattern = getEditingPattern()!;
 
     // Identity, not equality: callers memoise on this, and a fresh object per call
@@ -378,7 +446,7 @@ describe('readVoiceRef', () => {
     expect(readVoiceRef(pattern)).toBe(pattern.voiceRef);
   });
 
-  it('reads anything malformed as no choice at all', () => {
+  it('reads anything that is not a user variant as no choice at all', () => {
     const pattern = getEditingPattern()!;
     const withRef = (voiceRef: unknown) => ({ ...pattern, voiceRef });
 
@@ -388,6 +456,11 @@ describe('readVoiceRef', () => {
     expect(readVoiceRef(withRef({ kind: 'user', id: '' }))).toBeNull();
     expect(readVoiceRef(withRef({ kind: 'default' }))).toBeNull();
     expect(readVoiceRef(withRef({ kind: 'default', slotId: 'test-clean-amp' }))).toBeNull();
+    // ⚠ A WELL-FORMED default ref, naming a slot the lib really does ship — and it
+    // reads as null all the same. That is the agreed migration rather than an
+    // oversight: the app has no built-in voices, so the holder falls through to the
+    // instrument's default like any holder that never chose one.
+    expect(readVoiceRef(withRef({ kind: 'default', slotId: 'clean-amp' }))).toBeNull();
   });
 });
 
@@ -398,8 +471,9 @@ describe('resolution', () => {
   });
 
   it("honours the pattern's own choice over the instrument default", () => {
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'metal-amp' });
-    expect(editingPreset()).toBe(getDefaultPresetForSlot('metal-amp'));
+    const mine = savedVoice('metal-amp');
+    selectVoice('pattern', openPatternId(), mine.ref);
+    expect(editingPreset()).toBe(mine.preset);
   });
 
   it("resolves a user ref to that variant's preset", () => {
@@ -416,11 +490,12 @@ describe('resolution', () => {
 
 describe('selectVoice', () => {
   it("writes the pattern's ref and leaves the global default alone", () => {
+    const mine = savedVoice('blues-amp');
     const before = useVoiceStore.getState().activeVariants;
 
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'blues-amp' });
+    selectVoice('pattern', openPatternId(), mine.ref);
 
-    expect(getEditingPattern()!.voiceRef).toEqual({ kind: 'default', slotId: 'blues-amp' });
+    expect(getEditingPattern()!.voiceRef).toEqual(mine.ref);
     // `activeVariants` is the instrument-wide default shared by every pattern with no
     // explicit ref. Writing it from here would retune all of them.
     expect(useVoiceStore.getState().activeVariants).toBe(before);
@@ -430,21 +505,6 @@ describe('selectVoice', () => {
 // ------------------------------------------------------------------ writing ---
 
 describe('saveVoice', () => {
-  it('refuses a built-in slot, and does not reach the store to do it', () => {
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'crunch-amp' });
-    // The guard has to be real rather than a disabled button: the fourteen slot presets
-    // are readonly consts and `useVoiceStore` has no setter for them at all, so an
-    // edit that got this far would look saved and be gone on the next reload.
-    const updateVariant = vi.spyOn(useVoiceStore.getState(), 'updateVariant');
-
-    const result = saveVoice('pattern', openPatternId(), { ...getDefaultPresetForSlot('crunch-amp'), name: 'Hijacked' });
-
-    expect(result).toEqual({ ok: false, reason: 'built-in' });
-    expect(updateVariant).not.toHaveBeenCalled();
-    expect(useVoiceStore.getState().variants).toEqual([]);
-    updateVariant.mockRestore();
-  });
-
   it('refuses when the pattern has no explicit voice', () => {
     // It is playing the instrument's active voice — nothing addressable to write back
     // to, so this is Save-as territory.
@@ -520,13 +580,14 @@ describe('saveVoiceAs', () => {
     const result = saveVoiceAs('pattern', openPatternId(), 'My tone', getDefaultPresetForSlot('lead-amp'));
     if (!result.ok) throw new Error(result.reason);
 
-    // Without this the pattern keeps playing the built-in it was taken from and the
-    // saved variant sits unused — Save-as would appear to do nothing.
+    // Without this the pattern keeps playing what the copy was taken from — here the
+    // instrument's default — and the saved variant sits unused, so Save-as would
+    // appear to do nothing.
     expect(getEditingPattern()!.voiceRef).toEqual({ kind: 'user', id: result.id });
     expect(editingPreset()).toBe(useVoiceStore.getState().variants[0].preset);
   });
 
-  it('leaves the built-in it was copied from untouched', () => {
+  it('leaves the lib preset it was copied from untouched', () => {
     saveVoiceAs('pattern', openPatternId(), 'My tone', getDefaultPresetForSlot('lead-amp'));
     saveVoice('pattern', openPatternId(), { ...editingPreset(), level: { volumeDb: -20, pan: 0 } });
 
@@ -565,7 +626,7 @@ describe('writing with nothing open', () => {
     expect(saveVoice('pattern', id, preset)).toEqual({ ok: false, reason: 'no-holder' });
     expect(saveVoiceAs('pattern', id, 'Mine', preset)).toEqual({ ok: false, reason: 'no-holder' });
     expect(deleteVoice('pattern', id, 'whatever')).toEqual({ ok: false, reason: 'no-holder' });
-    expect(selectVoice('pattern', id, { kind: 'default', slotId: 'clean-amp' })).toEqual({
+    expect(selectVoice('pattern', id, { kind: 'user', id: 'whatever' })).toEqual({
       ok: false,
       reason: 'No such pattern is open.',
     });
@@ -649,8 +710,8 @@ describe('deleteVoice', () => {
     expect(deleteVoice('pattern', openPatternId(), saved.id)).toEqual({ ok: true, id: saved.id });
 
     expect(useVoiceStore.getState().variants).toEqual([]);
-    // Left dangling, the ref would still resolve — silently, to the instrument's first
-    // built-in — while the pane showed nothing selected.
+    // Left dangling, the ref would still resolve — silently, to the instrument's
+    // default — while the pane showed nothing selected.
     expect(getEditingPattern()!.voiceRef ?? null).toBeNull();
     expect(editingPreset()).toBe(getDefaultPresetForSlot('acoustic-guitar'));
   });
@@ -699,7 +760,7 @@ describe('an unsaved edit reaching the engine', () => {
     // This slice's headline controls. If the key ever hashed the whole preset instead of
     // the source, every amp knob would re-download the sampler — and nothing about that
     // failure is audible except the silence while it downloads.
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'clean-amp' });
+    selectVoice('pattern', openPatternId(), savedVoice('clean-amp').ref);
     const { voice } = startEngine();
     const amp = editingPreset().effects?.amp;
     if (!amp) throw new Error('expected clean-amp to ship an amp');
@@ -808,18 +869,21 @@ describe('an unsaved edit reaching the engine', () => {
 
   it('drops the draft once the pattern points at a different voice', () => {
     edit('level.volumeDb', -3);
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'metal-amp' });
+    const metal = savedVoice('metal-amp');
+    selectVoice('pattern', openPatternId(), metal.ref);
 
     render(createElement(EngineProbe));
     act(() => previewNote(0, 0));
 
     // Tagged with the ref it belongs to, so an abandoned edit cannot follow the user
     // onto the voice they switched to.
-    expect(lastVoice().preset).toBe(getDefaultPresetForSlot('metal-amp'));
+    expect(lastVoice().preset).toBe(metal.preset);
   });
 
   it('never resurrects an abandoned edit when the pattern points back at its voice', () => {
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'acoustic-guitar' });
+    const acoustic = savedVoice('acoustic-guitar', 'Mine acoustic');
+    const metal = savedVoice('metal-amp');
+    selectVoice('pattern', openPatternId(), acoustic.ref);
     const stored = editingPreset();
     edit('level.volumeDb', -30);
 
@@ -827,9 +891,9 @@ describe('an unsaved edit reaching the engine', () => {
     // prevent an abandoned edit coming back, since it starts matching again on the way
     // back — the `refreshVoice` a selection goes through is what retires it, because
     // `presetFor` reads (and so self-clears) the draft on the way past.
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'metal-amp' });
+    selectVoice('pattern', openPatternId(), metal.ref);
     refreshVoice();
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'acoustic-guitar' });
+    selectVoice('pattern', openPatternId(), acoustic.ref);
     refreshVoice();
 
     render(createElement(EngineProbe));
@@ -941,6 +1005,7 @@ describe('an unsaved edit reaching the engine', () => {
     // body, so the engine's own hook watches the tag instead.
     const saved = saveVoiceAs('pattern', openPatternId(), 'Mine', getDefaultPresetForSlot('clean-amp'));
     if (!saved.ok) throw new Error(saved.reason);
+    const metal = savedVoice('metal-amp');
     const { voice } = startEngine();
     const pattern = getEditingPattern()!;
     act(() => edit('level.volumeDb', -30));
@@ -950,10 +1015,7 @@ describe('an unsaved edit reaching the engine', () => {
     // a `refreshVoice`, and an undo that restores a snapshot carrying a different ref is
     // this line with nothing at all — which is the case being pinned.
     act(() => {
-      usePatternsStore.getState().setEditingPatternVoiceRef({
-        kind: 'default',
-        slotId: 'metal-amp',
-      });
+      usePatternsStore.getState().setEditingPatternVoiceRef(metal.ref);
     });
 
     // The entry is GONE, not merely shadowed by a tag that stopped matching: left
@@ -966,7 +1028,7 @@ describe('an unsaved edit reaching the engine', () => {
     // A rebuild rather than a retune because the REF moved: `voiceKeyOf` carries it.
     flushRebuild();
     expect(voice.dispose).toHaveBeenCalled();
-    expect(lastVoice().preset).toEqual(getDefaultPresetForSlot('metal-amp'));
+    expect(lastVoice().preset).toEqual(metal.preset);
   });
 
   it("never writes the live voice's preset back into the store", () => {
@@ -988,14 +1050,15 @@ describe('refreshVoice', () => {
   it('makes a selection audible without pinning it as an unsaved edit', () => {
     const saved = saveVoiceAs('pattern', openPatternId(), 'Mine', getDefaultPresetForSlot('clean-amp'));
     if (!saved.ok) throw new Error(saved.reason);
+    const metal = savedVoice('metal-amp');
     startEngine();
 
     // A selection has to reach a *running* engine somehow — nothing else calls
     // `ensureEngine` mid-playback.
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'metal-amp' });
+    selectVoice('pattern', openPatternId(), metal.ref);
     act(() => refreshVoice());
     flushRebuild();
-    expect(lastVoice().preset).toBe(getDefaultPresetForSlot('metal-amp'));
+    expect(lastVoice().preset).toBe(metal.preset);
 
     // And it must not have left a working copy behind: a variant is shared, so a Save
     // from anywhere against the ref the engine holds still has to reach the engine.
@@ -1026,14 +1089,15 @@ describe('the voice key', () => {
   });
 
   it("rebuilds when the pattern's voice choice changes", () => {
+    const metal = savedVoice('metal-amp');
     const { voice } = startEngine();
 
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'metal-amp' });
+    selectVoice('pattern', openPatternId(), metal.ref);
     act(() => previewNote(0, 0));
 
     expect(builtVoices()).toHaveLength(1);
     expect(voice.dispose).toHaveBeenCalled();
-    expect(lastVoice().preset).toBe(getDefaultPresetForSlot('metal-amp'));
+    expect(lastVoice().preset).toBe(metal.preset);
   });
 
   it('rebuilds on a choice change even when the two voices share a source', () => {
@@ -1041,15 +1105,17 @@ describe('the voice key', () => {
     // their source fingerprints are identical and only the *ref* half of the key can tell
     // them apart. `ensureEngine` never calls `swapPreset`, so without it the user picks
     // Surf and keeps hearing Clean — with the picker showing the new choice.
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'clean-amp' });
+    const clean = savedVoice('clean-amp', 'Mine clean');
+    const surf = savedVoice('surf-amp', 'Mine surf');
+    selectVoice('pattern', openPatternId(), clean.ref);
     const { voice } = startEngine();
 
-    selectVoice('pattern', openPatternId(), { kind: 'default', slotId: 'surf-amp' });
+    selectVoice('pattern', openPatternId(), surf.ref);
     act(() => previewNote(0, 0));
 
     expect(builtVoices()).toHaveLength(1);
     expect(voice.dispose).toHaveBeenCalled();
-    expect(lastVoice().preset).toBe(getDefaultPresetForSlot('surf-amp'));
+    expect(lastVoice().preset).toBe(surf.preset);
   });
 
   it('rebuilds when a saved edit changes the source under an unchanged ref', () => {

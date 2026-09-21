@@ -6,7 +6,6 @@ import {
   DEFAULT_CIRCUIT_AMP_ID,
   CIRCUIT_AMPS,
   SAMPLE_PACKS,
-  VOICE_PRESETS,
   detectSamplePack,
   type ADSREnvelope,
   type AmpParams,
@@ -65,34 +64,46 @@ import { getAtPath, hasBranchAtPath, hasPath, removeAtPath, setAtPath } from './
 
 /**
  * This is the test the descriptor-table approach exists for: it walks every path
- * the schema declares against every preset the lib actually ships. A typo'd path,
- * a range that a real preset falls outside of, or a picker that cannot represent a
- * built-in's selection all fail here rather than as a dead control in the pane.
+ * the schema declares against the FIXTURES below — hand-written `VoicePreset`
+ * literals, one per source kind plus one per optional shape. A typo'd path, a
+ * value outside a declared range, or a picker that cannot represent a stored
+ * selection all fail here rather than as a dead control in the pane.
+ *
+ * ⚠ IT NO LONGER WALKS THE LIB'S SHIPPED PRESETS, and that is the point rather
+ * than a hole. NO APP TEST MAY FAIL BECAUSE OF A SHIPPED PRESET'S VALUES: the
+ * fourteen predate almost all of the voice-chain work, they are stale by design,
+ * and a stale one failing this suite reported the lib's tuning as this app's
+ * defect. The fixtures carry everything that walk covered — every source kind,
+ * the primary's and the layer's; every section; every optional branch present AND
+ * absent; all three instruments — and they carry MORE, because a fixture can set
+ * a field no preset ships (`docs/PLAN-remove-presets.md`, "Tests: one line, drawn
+ * deliberately").
  *
  * ── ⚠ TWO RULES THAT LOOK ALIKE AND ARE OPPOSITE ─────────────────────────────
  *
- * 1. A row is checked ONLY against a preset that actually has it. `paramApplies`
+ * 1. A row is checked ONLY against a fixture that actually has it. `paramApplies`
  *    is the gate, and it is the fix for a real hole: this file used to run every
  *    param against every preset of a present section, so an FM row would have
  *    been "absent" on a sampler and either failed spuriously or, if marked
  *    optional, passed without ever being checked at all. One `FULLY_POPULATED`
  *    fixture can no longer cover the table — a preset has exactly one source
- *    kind — so there are three, one per kind, and `FIXTURES` is what the coverage
- *    assertions walk.
+ *    kind — so there are three, one per kind, and `FIXTURES` is what the per-kind
+ *    coverage assertions walk.
  *
- * 2. When a preset value falls outside a declared range, the RANGE used to be
- *    what was wrong. It is not any more. Every bound in `paramSchema` is cited to
- *    a page on Tone's documentation site, so an out-of-range preset is the PRESET
- *    being wrong and gets retuned in the lib. Widening a range to admit one is the
- *    specific mistake to avoid. Ten sampler presets were retuned on 2026-08-31 for
- *    exactly this reason; the allow-list that carried them in the meantime is gone.
+ * 2. When a value falls outside a declared range, the RANGE used to be what was
+ *    wrong. It is not any more. Every bound in `paramSchema` is cited to a page on
+ *    Tone's documentation site, so the VALUE is what is wrong and widening a range
+ *    to admit one is the specific mistake to avoid. That is why every fixture
+ *    below sits inside its ranges deliberately, and it is also why a stale shipped
+ *    preset is retuned in the lib rather than allowed for here. (Ten sampler
+ *    presets were retuned on 2026-08-31 for exactly this reason, back when this
+ *    file was what reported it.)
  *
- * The built-ins alone are not enough either: no shipped preset sets `enabled`,
- * `inputGainDb` or most other optional fields, so a typo in one of those paths is
- * invisible to a loop over `VOICE_PRESETS`. The fixtures below close that hole —
- * each is a `VoicePreset` literal with every in-scope field present for its source
- * kind, so `tsc` checks the shape and the coverage test checks that every declared
- * path lands on one of them.
+ * Every fixture is a `VoicePreset` literal with every in-scope field present for
+ * its source kind, so `tsc` checks the shape and the coverage assertions check
+ * that every declared path lands on one of them. That is what reaches `enabled`,
+ * `inputGainDb` and an in-range `source.release`, which no shipped preset sets at
+ * all.
  */
 
 /**
@@ -444,12 +455,81 @@ const DELUXE_CIRCUIT_AMP: VoicePreset = {
   },
 };
 
+/**
+ * The other two instruments.
+ *
+ * Nothing in the table reads `instrumentId` today — narrowing the offered sample
+ * packs to the neck is the PANE's job and `SAMPLE_PACK_OPTIONS` says so — so these
+ * are not exercising a branch. They keep the axis the walk over the fourteen used
+ * to cover: a row that acquires an instrument condition has a fixture on the wrong
+ * neck to fail against instead of passing unnoticed. FM-sourced because the lib's
+ * bass and ukulele voices are, there being no bass or ukulele sample pack.
+ */
+const FULLY_POPULATED_BASS: VoicePreset = {
+  ...FULLY_POPULATED_FM,
+  id: 'fully-populated-bass',
+  name: 'Fully populated bass',
+  instrumentId: 'bass',
+};
+
+const FULLY_POPULATED_UKULELE: VoicePreset = {
+  ...FULLY_POPULATED_FM,
+  id: 'fully-populated-ukulele',
+  name: 'Fully populated ukulele',
+  instrumentId: 'ukulele',
+  family: 'acoustic',
+};
+
 const ALL_FIXTURES: readonly VoicePreset[] = [
   ...FIXTURES,
   PLUCK_LAYERED,
   STATIC_FILTERED,
   DELUXE_CIRCUIT_AMP,
+  FULLY_POPULATED_BASS,
+  FULLY_POPULATED_UKULELE,
 ];
+
+/**
+ * The ABSENT half of every optional branch, and the one fixture that is
+ * deliberately not populated.
+ *
+ * `POPULATED_CHASSIS` gives every fixture above a layer, a body filter, a
+ * compressor and a full `effects` object, so on its own it answers every
+ * "present" assertion in this file and no "absent" one — and present-vs-absent
+ * used to be distinguishable only across the fourteen, where
+ * `ACOUSTIC_GUITAR_PRESET` carries no `effects` key at all and thirteen carry no
+ * body filter. This is that shape, written out as a literal so `tsc` still checks
+ * that what is left really is the whole of a `VoicePreset`.
+ *
+ * It is deliberately NOT in `ALL_FIXTURES`: the walks there assert that every
+ * section APPLIES to every fixture, which is the opposite of what this one is for.
+ */
+const BARE_SAMPLER: VoicePreset = {
+  id: 'bare-sampler',
+  name: 'Bare sampler',
+  instrumentId: 'guitar',
+  family: 'acoustic',
+  level: { volumeDb: 0, pan: 0 },
+  source: { kind: 'sampler', samples: FIXTURE_PACK.samples },
+};
+
+/**
+ * A cabinet with no makeup gain — the optional-key distinction one built-in used
+ * to carry alone (`makeupDb` set on exactly one of the fourteen).
+ *
+ * Built by removal from the sampler fixture rather than written out, so it stays in
+ * step with that fixture instead of being a second copy that drifts off it.
+ *
+ * ⚠ IT BUYS NO TYPE SAFETY. `removeAtPath<T extends object>(root, path): T` returns
+ * its result by cast, so this is `VoicePreset`-typed whatever was taken out of it —
+ * `makeupDb` ceasing to be optional in the lib would leave this an illegal preset with
+ * nothing red. What pins the optionality is the runtime assertion in `witnesses an
+ * optional key both present and absent`, not this annotation.
+ */
+const NO_MAKEUP_GAIN: VoicePreset = removeAtPath(
+  FULLY_POPULATED_SAMPLER,
+  'effects.cabIR.makeupDb',
+);
 
 /**
  * Compile-time coverage of the lib types this slice addresses. `Record<keyof X, true>`
@@ -676,8 +756,9 @@ function violationsFor(preset: VoicePreset, param: Param): readonly string[] {
  * ⚠ `violationsFor` IS THE FILE'S ONE CHECK, and every other block asserts it returns
  * `[]`. Nothing above can tell "no violation" from "the check never ran": gut the
  * `slider` case to `return []`, or delete the range comparison, or the `typeof` guards,
- * and every one of those blocks still passes — including `stale built-in values`, which
- * recomputes the comparison independently rather than going through here.
+ * and every one of those blocks still passes. NOTHING ELSE recomputes the comparison
+ * independently any more: the walk over the shipped presets that used to is gone, so
+ * these negatives are the only thing left asserting the check can fail at all.
  *
  * So these are the negatives. Each mutates one field of a fixture that is otherwise
  * valid, and asserts exactly one violation naming that path — the count matters, because
@@ -752,7 +833,8 @@ describe('violationsFor itself', () => {
   it('skips a row the preset does not have — and that is not the same as passing it', () => {
     // The gate, stated as an assertion rather than assumed. `harmonicity` is absent from
     // a sampler AND non-optional, so without `paramApplies` this would report
-    // "declared non-optional but absent" on ten of the fourteen built-ins.
+    // "declared non-optional but absent" on every sampler-sourced preset, this
+    // fixture included.
     const harmonicity = paramAt('source.params.harmonicity');
     expect(paramApplies(FULLY_POPULATED_SAMPLER, harmonicity)).toBe(false);
     expect(violationsFor(FULLY_POPULATED_SAMPLER, harmonicity)).toEqual([]);
@@ -766,9 +848,12 @@ describe('violationsFor itself', () => {
  * ⚠ THE NUMBERS THIS SLICE EXISTS TO CORRECT, pinned individually.
  *
  * The previous attempt at the Source panel lifted every range from guitar-tutor's Sound
- * Lab, and nothing above would notice it happening again: the shipped pluck preset's
- * 1.5 / 6000 sit inside Sound Lab's ranges AND inside Tone's, so reverting `attackNoise`
- * to 0–1 or `dampening` to 0–8000 leaves every other test in this file green. Each
+ * Lab, and a WIDENING is invisible to every other test in this file: reverting
+ * `dampening` to Sound Lab's 0–8000 still admits every value the fixtures hold, so
+ * nothing above goes red. (A NARROWING is now caught, which it was not while the pluck
+ * fixture was skipped whole: `attackNoise` back to Sound Lab's 0–1 fails
+ * `fully-populated-pluck: accepts every value` on 1.5. That is one direction of one
+ * row, which is why these assertions exist rather than being left to the walks.) Each
  * assertion below carries the page it came from — the documentation site, which is the
  * only source these are allowed to have.
  */
@@ -919,50 +1004,50 @@ describe('documented bounds', () => {
   });
 });
 
-describe('schema vs. every built-in VoicePreset', () => {
-  it('covers presets from all three instruments', () => {
-    // Guards against the loop below silently testing nothing if the lib's export
-    // shape changes.
-    expect(VOICE_PRESETS.length).toBeGreaterThanOrEqual(14);
-    expect(new Set(VOICE_PRESETS.map((p) => p.instrumentId))).toEqual(
+describe('every declared path against the fixtures', () => {
+  it('gives every source kind a fixture — the primary`s and the layer`s', () => {
+    expect(FIXTURES.map((f) => f.source.kind)).toEqual(SOURCE_KINDS);
+    // The second axis. `sampler` is deliberately absent: the picker does not
+    // offer it and no `layer.source.*` sampler row is declared, so there is
+    // nothing for a fixture to cover — see `LAYER_SUB_BRANCH`.
+    expect(
+      ALL_FIXTURES.flatMap((f) => (f.layer ? [f.layer.source.kind] : [])),
+    ).toEqual(expect.arrayContaining(['fm-synth', 'pluck-synth']));
+  });
+
+  it('keeps a fixture on each of the three instruments', () => {
+    // A FIXTURE-INTEGRITY GUARD, like `gives every source kind a fixture` above — not
+    // coverage of a branch. No row reads `instrumentId` today (`FULLY_POPULATED_BASS`
+    // says why), so no production edit can fail this. It is here so that the day a row
+    // acquires an instrument condition, the walks below already have a fixture on the
+    // wrong neck to fail against; deleting either one would otherwise go unnoticed.
+    expect(new Set(ALL_FIXTURES.map((f) => f.instrumentId))).toEqual(
       new Set(['guitar', 'bass', 'ukulele']),
     );
   });
 
-  it('ships a built-in of every source kind, so no arm of the table is untested', () => {
-    // Ten samplers, one pluck synth, three FM. If the lib ever drops one of the
-    // three, the rows for it are exercised only by a fixture and this says so.
-    expect(new Set(VOICE_PRESETS.map((p) => p.source.kind))).toEqual(new Set(SOURCE_KINDS));
+  it('applies every declared row to at least one fixture', () => {
+    // The coverage assertion the single `FULLY_POPULATED` could no longer make: a
+    // row whose condition matches nothing is a control nobody can ever see, and it
+    // would otherwise be silently skipped by every check in this file. With the
+    // shipped presets no longer walked, this is also the ONLY thing standing
+    // between a row and never being evaluated at all — a fixture is the whole of
+    // the table's coverage now.
+    const unreachable = ALL_PARAMS.filter(
+      (param) => !ALL_FIXTURES.some((fixture) => paramApplies(fixture, param)),
+    ).map((param) => param.path);
+    expect(unreachable).toEqual([]);
   });
 
-  // `electric-guitar` is skipped: it is the one shipped voice the app withdrew from
-  // the picker (2026-09-01), so its `source.kind` is deliberately not an option any
-  // more. Every other shipped voice is still walked.
-  for (const preset of VOICE_PRESETS.filter((p) => p.id !== 'electric-guitar')) {
-    it(`${preset.id}: every applicable path resolves and every value is in range`, () => {
-      // `LEVEL_BAR_PARAMS` is appended by hand, and it has to be: the two bar rows
-      // left `PARAM_SECTIONS` when the Level section was deleted, and a walk built
-      // from the sections alone stopped range-checking them against a shipped
-      // preset without failing — which is exactly the silence this loop exists to
-      // break. They apply to every preset, as the old section's null probe did.
-      const rows = [
-        ...PARAM_SECTIONS.filter((section) => sectionApplies(preset, section)).flatMap(
-          (section) => section.params,
-        ),
-        ...LEVEL_BAR_PARAMS,
-      ];
-      const violations = rows.flatMap((param) => violationsFor(preset, param));
-
-      expect(violations).toEqual([]);
-    });
-  }
-
-  it('shows the Source section on every one of the fourteen, never absent', () => {
-    // The whole point of the rename: `Samples` probed `source.samples` and so was
-    // ABSENT on the four synth-sourced built-ins. A source is not optional.
+  it('shows the Source section on every fixture, never absent', () => {
+    // A source is not optional, which was the whole point of the rename:
+    // `Samples` probed `source.samples` and so read as ABSENT on a synth-sourced
+    // voice. `BARE_SAMPLER` is in the corpus because a preset with no `effects`,
+    // no layer and no filter is the shape that would expose a probe reading
+    // something optional.
     const source = sectionAt('source');
     expect(source.presenceProbe).toBeNull();
-    for (const preset of VOICE_PRESETS) {
+    for (const preset of [...ALL_FIXTURES, BARE_SAMPLER]) {
       expect(sectionApplies(preset, source), preset.id).toBe(true);
       // …and it is never empty either: the kind row applies unconditionally, so
       // the section always has at least the picker plus that kind's own settings.
@@ -972,14 +1057,14 @@ describe('schema vs. every built-in VoicePreset', () => {
 
   it('shows only the current source kind`s rows', () => {
     // Scoped to the rows conditioned on the PRIMARY discriminant: the same
-    // section now also carries the second source's rows, which answer to
+    // section also carries the second source's rows, which answer to
     // `layer.source.kind` and are checked by their own test below.
     const primaryRows = sectionAt('source').params.filter(
       (param) => param.appliesWhen?.path === 'source.kind',
     );
     expect(primaryRows.length).toBeGreaterThan(0);
 
-    for (const preset of VOICE_PRESETS) {
+    for (const preset of [...ALL_FIXTURES, BARE_SAMPLER]) {
       const shown = ownParams(preset, sectionAt('source'));
       for (const param of shown) {
         if (param.appliesWhen?.path !== 'source.kind') continue;
@@ -997,20 +1082,19 @@ describe('schema vs. every built-in VoicePreset', () => {
     }
   });
 
-  it('shows the second source`s rows on exactly the three built-ins that carry one', () => {
-    // Acoustic Bass, Electric Bass and Acoustic Ukulele — all FM layers. The
-    // count is asserted so this cannot quietly become "on none of them", which is
-    // the shape the bug would take if `requiresBranch` stopped being evaluated.
-    const withLayer = VOICE_PRESETS.filter((preset) => preset.layer !== undefined);
-    expect(withLayer.map((p) => p.id).sort()).toEqual([
-      'acoustic-bass',
-      'acoustic-ukulele',
-      'electric-bass',
-    ]);
+  it('shows the second source`s rows on exactly the fixtures that carry one', () => {
+    const corpus = [...ALL_FIXTURES, BARE_SAMPLER];
+    // BOTH HALVES WITNESSED, asserted rather than assumed: every fixture built on
+    // `POPULATED_CHASSIS` has a layer, so a corpus of those alone would pass the
+    // loop below without ever evaluating the absent arm — which is the shape the
+    // bug would take if `requiresBranch` stopped being read.
+    const layered = corpus.filter((preset) => preset.layer !== undefined);
+    expect(layered.length).toBeGreaterThan(0);
+    expect(layered.length).toBeLessThan(corpus.length);
 
     const source = sectionAt('source');
     const { sub } = subBranchAt('layer');
-    for (const preset of VOICE_PRESETS) {
+    for (const preset of corpus) {
       const has = preset.layer !== undefined;
       expect(subBranchApplies(preset, sub), preset.id).toBe(has);
       // Its mix rows appear exactly when it does…
@@ -1025,15 +1109,23 @@ describe('schema vs. every built-in VoicePreset', () => {
     }
   });
 
-  it('shows the body filter on exactly the one built-in that carries one', () => {
-    const withFilter = VOICE_PRESETS.filter((preset) =>
-      sectionApplies(preset, sectionAt('body-filter')),
-    );
-    expect(withFilter.map((p) => p.id)).toEqual(['electric-guitar']);
-    // …and its real values reach the rows, rather than the rows falling back.
-    expect(getAtPath(withFilter[0], 'bodyFilter.cutoff')).toBe(5500);
-    expect(getAtPath(withFilter[0], 'bodyFilter.envelope.octaves')).toBe(1.5);
-    expect(branchParams(withFilter[0], sectionAt('body-filter')).map((p) => p.path)).toEqual([
+  it('shows the body filter on exactly the fixtures that carry one', () => {
+    const bodyFilter = sectionAt('body-filter');
+    const corpus = [...ALL_FIXTURES, BARE_SAMPLER];
+    for (const preset of corpus) {
+      expect(sectionApplies(preset, bodyFilter), preset.id).toBe(preset.bodyFilter !== undefined);
+    }
+    // Both halves, named: without `BARE_SAMPLER` every fixture carries a filter
+    // and the absent arm above is never taken.
+    expect(corpus.filter((p) => p.bodyFilter === undefined).map((p) => p.id)).toEqual([
+      'bare-sampler',
+    ]);
+
+    // …and the fixture's real values reach the rows, rather than the rows falling
+    // back.
+    expect(getAtPath(FULLY_POPULATED_SAMPLER, 'bodyFilter.cutoff')).toBe(5500);
+    expect(getAtPath(FULLY_POPULATED_SAMPLER, 'bodyFilter.envelope.octaves')).toBe(1.5);
+    expect(branchParams(FULLY_POPULATED_SAMPLER, bodyFilter).map((p) => p.path)).toEqual([
       'bodyFilter.envelope.attack',
       'bodyFilter.envelope.decay',
       'bodyFilter.envelope.sustain',
@@ -1041,83 +1133,45 @@ describe('schema vs. every built-in VoicePreset', () => {
       'bodyFilter.envelope.baseFrequency',
       'bodyFilter.envelope.octaves',
     ]);
+    // The cutoff envelope is the sub-branch, and every one of those rows is gated
+    // on it: a filter with no envelope shows none of them. `STATIC_FILTERED` is
+    // the fixture that witnesses the absent arm of THAT branch.
+    expect(branchParams(STATIC_FILTERED, bodyFilter)).toEqual([]);
   });
 
-  /**
-   * Sections no shipped preset carries, and is not meant to.
-   *
-   * `circuit-amp` is the experimental amp engine. It was added BESIDE the five
-   * models in `amp-models.ts` precisely so that no existing preset changes
-   * behaviour, and putting one on a built-in would undo that — `wireChain`
-   * builds one amp or the other, so a shipped preset carrying a circuit amp
-   * would silently stop using the amp it was voiced with.
-   *
-   * Its rows are covered by the fixtures instead (`POPULATED_CHASSIS`), which
-   * is where every `enabled` / `modelId` / `inputGainDb` path is already
-   * exercised. Delete this exemption if the engine ever stops being
-   * experimental and a built-in is voiced on it.
-   */
-  const SECTIONS_NO_BUILTIN_CARRIES: readonly SectionId[] = ['circuit-amp'];
-
-  it('finds at least one preset exercising each section, so no section is untested', () => {
-    for (const section of PARAM_SECTIONS) {
-      if (SECTIONS_NO_BUILTIN_CARRIES.includes(section.id)) continue;
-      const exercising = VOICE_PRESETS.filter((preset) => sectionApplies(preset, section));
-      expect(exercising.length, `no built-in preset has section ${section.id}`).toBeGreaterThan(0);
-    }
-  });
-
-  it('covers every exempted section with a fixture instead', () => {
-    // The exemption above must not become a way to smuggle in an untested
-    // section: what a built-in does not cover, a fixture has to.
-    for (const id of SECTIONS_NO_BUILTIN_CARRIES) {
-      const section = sectionAt(id);
-      expect(
-        ALL_FIXTURES.some((fixture) => sectionApplies(fixture, section)),
-        `no fixture has exempted section ${id}`,
-      ).toBe(true);
-    }
-  });
-
-  it('finds a built-in with each optional key both present and absent where that matters', () => {
-    // `makeupDb` present on exactly one built-in and absent on the rest is what
-    // makes the absent-vs-bypassed distinction load-bearing rather than theoretical.
-    const makeupDb = paramAt('effects.cabIR.makeupDb').path;
-    // The SPEAKER's branch, not `sectionApplies`: the Cabinet pane applies to a
+  it('witnesses an optional key both present and absent where that matters', () => {
+    // `effects.cabIR.makeupDb` present on one preset and absent on the rest is
+    // what made the absent-vs-bypassed distinction load-bearing rather than
+    // theoretical; `NO_MAKEUP_GAIN` is what carries the absent half now.
+    //
+    // `hasBranchAtPath`, never `sectionApplies`: the Cabinet pane applies to a
     // voice carrying only a room, and a room has no makeup gain to have set or
-    // left unset. Asking the pane would put a preset in this set that cannot
-    // witness either half of the assertion.
-    const withCab = VOICE_PRESETS.filter((p) => hasBranchAtPath(p, 'effects.cabIR'));
-    expect(withCab.some((p) => hasPath(p, makeupDb))).toBe(true);
-    expect(withCab.some((p) => !hasPath(p, makeupDb))).toBe(true);
-  });
-});
+    // left unset. Asking the pane would put a preset in this set that can witness
+    // neither half of the assertion.
+    const makeupDb = paramAt('effects.cabIR.makeupDb');
+    // `NO_MAKEUP_GAIN` is built by removal and typed by cast, so this is what says the
+    // absent half below is a legal preset rather than a broken one — see its comment.
+    expect(makeupDb.optional).toBe(true);
+    const withCab = [FULLY_POPULATED_SAMPLER, NO_MAKEUP_GAIN];
+    expect(withCab.every((p) => hasBranchAtPath(p, 'effects.cabIR'))).toBe(true);
+    expect(withCab.map((p) => hasPath(p, makeupDb.path))).toEqual([true, false]);
+    // Absent is a legal state for it and the row still APPLIES — optional means
+    // the control renders and reads its fallback, not that it goes away.
+    expect(paramApplies(NO_MAKEUP_GAIN, makeupDb)).toBe(true);
+    expect(violationsFor(NO_MAKEUP_GAIN, makeupDb)).toEqual([]);
 
-describe('every declared path against the per-kind fixtures', () => {
-  it('gives every source kind a fixture — the primary`s and the layer`s', () => {
-    expect(FIXTURES.map((f) => f.source.kind)).toEqual(SOURCE_KINDS);
-    // The second axis. `sampler` is deliberately absent: the picker does not
-    // offer it and no `layer.source.*` sampler row is declared, so there is
-    // nothing for a fixture to cover — see `LAYER_SUB_BRANCH`.
-    expect(
-      ALL_FIXTURES.flatMap((f) => (f.layer ? [f.layer.source.kind] : [])),
-    ).toEqual(expect.arrayContaining(['fm-synth', 'pluck-synth']));
-  });
-
-  it('applies every declared row to at least one fixture', () => {
-    // The coverage assertion the single `FULLY_POPULATED` could no longer make: a
-    // row whose condition matches nothing is a control nobody can ever see, and it
-    // would otherwise be silently skipped by every check in this file.
-    const unreachable = ALL_PARAMS.filter(
-      (param) => !ALL_FIXTURES.some((fixture) => paramApplies(fixture, param)),
-    ).map((param) => param.path);
-    expect(unreachable).toEqual([]);
+    // The `effects` object itself, present and absent. `ACOUSTIC_GUITAR_PRESET`
+    // carrying no `effects` key at all used to be the only witness of this, and
+    // `sectionApplies` reading an absent branch as present is a whole pane of
+    // controls written into a stage that is not there.
+    expect(hasPath(BARE_SAMPLER, 'effects')).toBe(false);
+    expect(hasPath(FULLY_POPULATED_SAMPLER, 'effects')).toBe(true);
   });
 
   for (const fixture of ALL_FIXTURES) {
     it(`${fixture.id}: resolves every applicable path, optional ones included`, () => {
-      // The assertion the built-in loop cannot make: no shipped preset sets
-      // `enabled`, `modelId` or `inputGainDb`, so those paths are only ever
+      // The assertion no walk over the shipped presets could make: not one of them
+      // sets `enabled`, `modelId` or `inputGainDb`, so those paths are only ever
       // exercised here. A typo in one fails this test (or `tsc`, on the literal).
       const missing = ALL_PARAMS.filter(
         (param) => paramApplies(fixture, param) && !hasPath(fixture, param.path),
@@ -1126,34 +1180,81 @@ describe('every declared path against the per-kind fixtures', () => {
     });
 
     it(`${fixture.id}: applies every section`, () => {
+      // ⚠ NO SECTION IS EXEMPT ANY MORE. The walk over the fourteen had to exempt
+      // `circuit-amp`: the engine is experimental and was added BESIDE the five
+      // amp models precisely so that no shipped preset changes behaviour, so no
+      // built-in carries one and none is meant to. A fixture is under no such
+      // constraint — `POPULATED_CHASSIS` populates every stage — so the exemption
+      // list is gone rather than re-pointed, and what is asserted here is the
+      // stronger statement it was a hole in.
       const inapplicable = PARAM_SECTIONS.filter(
         (section) => !sectionApplies(fixture, section),
       ).map((section) => section.id);
       expect(inapplicable).toEqual([]);
     });
 
-    it.skipIf(fixture.source.kind === 'pluck-synth')(
-      `${fixture.id}: accepts every value, reaching the checks the built-ins skip`,
-      () => {
-        // In particular the `toggle` branch of `violationsFor`, unreachable from the
-        // built-ins because none of them sets an `enabled` field — and, for the
-        // sampler fixture, an in-range `source.release`, which no built-in has.
-        // Skipped for the pluck fixture: that kind was withdrawn from the picker on
-        // 2026-09-01, so its `source.kind` is no longer a declared option. The
-        // fixture itself stays — three other assertions still need it.
-        expect(ALL_PARAMS.flatMap((param) => violationsFor(fixture, param))).toEqual([]);
-      },
-    );
+    it(`${fixture.id}: accepts every value, reaching the checks a shipped preset skips`, () => {
+      // In particular the `toggle` branch of `violationsFor`, which no shipped
+      // preset reaches because none of them sets an `enabled` field, and — on the
+      // sampler fixtures — an in-range `source.release`, which no shipped sampler
+      // has either.
+      //
+      // ONE ROW IS EXCLUDED, on the pluck fixture only: `source.kind`. The plucked
+      // synth was withdrawn from the picker on 2026-09-01
+      // (`OFFERED_SOURCE_KIND_OPTIONS`), so its own discriminant is deliberately
+      // not a declared option and a violation there is the withdrawal working
+      // rather than a defect. Its four `source.params.*` rows ARE range-checked,
+      // which is why the fixture is no longer skipped whole — nothing else in this
+      // file checks a pluck value now that the built-ins are not walked.
+      const rows = ALL_PARAMS.filter(
+        (param) => !(fixture.source.kind === 'pluck-synth' && param.path === 'source.kind'),
+      );
+      expect(rows.flatMap((param) => violationsFor(fixture, param))).toEqual([]);
+
+      // …and the exclusion is NECESSARY rather than defensive. The day pluck is
+      // offered again this goes red, which is the signal to delete the filter above —
+      // an exception nothing asserts is the shape the old built-in exemption list had,
+      // and it outlived its reason silently.
+      if (fixture.source.kind === 'pluck-synth') {
+        expect(violationsFor(fixture, paramAt('source.kind'))).toHaveLength(1);
+      }
+    });
   }
+
+  it('bare-sampler: satisfies every row the pane would show it, absent optionals included', () => {
+    // ⚠ THE ONE ARM `ALL_FIXTURES` CANNOT REACH. Every fixture in that list is fully
+    // populated, so the loop above only ever evaluates rows that are PRESENT. A row
+    // that applies and is legitimately ABSENT is the other half of `violationsFor`'s
+    // optional branch, and `BARE_SAMPLER` is the only preset here that has one:
+    // `source.release` is `optional` and gated on the sampler, so it applies here and
+    // is not set. Dropping that flag fails this test and nothing else in the file.
+    //
+    // Rows gathered through `sectionApplies`, exactly as the deleted walk over the
+    // fourteen gathered them and for the same reason: a row of an ABSENT section is
+    // not a row of this preset at all, and `paramApplies` alone does not say so — it
+    // gates on `appliesWhen` / `requiresBranch`, not on the section's probe.
+    // `LEVEL_BAR_PARAMS` is appended by hand because the bar is not a section.
+    const rows = [
+      ...PARAM_SECTIONS.filter((section) => sectionApplies(BARE_SAMPLER, section)).flatMap(
+        (section) => section.params,
+      ),
+      ...LEVEL_BAR_PARAMS,
+    ].filter((param) => paramApplies(BARE_SAMPLER, param));
+
+    const absent = rows.filter((param) => !hasPath(BARE_SAMPLER, param.path)).map((p) => p.path);
+    expect(absent).toContain('source.release');
+    expect(rows.flatMap((param) => violationsFor(BARE_SAMPLER, param))).toEqual([]);
+  });
 });
 
 describe('section presence', () => {
   it('reads a guarded-undefined branch as absent, not as present-and-bypassed', () => {
     // The lib builds `effects: KARORYFER_GREEN_CAB ? {...} : undefined` and
     // `cabIR: getCabinetIR(id) ? {...} : undefined`, so a key can exist with an
-    // `undefined` value. Every shipped preset resolves its IR today, so no loop over
-    // `VOICE_PRESETS` can pin this — and a `hasPath`-based probe would render a
-    // Cabinet section with no cabinet the first time the IR registry moves.
+    // `undefined` value. Every shipped preset resolves its IR today, so this state
+    // is reachable from no real preset and has to be constructed — and a
+    // `hasPath`-based probe would render a Cabinet section with no cabinet the
+    // first time the IR registry moves.
     const noCab: VoicePreset = { ...FULLY_POPULATED_SAMPLER, effects: { cabIR: undefined } };
     expect(hasPath(noCab, 'effects.cabIR')).toBe(true);
     expect(sectionApplies(noCab, sectionAt('cabinet'))).toBe(false);
@@ -1171,7 +1272,10 @@ describe('section presence', () => {
     expect(PARAM_SECTIONS.filter((section) => section.presenceProbe === null).map((s) => s.id)).toEqual(
       ['source', 'pedals'],
     );
-    for (const preset of VOICE_PRESETS) {
+    // `BARE_SAMPLER` is the one that matters here: a probe-less section has to
+    // apply to a preset carrying no `effects` object and no optional branch at all,
+    // which is the state a probe added to either of these would fail on.
+    for (const preset of [...ALL_FIXTURES, BARE_SAMPLER]) {
       expect(sectionApplies(preset, sectionAt('source')), preset.id).toBe(true);
       expect(sectionApplies(preset, sectionAt('pedals')), preset.id).toBe(true);
     }
@@ -1751,7 +1855,8 @@ describe('descriptor invariants', () => {
   it('seeds every sub-branch with a value its own rows accept', () => {
     // The seed is the ONE thing an Add writes, so a seed missing a field is a
     // half-built branch the engine reads `undefined` out of — and nothing else in
-    // this file would notice, because the built-ins all carry complete ones.
+    // this file would notice, because every fixture is written with its branches
+    // already complete rather than seeded.
     for (const { section, sub } of SUB_BRANCHES) {
       const seeded = withSeeded(FULLY_POPULATED_FM, sub);
       expect(subBranchApplies(seeded, sub), sub.id).toBe(true);
@@ -2456,15 +2561,26 @@ describe('the cabinet and the room, as two stages of one pane', () => {
       PARAM_SECTIONS.filter((section) => !stages.includes(section)).map((s) => s.id),
     ).toEqual(['cabinet']);
 
-    // Every preset in the file, plus one variant per stage with its own switch
-    // off — no built-in writes `enabled`, so without those the comparison would
-    // never reach the bypassed arm at all.
-    const corpus: readonly VoicePreset[] = [...VOICE_PRESETS, ...ALL_FIXTURES];
+    // Every preset in the file, plus three variants per stage: its switch on, its
+    // switch off, and its switch ABSENT.
+    //
+    // ⚠ THE ABSENT ONE IS THE ONE THAT MATTERS, and no fixture supplies it:
+    // `POPULATED_CHASSIS` writes `enabled: false` on every stage it populates and
+    // `BARE_SAMPLER` carries none of them, so `bypassed` and `absent` are the only
+    // answers the corpus can produce for a stage with a toggle. An absent `enabled` is
+    // implicit-on — the shape every shipped preset had, and what made the fourteen the
+    // `active` witness here while they were still walked. Without it, widening
+    // `stageBypassed` from `=== false` to `!== true` passes this test.
+    const corpus: readonly VoicePreset[] = [...ALL_FIXTURES, BARE_SAMPLER];
     for (const stage of stages) {
       const toggle = enabledParamIn(stage.params);
-      const presets = corpus.flatMap((preset) =>
-        toggle ? [preset, setAtPath(preset, toggle.path, false)] : [preset],
-      );
+      const presets: readonly VoicePreset[] = toggle
+        ? corpus.flatMap((preset) => [
+            setAtPath(preset, toggle.path, true),
+            setAtPath(preset, toggle.path, false),
+            removeAtPath(preset, toggle.path),
+          ])
+        : corpus;
       for (const preset of presets) {
         expect(sectionPresence(preset, stage), `${stage.label} / ${preset.id}`).toBe(
           legacy(preset, stage),

@@ -5,8 +5,9 @@
  * `VoicePreset` by the dotted paths `presetPaths.ts` understands. guitar-tutor's
  * Sound Lab hand-wrote a JSX block per parameter across 2,000 lines; the
  * structure here deliberately is not — a table is what lets `paramSchema.test.ts`
- * assert every path and range against every built-in preset, which hand-written
- * JSX can never do.
+ * assert every path and every range against a set of fixture presets: every path
+ * resolving, every value inside its declared bound, every row reachable from at
+ * least one fixture. Hand-written JSX can never do that.
  *
  * ⚠ ONE COMPONENT RENDERS THIS TABLE — `voice/VoiceEditor.tsx` — and both pages
  * draw that one component (`VoicePane` wraps it for the editing pattern,
@@ -27,9 +28,12 @@
  * attack-noise fader stops at 1 where Tone documents 20; its dampening runs to
  * 8000 where Tone documents 7000). They are not a source. Neither is a shipped
  * preset: the fourteen are preselected settings, so a value of theirs falling
- * outside a documented range means the PRESET is stale, and it is reported as a
- * finding rather than allowed for. (It has happened once — the ten samplers'
- * `source.release` — and it was fixed in the lib; FOLLOW-UPS row 24.)
+ * outside a documented range means the PRESET is stale and gets retuned in the
+ * lib. The app's suite is no longer what says so — `paramSchema.test.ts` stopped
+ * walking the shipped presets (`docs/PLAN-remove-presets.md`), because a stale
+ * one failing here reported the lib's tuning as this app's defect. (It has
+ * happened once — the ten samplers' `source.release` — and it was fixed in the
+ * lib; FOLLOW-UPS row 24.)
  *
  * SCOPE: Source (with its second source), Body filter, Amp, Cabinet — including
  * the room the cabinet stands in — and the final EQ, plus the two rows of the

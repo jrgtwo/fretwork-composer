@@ -30,9 +30,9 @@ import type { VoiceRefusal } from './voiceService';
  * How long a `<select>`'s voice pick waits before it is written.
  *
  * A native `<select>` fires `change` once per arrow key while closed, so a keyboard
- * user stepping the eleven guitar voices passes through all of them. Ten of those
- * slots are sampler-sourced, and once the page has played, every one of those
- * writes reaches `MultiTrackPlayback.setTrackVoice` — a whole new `Voice`, one
+ * user stepping a library of voices passes through all of them. A sampler-sourced
+ * voice is the common case, and once the page has played, every one of those writes
+ * reaches `MultiTrackPlayback.setTrackVoice` — a whole new `Voice`, one
  * `Tone.Sampler` and an HTTP load per bank, with the outgoing one held alive on a
  * 4 s release tail. One arrow-key walk is a fetch storm.
  *
@@ -111,15 +111,12 @@ export const voiceLabelClass = 'font-mono text-[9px] tracking-[0.1em] text-ink-m
 /**
  * The three refusals that say the same thing wherever they are raised.
  *
- * `no-holder`, `no-voice` and `built-in` are deliberately NOT here, and for two
- * reasons rather than one. `no-holder` and `no-voice` name the holder in their
- * sentence ("no pattern is open" / "this track follows its instrument's voice"),
- * and only the surface knows which holder it is; `no-holder` was the fourth member
- * until the refusal union merged `no-pattern` and `no-track`, and one code for both
- * kinds means one shared sentence would have to say "no holder", which is not
- * something to show anyone. `built-in` names no holder — it is here for the other
- * reason: the two surfaces word it differently, the pane keeping Sound Lab's
- * shipped sentence verbatim, and unifying them would silently reword shipped copy.
+ * `no-holder` and `no-voice` are deliberately NOT here: both name the holder in
+ * their sentence ("no pattern is open" / "this track follows its instrument's
+ * voice"), and only the surface knows which holder it is. `no-holder` was one code
+ * per kind until the union merged `no-pattern` and `no-track`, and one code for
+ * both kinds means a shared sentence would have to say "no holder", which is not
+ * something to show anyone.
  *
  * Each WRAPPER declares a complete `Record` of the union on top of this and hands
  * it to `VoiceEditor`, which is what makes a new refusal a compile error in both

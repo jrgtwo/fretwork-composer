@@ -38,9 +38,9 @@ import { VOICE_COMMIT_MS } from '../voice/voiceChrome';
  *
  * The same window, and the same reason, as `playbackService`'s
  * `REBUILD_COALESCE_MS` and `VoiceEditor`'s `WARM_COALESCE_MS`: a native `<select>`
- * fires `change` once per arrow key while closed, so a keyboard user stepping the
- * eleven guitar voices passes through all of them. Ten of those slots are
- * sampler-sourced, and once the page has played, every one of those writes reaches
+ * fires `change` once per arrow key while closed, so a keyboard user stepping a
+ * library of voices passes through all of them. A sampler-sourced voice is the
+ * common case, and once the page has played, every one of those writes reaches
  * `MultiTrackPlayback.setTrackVoice` — a whole new `Voice`, one `Tone.Sampler` and
  * an HTTP load per bank, with the outgoing one held alive on a 4 s release tail.
  * One arrow-key walk is a fetch storm.
@@ -547,18 +547,13 @@ export function TrackControls({
                 Another instrument’s voice
               </option>
             )}
-            {/* Not "none": a null ref plays something, it just isn't this track's
-                choice. Listed first so the way back is always in the same place. */}
+            {/* Not "none": a null ref plays something — the instrument's default —
+                it just isn't this track's own choice. Listed first so the way back
+                is always in the same place. */}
             <option value="">Auto</option>
-            {/* Grouped because the distinction is load-bearing rather than
-                cosmetic — only one of the two can ever be saved to (CP-15). */}
-            <optgroup label="Built-in">
-              {voices.builtIns.map((option) => (
-                <option key={option.key} value={option.key}>
-                  {option.name}
-                </option>
-              ))}
-            </optgroup>
+            {/* Grouped even though it is the only group: the heading is what says
+                these are the user's OWN voices, which is what makes "Auto" above it
+                read as the absence of one rather than as another voice. */}
             {voices.userVariants.length > 0 && (
               <optgroup label="Yours">
                 {voices.userVariants.map((option) => (

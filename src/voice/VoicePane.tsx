@@ -27,8 +27,9 @@
  *   - A voice is a SHARED asset. Save overwrites the variant for every pattern
  *     AND every track pointing at it, which is intended and was decided with the
  *     user. There is no per-holder fork.
- *   - The fourteen built-in slots are readonly lib consts with no setter, so
- *     Save is *impossible* for them, not merely discouraged.
+ *   - A pattern with no voice of its own has nothing to Save INTO: it is playing
+ *     the instrument's default, which is the lib resolver's floor and not a
+ *     document. Save as… is the way out, and the pane says so.
  *   - A draft is tagged with the instrument and ref it is an edit OF, so
  *     switching voice or instrument retires it — here by the explicit discard on
  *     the instrument gesture, in the editor for a voice pick, and by the engine's
@@ -61,16 +62,14 @@ const INSTRUMENTS = listInstruments();
 
 /**
  * Every refusal `voiceService` can return is a state this pane can be in, so each
- * one needs a sentence, and the three that name the holder cannot be shared with
- * a rack's — its versions say "this track". `built-in` is Sound Lab's shipped
- * wording, kept verbatim. Declared as a complete `Record` so a new refusal is a
- * compile error here rather than a missing sentence.
+ * one needs a sentence, and the two that name the holder cannot be shared with a
+ * rack's — its versions say "this track". Declared as a complete `Record` so a new
+ * refusal is a compile error here rather than a missing sentence.
  */
 const REFUSAL_TEXT: Record<VoiceRefusal, string> = {
   ...SHARED_VOICE_REFUSAL_TEXT,
   'no-holder': 'No pattern is open.',
   'no-voice': 'This pattern has no voice of its own. Use Save as… to keep these tweaks.',
-  'built-in': 'Defaults are read-only. Use Save as new variant to keep your tweaks.',
 };
 
 /** The pattern's ref-less state, worded as the fact it is rather than as an
@@ -112,9 +111,7 @@ export function VoicePane({
   }
 
   const currentKey = ref ? voiceKey(ref) : '';
-  const listed = [...voices.builtIns, ...voices.userVariants].some(
-    (option) => option.key === currentKey,
-  );
+  const listed = voices.userVariants.some((option) => option.key === currentKey);
 
   /** guitar-tutor's answer, kept: one `window.confirm` in front of a switch that
    *  would strand the unsaved edit. The voice picker's copy of this lives in the

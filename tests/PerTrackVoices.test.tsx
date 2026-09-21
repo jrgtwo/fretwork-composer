@@ -9,7 +9,6 @@ import {
   usePatternsStore,
   useVoiceStore,
   type Track,
-  type VariantRef,
   type VoicePreset,
 } from '@fretwork/lib';
 import { ArrangementGrid } from '../src/composition/ArrangementGrid';
@@ -34,6 +33,7 @@ import {
   selectVoice,
   trackVoiceRefStatus,
   voiceKey,
+  type UserVariantRef,
 } from '../src/voice/voiceService';
 import { playComposition, useCompositionPlayback } from '../src/audio/playbackService';
 import { addVoiceSection, setVoiceParam, voiceDraftKeys } from '../src/voice/voiceDrafts';
@@ -221,16 +221,29 @@ vi.mock('@fretwork/lib', async (importOriginal) => {
 
 const BAR = 4 * PPQ;
 
-/** A built-in guitar voice — the picker's own first offer, so the write and the
- *  offer set are the same set by construction. */
-function builtInVoice(index = 0): { ref: VariantRef; name: string } {
-  const option = listSelectableVoices('guitar').builtIns[index];
-  if (!option) throw new Error('the lib offers no built-in guitar voices');
-  return { ref: option.ref, name: option.name };
+/**
+ * One of the voices the picker actually OFFERS for guitar, seeded on first ask and
+ * found by name after — so the write and the offer set are the same set by
+ * construction, which is the property the built-in-backed version of this helper
+ * bought before the app stopped modelling built-ins (2026-09-20).
+ *
+ * Always read back OUT of `listSelectableVoices`, and that is load-bearing for the
+ * idempotence test below: the seam mints a fresh ref object per call, so two asks
+ * for the same index are equal and not identical.
+ */
+function offeredVoice(index = 0): { ref: UserVariantRef; name: string } {
+  const name = `Offered ${index}`;
+  const offered = () => listSelectableVoices('guitar').userVariants.find((o) => o.name === name);
+  if (!offered()) userVoice(name);
+  const option = offered();
+  if (!option) throw new Error(`the picker does not offer ${name}`);
+  return { ref: option.ref, name };
 }
 
-/** A user variant, so a track can point at a preset no built-in slot holds. */
-function userVoice(name: string, instrumentId: 'guitar' | 'bass' = 'guitar'): VariantRef {
+/** A user variant under a name of the caller's choosing — the only kind of voice
+ *  the app has. The preset carries the name, so `resolveTrackVoicePreset(...).name`
+ *  is how a test tells two of them apart. */
+function userVoice(name: string, instrumentId: 'guitar' | 'bass' = 'guitar'): UserVariantRef {
   const preset: VoicePreset = { ...ACOUSTIC_GUITAR_PRESET, name, instrumentId };
   const id = useVoiceStore.getState().addVariant({
     name,
@@ -338,12 +351,12 @@ describe('the track path in voiceService', () => {
     expect(resolveTrackVoicePreset(after[1]).name).not.toBe('Driven');
   });
 
-  it('gives two tracks on one instrument two different built-ins', () => {
+  it('gives two tracks on one instrument two different voices', () => {
     const tracks = twoTracks();
-    const first = builtInVoice(0);
-    const second = builtInVoice(1);
-    // The lib could in principle ship two slots with the same preset; the
-    // assertion below would then hold for a seam that ignored the ref entirely.
+    const first = offeredVoice(0);
+    const second = offeredVoice(1);
+    // Two fixtures with one name would make the assertions below hold for a seam
+    // that ignored the ref entirely.
     expect(first.name).not.toBe(second.name);
 
     selectVoice('track', tracks[0].id, first.ref);
@@ -397,7 +410,7 @@ describe('the track path in voiceService', () => {
   it('follows the instrument’s global active voice when the ref is null', () => {
     const tracks = twoTracks();
     const driven = userVoice('Driven');
-    const other = builtInVoice(1);
+    const other = offeredVoice(1);
     selectVoice('track', tracks[0].id, other.ref);
 
     // The lib's documented fallback: a null ref resolves through the global
@@ -453,8 +466,8 @@ describe('the track path in voiceService', () => {
     // this seam hands out: `listSelectableVoices` mints fresh ones per call and
     // so does `parseVoiceKey`. `compositionService` guards on reference identity
     // by charter, so the value comparison has to happen here or not at all.
-    const once = builtInVoice(1).ref;
-    const again = builtInVoice(1).ref;
+    const once = offeredVoice(1).ref;
+    const again = offeredVoice(1).ref;
     expect(once).not.toBe(again);
 
     selectVoice('track', tracks[0].id, once);
@@ -487,8 +500,8 @@ describe('the track path in voiceService', () => {
     // track has not got — and the picker never offers it, so a write that landed
     // would set a voice the user cannot see from where they are standing.
     const wrongInstrument = selectVoice('track', tracks[0].id, bassVoice);
-    const noTrack = selectVoice('track', 'not-a-track', builtInVoice().ref);
-    act(() => useVoiceStore.getState().deleteVariant((bassVoice as { id: string }).id));
+    const noTrack = selectVoice('track', 'not-a-track', offeredVoice().ref);
+    act(() => useVoiceStore.getState().deleteVariant(bassVoice.id));
     const gone = selectVoice('track', tracks[0].id, { kind: 'user', id: 'deleted-id' });
 
     expect(wrongInstrument).toEqual({ ok: false, reason: expect.stringContaining('guitar') });
@@ -523,7 +536,7 @@ describe('the per-track voice picker', () => {
     expect(await openVoice(user, after[1])).toHaveValue(voiceKey(driven));
   });
 
-  it('offers the shared library, split into built-ins and yours', async () => {
+  it('offers the user’s own voices for this instrument and no others', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     const driven = userVoice('Driven');
@@ -531,7 +544,16 @@ describe('the per-track voice picker', () => {
     render(<ArrangementGrid />);
 
     const picker = await openVoice(user, tracks[0]);
-    expect(within(picker).getByRole('option', { name: 'Auto' })).toBeInTheDocument();
+    // EXHAUSTIVE, not spot-checked: "Driven is there and Thumpy is not" passes just
+    // as happily with a whole extra group of options beside them, which is the shape
+    // the built-in optgroup had. The editor's own picker is pinned this way in
+    // `tests/VoicePane.test.tsx`; the mixer strip is the other surface and gets the
+    // same guarantee.
+    expect(
+      within(picker)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['Auto', 'Driven']);
     expect(within(picker).getByRole('option', { name: 'Driven' })).toHaveValue(
       voiceKey(driven),
     );
@@ -539,10 +561,36 @@ describe('the per-track voice picker', () => {
     expect(within(picker).queryByRole('option', { name: 'Thumpy' })).toBeNull();
   });
 
+  it('reads a ref left behind by the version that offered built-ins as no voice at all', async () => {
+    // ⚠ THE MIGRATION, FROM THE SURFACE. A stored `{ kind: 'default', slotId }` is
+    // what a document written before 2026-09-20 carries
+    // (`docs/PLAN-remove-presets.md`), and the agreed answer is that it reads as NO
+    // voice so the track falls through to its instrument's default. That answer is
+    // `validateVoiceRef`'s, and the only thing keeping it true HERE is that the strip
+    // reads the ref through the seam: `Track.voiceRef` is typed `unknown`, so a
+    // future edit reading it raw is the obvious shortcut — and it would land on
+    // 'deleted', which shows the disabled "Voice deleted" option. That option is
+    // about a USER variant that is gone and the plan says a legacy default ref must
+    // never reach it.
+    const user = userEvent.setup();
+    const tracks = twoTracks();
+    setTrackVoiceRef(tracks[0].id, { kind: 'default', slotId: 'clean-amp' });
+    render(<ArrangementGrid />);
+
+    expect(trackVoiceRefStatus(getTracks()[0])).toBe('none');
+    const picker = await openVoice(user, getTracks()[0]);
+    // Auto selected, and not a word about a deletion.
+    expect(picker).toHaveValue('');
+    expect(within(picker).queryByRole('option', { name: 'Voice deleted' })).toBeNull();
+    expect(
+      within(picker).queryByRole('option', { name: 'Another instrument’s voice' }),
+    ).toBeNull();
+  });
+
   it('names a voice that has left the library rather than showing nothing', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
-    const driven = userVoice('Driven') as { kind: 'user'; id: string };
+    const driven = userVoice('Driven');
     selectVoice('track', tracks[0].id, driven);
     // `deleteVoice` repairs the editing PATTERN and leaves other holders to the
     // lib's clean fallback, so a track's ref can dangle from two clicks away.
@@ -616,8 +664,8 @@ describe('the per-track voice picker', () => {
   it('coalesces a walk through the list into one write', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
-    const first = builtInVoice(0);
-    const second = builtInVoice(1);
+    const first = offeredVoice(0);
+    const second = offeredVoice(1);
     render(<ArrangementGrid />);
     const picker = await openVoice(user, tracks[0]);
 
@@ -717,7 +765,7 @@ describe('changing the instrument destroys the voice, and says so first', () => 
   it('does not ask about a voice that is already gone', async () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
-    const driven = userVoice('Driven') as { kind: 'user'; id: string };
+    const driven = userVoice('Driven');
     selectVoice('track', tracks[0].id, driven);
     // The variant goes; the track fell back to the instrument's voice the moment
     // it did. There is nothing left for the write to destroy, and a confirmation

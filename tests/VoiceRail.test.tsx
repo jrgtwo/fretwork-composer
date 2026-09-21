@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
+  ALL_SLOT_IDS,
   DEFAULT_PATTERNS_STATE,
+  getDefaultPresetForSlot,
   usePatternsStore,
   useVoiceStore,
   type Track,
@@ -171,10 +173,45 @@ const dirtyOf = (track: Track): boolean => isVoiceDirty('track', track.id);
 
 const volumeOf = (track: Track): unknown => getAtPath(presetOf(track), VOLUME_PATH);
 
-/** A built-in guitar voice by name, so a test names a tone rather than a slot id. */
-function builtIn(name: string) {
-  const found = listSelectableVoices('guitar').builtIns.find((voice) => voice.name === name);
-  if (!found) throw new Error(`no built-in guitar voice called ${name}`);
+/**
+ * A voice of the user's own by NAME, seeded out of the lib slot preset of that name
+ * on first ask and found by name after — so a test names a tone rather than a slot
+ * id, and two asks are one voice.
+ *
+ * The app has no built-in voices any more (2026-09-20,
+ * `docs/PLAN-remove-presets.md`). A lib preset is still the cheapest source of real,
+ * complete preset DATA to build a variant out of, which is all this uses it for; the
+ * ref it returns comes out of the rail's own offer set.
+ */
+function voiceNamed(name: string) {
+  const offered = () =>
+    listSelectableVoices('guitar').userVariants.find((voice) => voice.name === name);
+  if (!offered()) {
+    const source = ALL_SLOT_IDS.map((slotId) => {
+      try {
+        return getDefaultPresetForSlot(slotId);
+      } catch {
+        return null;
+      }
+    }).find((preset) => preset?.name === name);
+    if (!source) throw new Error(`the lib ships no preset called ${name}`);
+    // The name is looked up across every slot the lib ships, so this is what stops a
+    // BASS preset being seeded as a guitar variant and offered on a guitar neck. A
+    // wrong-neck ref is a real state with its own prose (`wrong-instrument`) — not one
+    // to reach by accident in the helper that means "a voice that fits".
+    if (source.instrumentId !== 'guitar') {
+      throw new Error(`${name} is a ${source.instrumentId} preset, not a guitar one`);
+    }
+    useVoiceStore.getState().addVariant({
+      name,
+      instrumentId: 'guitar',
+      family: source.family,
+      collectionId: null,
+      preset: { ...source, name },
+    });
+  }
+  const found = offered();
+  if (!found) throw new Error(`the rail does not offer a voice called ${name}`);
   return found;
 }
 
@@ -240,7 +277,7 @@ describe('the empty rail', () => {
     render(<CompositionPage views={viewsOf('voice')} />);
 
     const rail = screen.getByRole('complementary', { name: 'Voices' });
-    expect(within(rail).getByRole('group', { name: 'Presets' })).toBeInTheDocument();
+    expect(within(rail).getByRole('group', { name: 'My tones' })).toBeInTheDocument();
 
     act(() => selectTrack(null));
     expect(screen.getByRole('complementary', { name: 'Pattern library' })).toBeInTheDocument();
@@ -252,20 +289,54 @@ describe('the empty rail', () => {
 // -------------------------------------------------------------- the two groups ---
 
 describe('the list', () => {
-  it('separates built-in slots from the user’s own, and says when there are none of the latter', () => {
+  /** Every landmark the rail draws, in order. Read exhaustively rather than probed
+   *  one label at a time: what this pins is that there are TWO and which, and a
+   *  `getByRole('group', { name })` per label passes just as happily with a third. */
+  const groupLabels = () =>
+    screen
+      .getAllByRole('group')
+      .map((element) => element.getAttribute('aria-label'));
+
+  it('separates the instrument default from the user’s own, and says when there are none', () => {
     twoTracks();
     selectTrack(lead().id);
     render(<VoiceRail />);
 
-    // The distinction is load-bearing rather than cosmetic: only one of the two
-    // groups can ever be saved to.
-    expect(group('Presets').getAllByRole('button').length).toBeGreaterThan(1);
+    // The distinction is load-bearing rather than cosmetic: only one of the two is a
+    // voice that can be saved to, and the other is the absence of one.
+    expect(groupLabels()).toEqual(['Instrument default', 'My tones']);
+    expect(group('Instrument default').getAllByRole('button')).toHaveLength(1);
     expect(
       group('My tones').getByText(/No voices of your own for guitar yet/),
     ).toBeInTheDocument();
     // …and that is a DIFFERENT empty from having no track selected, which is the
     // rule the other rails established.
     expect(screen.queryByText('No track selected')).not.toBeInTheDocument();
+  });
+
+  it('keeps the user’s own voices out of the instrument-default group', () => {
+    // ⚠ WHAT THE EMPTY-LIBRARY TEST ABOVE CANNOT SEE. With no variants seeded the
+    // 'Instrument default' group holds its one hard-coded Auto row whatever the voice
+    // data says, so its count is not evidence of a separation — it is evidence of a
+    // literal. Seeding a variant is what makes the two groups answer to different
+    // data, so a rail that listed the library under the wrong label, or Auto twice,
+    // fails here and only here.
+    twoTracks();
+    const crunch = voiceNamed('Crunch');
+    selectTrack(lead().id);
+    render(<VoiceRail />);
+
+    expect(groupLabels()).toEqual(['Instrument default', 'My tones']);
+    expect(
+      group('Instrument default')
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual([expect.stringContaining('Auto')]);
+    expect(
+      group('My tones')
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual([expect.stringContaining(crunch.name)]);
   });
 });
 
@@ -276,9 +347,11 @@ describe('picking a voice', () => {
     twoTracks();
     openBlankPattern('Riff');
     selectTrack(lead().id);
+    // Seeded BEFORE the render: a variant added afterwards is a store write outside
+    // `act`, and the list this test clicks in would not have it yet.
+    const clean = voiceNamed('Clean Amp');
     render(<VoiceRail />);
 
-    const clean = builtIn('Clean Amp');
     await userEvent.click(screen.getByRole('button', { name: clean.name }));
 
     expect(readTrackVoiceRef(lead())).toEqual(clean.ref);
@@ -294,7 +367,7 @@ describe('picking a voice', () => {
     twoTracks();
     openBlankPattern('Riff');
     selectTrack(lead().id);
-    const clean = builtIn('Clean Amp');
+    const clean = voiceNamed('Clean Amp');
 
     const rail = render(<VoiceRail />);
     await userEvent.click(screen.getByRole('button', { name: clean.name }));
@@ -327,7 +400,7 @@ describe('picking a voice', () => {
   it('offers the way back to the instrument’s own voice', async () => {
     twoTracks();
     selectTrack(lead().id);
-    selectVoice('track', lead().id, builtIn('Clean Amp').ref);
+    selectVoice('track', lead().id, voiceNamed('Clean Amp').ref);
     render(<VoiceRail />);
 
     await userEvent.click(auto());
@@ -340,14 +413,15 @@ describe('picking a voice', () => {
   it('confirms before stranding an unsaved edit, and throws it away when the answer is yes', async () => {
     twoTracks();
     selectTrack(lead().id);
-    const clean = builtIn('Clean Amp');
+    const clean = voiceNamed('Clean Amp');
+    const crunch = voiceNamed('Crunch');
     selectVoice('track', lead().id, clean.ref);
     setVoiceParam('track', lead().id, VOLUME_PATH, -6);
     render(<VoiceRail />);
 
     // Answered NO: nothing moves, and the edit is still there to go back to.
     vi.stubGlobal('confirm', () => false);
-    await userEvent.click(screen.getByRole('button', { name: builtIn('Crunch').name }));
+    await userEvent.click(screen.getByRole('button', { name: crunch.name }));
     expect(readTrackVoiceRef(lead())).toEqual(clean.ref);
     expect(dirtyOf(lead())).toBe(true);
 
@@ -356,8 +430,8 @@ describe('picking a voice', () => {
     // draft by tag, so one that was never actually discarded matches again here
     // and the user is silently back on an edit they threw away.
     vi.stubGlobal('confirm', () => true);
-    await userEvent.click(screen.getByRole('button', { name: builtIn('Crunch').name }));
-    expect(readTrackVoiceRef(lead())).toEqual(builtIn('Crunch').ref);
+    await userEvent.click(screen.getByRole('button', { name: crunch.name }));
+    expect(readTrackVoiceRef(lead())).toEqual(crunch.ref);
     selectVoice('track', lead().id, clean.ref);
     expect(dirtyOf(lead())).toBe(false);
   });
@@ -365,7 +439,7 @@ describe('picking a voice', () => {
   it('marks the current voice as pressed, so the list says what is playing', () => {
     twoTracks();
     selectTrack(lead().id);
-    const clean = builtIn('Clean Amp');
+    const clean = voiceNamed('Clean Amp');
     selectVoice('track', lead().id, clean.ref);
     render(<VoiceRail />);
 

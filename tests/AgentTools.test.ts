@@ -42,6 +42,10 @@ import {
   unknownInstrumentRefusal,
   useHistoryState as usePatternHistory,
 } from '../src/patterns/patternService';
+// The seam's own authoring of the refusal sentences the model reads. Imported
+// rather than retyped, so a reworded refusal is a failure here instead of two
+// copies drifting apart.
+import { describeVoiceRefusal } from '../src/voice/voiceService';
 import {
   abortEditGesture as abortCompositionGesture,
   addTrack as addTrackDirect,
@@ -188,8 +192,9 @@ describe('the tool registry', () => {
   /**
    * The tripwire. The agent gets NO privileged path: a tool that imported the
    * lib's store or `composition-ops` would bypass the guards the seams enforce —
-   * the track cap, the empty-name rule, the built-in refusal — every one of
-   * which exists at the seam precisely because the agent does not press buttons.
+   * the track cap, the empty-name rule, the wrong-instrument voice refusal — every
+   * one of which exists at the seam precisely because the agent does not press
+   * buttons.
    */
   it('reaches the lib only through the seams', () => {
     // Read as source rather than by inspecting the modules, because the defect
@@ -781,24 +786,53 @@ describe('refusals reach the caller as sentences', () => {
     value(call('pattern_open_blank', { name: 'Somewhere else' }));
   });
 
-  it('refuses a write to a built-in voice, and says what to do instead', () => {
+  it('offers no voices at all until the user has saved one, and says so in words', () => {
     value(call('composition_open_blank', { name: 'Song' }));
     const trackId = rows(value(call('read_composition')).tracks)[0].trackId as string;
-    const voices = rows(value(call('voice_list_for_track', { trackId })).voices);
-    const builtIn = voices.find((voice) => voice.builtIn === true);
-    expect(builtIn).toBeDefined();
 
-    const key = builtIn?.voiceKey as string;
-    expect(key.startsWith('default:')).toBe(true);
-    // The fourteen slot presets are readonly lib consts with no setter anywhere
-    // in the lib, so this is a refusal and not a disabled button.
+    // The app has no built-in voices (2026-09-20, `docs/PLAN-remove-presets.md`), so
+    // an empty list is the STARTING state rather than a fault — every track follows
+    // its instrument's default until something is saved. The tool's description says
+    // so, because a model that read an empty list as an error would stop here.
+    const listed = value(call('voice_list_for_track', { trackId }));
+    expect(rows(listed.voices)).toEqual([]);
+    expect(listed.currentVoiceKey).toBeNull();
+    expect(listed.currentVoiceStatus).toBe('none');
+
+    // And a key of the shape this app used to hand out is refused rather than read as
+    // a variant id: `default:clean-amp` names no voice here.
+    //
+    // ⚠ EACH SENTENCE, NOT JUST "IT FAILED". These three strings are the model's only
+    // signal that `default:<slotId>` is not a key, and `expect(refused).toBeTruthy()`
+    // passes on any of them, including a wrong one. Sharper than that: mutate
+    // `variantIdFromKey` to read a key's tail as a variant id — the exact hazard its
+    // own comment names — and rename and delete still refuse, because `unknown-variant`
+    // catches the phantom id downstream. Only `voice_set_for_track` sees the
+    // difference, so ITS sentence is the one that has to be pinned by name.
+    expect(reason(call('voice_set_for_track', { trackId, voiceKey: 'default:clean-amp' })))
+      .toBe('Not a voice key: default:clean-amp.');
     for (const refused of [
-      reason(call('voice_rename', { voiceKey: key, name: 'Mine' })),
-      reason(call('voice_delete', { trackId, voiceKey: key })),
+      reason(call('voice_rename', { voiceKey: 'default:clean-amp', name: 'Mine' })),
+      reason(call('voice_delete', { trackId, voiceKey: 'default:clean-amp' })),
     ]) {
-      expect(refused).toContain('built-in');
-      expect(refused).toContain('Save it as a new voice');
+      expect(refused).toBe(describeVoiceRefusal('track', 'unknown-variant'));
     }
+
+    // Save-as is the way a voice comes into being, and the list carries it after.
+    const saved = value(call('voice_save_as', { trackId, name: 'Mine' }));
+    expect(rows(value(call('voice_list_for_track', { trackId })).voices)).toEqual([
+      { voiceKey: saved.voiceKey, name: 'Mine' },
+    ]);
+
+    // …and NOW the refused pick is checkable: with a voice on the track, a bad key
+    // coerced into "clear the ref" would lose it. That is the failure
+    // `voice_set_for_track`'s parse guard exists for, and it is invisible while the
+    // track's ref is null anyway — which it was everywhere above.
+    expect(reason(call('voice_set_for_track', { trackId, voiceKey: 'default:clean-amp' })))
+      .toBe('Not a voice key: default:clean-amp.');
+    expect(value(call('voice_list_for_track', { trackId })).currentVoiceKey).toBe(
+      saved.voiceKey,
+    );
   });
 
   it('refuses a string the instrument has not got, rather than losing the note', () => {

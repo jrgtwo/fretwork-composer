@@ -771,6 +771,11 @@ describe('track settings round-trip through the store', () => {
 
   it('stores a voiceRef opaquely — the cast is voiceService’s, not this seam’s', () => {
     const id = storedTracks()[0].id;
+    // Deliberately a shape the APP no longer models: `voiceService` narrowed its ref
+    // type to the user arm (2026-09-20, `docs/PLAN-remove-presets.md`) and reads this
+    // as "no voice". This seam stores it back byte-for-byte all the same, which is
+    // the charter — validating it here would be a second opinion about voices living
+    // in the composition store.
     const ref = { kind: 'default', slotId: 'clean-amp' };
 
     setTrackVoiceRef(id, ref);
@@ -792,7 +797,7 @@ describe('track settings round-trip through the store', () => {
 
     expect(setTrackName('nope', 'zzz').ok).toBe(false);
     expect(setTrackInstrument('nope', 'bass').ok).toBe(false);
-    expect(setTrackVoiceRef('nope', { kind: 'default' }).ok).toBe(false);
+    expect(setTrackVoiceRef('nope', { kind: 'user', id: 'whatever' }).ok).toBe(false);
     expect(setTrackVolumeDb('nope', -6).ok).toBe(false);
     expect(setTrackPan('nope', -0.5).ok).toBe(false);
     expect(setTrackMuted('nope', true).ok).toBe(false);

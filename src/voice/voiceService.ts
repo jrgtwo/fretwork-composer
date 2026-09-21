@@ -8,9 +8,12 @@
  *   - a voice is a SHARED asset. `pattern.voiceRef` is a reference, so editing a
  *     user variant changes it for every pattern pointing at it. That is intended;
  *     what must not leak is the temptation to auto-fork a private copy per pattern.
- *   - the fourteen built-in slots are `readonly` consts with no setter anywhere in
- *     the lib, so Save is not merely discouraged for them — it is impossible, and
- *     the refusal has to be a guard here rather than a disabled button in a pane.
+ *   - the app has ONE kind of voice: the user's own. `VariantRef`'s `default` arm —
+ *     the lib's fourteen slot presets — is unrepresentable above this line (see
+ *     {@link UserVariantRef}), so nothing here offers, names or validates against
+ *     it. The lib keeps those presets because its resolver needs a FLOOR, and that
+ *     floor is what "Auto" / "Instrument default" plays; the app authors no
+ *     starting preset of its own.
  *   - `pattern.voiceRef` is typed `unknown` on `Pattern` (the lib keeps its pattern
  *     model independent of the voices module and documents casting at use), so
  *     exactly one module should own that cast and its validation. This one.
@@ -29,14 +32,10 @@
  */
 import { useMemo } from 'react';
 import {
-  ALL_SLOT_IDS,
-  getDefaultPresetForSlot,
-  getSlotsForInstrument,
   resolveActiveVoice,
   useVoiceStore,
   type FretInstrumentId,
   type Pattern,
-  type SlotId,
   type Track,
   type Variant,
   type VariantRef,
@@ -61,54 +60,63 @@ import {
 
 const store = () => useVoiceStore.getState();
 
-/** Membership asked of the lib's own list, so a slot the lib adds is accepted and
- *  one it renames is rejected. Both matter — the lib has renamed slots before and
- *  ships a migration map for it. */
-const KNOWN_SLOT_IDS: ReadonlySet<string> = new Set(ALL_SLOT_IDS);
-
 // ------------------------------------------------------------------- refs ---
 
 /**
- * A voice the user can pick, built-in or their own.
+ * ⚠ THE ONLY KIND OF REF THE APP HAS — a user variant.
  *
- * `key` exists because a `VariantRef` is an object and a `<select>` value is a
- * string. It round-trips through `parseVoiceKey`, so a picker never has to
- * reconstruct a ref by hand.
+ * `VariantRef`'s other arm, `{ kind: 'default', slotId }`, names one of the lib's
+ * fourteen slot presets. The app stopped modelling those (2026-09-20,
+ * `docs/PLAN-remove-presets.md`): a holder either points at a voice of the user's
+ * own or has none and follows its instrument, and the instrument's fall-through is
+ * the lib resolver's own floor rather than anything this module names.
+ *
+ * Narrowed at the TYPE rather than refused at a guard, which is the whole point:
+ * every "is this a built-in?" branch that used to exist is now unrepresentable
+ * instead of unreachable, so none of them can survive as dead code. A stored
+ * default ref therefore reads as `null` through {@link readVoiceRef} — not
+ * migrated, not displayed, and not a picker state of its own.
+ */
+export type UserVariantRef = Extract<VariantRef, { kind: 'user' }>;
+
+/**
+ * A voice the user can pick. All of them are the user's own.
+ *
+ * `key` exists because a ref is an object and a `<select>` value is a string. It
+ * round-trips through `parseVoiceKey`, so a picker never has to reconstruct a ref
+ * by hand.
  */
 export interface VoiceOption {
   readonly key: string;
-  readonly ref: VariantRef;
+  readonly ref: UserVariantRef;
   readonly name: string;
-  /** Built-ins are readonly lib consts. Save is refused for them. */
-  readonly builtIn: boolean;
 }
 
 export interface SelectableVoices {
-  readonly builtIns: readonly VoiceOption[];
   readonly userVariants: readonly VoiceOption[];
 }
 
-export function voiceKey(ref: VariantRef): string {
-  return ref.kind === 'default' ? `default:${ref.slotId}` : `user:${ref.id}`;
+/** Still prefixed, and the prefix is not vestigial: it is what makes
+ *  {@link parseVoiceKey} able to reject a key that is not one of ours — a stored
+ *  `default:clean-amp` included — rather than reading its tail as a variant id. */
+export function voiceKey(ref: UserVariantRef): string {
+  return `user:${ref.id}`;
 }
 
 /**
- * The inverse of `voiceKey`. Null for anything unrecognised — including a slot id
- * the lib no longer knows, because an unknown slot resolves to the instrument's
- * first default and the picker would then show a selection that plays something
- * else. A variant id can't be validated here (variants come and go); `saveVoice`
- * and `renameVoice` check that separately.
+ * The inverse of `voiceKey`. Null for anything else, which now includes every
+ * `default:<slotId>` key a previous version of this app handed out: the app has no
+ * such voice any more, so the only honest answer is "not a voice key". A variant id
+ * can't be validated here (variants come and go); `saveVoice` and `renameVoice`
+ * check that separately.
  */
-export function parseVoiceKey(key: string): VariantRef | null {
+export function parseVoiceKey(key: string): UserVariantRef | null {
   const separator = key.indexOf(':');
   if (separator === -1) return null;
   const kind = key.slice(0, separator);
   const rest = key.slice(separator + 1);
   if (!rest) return null;
   if (kind === 'user') return { kind: 'user', id: rest };
-  if (kind === 'default' && KNOWN_SLOT_IDS.has(rest)) {
-    return { kind: 'default', slotId: rest as SlotId };
-  }
   return null;
 }
 
@@ -119,25 +127,20 @@ export function parseVoiceKey(key: string): VariantRef | null {
  * same reason (the lib keeps its pattern model independent of the voices
  * module), so they validate through one function rather than two that drift.
  *
- * Validated rather than cast blind because a ref is *persisted*: a malformed one
- * (a slot id the lib has since renamed, hand-edited storage) has to read as "no
- * choice" so resolution falls through cleanly, not as a choice the picker then
- * cannot find. The stored object is returned as-is when it is valid, so the
- * reference stays stable for callers that compare or memoise on it — which
+ * Validated rather than cast blind because a ref is *persisted*: anything that is
+ * not a user variant (hand-edited storage, or a `{ kind: 'default', slotId }` left
+ * behind by the version of this app that offered the lib's slot presets) has to
+ * read as "no choice" so resolution falls through cleanly, not as a choice the
+ * picker then cannot find. That fall-through IS the migration — see
+ * {@link UserVariantRef}. The stored object is returned as-is when it is valid, so
+ * the reference stays stable for callers that compare or memoise on it — which
  * `playbackService` and the lib's own `diffTracks` both do.
  */
-function validateVoiceRef(ref: unknown): VariantRef | null {
+function validateVoiceRef(ref: unknown): UserVariantRef | null {
   if (typeof ref !== 'object' || ref === null) return null;
-  const candidate = ref as { kind?: unknown; slotId?: unknown; id?: unknown };
+  const candidate = ref as { kind?: unknown; id?: unknown };
   if (candidate.kind === 'user' && typeof candidate.id === 'string' && candidate.id !== '') {
-    return ref as VariantRef;
-  }
-  if (
-    candidate.kind === 'default' &&
-    typeof candidate.slotId === 'string' &&
-    KNOWN_SLOT_IDS.has(candidate.slotId)
-  ) {
-    return ref as VariantRef;
+    return ref as UserVariantRef;
   }
   return null;
 }
@@ -149,12 +152,12 @@ function validateVoiceRef(ref: unknown): VariantRef | null {
  * ⚠ PATTERN, not track. {@link readTrackVoiceRef} is the other one; see the
  * TRACK PATH banner below for why they are two functions and not one generic.
  */
-export function readVoiceRef(pattern: Pattern): VariantRef | null {
+export function readVoiceRef(pattern: Pattern): UserVariantRef | null {
   return validateVoiceRef(pattern.voiceRef);
 }
 
 /** React hook: the editing pattern's voice choice, or null. */
-export function useEditingVoiceRef(): VariantRef | null {
+export function useEditingVoiceRef(): UserVariantRef | null {
   const pattern = useEditingPattern();
   return pattern ? readVoiceRef(pattern) : null;
 }
@@ -181,43 +184,10 @@ export function getEditingVoicePreset(): VoicePreset | null {
 
 // ----------------------------------------------------------------- listing ---
 
-/**
- * Zero or one option, because `getDefaultPresetForSlot` *throws* for a slot id with no
- * shipped preset. That is a lib inconsistency rather than something a user can cause,
- * but the same reasoning that makes `parseVoiceKey` reject an unknown slot applies here:
- * a registry the lib has half-renamed must cost the picker one entry, not the render.
- */
-/** Withdrawn from the picker 2026-09-01: unusable by ear — every note doubles and
- *  the string will not ring. Its source kind is withdrawn too, in `paramSchema`.
- *  A track already pointing at it still plays it; nothing new can select it. */
-const WITHDRAWN_SLOT_IDS: readonly string[] = ['electric-guitar'];
-
-const optionForSlot = (slotId: SlotId): VoiceOption[] => {
-  if (WITHDRAWN_SLOT_IDS.includes(slotId)) return [];
-  try {
-    return [
-      {
-        key: voiceKey({ kind: 'default', slotId }),
-        ref: { kind: 'default', slotId },
-        // The slot's own preset name. `parseSlotId` is the lib's id splitter and is
-        // deliberately unused: it assumes `<family>-<instrumentId>`, which holds for 3 of
-        // the 11 guitar slots and turns `clean-amp` into instrument "amp" and
-        // `karoryfer-green-guitar` into "green". The lib's own `getDefaultPresetForSlot`
-        // sidesteps it for the same reason, in a comment that says so.
-        name: getDefaultPresetForSlot(slotId).name,
-        builtIn: true,
-      },
-    ];
-  } catch {
-    return [];
-  }
-};
-
 const optionForVariant = (variant: Variant): VoiceOption => ({
   key: voiceKey({ kind: 'user', id: variant.id }),
   ref: { kind: 'user', id: variant.id },
   name: variant.name,
-  builtIn: false,
 });
 
 function selectableVoices(
@@ -225,9 +195,6 @@ function selectableVoices(
   variants: readonly Variant[],
 ): SelectableVoices {
   return {
-    // Registry order — the lib groups the instrument's own voices before its amp
-    // slots, which is the order a picker wants anyway.
-    builtIns: getSlotsForInstrument(instrumentId).flatMap(optionForSlot),
     // Filtered by instrument: a bass variant offered on a guitar pattern would
     // resolve to a bass preset on the wrong neck. Left in store order, which is
     // creation order — sorting by name would reshuffle the list under a rename.
@@ -242,9 +209,11 @@ export function listSelectableVoices(instrumentId: FretInstrumentId): Selectable
   return selectableVoices(instrumentId, store().variants);
 }
 
-/** React hook: everything the user can pick for this instrument, split so a picker
- *  can label the two groups differently — the distinction is load-bearing, since
- *  only one of them can be saved to. */
+/** React hook: everything the user can pick for this instrument.
+ *
+ *  Still a record with one field rather than a bare array: a picker draws the
+ *  user's voices as a labelled group beside the "Auto" / "Instrument default" row,
+ *  and a named field is what keeps that grouping from being implied by position. */
 export function useSelectableVoices(instrumentId: FretInstrumentId): SelectableVoices {
   const variants = useVoiceStore((s) => s.variants);
   return useMemo(() => selectableVoices(instrumentId, variants), [instrumentId, variants]);
@@ -278,7 +247,7 @@ export function useSelectableVoices(instrumentId: FretInstrumentId): SelectableV
  * A track's own voice choice, validated — null when it has none, which is the
  * lib's documented fallback to the instrument's global active variant.
  */
-export function readTrackVoiceRef(track: Track): VariantRef | null {
+export function readTrackVoiceRef(track: Track): UserVariantRef | null {
   return validateVoiceRef(track.voiceRef);
 }
 
@@ -398,11 +367,12 @@ export function resolveHolderVoicePreset(kind: HolderKind, id: string): VoicePre
  * selector ignores its state argument, because `resolveActiveVoice` reads the voice
  * store itself and is not reactive — so a rename, a save or a change to the
  * instrument's global active variant would otherwise never reach the editor. Sound
- * as a snapshot only because every resolution returns either a stored object or a
- * built-in const, so the reference is stable between renders; a resolution that
- * started spreading would render-loop its consumer rather than fail an assertion. The HOLDER half is the caller's own subscription: the pane
- * reads `useEditingPattern`, the rack is handed a `Track` by a grid that reads
- * the composition store, and either re-renders this.
+ * as a snapshot only because every resolution returns either a stored object or one
+ * of the lib's own frozen preset consts, so the reference is stable between
+ * renders; a resolution that started spreading would render-loop its consumer
+ * rather than fail an assertion. The HOLDER half is the caller's own subscription:
+ * the pane reads `useEditingPattern`, the rack is handed a `Track` by a grid that
+ * reads the composition store, and either re-renders this.
  */
 export function useHolderVoicePreset(kind: HolderKind, id: string): VoicePreset | null {
   return useVoiceStore(() => resolveHolderVoicePreset(kind, id));
@@ -431,19 +401,18 @@ export type TrackVoiceStatus = 'none' | 'ok' | 'deleted' | 'wrong-instrument';
  *  label can never disagree about which of the two failures this is. */
 function voiceStatusOf(
   instrumentId: FretInstrumentId,
-  ref: VariantRef,
+  ref: UserVariantRef,
   variants: readonly Variant[],
 ): Exclude<TrackVoiceStatus, 'none'> {
   const key = voiceKey(ref);
+  // Asked of the OFFER SET rather than of `variants` directly, though the two
+  // filters are one line apart: it is what makes "the picker offers it" and "the
+  // write accepts it" the same question by construction.
   const offered = selectableVoices(instrumentId, variants);
-  const known =
-    offered.builtIns.some((option) => option.key === key) ||
-    offered.userVariants.some((option) => option.key === key);
-  if (known) return 'ok';
-  if (ref.kind === 'user' && !variants.some((variant) => variant.id === ref.id)) {
-    return 'deleted';
-  }
-  return 'wrong-instrument';
+  if (offered.userVariants.some((option) => option.key === key)) return 'ok';
+  // Present but not offered can only mean the wrong neck, since the offer set is
+  // the instrument's variants and nothing else.
+  return variants.some((variant) => variant.id === ref.id) ? 'wrong-instrument' : 'deleted';
 }
 
 /** Non-reactive read — for event handlers and the write path. */
@@ -498,8 +467,13 @@ export function useTrackVoiceStatus(track: Track): TrackVoiceStatus {
  *   `no-voice`        — the holder has no explicit ref, so it is playing whatever
  *                       the instrument's active voice resolves to. Nothing
  *                       addressable to write back to; Save-as is the way out.
- *   `built-in`        — one of the fourteen readonly slot presets.
- *   `unknown-variant` — the ref names a variant that no longer exists.
+ *   `unknown-variant` — the ref names a variant that no longer exists, belongs to
+ *                       another instrument, or was named by a string that is not
+ *                       one of our voice keys at all ({@link variantIdFromKey},
+ *                       which is the agent's path in). THREE states, ONE code and
+ *                       one sentence, deliberately: all three mean "that is not a
+ *                       voice you have", and a caller's only move is the same in
+ *                       each.
  *   `empty-name`      — a variant with a blank name is unfindable in the picker.
  *   `capped`          — the lib's tier gate refused and has already opened its own
  *                       signup/upgrade prompt.
@@ -507,7 +481,6 @@ export function useTrackVoiceStatus(track: Track): TrackVoiceStatus {
 export type VoiceRefusal =
   | 'no-holder'
   | 'no-voice'
-  | 'built-in'
   | 'unknown-variant'
   | 'empty-name'
   | 'capped';
@@ -524,7 +497,7 @@ const refuse = (reason: VoiceRefusal): VoiceWriteResult => ({ ok: false, reason 
  * The codes above are for a surface that wants to render each state differently
  * (`VoicePane` and `TrackVoiceRack` both map them with a `Record`, and get to phrase
  * them in their own voice next to the control that caused them). A caller with no
- * surface — the agent's tools, a log line — needs prose, and `'built-in'` on its
+ * surface — the agent's tools, a log line — needs prose, and `'no-voice'` on its
  * own is not prose. Authored HERE rather than in the tool layer so there is one
  * map to widen when the union grows, and so a new refusal cannot reach a caller
  * as a bare identifier.
@@ -556,8 +529,6 @@ export function describeVoiceRefusal(kind: HolderKind, reason: VoiceRefusal): st
         : 'That track is no longer in this composition.';
     case 'no-voice':
       return 'That has no voice of its own to save — it is playing the instrument’s active voice. Save it as a new voice instead.';
-    case 'built-in':
-      return 'That is one of the built-in voices — they cannot be renamed, deleted or overwritten. Save it as a new voice instead.';
     case 'unknown-variant':
       return 'That voice is not in your library (or belongs to another instrument).';
     case 'empty-name':
@@ -604,7 +575,7 @@ export function describeVoiceRefusal(kind: HolderKind, reason: VoiceRefusal): st
  *      make either call itself: `playbackService` imports this module, so the
  *      arrow only points one way.
  */
-export function selectVoice(kind: HolderKind, id: string, ref: VariantRef | null): Result {
+export function selectVoice(kind: HolderKind, id: string, ref: UserVariantRef | null): Result {
   return kind === 'track' ? selectTrackVoice(id, ref) : selectPatternVoice(id, ref);
 }
 
@@ -618,7 +589,7 @@ export function selectVoice(kind: HolderKind, id: string, ref: VariantRef | null
  *
  * Nothing becomes audible as a side effect — see point 3 above.
  */
-function selectPatternVoice(patternId: string, ref: VariantRef | null): Result {
+function selectPatternVoice(patternId: string, ref: UserVariantRef | null): Result {
   const pattern = editingPatternById(patternId);
   if (!pattern) return { ok: false, reason: describeVoiceRefusal('pattern', 'no-holder') };
   if (ref === null) {
@@ -659,7 +630,7 @@ function selectPatternVoice(patternId: string, ref: VariantRef | null): Result {
  * which fires nothing on an unchanged value; squarely reachable by the agent,
  * which is the caller that matters here.
  */
-function selectTrackVoice(trackId: string, ref: VariantRef | null): Result {
+function selectTrackVoice(trackId: string, ref: UserVariantRef | null): Result {
   const track = findTrack(trackId);
   // Through {@link describeVoiceRefusal} rather than a sentence of its own: this is
   // the same `no-holder` state `saveVoice` and `deleteVoice` refuse on this arm, and
@@ -698,11 +669,11 @@ function selectTrackVoice(trackId: string, ref: VariantRef | null): Result {
 /**
  * Overwrite the variant a pattern or a track points at with `preset`.
  *
- * The built-in refusal is the real guard, not a mirror of a disabled button: the
- * fourteen slot presets are `readonly` consts reached through
- * `getDefaultPresetForSlot`, and `useVoiceStore` has no setter for them at all —
- * only `updateVariant`, which addresses user variants by id. A UI that let this
- * through would look like it saved and lose the edit on the next reload.
+ * `no-voice` is the real guard, not a mirror of a disabled button: a holder with no
+ * ref is playing whatever the lib's resolver falls through to, and `useVoiceStore`
+ * has only `updateVariant`, which addresses a user variant by id. A UI that let
+ * that through would look like it saved and lose the edit on the next reload.
+ * Save-as is the way out, and it is what the surfaces say.
  *
  * Remember that a variant is SHARED: this changes the voice for every pattern AND
  * every track pointing at the same ref, which is intended and is why both
@@ -713,9 +684,9 @@ function selectTrackVoice(trackId: string, ref: VariantRef | null): Result {
  * this module, so reading it from here would be a cycle. The caller passes
  * `voicePreset(kind, id)`.
  *
- * The arms differ only in WHOSE ref and instrument they resolve — the four guards
+ * The arms differ only in WHOSE ref and instrument they resolve — the three guards
  * in {@link writeVariant} are the whole of Save's semantics and are shared, so
- * the built-in refusal has one place to drift from.
+ * there is one authoring of them to drift from.
  */
 export function saveVoice(kind: HolderKind, id: string, preset: VoicePreset): VoiceWriteResult {
   if (kind === 'track') {
@@ -733,17 +704,16 @@ export function saveVoice(kind: HolderKind, id: string, preset: VoicePreset): Vo
  * arms.
  *
  * The arms differ only in WHOSE ref and instrument they resolve. Shared rather
- * than copied because these four guards are the whole of Save's semantics, and a
- * second copy of the built-in refusal is a second place for it to drift from the
- * one the buttons are disabled by.
+ * than copied because these three guards are the whole of Save's semantics, and a
+ * second copy of them is a second place to drift from the rule the buttons are
+ * disabled by.
  */
 function writeVariant(
-  ref: VariantRef | null,
+  ref: UserVariantRef | null,
   instrumentId: FretInstrumentId,
   preset: VoicePreset,
 ): VoiceWriteResult {
   if (!ref) return refuse('no-voice');
-  if (ref.kind === 'default') return refuse('built-in');
 
   const variant = store().variants.find((candidate) => candidate.id === ref.id);
   if (!variant) return refuse('unknown-variant');
@@ -763,8 +733,8 @@ function writeVariant(
 /**
  * Copy `preset` into a new user variant and point the holder at it.
  *
- * The repoint is the whole point: without it the holder keeps playing the built-in
- * the copy was taken from, and the saved variant sits in the library unused. It is
+ * The repoint is the whole point: without it the holder keeps playing whatever the
+ * copy was taken from, and the saved variant sits in the library unused. It is
  * also the half that differs between the arms — everything before it is the same
  * mint through {@link addUserVariant}, and folders are a later slice either way,
  * so the variant lands at the root.
@@ -851,24 +821,19 @@ function addUserVariant(
  *
  * Everything that offers a voice hands out keys (`listSelectableVoices`,
  * `voiceKey`) and {@link selectVoice} takes a ref, but {@link renameVoice} and
- * {@link deleteVoice} take a bare VARIANT ID, which a built-in slot does not
- * have. A caller holding only keys therefore had to strip the prefix itself and
- * got `unknown-variant` back for `default:clean-amp` — which is a wrong sentence
- * as well as an unhelpful one: that voice is not unknown, it is one of the
- * fourteen readonly slot presets and there is no setter for it anywhere in the
- * lib. Answering `built-in` is the difference between "check the id" and "copy
- * it to a voice of your own first".
+ * {@link deleteVoice} take a bare VARIANT ID. A caller holding only keys would
+ * otherwise strip the prefix itself, and `key.split(':')[1]` reads the tail of
+ * ANY key as a variant id — including a `default:<slotId>` one left over in
+ * storage, which would then address a variant that never existed.
  *
- * Guarded HERE rather than in a caller for the reason the built-in refusal
- * itself is: a rule only one surface enforces is a rule every other surface
- * walks past.
+ * Kept as a function rather than inlined for the reason the parse itself is: the
+ * key format has one authoring, and a caller that re-derives it is a second one.
  */
 export function variantIdFromKey(
   key: string,
 ): { readonly ok: true; readonly id: string } | { readonly ok: false; readonly reason: VoiceRefusal } {
   const ref = parseVoiceKey(key);
   if (!ref) return { ok: false, reason: 'unknown-variant' };
-  if (ref.kind === 'default') return { ok: false, reason: 'built-in' };
   return { ok: true, id: ref.id };
 }
 
@@ -897,8 +862,8 @@ export function renameVoice(id: string, name: string): VoiceWriteResult {
  * silent. The lib's `deleteVariant` repoints the global `activeVariants` map off
  * the deleted id and knows nothing about documents, so a dangling ref is left in
  * whatever pointed at the variant. Left alone it would resolve — silently, by
- * design — to the instrument's first built-in, with the surface showing nothing
- * selected while the holder still played.
+ * design — to the instrument's default, with the surface showing nothing selected
+ * while the holder still played.
  *
  *   - The EDITING PATTERN's ref is repaired on BOTH arms, in
  *     {@link destroyVariant}. It is not the track arm's business who else
@@ -926,7 +891,7 @@ export function deleteVoice(kind: HolderKind, id: string, variantId: string): Vo
     if (!deleted.ok && deleted.reason !== 'unknown-variant') return deleted;
 
     const ref = readTrackVoiceRef(track);
-    if (ref?.kind === 'user' && ref.id === variantId) {
+    if (ref?.id === variantId) {
       const repaired = selectVoice('track', id, null);
       if (!repaired.ok) return refuse('no-holder');
     }
@@ -955,7 +920,7 @@ function destroyVariant(variantId: string): VoiceWriteResult {
 
   const pattern = getEditingPattern();
   const ref = pattern ? readVoiceRef(pattern) : null;
-  if (ref?.kind === 'user' && ref.id === variantId) setEditingPatternVoiceRef(null);
+  if (ref?.id === variantId) setEditingPatternVoiceRef(null);
 
   return { ok: true, id: variantId };
 }

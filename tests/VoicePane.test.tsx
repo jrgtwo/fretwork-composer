@@ -6,12 +6,14 @@ import {
   ACOUSTIC_GUITAR_PRESET,
   CABINET_IRS,
   detectSamplePack,
+  getDefaultPresetForSlot,
   getSamplePack,
   sourceTrimDb,
   usePatternsStore,
   useFretworkStore,
   useVoiceStore,
   type CabIRParams,
+  type SlotId,
   type VoicePreset,
 } from '@fretwork/lib';
 import { VoicePane } from '../src/voice/VoicePane';
@@ -26,7 +28,7 @@ import {
   subscribeVoiceDrafts,
 } from '../src/voice/voiceDrafts';
 import { SEED_VOICE_REVERB } from '../src/voice/pedalDefaults';
-import { readVoiceRef } from '../src/voice/voiceService';
+import { readVoiceRef, voiceKey } from '../src/voice/voiceService';
 import { VOICE_COMMIT_MS } from '../src/voice/voiceChrome';
 import { clearPendingWarms } from '../src/voice/sampleWarm';
 import { getEditingPattern, openBlankPattern } from '../src/patterns/patternService';
@@ -113,6 +115,37 @@ const pickVoice = async (key: string) => {
   const picker = screen.getByLabelText('Voice');
   await userEvent.selectOptions(picker, key);
   fireEvent.blur(picker);
+};
+
+/**
+ * A voice of the user's own, seeded out of one of the lib's slot presets: the
+ * `<select>` key that picks it, and the variant id behind it.
+ *
+ * These tests used to pick `default:<slotId>` keys directly. The app has no built-in
+ * voices any more (2026-09-20, `docs/PLAN-remove-presets.md`) and such a key now
+ * names nothing — but a lib preset is still the cheapest source of real, complete
+ * preset DATA to build a variant out of, and the data is the point: a test about a
+ * second source needs a voice that HAS one.
+ *
+ * The key comes from `voiceKey` and the id is handed back beside it, rather than
+ * either being spelt out here: the format has ONE authoring at the seam, and a test
+ * that writes `user:${id}` or slices the prefix back off is a second one that goes
+ * on passing after the seam's changes.
+ */
+const seedVoice = (
+  slotId: SlotId,
+  name = `Seeded ${slotId}`,
+): { readonly key: string; readonly id: string } => {
+  const source = getDefaultPresetForSlot(slotId);
+  const id = useVoiceStore.getState().addVariant({
+    name,
+    instrumentId: source.instrumentId,
+    family: source.family,
+    collectionId: null,
+    preset: { ...source, name },
+  });
+  if (!id) throw new Error(`the voice store refused a variant from ${slotId}`);
+  return { key: voiceKey({ kind: 'user', id }), id };
 };
 const section = (name: string) => screen.getByRole('button', { name });
 /** The ref the open pattern actually holds, read through the seam rather than off
@@ -887,13 +920,15 @@ describe('VoicePane', () => {
     expect(within(picker).getByRole('option', { name: 'Not in the registry' })).toBeDisabled();
   });
 
-  it('refuses Save on a built-in and says why', async () => {
+  it('refuses Save on a pattern with no voice of its own and says why', async () => {
+    // The pane's DEFAULT state now that built-ins are gone: no ref at all, playing
+    // the instrument's default, which is the lib resolver's floor and not a
+    // document. Nothing to write into, so Save as… is the only way out.
     render(<Host />);
-    await pickVoice('default:acoustic-guitar');
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
 
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
-    expect(screen.getByText(/Defaults are read-only/)).toBeInTheDocument();
+    expect(screen.getByText(/no voice of its own/)).toBeInTheDocument();
     // Rename and Delete are refused for the same reason — there is no record to patch.
     expect(screen.getByRole('button', { name: 'Rename' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Delete' })).toBeDisabled();
@@ -901,7 +936,6 @@ describe('VoicePane', () => {
 
   it('Save as… creates a variant, repoints the pattern and clears the working copy', async () => {
     render(<Host />);
-    await pickVoice('default:acoustic-guitar');
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
 
     await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
@@ -921,8 +955,8 @@ describe('VoicePane', () => {
     const picker = screen.getByLabelText('Voice') as HTMLSelectElement;
     expect(picker.value).toBe(`user:${variants[0].id}`);
     expect(within(picker).getByRole('group', { name: 'My tones' })).toBeInTheDocument();
-    // A user variant can be saved to, so the read-only hint is gone.
-    expect(screen.queryByText(/Defaults are read-only/)).not.toBeInTheDocument();
+    // A user variant can be saved to, so the "nothing to save into" line is gone.
+    expect(screen.queryByText(/no voice of its own/)).not.toBeInTheDocument();
   });
 
   it('Save overwrites the variant every pattern pointing at it shares', async () => {
@@ -962,9 +996,10 @@ describe('VoicePane', () => {
 
   it('confirms before a switch would strand unsaved work', async () => {
     const asked = stubConfirm(false);
+    const green = seedVoice('karoryfer-green-guitar').key;
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-    await pickVoice('default:karoryfer-green-guitar');
+    await pickVoice(green);
 
     expect(asked).toHaveLength(1);
     // Refused, so the edit survives and the voice hasn't moved.
@@ -977,15 +1012,14 @@ describe('VoicePane', () => {
     // `chooseVoice` that forgot to clear the copy would leave the pane showing the old
     // preset's edits over the new voice.
     stubConfirm(true);
+    const green = seedVoice('karoryfer-green-guitar').key;
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-    await pickVoice('default:karoryfer-green-guitar');
+    await pickVoice(green);
 
     expect(screen.getByText('Saved')).toBeInTheDocument();
     expect(screen.queryByLabelText('Drive')).not.toBeInTheDocument();
-    expect((screen.getByLabelText('Voice') as HTMLSelectElement).value).toBe(
-      'default:karoryfer-green-guitar',
-    );
+    expect((screen.getByLabelText('Voice') as HTMLSelectElement).value).toBe(green);
   });
 
   it('says so when there is no pattern to edit', async () => {
@@ -1026,19 +1060,20 @@ describe('VoicePane', () => {
     // blur, which is the gesture a keyboard user makes anyway — so delete the
     // timer and commit synchronously and they all still pass. This is the one
     // that does not.
+    const green = seedVoice('karoryfer-green-guitar');
     vi.useFakeTimers();
     render(<Host />);
     const picker = screen.getByLabelText('Voice');
-    fireEvent.change(picker, { target: { value: 'default:karoryfer-green-guitar' } });
+    fireEvent.change(picker, { target: { value: green.key } });
 
     // The control shows the pick; the pattern has not taken it.
-    expect((picker as HTMLSelectElement).value).toBe('default:karoryfer-green-guitar');
+    expect((picker as HTMLSelectElement).value).toBe(green.key);
     expect(liveRef()).toBeNull();
 
     act(() => {
       vi.advanceTimersByTime(VOICE_COMMIT_MS);
     });
-    expect(liveRef()).toEqual({ kind: 'default', slotId: 'karoryfer-green-guitar' });
+    expect(liveRef()).toEqual({ kind: 'user', id: green.id });
   });
 
   it('drops a pick the instrument switch overtook, rather than writing it to the new one', async () => {
@@ -1048,11 +1083,10 @@ describe('VoicePane', () => {
     // already-on-it short-circuit misses and a GUITAR variant lands on a BASS
     // pattern — a voice the picker then has to show as "Unavailable", with no
     // gesture the user can connect it to.
+    const green = seedVoice('karoryfer-green-guitar').key;
     vi.useFakeTimers();
     render(<Host />);
-    fireEvent.change(screen.getByLabelText('Voice'), {
-      target: { value: 'default:karoryfer-green-guitar' },
-    });
+    fireEvent.change(screen.getByLabelText('Voice'), { target: { value: green } });
     fireEvent.change(screen.getByLabelText('Instrument'), { target: { value: 'bass' } });
 
     act(() => {
@@ -1096,12 +1130,11 @@ describe('VoicePane', () => {
     // against the pattern that is actually open and refuses a stale one. Remove
     // the cancel and this still passes, off the seam's guard — which is the
     // order the two were meant to be in.
+    const green = seedVoice('karoryfer-green-guitar').key;
     vi.useFakeTimers();
     const first = getEditingPattern()!.id;
     render(<Host />);
-    fireEvent.change(screen.getByLabelText('Voice'), {
-      target: { value: 'default:karoryfer-green-guitar' },
-    });
+    fireEvent.change(screen.getByLabelText('Voice'), { target: { value: green } });
     act(() => {
       openBlankPattern('Second');
     });
@@ -1120,16 +1153,20 @@ describe('VoicePane', () => {
     // be: React's value tracker drops a `change` whose value did not move, so re-picking
     // the current instrument never reaches the handler at all.
     const asked = stubConfirm(true);
+    // A guitar voice of the user's own, so the last assertion is about the list
+    // FOLLOWING the instrument rather than about an empty list either way.
+    seedVoice('karoryfer-green-guitar', 'My guitar tone');
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    expect(screen.getByRole('option', { name: 'My guitar tone' })).toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
 
     expect(asked).toHaveLength(1);
     expect(screen.getByText('Saved')).toBeInTheDocument();
     expect((screen.getByLabelText('Instrument') as HTMLSelectElement).value).toBe('bass');
-    // Bass slots only — the voice list has to follow the pattern, or the picker offers a
-    // voice that plays on another neck.
-    expect(screen.queryByRole('option', { name: 'Acoustic Bass' })).toBeInTheDocument();
+    // The voice list has to follow the pattern, or the picker offers a voice that
+    // plays on another neck.
+    expect(screen.queryByRole('option', { name: 'My guitar tone' })).toBeNull();
   });
 
   it('refuses Save into a variant that has left the library, and says so', async () => {
@@ -1316,15 +1353,21 @@ describe('VoicePane', () => {
   });
 
   it('changing instrument re-offers that instrument’s voices', async () => {
+    seedVoice('karoryfer-green-guitar', 'My guitar tone');
+    seedVoice('electric-bass', 'My bass tone');
     render(<Host />);
+
+    const offered = () =>
+      within(screen.getByLabelText('Voice') as HTMLSelectElement)
+        .getAllByRole('option')
+        .map((option) => option.textContent);
+    expect(offered()).toEqual(['Instrument default', 'My guitar tone']);
+
     await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
 
-    const picker = screen.getByLabelText('Voice') as HTMLSelectElement;
-    const offered = within(picker)
-      .getAllByRole('option')
-      .map((option) => option.textContent);
-    // Bass has two slots and none of the guitar amps.
-    expect(offered).toEqual(['Instrument default', 'Acoustic Bass', 'Electric Bass']);
+    // The bass voice and none of the guitar ones — a variant for another neck would
+    // resolve to a preset this pattern has not got.
+    expect(offered()).toEqual(['Instrument default', 'My bass tone']);
   });
 
   // ─── the second source (`preset.layer`) ────────────────────────────────────
@@ -1408,10 +1451,11 @@ describe('VoicePane', () => {
     expect(Object.hasOwn(draftPreset(), 'layer')).toBe(false);
   });
 
-  it('shows a built-in`s real second source rather than the schema fallbacks', async () => {
+  it('shows a real preset`s second source rather than the schema fallbacks', async () => {
     render(<Host />);
     await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
-    await pickVoice('default:acoustic-bass');
+    // No pick: a bass pattern with no voice of its own already resolves to Acoustic
+    // Bass through the lib's floor, which is what this reads its values from.
     const layer = await openSecondSource();
 
     // Acoustic Bass ships `gainDb: -8`, `octaveOffset: -1`, an FM sub-body at
@@ -1443,7 +1487,6 @@ describe('VoicePane', () => {
   it('writes a second source edit to `layer`, leaving the primary source alone', async () => {
     render(<Host />);
     await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
-    await pickVoice('default:acoustic-bass');
     const layer = await openSecondSource();
 
     const mix = layer.getByRole('spinbutton', { name: 'Second source Mix' });
@@ -1469,7 +1512,6 @@ describe('VoicePane', () => {
     // it worked. Asserted on both branches of the preset, in both directions.
     render(<Host />);
     await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
-    await pickVoice('default:acoustic-bass');
     const layer = await openSecondSource();
 
     await userEvent.selectOptions(layer.getByLabelText('Second source Source'), 'pluck-synth');

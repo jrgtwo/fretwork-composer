@@ -65,7 +65,7 @@ import {
 const listForTrack = defineTool<{ trackId: string }>({
   name: 'voice_list_for_track',
   description:
-    "Every voice one track can be set to — the built-in voices for its instrument plus the user's own saved ones for that instrument. Built-in voices cannot be overwritten or deleted. A voice for another instrument is never offered, because it would resolve to a preset for a neck this track has not got.",
+    "Every voice one track can be set to — the user's own saved voices for this track's instrument. A voice for another instrument is never offered, because it would resolve to a preset for a neck this track has not got. The list can be EMPTY, which is not an error: it means the user has saved no voices for this instrument yet, and every track on it follows the instrument's default. Use voice_save_as to make one.",
   parameters: obj({ trackId: str('From read_composition.') }, ['trackId']),
   run: ({ trackId }) => {
     const track = findTrack(trackId);
@@ -73,11 +73,10 @@ const listForTrack = defineTool<{ trackId: string }>({
     const instrumentId = trackInstrumentId(track);
     const offered = listSelectableVoices(instrumentId);
     const describe = (
-      option: (typeof offered.builtIns)[number],
+      option: (typeof offered.userVariants)[number],
     ): JsonValue => ({
       voiceKey: option.key,
       name: option.name,
-      builtIn: option.builtIn,
     });
     const current = readTrackVoiceRef(track);
     return ok({
@@ -88,7 +87,7 @@ const listForTrack = defineTool<{ trackId: string }>({
       // legitimate state rather than a missing value.
       currentVoiceKey: current ? voiceKey(current) : null,
       currentVoiceStatus: trackVoiceRefStatus(track),
-      voices: [...offered.builtIns, ...offered.userVariants].map(describe),
+      voices: offered.userVariants.map(describe),
     });
   },
 });
@@ -119,7 +118,7 @@ const setForTrack = defineTool<{ trackId: string; voiceKey: string | null }>({
 const saveAsForTrack = defineTool<{ trackId: string; name: string }>({
   name: 'voice_save_as',
   description:
-    "Save what a track currently sounds like as a new voice of the user's own, under a name, and point the track at it. This is how a built-in voice becomes something that can be renamed or kept — the built-ins themselves are read-only.",
+    "Save what a track currently sounds like as a new voice of the user's own, under a name, and point the track at it. This is the only way a new voice comes into being: a track following its instrument's default has nothing to save into, so this is what turns what it sounds like now into something that can be picked, renamed and kept.",
   parameters: obj(
     { trackId: str('From read_composition.'), name: str('What to call the new voice.') },
     ['trackId', 'name'],
@@ -144,16 +143,16 @@ const saveAsForTrack = defineTool<{ trackId: string; name: string }>({
 const rename = defineTool<{ voiceKey: string; name: string }>({
   name: 'voice_rename',
   description:
-    'Rename one of the saved voices. A voice is SHARED: the new name shows everywhere it is used. The built-in voices cannot be renamed.',
+    'Rename one of the saved voices. A voice is SHARED: the new name shows everywhere it is used.',
   parameters: obj(
     { voiceKey: str('From voice_list_for_track.'), name: str('The new name.') },
     ['voiceKey', 'name'],
   ),
   run: ({ voiceKey: key, name }) => {
     // Keys in, keys out: everything that OFFERS a voice hands out keys, so the
-    // write path takes one too. The seam turns it into a variant id and refuses
-    // a built-in as `built-in` rather than as "unknown" — which is why this is
-    // not a `key.split(':')` here.
+    // write path takes one too. The seam turns it into a variant id, and it is the
+    // seam's job rather than a `key.split(':')` here because the key format has one
+    // authoring — a split would read the tail of ANY string as a variant id.
     const variant = variantIdFromKey(key);
     // The kind is inert on this path and only `describeVoiceRefusal`'s signature
     // asks for it: rename addresses a VARIANT by id — a variant has no holder to
@@ -171,7 +170,7 @@ const rename = defineTool<{ voiceKey: string; name: string }>({
 const deleteForTrack = defineTool<{ trackId: string; voiceKey: string }>({
   name: 'voice_delete',
   description:
-    "Delete one of the saved voices and put the track named here back on its instrument's default. A voice is SHARED: only the named track is repaired, so any OTHER track pointing at the same voice is left with a dangling reference (read_composition still shows its key, and voice_list_for_track reports it as deleted) — set those tracks yourself. The built-in voices cannot be deleted.",
+    "Delete one of the saved voices and put the track named here back on its instrument's default. A voice is SHARED: only the named track is repaired, so any OTHER track pointing at the same voice is left with a dangling reference (read_composition still shows its key, and voice_list_for_track reports it as deleted) — set those tracks yourself.",
   parameters: obj(
     {
       trackId: str('The track to repair afterwards, from read_composition.'),

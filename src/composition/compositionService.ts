@@ -1284,10 +1284,10 @@ function nextTrackName(tracks: readonly Track[]): string {
  * Append a track.
  *
  * The cap is refused HERE and not merely greyed out in the UI, matching the
- * precedent that built-in voices are unsaveable at the seam: the agent's tools
- * reach this module, not a button, and a rule only a button enforces is a rule
- * the agent can walk straight past. The cap is real — each sampler voice loads
- * its own sample bank.
+ * precedent that a blank track name and a wrong-instrument voice are both refused
+ * at the seam: the agent's tools reach this module, not a button, and a rule only a
+ * button enforces is a rule the agent can walk straight past. The cap is real —
+ * each sampler voice loads its own sample bank.
  */
 export function addTrack(name?: string, instrumentId?: FretInstrumentId): Result<Track> {
   if (lockedOut()) return refuse(JOB_LOCK_REASON);

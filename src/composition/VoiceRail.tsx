@@ -64,9 +64,9 @@ import { SHARED_VOICE_REFUSAL_TEXT } from '../voice/voiceChrome';
  * ── Why a list of buttons and not a `<select>` ───────────────────────────────
  *
  * Both `<select>` pickers on this page debounce their writes by `VOICE_COMMIT_MS`,
- * because a native `<select>` fires `change` once per arrow key while closed and
- * ten of the eleven guitar voices are sampler-sourced — one keyboard walk down
- * the list is a fetch storm. THIS SURFACE NEEDS NO SUCH WINDOW, and the reason is
+ * because a native `<select>` fires `change` once per arrow key while closed and a
+ * sampler-sourced voice costs an HTTP load per bank — one keyboard walk down a
+ * library of them is a fetch storm. THIS SURFACE NEEDS NO SUCH WINDOW, and the reason is
  * the control rather than the rail: arrowing through a list of buttons moves
  * focus and commits nothing, so a pick costs exactly one write whether it was
  * made with a pointer or with a keyboard. The rail also has the full 300 px, so
@@ -264,8 +264,8 @@ function TrackVoicePicker({ track }: { track: Track }) {
         {(status === 'deleted' || status === 'wrong-instrument') && (
           <p className="px-1 py-1.5 font-mono text-[9px] leading-relaxed text-brass-hi">
             {status === 'deleted'
-              ? 'This track’s voice has been deleted; it is playing a built-in until you pick another.'
-              : 'This track’s voice belongs to another instrument; it is playing a built-in until you pick another.'}
+              ? 'This track’s voice has been deleted; it is playing its instrument’s default until you pick another.'
+              : 'This track’s voice belongs to another instrument; it is playing its instrument’s default until you pick another.'}
           </p>
         )}
 
@@ -289,21 +289,10 @@ function TrackVoicePicker({ track }: { track: Track }) {
           </ul>
         </div>
 
-        <Group label="Presets" count={voices.builtIns.length}>
-          {voices.builtIns.length === 0 ? (
-            <p className="px-1 py-1.5 font-mono text-[9px] leading-relaxed text-ink-mut">
-              The lib ships no voices for {instrumentId}.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-1">{voices.builtIns.map(row)}</ul>
-          )}
-        </Group>
-
         <Group label="My tones" count={voices.userVariants.length}>
           {voices.userVariants.length === 0 ? (
-            // The OTHER kind of empty, and it says which: nothing is wrong and
-            // nothing is missing — this instrument simply has no variants of the
-            // user's yet, and the way to make one is named.
+            // Nothing is wrong and nothing is missing — this instrument simply has
+            // no variants of the user's yet, and the way to make one is named.
             <p className="px-1 py-1.5 font-mono text-[9px] leading-relaxed text-ink-mut">
               No voices of your own for {instrumentId} yet. Tune this track on its rack, then Save
               as… to keep it.
@@ -317,9 +306,14 @@ function TrackVoicePicker({ track }: { track: Track }) {
   );
 }
 
-/** The two groups are labelled landmarks rather than headings alone: the
- *  distinction between them is load-bearing — only one of them can ever be saved
- *  to — and a group is what lets a screen reader (and a test) scope to one. */
+/** The user's own voices, as a labelled landmark rather than a heading alone: the
+ *  count belongs beside the label, and a group is what lets a screen reader (and a
+ *  test) scope to this list rather than the whole rail.
+ *
+ *  ONE call site, and the "Instrument default" row above is deliberately not a
+ *  second one — it is a hand-rolled `role="group"` because it holds exactly one
+ *  fixed row, so the heading strip and the count this draws would both be noise.
+ *  A second real list is what makes this a component again. */
 function Group({
   label,
   count,

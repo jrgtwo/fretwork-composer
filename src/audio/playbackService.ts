@@ -184,7 +184,7 @@ let sharedMetronome: Metronome | null = null;
  */
 function refKeyOf(pattern: Pattern): string {
   const ref = readVoiceRef(pattern);
-  const key = ref === null ? 'none' : ref.kind === 'user' ? `u:${ref.id}` : `d:${ref.slotId}`;
+  const key = ref === null ? 'none' : `u:${ref.id}`;
   return `${patternInstrumentId(pattern)}|${key}`;
 }
 

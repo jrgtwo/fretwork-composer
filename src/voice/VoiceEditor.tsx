@@ -103,7 +103,6 @@ import {
   getCabinetIR,
   getSamplePack,
   type FretInstrumentId,
-  type VariantRef,
 } from '@fretwork/lib';
 import {
   DEFAULT_OPEN_SECTIONS,
@@ -156,6 +155,7 @@ import {
   useSelectableVoices,
   voiceKey,
   type HolderKind,
+  type UserVariantRef,
   type VoiceRefusal,
 } from './voiceService';
 import {
@@ -253,8 +253,9 @@ export function VoiceEditor({
    *  wrapper, which is the half that knows whether a pattern or a track is being
    *  asked. */
   instrumentId: FretInstrumentId;
-  /** The holder's stored ref, subscribed by the wrapper. */
-  voiceRef: VariantRef | null;
+  /** The holder's stored ref, subscribed by the wrapper. Null is "no voice of its
+   *  own", which is the only other state there is — see {@link UserVariantRef}. */
+  voiceRef: UserVariantRef | null;
   /**
    * The same ref as of NOW, for the commit that fires up to
    * {@link VOICE_COMMIT_MS} after the render that scheduled it. The rail, a
@@ -262,7 +263,7 @@ export function VoiceEditor({
    * value can be a window out of date — which would write a pick the model has
    * already taken, or skip one it has not.
    */
-  readVoiceRef: () => VariantRef | null;
+  readVoiceRef: () => UserVariantRef | null;
   /** What every accessible name here is scoped by — a track's name where eight
    *  racks share one page, null where the holder is the only one on screen and
    *  the visible engraving is name enough. */
@@ -433,7 +434,13 @@ export function VoiceEditor({
   const write = (path: string, value: unknown) => report(setVoiceParam(kind, id, path, value));
 
   const currentKey = voiceRef ? voiceKey(voiceRef) : '';
-  const isBuiltIn = voiceRef === null || voiceRef.kind === 'default';
+  /** No voice of its own — the holder is on its instrument's default, which is the
+   *  lib resolver's floor and not a document. Nothing to Save into, rename or
+   *  delete, so the four buttons that address a voice are all disabled by this one
+   *  fact. It replaced an `isBuiltIn` that also covered the lib's slot presets; the
+   *  app stopped modelling those (`docs/PLAN-remove-presets.md`) and the two states
+   *  collapsed into this one. */
+  const followsInstrument = voiceRef === null;
 
   /** One confirmation in front of every switch that would throw the working copy
    *  away — and a pick really does throw it away (see `discard` in
@@ -572,8 +579,8 @@ export function VoiceEditor({
     // variant — but this is the one place here that could swallow a failure, and
     // a form that sits open saying nothing is what this editor would be blamed
     // for.
-    if (voiceRef?.kind !== 'user') {
-      setNotice(refusals['built-in']);
+    if (voiceRef === null) {
+      setNotice(refusals['no-voice']);
       return;
     }
     const renamed = renameVoice(voiceRef.id, trimmed);
@@ -589,7 +596,7 @@ export function VoiceEditor({
   };
 
   const remove = () => {
-    if (voiceRef?.kind !== 'user') return;
+    if (voiceRef === null) return;
     // ONE dialog, not two. Deleting the variant also strands this holder's unsaved
     // edit — a pick asks about exactly that on the same screen, and asking twice in
     // a row is how people learn to click through confirmations — so the loss is
@@ -599,8 +606,8 @@ export function VoiceEditor({
     // can legitimately sit on one shared variant, and then the variant's name says
     // nothing about which of eight racks asked.
     const consequence = dirty
-      ? 'Your unsaved edits to it go too, and any pattern or track using it falls back to a built-in voice.'
-      : 'Any pattern or track using it falls back to a built-in voice.';
+      ? 'Your unsaved edits to it go too, and any pattern or track using it falls back to its instrument’s default.'
+      : 'Any pattern or track using it falls back to its instrument’s default.';
     if (
       !window.confirm(
         `Delete “${preset.name}”${scope ? `, ${scope}’s voice` : ''}? ${consequence}`,
@@ -612,7 +619,7 @@ export function VoiceEditor({
     // ONE seam call, because it is one act: the seam destroys the variant and
     // repairs THIS holder's dangling ref itself, which is what the kind buys —
     // under the wrong one the same call would fix the open pattern and leave a
-    // track resolving silently to a built-in.
+    // track resolving silently to its instrument's default.
     const result = deleteVoice(kind, id, voiceRef.id);
     if (!result.ok) {
       setNotice(refusals[result.reason]);
@@ -1405,17 +1412,8 @@ export function VoiceEditor({
               {follow.label}
             </option>
           )}
-          {/* Guarded rather than always drawn: an instrument the lib ships no
-              voices for would otherwise get an empty group with a heading. */}
-          {voices.builtIns.length > 0 && (
-            <optgroup label="Presets">
-              {voices.builtIns.map((option) => (
-                <option key={option.key} value={option.key}>
-                  {option.name}
-                </option>
-              ))}
-            </optgroup>
-          )}
+          {/* Guarded rather than always drawn: an instrument the user has saved
+              nothing for would otherwise get an empty group with a heading. */}
           {voices.userVariants.length > 0 && (
             <optgroup label="My tones">
               {voices.userVariants.map((option) => (
@@ -1444,7 +1442,7 @@ export function VoiceEditor({
           // the seam refuses both rather than overwriting a voice the user cannot
           // see from where they are standing. The seam refuses independently of
           // this attribute — this is a mirror of the rule, not the rule.
-          disabled={!dirty || isBuiltIn || unavailable !== null}
+          disabled={!dirty || followsInstrument || unavailable !== null}
           className={buttonClass}
         >
           Save
@@ -1463,7 +1461,7 @@ export function VoiceEditor({
           onClick={openNameForm('rename', preset.name)}
           // Renaming WHILE DIRTY is fine: `voiceDrafts.setVoiceName` patches the
           // draft, so the next Save cannot silently undo the rename.
-          disabled={isBuiltIn}
+          disabled={followsInstrument}
           className={buttonClass}
         >
           Rename
@@ -1473,10 +1471,10 @@ export function VoiceEditor({
           aria-label={named(`Delete ${scope}’s voice`)}
           onClick={remove}
           // Save's guard, for Save's reason and one of its own: `preset` has
-          // already fallen back to a built-in when the ref names a variant that is
-          // gone, so a live Delete here would ask about — and name — a voice that
-          // is not the one the ref points at.
-          disabled={isBuiltIn || unavailable !== null}
+          // already fallen back to the instrument's default when the ref names a
+          // variant that is gone, so a live Delete here would ask about — and name
+          // — a voice that is not the one the ref points at.
+          disabled={followsInstrument || unavailable !== null}
           className={buttonClass}
         >
           Delete
@@ -1515,10 +1513,8 @@ export function VoiceEditor({
         <p className="flex-none font-mono text-[8.5px] leading-relaxed text-ink-mut">
           {/* Why Save is refused, stated where the refusal is — a disabled button
               with no reason is what this editor would be most blamed for. */}
-          {isBuiltIn
-            ? voiceRef === null
-              ? refusals['no-voice']
-              : refusals['built-in']
+          {followsInstrument
+            ? refusals['no-voice']
             : unavailable
               ? unavailable.reason
               : // The one case where there IS something to save into — and where

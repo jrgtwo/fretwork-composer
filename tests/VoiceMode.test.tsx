@@ -3,14 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
+  ALL_SLOT_IDS,
   CABINET_IRS,
   DEFAULT_PATTERNS_STATE,
   PPQ,
+  getDefaultPresetForSlot,
   useMetronomeStore,
   usePatternsStore,
   getSamplePack,
   sourceTrimDb,
   useVoiceStore,
+  type FretInstrumentId,
   type Track,
   type VoicePreset,
 } from '@fretwork/lib';
@@ -462,14 +465,56 @@ const strip = (track: Track) =>
       .parentElement as HTMLElement,
   );
 
-/** The built-in voice with this name. The default guitar voice is `Acoustic
- *  Guitar`, which has no `effects` at all, so any test about an amp or a cabinet
- *  has to put the track on a voice that HAS one rather than assume. */
-function voiceNamed(name: string) {
-  const found = listSelectableVoices('guitar').builtIns.find(
-    (voice) => voice.name === name,
-  );
-  if (!found) throw new Error(`no built-in guitar voice called ${name}`);
+/**
+ * A voice of the USER'S OWN, seeded out of the lib slot preset with this name.
+ *
+ * The app has no built-in voices any more (2026-09-20,
+ * `docs/PLAN-remove-presets.md`) — a holder points at a user variant or at nothing.
+ * A lib preset is still the cheapest source of real, complete preset DATA to build
+ * a variant out of, and the DATA is what these tests need: the voice a guitar track
+ * falls back to is `Acoustic Guitar`, which has no `effects` at all, so any test
+ * about an amp or a cabinet has to put the track on a voice that HAS one rather
+ * than assume.
+ *
+ * Seeded once per name and found by name afterwards, so two asks for `'Crunch'` are
+ * one voice — which the coalescing tests below rely on. Read back out of the OFFER
+ * SET both times, so the write and the offer stay one set by construction and each
+ * call still hands out a fresh ref object.
+ */
+function voiceNamed(name: string, instrumentId: FretInstrumentId = 'guitar') {
+  const offered = () =>
+    listSelectableVoices(instrumentId).userVariants.find((voice) => voice.name === name);
+  if (!offered()) {
+    // `getDefaultPresetForSlot` throws for a slot the lib ships no preset for, which
+    // is a lib inconsistency rather than anything a test can cause — caught so the
+    // failure is "no preset called X" rather than whatever that slot raised.
+    const source = ALL_SLOT_IDS.map((slotId) => {
+      try {
+        return getDefaultPresetForSlot(slotId);
+      } catch {
+        return null;
+      }
+    }).find((preset) => preset?.name === name);
+    if (!source) throw new Error(`the lib ships no preset called ${name}`);
+    // ⚠ THE NECKS HAVE TO AGREE. The name is looked up across every slot the lib
+    // ships, so nothing but this stops `voiceNamed('Acoustic Bass')` seeding a BASS
+    // preset as a guitar variant — a fixture the guitar picker would then offer, on
+    // a neck the preset was never measured for. A wrong-neck voice is a real state
+    // the app has prose for (`wrong-instrument`); it is not one to reach by
+    // accident, in a helper whose whole job is a voice that is meant to fit.
+    if (source.instrumentId !== instrumentId) {
+      throw new Error(`${name} is a ${source.instrumentId} preset, not a ${instrumentId} one`);
+    }
+    useVoiceStore.getState().addVariant({
+      name,
+      instrumentId,
+      family: source.family,
+      collectionId: null,
+      preset: { ...source, name },
+    });
+  }
+  const found = offered();
+  if (!found) throw new Error(`the picker does not offer a voice called ${name}`);
   return found;
 }
 
@@ -582,7 +627,7 @@ describe('the per-track voice draft seam', () => {
 
   it('retires a draft when the track is pointed at a different voice', () => {
     const tracks = twoTracks();
-    const other = listSelectableVoices('guitar').builtIns[1];
+    const other = voiceNamed('Crunch');
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
     expect(dirtyOf(getTracks()[0])).toBe(true);
 
@@ -804,10 +849,7 @@ describe('the per-track voice draft seam', () => {
 function bassTrackWithLayer(): Track {
   const tracks = twoTracks();
   expect(setTrackInstrument(tracks[0].id, 'bass').ok).toBe(true);
-  const bass = listSelectableVoices('bass').builtIns.find(
-    (voice) => voice.name === 'Acoustic Bass',
-  );
-  if (!bass) throw new Error('no built-in bass voice called Acoustic Bass');
+  const bass = voiceNamed('Acoustic Bass', 'bass');
   expect(selectVoice('track', tracks[0].id, bass.ref).ok).toBe(true);
   return getTracks()[0];
 }
@@ -815,7 +857,7 @@ function bassTrackWithLayer(): Track {
 describe('the second source and the body filter, through the track seam', () => {
   it('accepts a second source row on a voice that has one', () => {
     const track = bassTrackWithLayer();
-    // The built-in's real values, not the schema's fallbacks.
+    // The seeded preset's real values, not the schema's fallbacks.
     expect(getAtPath(presetOf(track), 'layer.gainDb')).toBe(-8);
     expect(getAtPath(presetOf(track), 'layer.octaveOffset')).toBe(-1);
 
@@ -1137,8 +1179,8 @@ describe('the pedalboard, through the track seam', () => {
 describe('the rack in a lane', () => {
   it('draws one rack per track, each on its own voice', () => {
     const tracks = twoTracks();
-    const mineVoice = listSelectableVoices('guitar').builtIns[0];
-    const theirsVoice = listSelectableVoices('guitar').builtIns[1];
+    const mineVoice = voiceNamed('Clean Amp');
+    const theirsVoice = voiceNamed('Crunch');
     selectVoice('track', tracks[0].id, mineVoice.ref);
     selectVoice('track', tracks[1].id, theirsVoice.ref);
     // The fixture is only a real test of "each on its OWN voice" if the two are
@@ -1735,34 +1777,24 @@ const notice = (track: Track) =>
   screen.getByRole('status', { name: `${track.name} voice messages` });
 
 describe('saving a voice from the track’s own rack', () => {
-  it('refuses a built-in slot, in the button and in the seam, with a reason', () => {
+  it('refuses a track with no voice of its own, in the button and in the seam', () => {
     const tracks = twoTracks();
-    selectVoice('track', tracks[0].id, voiceNamed('Clean Amp').ref);
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
     render(<ArrangementGrid views={viewsOf('voice')} />);
 
-    // Disabled AND explained: the fourteen slots are readonly lib consts with no
-    // setter, so Save is impossible rather than discouraged.
+    // Disabled AND explained: a track following its instrument is playing the lib
+    // resolver's floor, which is not a document there is anything to write into.
+    // Save as… is the way out and the sentence says so.
     expect(rack(tracks[0]).getByRole('button', { name: `Save ${tracks[0].name}’s voice` }))
       .toBeDisabled();
-    expect(rack(tracks[0]).getByText(/Presets are read-only/)).toBeInTheDocument();
+    expect(rack(tracks[0]).getByText(/follows its instrument’s voice/)).toBeInTheDocument();
 
     // The seam refuses independently of the disabled attribute — which is what the
     // agent hits, since it never sees a button at all.
     expect(saveVoice('track', tracks[0].id, presetOf(getTracks()[0]))).toEqual({
       ok: false,
-      reason: 'built-in',
+      reason: 'no-voice',
     });
-  });
-
-  it('explains the fallback rather than the read-only rule when there is no ref at all', () => {
-    const tracks = twoTracks();
-    render(<ArrangementGrid views={viewsOf('voice')} />);
-
-    // `no-voice`, not `built-in`: there is nothing read-only here, there is simply
-    // nothing to save INTO, and the two have different things to do about them.
-    expect(rack(tracks[0]).getByText(/follows its instrument’s voice/)).toBeInTheDocument();
-    expect(rack(tracks[0]).queryByText(/Presets are read-only/)).not.toBeInTheDocument();
   });
 
   it('says what Save would overwrite, naming the variant, before Save is pressed', () => {
@@ -1921,8 +1953,8 @@ describe('saving a voice from the track’s own rack', () => {
     expect(asked[0]).toContain('Doomed');
     expect(asked[0]).toContain('Your unsaved edits to it go too');
     expect(useVoiceStore.getState().variants).toHaveLength(0);
-    // Cleared rather than left dangling: a dangling ref resolves silently to a
-    // built-in while the picker shows nothing selected.
+    // Cleared rather than left dangling: a dangling ref resolves silently to the
+    // instrument's default while the picker shows nothing selected.
     expect(readTrackVoiceRef(getTracks()[0])).toBeNull();
     expect(readTrackVoiceRef(getTracks()[1])).toBeNull();
 
@@ -1957,8 +1989,9 @@ describe('saving a voice from the track’s own rack', () => {
     for (const track of getTracks()) {
       expect(rack(track).getByRole('button', { name: `Save ${track.name}’s voice` }))
         .toBeDisabled();
-      // Delete goes with it: `preset` has already fallen back to a built-in here, so
-      // a live Delete would put a name in its dialog that is not the ref's.
+      // Delete goes with it: `preset` has already fallen back to the instrument's
+      // default here, so a live Delete would put a name in its dialog that is not
+      // the ref's.
       expect(rack(track).getByRole('button', { name: `Delete ${track.name}’s voice` }))
         .toBeDisabled();
       expect(saveVoice('track', track.id, presetOf(track))).toEqual({
@@ -2111,9 +2144,11 @@ describe('the rack header’s voice picker', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     openBlankPattern('Riff');
+    // Seeded BEFORE the render: a variant added afterwards is a store write outside
+    // `act`, so the `<option>` this picks would not be in the list yet.
+    const clean = voiceNamed('Clean Amp');
     render(<ArrangementGrid views={viewsOf('voice')} />);
 
-    const clean = voiceNamed('Clean Amp');
     await user.selectOptions(picker(tracks[0]), clean.key);
     // The window is short and real: nothing is written until it closes.
     await waitFor(() => expect(readTrackVoiceRef(getTracks()[0])).toEqual(clean.ref));
@@ -2240,6 +2275,7 @@ describe('the rack header’s voice picker', () => {
   it('does not ask about an edit that was reverted inside the window', () => {
     const tracks = twoTracks();
     const clean = voiceNamed('Clean Amp');
+    const crunch = voiceNamed('Crunch');
     selectVoice('track', tracks[0].id, clean.ref);
     setVoiceParam('track', tracks[0].id, VOLUME_PATH, -6);
     render(<ArrangementGrid views={viewsOf('voice')} />);
@@ -2253,7 +2289,7 @@ describe('the rack header’s voice picker', () => {
     vi.useFakeTimers();
     try {
       fireEvent.change(picker(getTracks()[0]), {
-        target: { value: voiceNamed('Crunch').key },
+        target: { value: crunch.key },
       });
       // Inside the window, and it retires the draft. The question the timer was
       // going to ask is about an edit that no longer exists — asked from the
@@ -2282,9 +2318,9 @@ describe('the rack header’s voice picker', () => {
   it('commits on leaving the field rather than waiting the window out', () => {
     twoTracks();
     openBlankPattern('Riff');
+    const crunch = voiceNamed('Crunch');
     render(<ArrangementGrid views={viewsOf('voice')} />);
 
-    const crunch = voiceNamed('Crunch');
     vi.useFakeTimers();
     try {
       fireEvent.change(picker(getTracks()[0]), { target: { value: crunch.key } });
@@ -2303,6 +2339,7 @@ describe('the rack header’s voice picker', () => {
 
   it('commits a clean pick the unmount interrupts, and asks nothing during teardown', () => {
     twoTracks();
+    const crunch = voiceNamed('Crunch');
     const grid = render(<ArrangementGrid views={viewsOf('voice')} />);
 
     const asked: string[] = [];
@@ -2311,7 +2348,6 @@ describe('the rack header’s voice picker', () => {
       return true;
     });
 
-    const crunch = voiceNamed('Crunch');
     vi.useFakeTimers();
     try {
       fireEvent.change(picker(getTracks()[0]), { target: { value: crunch.key } });
@@ -2459,7 +2495,7 @@ describe('deleting a variant repairs what pointed at it', () => {
     // TWO repairs, and this is the arm where losing the second one is silent: the
     // track's own ref is cleared by the arm, the EDITING PATTERN's by the shared
     // destroy. Left dangling the pattern would resolve — quietly, by design — to
-    // the instrument's first built-in while the picker showed nothing selected.
+    // the instrument's default while the picker showed nothing selected.
     expect(readTrackVoiceRef(getTracks()[0])).toBeNull();
     expect(readVoiceRef(getEditingPattern()!)).toBeNull();
   });

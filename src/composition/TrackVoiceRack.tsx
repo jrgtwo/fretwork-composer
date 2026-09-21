@@ -105,17 +105,15 @@ import { findTrack, trackInstrumentId } from './compositionService';
 
 /**
  * Every refusal the write seam can hand back needs a sentence, since each is a
- * state this rack can legitimately be in. The three on top of the shared set are
- * the ones that NAME THE HOLDER, which is why they are stated here rather than
- * shared with `VoicePane`: its versions say "this pattern". `built-in` is Sound
- * Lab's shipped wording, kept.
+ * state this rack can legitimately be in. The two on top of the shared set are the
+ * ones that NAME THE HOLDER, which is why they are stated here rather than shared
+ * with `VoicePane`: its versions say "this pattern".
  */
 const REFUSAL_TEXT: Record<VoiceRefusal, string> = {
   ...SHARED_VOICE_REFUSAL_TEXT,
   'no-holder': 'That track is no longer in this composition.',
   'no-voice':
     'This track follows its instrument’s voice. Use Save as… to keep these tweaks as a voice of its own.',
-  'built-in': 'Presets are read-only. Use Save as… to keep your tweaks.',
 };
 
 /** A track's ref-less state is a real CHOICE — the lib's documented fallback to
