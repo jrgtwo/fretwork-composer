@@ -285,15 +285,20 @@ describe('switching source', () => {
     expect(seedLayerFor(sampled).octaveOffset).toBe(SEED_LAYER.octaveOffset);
   });
 
-  it('leaves every shipped layer alone — the seed is for a layer being ADDED', () => {
-    // The three built-ins that carry one were mixed by ear against their own
-    // primaries; nothing here may re-level them.
-    const layered = VOICE_PRESETS.filter((preset) => preset.layer);
-    expect(layered.length).toBeGreaterThanOrEqual(3);
-    for (const preset of layered) {
-      expect(preset.layer?.gainDb, preset.id).not.toBe(seedLayerFor(preset).gainDb);
-    }
-  });
+  /**
+   * ⚠ "LEAVES EVERY SHIPPED LAYER ALONE" USED TO SIT HERE. Deleted 2026-09-21,
+   * and not replaced in kind: it walked `VOICE_PRESETS` and asserted only that a
+   * number this module computes did not happen to equal a number the lib ships.
+   * It exercised no write, so it would have stayed green if the app HAD re-levelled
+   * a shipped layer, and it went red whenever the lib retuned one onto the seed
+   * value — the app's suite failing over someone else's data.
+   *
+   * The property it was named for is about the app: `addVoiceSubBranch` returns
+   * early when the branch is already there, so an Add never re-seeds a layer that
+   * exists. That is asserted where the write lives, against a fixture mixed to a
+   * level the seed would not produce — `tests/VoiceMode.test.tsx`, "leaves a layer
+   * the voice already had alone".
+   */
 
   // ─── the body filter ───────────────────────────────────────────────────────
 

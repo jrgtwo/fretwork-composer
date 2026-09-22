@@ -15,6 +15,7 @@ import {
   useVoiceStore,
   type FretInstrumentId,
   type Track,
+  type VoiceLayer,
   type VoicePreset,
 } from '@fretwork/lib';
 import { App } from '../src/App';
@@ -75,7 +76,7 @@ import { SEED_VOICE_REVERB } from '../src/voice/pedalDefaults';
 import { clearPendingWarms } from '../src/voice/sampleWarm';
 import { playComposition, useCompositionPlayback } from '../src/audio/playbackService';
 import { getAtPath } from '../src/voice/presetPaths';
-import { SEED_BODY_FILTER_ENVELOPE } from '../src/voice/sourceDefaults';
+import { SEED_BODY_FILTER_ENVELOPE, SEED_LAYER, seedLayerFor } from '../src/voice/sourceDefaults';
 import {
   getEditingPattern,
   openBlankPattern,
@@ -986,6 +987,43 @@ describe('the second source and the body filter, through the track seam', () => 
     expect(Object.hasOwn(preset, 'layer')).toBe(false);
     // The other track was never touched by any of it.
     expect(presetOf(getTracks()[1]).layer).toBeUndefined();
+  });
+
+  it('leaves a layer the voice already had alone — the seed is for one being ADDED', () => {
+    /**
+     * ⚠ THE IDEMPOTENCE ASSERTION ABOVE CANNOT CATCH THIS, which is why this is a
+     * test of its own. It re-adds over a layer the SEED made, so both paths write
+     * the same numbers and dropping `addVoiceSubBranch`'s `subBranchApplies` guard
+     * leaves it green. The property that has teeth is a layer mixed to something
+     * the seed would never produce surviving an Add.
+     *
+     * It is a real property rather than a hypothetical: `seedLayerFor` corrects the
+     * mix for the primary's calibration trim, so re-seeding a hand-mixed layer would
+     * silently re-level it to −29 dB under a sampled primary — a tuning the user set
+     * by ear, replaced by arithmetic, with no gesture that says so.
+     *
+     * Replaces `sourceDefaults.test.ts`'s "leaves every shipped layer alone"
+     * (deleted 2026-09-21), which walked the lib's shipped presets and asserted only
+     * that a number the app computes did not happen to equal a number the lib ships.
+     * That could not fail for the right reason or pass for it: it exercised no write,
+     * and it went red whenever the lib retuned a layer onto the seed value.
+     */
+    const tracks = twoTracks();
+    const id = tracks[0].id;
+    const base = presetOf(tracks[0]);
+    // Derived from the seed rather than stated, so the fixture cannot drift into
+    // being the seed value and quietly stop testing anything.
+    const byEarDb = seedLayerFor(base).gainDb + 6;
+    const mixedByEar: VoiceLayer = { ...SEED_LAYER, gainDb: byEarDb, octaveOffset: -1 };
+    expect(byEarDb).not.toBe(seedLayerFor(base).gainDb);
+
+    expect(saveVoiceAs('track', id, 'Hand-mixed', { ...base, layer: mixedByEar }).ok).toBe(true);
+    expect(presetOf(getTracks()[0]).layer).toEqual(mixedByEar);
+
+    // Answers ok — a caller that cannot see the rack must not have to look first —
+    // and writes nothing.
+    expect(addVoiceSubBranch('track', id, 'layer').ok).toBe(true);
+    expect(presetOf(getTracks()[0]).layer).toEqual(mixedByEar);
   });
 
   it('refuses the sub-branch seams in words rather than doing nothing', () => {
