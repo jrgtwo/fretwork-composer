@@ -20,7 +20,18 @@ import type { CircuitAmpParams } from '@fretwork/lib';
  * here rather than a rewrite of every call site.
  */
 export function circuitAmpControlPath(_ampId: string, controlId: string): string {
-  return `effects.circuitAmp.controls.${controlId}`;
+  return `${CIRCUIT_AMP_CONTROLS}.${controlId}`;
+}
+
+const CIRCUIT_AMP_CONTROLS = 'effects.circuitAmp.controls';
+
+/** The other direction: which control a schema path names, or `undefined` for a
+ *  path that is not one of them. Here rather than at a call site so the two stay
+ *  one another's inverse — a caller spelling the prefix again is how a rename
+ *  leaves half the app reading the old shape. */
+export function circuitAmpControlId(path: string): string | undefined {
+  const prefix = `${CIRCUIT_AMP_CONTROLS}.`;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : undefined;
 }
 
 /** A pot seeds its numeric default, a switch its declared option value. Both

@@ -1,14 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AMP_MODELS,
   CABINET_IRS,
-  DEFAULT_AMP_MODEL_ID,
   DEFAULT_CIRCUIT_AMP_ID,
   CIRCUIT_AMPS,
   SAMPLE_PACKS,
   detectSamplePack,
   type ADSREnvelope,
-  type AmpParams,
+  type CircuitAmpParams,
   type AutoWahParams,
   type ChorusParams,
   type CompressorParams,
@@ -292,18 +290,12 @@ const POPULATED_CHASSIS: Omit<VoicePreset, 'id' | 'name' | 'source'> = {
       band6_4kHz: -0.5,
       levelDb: -1,
     },
-    amp: {
-      enabled: false,
-      modelId: DEFAULT_AMP_MODEL_ID,
-      preGainDb: 0,
-      preDrive: 0.3,
-      bass: 0,
-      mid: 0,
-      treble: 0,
-      presence: 0,
-      powerDrive: 0.1,
-      outputDb: 0,
-    },
+    // ⚠ NO `amp` BRANCH, and its absence is the fixture agreeing with the app.
+    // The five-model classic stage came out of the schema on 2026-09-23: no
+    // section declares a row under `effects.amp`, so nothing here can author one
+    // and a fixture carrying one would be a shape no gesture in this app reaches.
+    // The LIB still has the stage — see `EFFECTS_STAGES` below, which walks the
+    // lib's type and names `amp` as offered by the lib and not by us.
     cabIR: { enabled: false, url: CABINET_IRS[0].url, makeupDb: 1.5 },
     // The room the cabinet stands in. On every fixture for the reason the pedals
     // are: its three rows are gated on `effects.reverb` and nothing else, so a
@@ -535,20 +527,19 @@ const NO_MAKEUP_GAIN: VoicePreset = removeAtPath(
  * Compile-time coverage of the lib types this slice addresses. `Record<keyof X, true>`
  * means `tsc` fails if the lib adds a field and the schema does not declare it; the
  * runtime assertion below fails if a declared path is dropped. Without this, deleting
- * `effects.amp.treble` passes every other test in the file and the pane builds a
+ * `effects.finalEq.high` passes every other test in the file and the pane builds a
  * `Tone.EQ3` with `high: undefined`.
+ *
+ * The amp's table is the circuit amp's since 2026-09-23, when the five-model classic
+ * stage came out of the schema. It is checked one level down rather than leaf by
+ * leaf, because `controls` is a record keyed by whatever the amp in hand declares —
+ * the per-control rows have their own describe block below.
  */
-const AMP_LEAVES: Record<keyof AmpParams, true> = {
+const CIRCUIT_AMP_LEAVES: Record<keyof CircuitAmpParams, true> = {
   enabled: true,
-  modelId: true,
-  preGainDb: true,
-  preDrive: true,
-  bass: true,
-  mid: true,
-  treble: true,
-  presence: true,
-  powerDrive: true,
-  outputDb: true,
+  ampId: true,
+  inputGainDb: true,
+  controls: true,
 };
 const CAB_IR_LEAVES: Record<keyof CabIRParams, true> = { enabled: true, url: true, makeupDb: true };
 /** The room, which hangs off the Cabinet section as a sub-branch rather than
@@ -794,8 +785,8 @@ describe('violationsFor itself', () => {
     // An encoder has no range to fail, so its type guard is the only check it has.
     const nan = setAtPath(FULLY_POPULATED_FM, 'source.params.harmonicity', Number.NaN);
     expect(only(nan, 'source.params.harmonicity')).toContain('expected a finite number');
-    const flag = setAtPath(FULLY_POPULATED_SAMPLER, 'effects.amp.enabled', 'yes');
-    expect(only(flag, 'effects.amp.enabled')).toContain('expected a boolean');
+    const flag = setAtPath(FULLY_POPULATED_SAMPLER, 'effects.circuitAmp.enabled', 'yes');
+    expect(only(flag, 'effects.circuitAmp.enabled')).toContain('expected a boolean');
   });
 
   it('catches a required path that is simply absent', () => {
@@ -1170,8 +1161,8 @@ describe('every declared path against the fixtures', () => {
 
   for (const fixture of ALL_FIXTURES) {
     it(`${fixture.id}: resolves every applicable path, optional ones included`, () => {
-      // The assertion no walk over the shipped presets could make: not one of them
-      // sets `enabled`, `modelId` or `inputGainDb`, so those paths are only ever
+      // The assertion no walk over the shipped presets could make: not one of
+      // them carries a circuit amp at all, so `effects.circuitAmp.*` is only ever
       // exercised here. A typo in one fails this test (or `tsc`, on the literal).
       const missing = ALL_PARAMS.filter(
         (param) => paramApplies(fixture, param) && !hasPath(fixture, param.path),
@@ -1261,7 +1252,7 @@ describe('section presence', () => {
 
     const noEffects: VoicePreset = { ...FULLY_POPULATED_SAMPLER, effects: undefined };
     expect(hasPath(noEffects, 'effects')).toBe(true);
-    expect(sectionApplies(noEffects, sectionAt('amp'))).toBe(false);
+    expect(sectionApplies(noEffects, sectionAt('circuit-amp'))).toBe(false);
   });
 
   it('never calls a probe-less section absent', () => {
@@ -1424,6 +1415,16 @@ const CIRCUIT_AMP_CONTROL_PARAMS = sectionAt('circuit-amp').params.filter(
   (p) => p.path.startsWith('effects.circuitAmp.controls.'),
 );
 
+/** The section's OWN three — enabled / ampId / inputGainDb, the rows every
+ *  circuit amp carries whatever its topology. By path, for `CAB_OWN_PARAMS`'
+ *  reason: the gate is what the rules below check, so the set cannot be derived
+ *  from anything that already reads one. */
+const CIRCUIT_AMP_OWN_PARAMS = sectionAt('circuit-amp').params.filter(
+  (p) =>
+    p.path.startsWith('effects.circuitAmp.') &&
+    !p.path.startsWith('effects.circuitAmp.controls.'),
+);
+
 /**
  * The Cabinet's own rows — the speaker's, as opposed to the room's.
  *
@@ -1474,11 +1475,18 @@ const CONDITIONAL_ROW_COUNT =
   ALL_PEDAL_PARAMS.length +
   // Every circuit-amp CONTROL row. The section's probe answers "is there a
   // circuit amp", never "which one", and different amps declare different
-  // knobs — a Princeton has Volume and Tone where a Deluxe will have tremolo —
-  // so the row is the only place "this control belongs to that amp" can live.
-  // The section's own three rows (enabled / ampId / inputGainDb) are ungated,
-  // because every circuit amp has them whatever its topology.
+  // knobs — a Princeton has Volume and Tone where a Deluxe has two volumes and
+  // an inverter switch — so the row is the only place "this control belongs to
+  // that amp" can live.
   CIRCUIT_AMP_CONTROL_PARAMS.length +
+  // …and the section's own three, which every circuit amp has whatever its
+  // topology and which are gated all the same — on the BRANCH, for the seam's
+  // reason rather than the pane's. See the section's header, and `CircuitAmpParams`
+  // for the hole: `controls` is required, so a seam that accepted
+  // `effects.circuitAmp.inputGainDb` on a voice with no amp would mint a stage
+  // `isStageEnabled` reads as live and `buildCircuitAmpLite` then indexes
+  // `params.controls[…]` on.
+  CIRCUIT_AMP_OWN_PARAMS.length +
   // Every final-EQ row. Its probe is a single path and answers presence for the
   // pane, so the gate here is the seam's rather than the pane's — the section's
   // own comment in `paramSchema` carries the argument, and the rule below names
@@ -1590,11 +1598,11 @@ describe('row conditions', () => {
   });
 
   it('conditions a row only where a branch it lives under is optional', () => {
-    // Amp and Cabinet are governed by their section probe, and a row-level
-    // condition there would be a second, quieter presence rule — and the bar's two
-    // rows apply to every preset there is. What may carry one: the
-    // Source section (whose rows differ by source kind, and which holds the
-    // layer) and a sub-branch's rows.
+    // A section whose probe ANSWERS presence must not also gate rows, or the pane
+    // would carry a second, quieter presence rule — and the bar's two rows apply
+    // to every preset there is. What may carry one: the Source section (whose
+    // rows differ by source kind, and which holds the layer), a sub-branch's
+    // rows, and the sections that argue for it below.
     const conditional = ALL_PARAMS.filter(isConditional).map((p) => p.path);
     const allowed = new Set([
       ...sectionAt('source').params.map((p) => p.path),
@@ -1616,6 +1624,10 @@ describe('row conditions', () => {
       // because WHICH amp decides which knobs exist. A Princeton declares
       // Volume and Tone; the section cannot know that, and the row can.
       ...CIRCUIT_AMP_CONTROL_PARAMS.map((p) => p.path),
+      // …and the circuit amp's own three, on the final EQ's grounds rather than
+      // the control rows': the gate is the SEAM's, not the pane's. Same shape,
+      // different argument, which is why they are listed apart.
+      ...CIRCUIT_AMP_OWN_PARAMS.map((p) => p.path),
       // The Cabinet's own rows — the fifth case, and the reason this rule is
       // stated as "a section whose probe ANSWERS presence must not also gate
       // rows" rather than "a section must not". The Cabinet's probe lists the
@@ -1630,8 +1642,7 @@ describe('row conditions', () => {
       // `setVoiceParam` writes one path at a time, so an ungated row is a path
       // the seam would accept on a voice with no EQ, minting a partial `EQParams`
       // that `isStageEnabled` reads as live and `buildChain` hands to `Tone.EQ3`
-      // with `undefined`s. `AmpParams` has the identical hole and keeps it; the
-      // section's comment says so rather than claiming a distinction.
+      // with `undefined`s.
       ...FINAL_EQ_OWN_PARAMS.map((p) => p.path),
     ]);
     // `[].every(…)` is `true`, so the count comes first here too.
@@ -1769,7 +1780,12 @@ describe('descriptor invariants', () => {
         .map((p) => p.path.slice(prefix.length + 1))
         .sort();
 
-    expect(leavesUnder(ALL_PARAMS, 'effects.amp')).toEqual(Object.keys(AMP_LEAVES).sort());
+    // One level down: `controls.volume` and `controls.tone` are both the
+    // `controls` field, and which keys it carries is the amp's business.
+    const circuitAmpFields = [
+      ...new Set(leavesUnder(ALL_PARAMS, 'effects.circuitAmp').map((leaf) => leaf.split('.')[0])),
+    ].sort();
+    expect(circuitAmpFields).toEqual(Object.keys(CIRCUIT_AMP_LEAVES).sort());
     expect(leavesUnder(ALL_PARAMS, 'effects.cabIR')).toEqual(Object.keys(CAB_IR_LEAVES).sort());
     expect(leavesUnder(ALL_PARAMS, 'effects.reverb')).toEqual(
       Object.keys(VOICE_REVERB_LEAVES).sort(),
@@ -2084,13 +2100,14 @@ describe('descriptor invariants', () => {
   it('resolves an unrecognised value the way the audio chain will', () => {
     // The enums differ here, deliberately, and no rule is generic — which is why
     // `resolve` sits on the descriptor rather than in a path check inside the pane.
-    // The amp id has a real fallback in the lib: `getAmpModel` builds Plexi for anything
-    // unknown, so naming Plexi is the truth.
-    const model = paramAt('effects.amp.modelId');
+    // The amp id has a real fallback in the lib: `getCircuitAmp` builds the default
+    // circuit for anything unknown, so naming it is the truth — and the faceplate in
+    // `VoiceEditor.renderAmp` is engraved from the same resolver for the same reason.
+    const model = paramAt('effects.circuitAmp.ampId');
     expect(model.kind).toBe('enum');
     if (model.kind === 'enum') {
-      expect(model.resolve('no-such-amp')).toBe(DEFAULT_AMP_MODEL_ID);
-      expect(model.resolve(undefined)).toBe(DEFAULT_AMP_MODEL_ID);
+      expect(model.resolve('no-such-amp')).toBe(DEFAULT_CIRCUIT_AMP_ID);
+      expect(model.resolve(undefined)).toBe(DEFAULT_CIRCUIT_AMP_ID);
     }
     // A cabinet has none: an unregistered URL is a real IR this editor cannot name, and
     // an absent one is a cabinet branch with no cabinet. Both must read as no-selection
@@ -2129,7 +2146,9 @@ describe('descriptor invariants', () => {
   it('offers exactly the lib registries, in registry order', () => {
     // The mapping rather than a count: a legitimate lib addition should show up as a
     // new option, not as a failure — but dropping or reordering the mapping should.
-    expect(optionValues(paramAt('effects.amp.modelId'))).toEqual(AMP_MODELS.map((m) => m.id));
+    expect(optionValues(paramAt('effects.circuitAmp.ampId'))).toEqual(
+      CIRCUIT_AMPS.map((amp) => amp.id),
+    );
     expect(optionValues(paramAt('effects.cabIR.url'))).toEqual(CABINET_IRS.map((ir) => ir.url));
     // Unfiltered by instrument on purpose — see the comment on SAMPLE_PACK_OPTIONS.
     expect(optionValues(paramAt('source.samples'))).toEqual(SAMPLE_PACKS.map((p) => p.id));
@@ -2155,7 +2174,6 @@ describe('scope', () => {
       'source',
       'body-filter',
       'pedals',
-      'amp',
       'circuit-amp',
       'cabinet',
       'final-eq',
@@ -2194,7 +2212,11 @@ describe('scope', () => {
     // room the cabinet stands in, and it is declared on the Cabinet section.
     //
     // `effects.finalEq` came off on 2026-09-18 with the Final EQ section, and the
-    // list is now EMPTY.
+    // list was empty until 2026-09-23 — when `effects.amp` went ON it, which is the
+    // one entry that is not a deferral. The five-model classic amp stage came out of
+    // the APP that day and the lib kept every node of it; `amp` is therefore a stage
+    // the lib offers and this app deliberately does not, and the row below is what
+    // makes a schema quietly regrowing one fail here.
     //
     // ⚠ SO THE WALK GOES THE OTHER WAY ROUND, off the lib's type. An empty
     // allowlist checked row by row asserts NOTHING — the loop body never runs, and
@@ -2216,7 +2238,8 @@ describe('scope', () => {
       reverb: true,
       finalEq: true,
     };
-    const deferred: readonly (keyof EffectsConfig)[] = [];
+    // Not "not yet", in the `amp` case: not at all. See the note above.
+    const deferred: readonly (keyof EffectsConfig)[] = ['amp'];
     const paths = [...ALL_PARAMS, ...ALL_PEDAL_PARAMS].map((p) => p.path);
     for (const stage of Object.keys(EFFECTS_STAGES) as (keyof EffectsConfig)[]) {
       const reached = paths.some((path) => path.startsWith(`effects.${stage}.`));

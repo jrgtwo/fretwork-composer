@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import {
   ALL_SLOT_IDS,
   CABINET_IRS,
+  DEFAULT_CIRCUIT_AMP_ID,
   DEFAULT_PATTERNS_STATE,
   PPQ,
   getDefaultPresetForSlot,
@@ -378,8 +379,14 @@ const volumeOf = (track: Track): unknown => getAtPath(presetOf(track), VOLUME_PA
 const stage = (track: Track, section: string) =>
   within(screen.getByRole('region', { name: `${track.name} ${section}` }));
 
-const knob = (track: Track, section: string, name: string) =>
-  stage(track, section).getByRole('slider', { name });
+/**
+ * A knob on an amp's PLATE, which is named differently from every other
+ * section's rows: `renderAmp` scopes them by the STAGE as well as the holder,
+ * because the circuit amp's own Input gain and Volume are word-for-word the
+ * IN/OUT bar's two and the bar sits outside every region.
+ */
+const plateKnob = (track: Track, section: string, name: string) =>
+  stage(track, section).getByRole('slider', { name: `${track.name} ${section} ${name}` });
 
 /**
  * One of the two knobs in a rack's IN/OUT bar.
@@ -657,18 +664,20 @@ describe('the per-track voice draft seam', () => {
     // Whatever the fixture voice ships with, both ends of the round trip are
     // asserted rather than the starting state — `ACOUSTIC_GUITAR_PRESET` has no
     // `effects` object at all, and other built-ins do.
-    expect(removeVoiceSection('track', tracks[0].id, 'amp').ok).toBe(true);
-    expect(getAtPath(presetOf(getTracks()[0]), 'effects.amp')).toBeUndefined();
+    expect(removeVoiceSection('track', tracks[0].id, 'circuit-amp').ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.circuitAmp')).toBeUndefined();
 
-    expect(addVoiceSection('track', tracks[0].id, 'amp').ok).toBe(true);
+    expect(addVoiceSection('track', tracks[0].id, 'circuit-amp').ok).toBe(true);
 
     // Required params only: the optional ones are left out on purpose, because
     // the lib documents its own default for each and writing our guess would
     // turn "unspecified" into a value the user never chose.
     const amp = presetOf(getTracks()[0]);
-    expect(getAtPath(amp, 'effects.amp.preDrive')).toBe(0.3);
-    expect(getAtPath(amp, 'effects.amp.bass')).toBe(0);
-    expect(getAtPath(amp, 'effects.amp.enabled')).toBeUndefined();
+    expect(getAtPath(amp, 'effects.circuitAmp.inputGainDb')).toBe(0);
+    // The amp's OWN controls, seeded from the circuit the seeded `ampId` names —
+    // which is the half of the Add that `appliesWhen` decides.
+    expect(getAtPath(amp, 'effects.circuitAmp.controls.tone')).toBe(0.5);
+    expect(getAtPath(amp, 'effects.circuitAmp.enabled')).toBeUndefined();
   });
 
   it('adds a COMPLETE final EQ, and removes the whole branch', () => {
@@ -724,11 +733,46 @@ describe('the per-track voice draft seam', () => {
     expect(getAtPath(presetOf(getTracks()[0]), 'effects.finalEq.lowFrequency')).toBe(0);
   });
 
+  it('refuses every circuit-amp row on a voice that has no amp', () => {
+    // `CircuitAmpParams.controls` is REQUIRED, and `setVoiceParam` writes one
+    // path at a time. Ungated, these three rows would let a caller with no
+    // pointer mint `effects.circuitAmp = { inputGainDb: 3 }` — which
+    // `isStageEnabled` reads as a live stage and `buildCircuitAmpLite` then
+    // indexes `params.controls[…]` on, throwing inside the chain build. The
+    // final EQ's hole, on the section that is now the app's only amp.
+    const tracks = twoTracks();
+    expect(getAtPath(presetOf(tracks[0]), 'effects.circuitAmp')).toBeUndefined();
+
+    for (const [path, value] of [
+      ['effects.circuitAmp.inputGainDb', 3],
+      ['effects.circuitAmp.enabled', true],
+      ['effects.circuitAmp.ampId', DEFAULT_CIRCUIT_AMP_ID],
+      ['effects.circuitAmp.controls.tone', 0.7],
+    ] as const) {
+      expect(setVoiceParam('track', tracks[0].id, path, value), path).toEqual({
+        ok: false,
+        reason: expect.stringContaining('not a setting'),
+      });
+    }
+
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.circuitAmp')).toBeUndefined();
+    expect(dirtyOf(getTracks()[0])).toBe(false);
+
+    // …and every one of them lands once the Add has written the branch, so the
+    // gate is a gate and not a ban.
+    expect(addVoiceSection('track', tracks[0].id, 'circuit-amp').ok).toBe(true);
+    expect(setVoiceParam('track', tracks[0].id, 'effects.circuitAmp.inputGainDb', 3).ok).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.circuitAmp.inputGainDb')).toBe(3);
+  });
+
   it('seeds a stage from a caller’s value in one commit, and refuses an unseedable path', () => {
-    // The seam behind "Use suggested cab". Two commits — add, then write over the
-    // seed — is two draft notifications, and `playbackService` rebuilds the effects
-    // chain off each one, so on the pattern arm that fetched a cab IR nobody asked
-    // for before replacing it. One call, one notification, the caller's value.
+    // `addVoiceSection`'s `seed`, which has no production caller today — "Use
+    // suggested cab" was the last one and went with the classic amp on
+    // 2026-09-23. Kept and tested because the argument is about the SEAM, not
+    // about that button: two commits — add, then write over the seed — are two
+    // draft notifications, and `playbackService` rebuilds the effects chain off
+    // each one, so on the pattern arm that fetched a cab IR nobody asked for
+    // before replacing it. One call, one notification, the caller's value.
     const tracks = twoTracks();
     expect(removeVoiceSection('track', tracks[0].id, 'cabinet').ok).toBe(true);
     const url = CABINET_IRS[CABINET_IRS.length - 1].url;
@@ -1086,9 +1130,11 @@ describe('the second source and the body filter, through the track seam', () => 
     expect(setVoiceParam('track', tracks[0].id, 'layer.octaveOffset', -1).ok).toBe(true);
     // …and a fractional value on a NON-integral slider is still fine: a step is a
     // detent, not a grid the preset has to sit on.
-    expect(addVoiceSection('track', tracks[0].id, 'amp').ok).toBe(true);
-    expect(setVoiceParam('track', tracks[0].id, 'effects.amp.preGainDb', 3.7).ok).toBe(true);
-    expect(getAtPath(presetOf(getTracks()[0]), 'effects.amp.preGainDb')).toBe(3.7);
+    expect(addVoiceSection('track', tracks[0].id, 'circuit-amp').ok).toBe(true);
+    expect(
+      setVoiceParam('track', tracks[0].id, 'effects.circuitAmp.inputGainDb', 3.7).ok,
+    ).toBe(true);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.circuitAmp.inputGainDb')).toBe(3.7);
   });
 });
 
@@ -1232,7 +1278,7 @@ describe('the rack in a lane', () => {
         screen.getByRole('button', { name: `Voice rack for ${track.name}` }),
       ).toBeInTheDocument();
       // Every stage of every track is its own landmark, named for the track.
-      for (const section of ['Source', 'Amp', 'Cabinet + room']) {
+      for (const section of ['Source', 'Amp (circuit)', 'Cabinet + room']) {
         expect(
           screen.getByRole('region', { name: `${track.name} ${section}` }),
         ).toBeInTheDocument();
@@ -1529,28 +1575,37 @@ describe('the rack in a lane', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     selectVoice('track', tracks[0].id, voiceNamed('Crunch').ref);
+    // No lib preset ships a circuit amp, so the round trip starts by adding one
+    // through the seam — the BUTTONS are what this test is about, and it needs a
+    // stage present for Remove to be the one on offer.
+    expect(addVoiceSection('track', tracks[0].id, 'circuit-amp').ok).toBe(true);
     render(<ArrangementGrid views={viewsOf('voice')} />);
 
     await user.click(
-      screen.getByRole('button', { name: `Remove Amp for ${getTracks()[0].name}` }),
+      screen.getByRole('button', { name: `Remove Amp (circuit) for ${getTracks()[0].name}` }),
     );
 
-    expect(getAtPath(presetOf(getTracks()[0]), 'effects.amp')).toBeUndefined();
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.circuitAmp')).toBeUndefined();
     // Absent, not bypassed: the branch is gone and the stage says so in words
     // rather than merely going dark.
-    expect(stage(getTracks()[0], 'Amp').getByText(/No amp stage/i)).toBeInTheDocument();
+    // The exact sentence, not merely "some stage is absent": `absentLabel` is
+    // what keeps it from reading "No amp (circuit) stage", which would name a
+    // distinction from a classic stage this app no longer offers.
+    expect(
+      stage(getTracks()[0], 'Amp (circuit)').getByText(/No amp stage on this voice/i),
+    ).toBeInTheDocument();
     // The other rack took no edit — the buttons are per track, like everything
     // else here.
     expect(dirtyOf(getTracks()[1])).toBe(false);
 
     await user.click(
-      screen.getByRole('button', { name: `Add Amp for ${getTracks()[0].name}` }),
+      screen.getByRole('button', { name: `Add Amp (circuit) for ${getTracks()[0].name}` }),
     );
 
     // Seeded from the SCHEMA's own fallbacks, which is what makes the button a
     // way of calling `addVoiceSection` rather than a second authority on
     // what an amp starts as.
-    expect(getAtPath(presetOf(getTracks()[0]), 'effects.amp.preDrive')).toBe(0.3);
+    expect(getAtPath(presetOf(getTracks()[0]), 'effects.circuitAmp.inputGainDb')).toBe(0);
   });
 
   it('shows the same Source rows the pattern pane does, and switches from them', async () => {
@@ -1756,9 +1811,11 @@ describe('the rack in a lane', () => {
     expect(
       screen.getByRole('button', { name: `Voice rack for ${tracks[0].name}` }),
     ).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByRole('region', { name: `${tracks[0].name} Amp` })).toBeNull();
+    expect(screen.queryByRole('region', { name: `${tracks[0].name} Amp (circuit)` })).toBeNull();
     // Per TRACK: the other rack is untouched by its neighbour folding.
-    expect(screen.getByRole('region', { name: `${tracks[1].name} Amp` })).toBeInTheDocument();
+    expect(
+      screen.getByRole('region', { name: `${tracks[1].name} Amp (circuit)` }),
+    ).toBeInTheDocument();
 
     // …AND THE STRIP IS NOT JUST THE HEADER ROW. The IN/OUT bar survives the
     // rack's own fold, which is the whole reason it is a bar and not a stage:
@@ -2842,7 +2899,7 @@ describe('the stages stack, and the lane holds them', () => {
     // Two levels of disclosure on one page, and the names have to tell them
     // apart — "Voice rack for Rhythm" is the whole rack, this is one stage of it.
     const disclosure = screen.getByRole('button', {
-      name: `Amp stage for ${tracks[0].name}`,
+      name: `Amp (circuit) stage for ${tracks[0].name}`,
     });
     expect(disclosure).toHaveAttribute('aria-expanded', 'true');
     expect(
@@ -2855,7 +2912,7 @@ describe('the stages stack, and the lane holds them', () => {
     // collapse is: this outlives the mode switch that unmounts the rack. What
     // travels is the WHOLE folded set, which starts as the schema's default —
     // the caller stores a list, not a diff.
-    expect(folded).toEqual([{ [tracks[0].id]: [...DEFAULT_FOLDED, 'amp'] }]);
+    expect(folded).toEqual([{ [tracks[0].id]: [...DEFAULT_FOLDED, 'circuit-amp'] }]);
   });
 
   it('opens on the same stages the pattern page does', () => {
@@ -2921,26 +2978,35 @@ describe('the stages stack, and the lane holds them', () => {
     const tracks = twoTracks();
     selectVoice('track', tracks[0].id, voiceNamed('Crunch').ref);
     selectVoice('track', tracks[1].id, voiceNamed('Crunch').ref);
+    // No lib preset ships a circuit amp, so both racks are given one — the stage
+    // has to have a knob in it for "its controls left the tree" to mean anything.
+    for (const track of getTracks()) {
+      expect(addVoiceSection('track', track.id, 'circuit-amp').ok).toBe(true);
+    }
 
     render(
       <ArrangementGrid
         views={viewsOf('voice')}
-        collapsedRackSections={{ [getTracks()[0].id]: ['amp'] }}
+        collapsedRackSections={{ [getTracks()[0].id]: ['circuit-amp'] }}
       />,
     );
 
     const button = screen.getByRole('button', {
-      name: `Amp stage for ${getTracks()[0].name}`,
+      name: `Amp (circuit) stage for ${getTracks()[0].name}`,
     });
     expect(button).toHaveAttribute('aria-expanded', 'false');
     // The region stays mounted — `aria-controls` has to point at something that
     // exists — but its controls leave the accessibility tree with it.
-    const region = screen.getByRole('region', { name: `${getTracks()[0].name} Amp` });
+    const region = screen.getByRole('region', { name: `${getTracks()[0].name} Amp (circuit)` });
     expect(document.getElementById(button.getAttribute('aria-controls') ?? '')).not.toBeNull();
-    expect(within(region).queryByRole('slider', { name: 'Drive' })).toBeNull();
+    expect(
+      within(region).queryByRole('slider', {
+        name: `${getTracks()[0].name} Amp (circuit) Tone`,
+      }),
+    ).toBeNull();
     // Per TRACK and per STAGE: the neighbour's amp is open, and this rack's own
     // IN/OUT bar — which folds with nothing — is untouched.
-    expect(stage(getTracks()[1], 'Amp').getByRole('slider', { name: 'Drive' })).toBeInTheDocument();
+    expect(plateKnob(getTracks()[1], 'Amp (circuit)', 'Tone')).toBeInTheDocument();
     expect(barKnob(getTracks()[0], 'Volume')).toBeInTheDocument();
   });
 });
@@ -3313,7 +3379,8 @@ describe('unsaved tone survives the things that unmount it', () => {
     render(<App />);
     await intoVoiceMode(user);
     const track = getTracks()[0];
-    const amp = () => screen.getByRole('button', { name: `Amp stage for ${track.name}` });
+    const amp = () =>
+      screen.getByRole('button', { name: `Amp (circuit) stage for ${track.name}` });
 
     await user.click(amp());
     expect(amp()).toHaveAttribute('aria-expanded', 'false');
@@ -3773,24 +3840,27 @@ describe('ONE editor, two pages', () => {
     const user = userEvent.setup();
     const tracks = twoTracks();
     // The default guitar voice is `Acoustic Guitar`, which has no `effects` at
-    // all — so an amp knob only exists on a voice that HAS an amp, on both sides.
+    // all, and no lib preset ships a circuit amp — so an amp knob only exists on a
+    // voice that has been GIVEN one, on both sides.
     const crunch = voiceNamed('Crunch');
     openBlankPattern('Scale');
     selectVoice('pattern', getEditingPattern()!.id, crunch.ref);
     selectVoice('track', tracks[0].id, crunch.ref);
+    expect(addVoiceSection('pattern', getEditingPattern()!.id, 'circuit-amp').ok).toBe(true);
+    expect(addVoiceSection('track', tracks[0].id, 'circuit-amp').ok).toBe(true);
     render(<App />);
 
     // Amp is open by default on both surfaces, so no fold gesture is needed.
-    const paneDrive = within(screen.getByRole('region', { name: 'Amp stage' })).getByRole(
-      'slider',
-      { name: 'Drive' },
-    );
+    const paneDrive = within(
+      screen.getByRole('region', { name: 'Amp (circuit) stage' }),
+      // Scoped by the stage even with one holder — see `plateKnob`.
+    ).getByRole('slider', { name: 'Amp (circuit) Tone' });
     // Literal, for the reason the Volume test states: reading the constant here
     // would make the assertion agree with whatever the constant says.
     expect(diameterOf(paneDrive)).toBe(56);
 
     await intoVoiceMode(user);
-    expect(diameterOf(knob(getTracks()[0], 'Amp', 'Drive'))).toBe(42);
+    expect(diameterOf(plateKnob(getTracks()[0], 'Amp (circuit)', 'Tone'))).toBe(42);
     // The lane's plate is the one sized to fit eight of these across a row.
     expect(PANE_KNOB_SCALE.amp).toBe(56);
     expect(LANE_KNOB_SCALE.amp).toBe(42);

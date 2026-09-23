@@ -123,9 +123,9 @@ describe('Knob', () => {
    * call site the next slice writes.
    */
   it('takes its props straight from a SliderParam descriptor', () => {
-    const amp = PARAM_SECTIONS.find((s) => s.id === 'amp')!;
+    const amp = PARAM_SECTIONS.find((s) => s.id === 'circuit-amp')!;
     const param = amp.params.find(
-      (p): p is SliderParam => p.kind === 'slider' && p.path === 'effects.amp.bass',
+      (p): p is SliderParam => p.kind === 'slider' && p.path === 'effects.circuitAmp.inputGainDb',
     )!;
 
     render(
@@ -141,9 +141,9 @@ describe('Knob', () => {
       />,
     );
 
-    const dial = screen.getByRole('slider', { name: 'Bass' });
-    expect(dial).toHaveAttribute('aria-valuemin', '-12');
-    expect(dial).toHaveAttribute('aria-valuemax', '12');
+    const dial = screen.getByRole('slider', { name: 'Input gain' });
+    expect(dial).toHaveAttribute('aria-valuemin', '-24');
+    expect(dial).toHaveAttribute('aria-valuemax', '24');
     expect(dial).toHaveAttribute('aria-valuetext', '-3.0 dB');
   });
 

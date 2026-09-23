@@ -70,15 +70,22 @@ describe('CIRCUIT_AMP_SECTION', () => {
     });
   });
 
-  it('carries the input gain as an ungated row, since every amp has one', () => {
+  it('carries the input gain on no amp condition, since every amp has one', () => {
     const row = CIRCUIT_AMP_SECTION.params.find(
       (p) => p.path === 'effects.circuitAmp.inputGainDb',
     );
     expect(row).toBeDefined();
+    // No `appliesWhen` — it belongs to no particular circuit. It IS gated on the
+    // branch, which is a different question and the seam's rather than the pane's.
     expect(row?.appliesWhen).toBeUndefined();
+    expect(row?.requiresBranch).toBe('effects.circuitAmp');
   });
 
-  it('is removable, so the classic amp can be compared against it', () => {
+  it('is removable, so a voice can be built with no amp at all', () => {
+    // Removing it now leaves the voice AMPLESS, not on some other amp: the
+    // five-model classic stage came out of the app on 2026-09-23 and this is the
+    // only amp left. That is the shape the stock acoustic instruments already
+    // ship in, so it is a real voice rather than a broken one.
     expect(CIRCUIT_AMP_SECTION.presenceProbe).toBe('effects.circuitAmp');
     expect(CIRCUIT_AMP_SECTION.removableBranch).toBe('effects.circuitAmp');
   });
@@ -101,7 +108,11 @@ describe('CIRCUIT_AMP_SECTION', () => {
  */
 describe('seeding the section the way the Add gesture does', () => {
   function seedByRowOrder(): Record<string, unknown> {
-    let preset = {} as Record<string, unknown>;
+    // THE BRANCH GOES IN EMPTY FIRST, exactly as `addVoiceSection` does it — and
+    // for the same reason: every row of this section is gated on the branch, so a
+    // loop that started from `{}` would find `paramApplies` false for all of them
+    // and seed nothing at all.
+    let preset = setAtPath({} as never, 'effects.circuitAmp', {}) as Record<string, unknown>;
     for (const param of CIRCUIT_AMP_SECTION.params) {
       if (param.optional) continue;
       if (!paramApplies(preset as never, param)) continue;
@@ -195,10 +206,39 @@ describe('only the selected amp\'s knobs are visible', () => {
     }
   });
 
-  it('shows no control at all for an amp id the registry has never heard of', () => {
-    // The chain still builds — `getCircuitAmp` falls back — but the PANE draws
-    // nothing rather than a set of knobs belonging to some other circuit.
-    const visible = visibleParams(presetWithAmpId('no-such-amp'), CIRCUIT_AMP_SECTION);
-    expect(visible.some((p) => p.path.startsWith('effects.circuitAmp.controls.'))).toBe(false);
+  it("shows the FALLBACK amp's knobs for an id the registry has never heard of", () => {
+    // Because that is the circuit the chain really builds: `getCircuitAmp` falls
+    // back to the default for a missing or unknown id, and `buildCircuitAmpLite`
+    // then reads `params.controls` against THAT amp's control list. The gate goes
+    // through the same resolver as the picker and the faceplate
+    // (`ParamCondition.resolve`), so all three name one amp. Drawing nothing here
+    // instead — which this test used to assert — left a plate engraved
+    // "Princeton 5F2-A" holding none of the Princeton's knobs while the lib built
+    // a Princeton with every control at its default.
+    const fallback = getCircuitAmp(undefined);
+    const visible = new Set(
+      visibleParams(presetWithAmpId('no-such-amp'), CIRCUIT_AMP_SECTION).map((p) => p.path),
+    );
+    for (const control of fallback.controls) {
+      expect(visible.has(circuitAmpControlPath(fallback.id, control.id)), control.id).toBe(true);
+    }
+    // And still nothing belonging only to another circuit.
+    for (const amp of CIRCUIT_AMPS) {
+      if (amp.id === fallback.id) continue;
+      const declaredByFallback = new Set(fallback.controls.map((c) => c.id));
+      for (const control of amp.controls) {
+        if (declaredByFallback.has(control.id)) continue;
+        expect(visible.has(circuitAmpControlPath(amp.id, control.id)), control.id).toBe(false);
+      }
+    }
+  });
+
+  it('refuses a control row on a voice carrying no circuit amp at all', () => {
+    // The gate above resolves an unknown id to the default, so without
+    // `requiresBranch` every Princeton row would apply to a voice with no amp —
+    // and `setVoiceParam` would mint `effects.circuitAmp` with no `controls` for
+    // `buildCircuitAmpLite` to index. Both halves are needed; this is the second.
+    const noAmp = { effects: {} } as never;
+    expect(visibleParams(noAmp, CIRCUIT_AMP_SECTION)).toEqual([]);
   });
 });

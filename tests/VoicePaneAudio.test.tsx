@@ -77,19 +77,26 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+
 describe('VoicePane → the draft store → playbackService', () => {
   it('pushes every knob edit at the live voice', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
 
     // The branch creation is itself an edit and has to land.
     expect(pushed()).toHaveLength(1);
-    expect(pushed()[0]).toMatchObject({ effects: { amp: { preDrive: 0.3 } } });
+    expect(pushed()[0]).toMatchObject({
+      effects: { circuitAmp: { controls: { tone: 0.5 } } },
+    });
 
-    // Drive is a knob now, not a range input: `End` drives it to its declared max.
-    fireEvent.keyDown(screen.getByLabelText('Drive'), { key: 'End' });
+    // Tone is a knob, not a range input: `End` drives it to its declared max.
+    // Scoped to the stage, because the amp's Volume and the IN/OUT bar's share a name.
+    // "Amp (circuit) Tone", not "Tone": the plate scopes its knobs by the stage
+    // (`renderAmp`'s `nameScope`), because the amp's own Volume and Input gain are
+    // word-for-word the IN/OUT bar's two.
+    fireEvent.keyDown(screen.getByLabelText('Amp (circuit) Tone'), { key: 'End' });
     expect(pushed()).toHaveLength(2);
-    expect(pushed()[1]).toMatchObject({ effects: { amp: { preDrive: 1 } } });
+    expect(pushed()[1]).toMatchObject({ effects: { circuitAmp: { controls: { tone: 1 } } } });
     // What is pushed is what the pane holds, never a round-trip through `voice.preset` —
     // see LIB-GAP(9b) on why the caller's copy is the only trustworthy one.
     expect(refreshed).not.toHaveBeenCalled();
@@ -97,13 +104,13 @@ describe('VoicePane → the draft store → playbackService', () => {
 
   it('removing a stage is an edit too, not a rebuild', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     notified.length = 0;
 
-    await userEvent.click(screen.getByRole('button', { name: 'Remove Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Amp (circuit)' }));
     expect(pushed()).toHaveLength(1);
     expect(pushed()[0]).not.toBeNull();
-    expect(pushed()[0]?.effects?.amp).toBeUndefined();
+    expect(pushed()[0]?.effects?.circuitAmp).toBeUndefined();
   });
 
   // REMOVED 2026-09-01, see docs/HANDOFF.md — picked a shipped voice by id to test
@@ -119,7 +126,7 @@ describe('VoicePane → the draft store → playbackService', () => {
     expect(pushed()).toHaveLength(0);
     expect(refreshed).toHaveBeenCalledTimes(1);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     expect(pushed().at(-1)).toEqual(expect.objectContaining({ effects: expect.anything() }));
 
     // The store now holds it, so the draft has to go — otherwise a later Save against
@@ -129,7 +136,7 @@ describe('VoicePane → the draft store → playbackService', () => {
     expect(pushed().at(-1)).toBeNull();
 
     // And once more with an edit standing when Save as… is pressed.
-    await userEvent.click(screen.getByRole('button', { name: 'Remove Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Amp (circuit)' }));
     refreshed.mockClear();
     await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
@@ -144,7 +151,7 @@ describe('VoicePane → the draft store → playbackService', () => {
     // keyed `pattern:<id>` now, so a switch strands nothing: there is nothing to discard
     // and nothing to push, and the first pattern's tone is still there on the way back.
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     const first = getEditingPattern()?.id;
     notified.length = 0;
 
@@ -153,7 +160,7 @@ describe('VoicePane → the draft store → playbackService', () => {
     });
 
     expect(notified).toHaveLength(0);
-    expect(readVoiceDraft('pattern', first ?? '')?.effects?.amp).toBeDefined();
+    expect(readVoiceDraft('pattern', first ?? '')?.effects?.circuitAmp).toBeDefined();
     // …and the pattern that just opened is on its stored voice, not the other's edit.
     expect(readVoiceDraft('pattern', getEditingPattern()?.id ?? '')).toBeNull();
   });

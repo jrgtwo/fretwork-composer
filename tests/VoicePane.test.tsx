@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import {
   ACOUSTIC_GUITAR_PRESET,
   CABINET_IRS,
+  DEFAULT_CIRCUIT_AMP_ID,
   detectSamplePack,
   getDefaultPresetForSlot,
   getSamplePack,
@@ -25,7 +26,6 @@ import {
   isVoiceDirty,
   readVoiceDraft,
   setVoiceParam,
-  subscribeVoiceDrafts,
 } from '../src/voice/voiceDrafts';
 import { SEED_VOICE_REVERB } from '../src/voice/pedalDefaults';
 import { readVoiceRef, voiceKey } from '../src/voice/voiceService';
@@ -51,8 +51,7 @@ import { getEditingPattern, openBlankPattern } from '../src/patterns/patternServ
  *   - **The write seam's identity guard** (`next === the preset the holder is showing`)
  *     cannot be reached from the DOM. React's own value tracker discards a `change`
  *     event whose value did not move, so the guard never sees one. It still covers the
- *     programmatic callers — Add/Remove stage, "Use suggested cab" — which is why it is
- *     not dead code.
+ *     programmatic callers — Add and Remove stage — which is why it is not dead code.
  *
  * `collapsedSections` — the FOLDED set, which is the polarity both surfaces hold
  * since the two editors merged — is hoisted into a host component because that is where
@@ -148,6 +147,15 @@ const seedVoice = (
   return { key: voiceKey({ kind: 'user', id }), id };
 };
 const section = (name: string) => screen.getByRole('button', { name });
+
+/** The Princeton's tone pot: this file's stand-in for "an amp knob", the way the
+ *  classic stage's Drive was until 2026-09-23.
+ *
+ *  Its knob answers to "Amp (circuit) Tone", not "Tone": the plate scopes its
+ *  knobs by the stage (`renderAmp`'s `nameScope`) because the amp's own Volume
+ *  and Input gain are word-for-word the IN/OUT bar's two. */
+const TONE_PATH = 'effects.circuitAmp.controls.tone';
+const TONE_KNOB = 'Amp (circuit) Tone';
 /** The ref the open pattern actually holds, read through the seam rather than off
  *  the `<select>` — the picker shows a DRAFT key for up to `VOICE_COMMIT_MS`
  *  after a pick, and the whole question below is whether that draft has landed. */
@@ -194,7 +202,7 @@ describe('VoicePane', () => {
 
     // Section disclosures carry the label alone — no status text folded into the
     // accessible name, which is why the status note sits outside the button.
-    for (const name of ['Source', 'Body filter', 'Pedals', 'Amp', 'Cabinet + room']) {
+    for (const name of ['Source', 'Body filter', 'Pedals', 'Amp (circuit)', 'Cabinet + room']) {
       expect(section(name)).toBeInTheDocument();
     }
     // `Level` is NOT among them any more, and nothing replaced it in the fold
@@ -248,23 +256,25 @@ describe('VoicePane', () => {
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
 
-    // Scoped to the section's own region: 'Volume' and 'Input gain' are also the
-    // IN/OUT bar's two knobs, and a bare query would pass on the wrong control.
     const stageRegion = screen.getByRole('region', { name: 'Amp (circuit) stage' });
     expect(within(stageRegion).getByLabelText('Amp')).toBeInTheDocument();
-    expect(within(stageRegion).getByLabelText('Volume')).toBeInTheDocument();
-    expect(within(stageRegion).getByLabelText('Tone')).toBeInTheDocument();
+    // The PLATE's knobs are named by the stage as well — `renderAmp`'s
+    // `nameScope` — because the amp's own Volume and Input gain are word-for-word
+    // the IN/OUT bar's two and the bar sits outside every region.
+    expect(within(stageRegion).getByLabelText('Amp (circuit) Volume')).toBeInTheDocument();
+    expect(within(stageRegion).getByLabelText('Amp (circuit) Tone')).toBeInTheDocument();
     // Input gain is the universal row — before the circuit, not the amp's own
     // Volume, which sits inside it. Both are present and they are not the same
     // control.
-    expect(within(stageRegion).getByLabelText('Input gain')).toBeInTheDocument();
-    // And no knob from an amp this one does not declare.
-    expect(within(stageRegion).queryByLabelText('Presence')).not.toBeInTheDocument();
+    expect(within(stageRegion).getByLabelText('Amp (circuit) Input gain')).toBeInTheDocument();
+    // And no knob belonging to an amp this one is not: `Bright vol` is the
+    // Deluxe's second volume pot and the Princeton has no such thing. An
+    // INDEPENDENT anchor — every other assertion here walks the same gate the
+    // renderer walks, so this is the one that would catch the gate going open.
+    expect(within(stageRegion).queryByLabelText(/Bright vol/)).not.toBeInTheDocument();
 
-    // And nothing from the classic amp leaks in: that stage has its own section
-    // and `wireChain` builds one or the other.
     const stage = draftPreset().effects?.circuitAmp;
-    expect(stage?.ampId).toBe('princeton-5f2a');
+    expect(stage?.ampId).toBe(DEFAULT_CIRCUIT_AMP_ID);
     expect(stage?.controls).toEqual({ volume: 0.5, tone: 0.5 });
   });
 
@@ -275,15 +285,15 @@ describe('VoicePane', () => {
     expect(ACOUSTIC_GUITAR_PRESET.effects).toBeUndefined();
     expect(ACOUSTIC_GUITAR_PRESET.bodyFilter).toBeUndefined();
     render(<Host />);
-    // Five, not three: the experimental circuit amp is a section of its own and no
-    // shipped preset carries one, by design — `wireChain` builds one amp or the
-    // other, so a built-in voiced on the classic amp must not also carry a circuit
-    // — and the final EQ is a fifth stage, absent here with the rest of `effects`.
+    // Four: body filter, amp, cabinet and final EQ, all absent with the rest of
+    // `effects`. It was five until 2026-09-23, when the five-model classic amp
+    // stage came out of the app and left the circuit amp as the only amp — the
+    // count is the section list, so a stage quietly regrowing fails here.
     // The rack's terse sentence, which is now both surfaces': the pane used to
     // print an explanatory paragraph here and the composition page a lamp and a
     // line. One editor, one wording — and the dark lamp beside it is the other
     // half, which jsdom cannot read.
-    expect(screen.getAllByText(/stage on this voice\./)).toHaveLength(5);
+    expect(screen.getAllByText(/stage on this voice\./)).toHaveLength(4);
     // The acronym, pinned. `Final EQ` is the first label in the table that does
     // not lowercase cleanly, and the sentence reads it off `absentLabel` rather
     // than off `label.toLowerCase()` — which would say "No final eq stage".
@@ -315,10 +325,10 @@ describe('VoicePane', () => {
     // once. "Enabled, switch" twice over is the same defect the Add/Remove buttons
     // already solve, and a test that adds only one section cannot see it.
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
 
-    expect(screen.getByRole('switch', { name: 'Amp Enabled' })).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Amp (circuit) Enabled' })).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: 'Cabinet + room Enabled' })).toBeInTheDocument();
     expect(screen.getAllByRole('switch')).toHaveLength(2);
   });
@@ -649,80 +659,32 @@ describe('VoicePane', () => {
     render(<Host />);
     expect(screen.getByText('Saved')).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
     // The amp's params are knobs, not range inputs, so the value is on `aria-valuenow`
     // rather than on `.value` — which is also the only place a screen reader reads it.
-    expect(screen.getByLabelText('Drive')).toHaveAttribute('aria-valuenow', '0.3');
-    expect(screen.getByLabelText('Power')).toHaveAttribute('aria-valuenow', '0.1');
-    // An absent modelId resolves through `getAmpModel`, so the picker names the model
-    // the chain would really build rather than showing nothing.
-    expect((screen.getByLabelText('Model') as HTMLSelectElement).value).toBe('marshall-plexi');
+    expect(screen.getByLabelText(TONE_KNOB)).toHaveAttribute('aria-valuenow', '0.5');
+    expect(screen.getByLabelText('Amp (circuit) Volume')).toHaveAttribute('aria-valuenow', '0.5');
+    // The seeded `ampId` names the circuit the chain would really build — and an
+    // absent one would too, through `getCircuitAmp`.
+    expect((screen.getByLabelText('Amp') as HTMLSelectElement).value).toBe(
+      DEFAULT_CIRCUIT_AMP_ID,
+    );
   });
 
   it('leaves the optional params of an added branch unwritten', async () => {
     // Not visible in the DOM: an omitted `enabled` and `enabled: true` both render "In
-    // chain", and an omitted `modelId` renders as Plexi either way. So the assertion has
-    // to be on the preset. Writing our guess would turn "the lib's default" into a value
-    // the user never chose, and would be saved as such.
+    // chain". So the assertion has to be on the preset. Writing our guess would turn
+    // "the lib's default" into a value the user never chose, and would be saved as such.
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
 
-    const amp = draftPreset().effects?.amp;
-    expect(amp?.preDrive).toBe(0.3); // required — seeded
+    const amp = draftPreset().effects?.circuitAmp;
+    expect(amp?.inputGainDb).toBe(0); // required — seeded
+    expect(amp?.controls.tone).toBe(0.5); // required — seeded
     expect(amp?.enabled).toBeUndefined();
-    expect(amp?.modelId).toBeUndefined();
+    // And the Add stayed inside its own stage: no cabinet came with it.
     expect(draftPreset().effects?.cabIR).toBeUndefined();
-  });
-
-  it('offers the amp model’s suggested cab — nothing in the lib applies it', async () => {
-    render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-    // Folded first: the button lives in Amp and writes into Cabinet, so with Cabinet
-    // closed the only feedback would be the button vanishing.
-    await userEvent.click(section('Cabinet + room'));
-    expect(section('Cabinet + room')).toHaveAttribute('aria-expanded', 'false');
-
-    await userEvent.click(screen.getByRole('button', { name: /Use suggested cab/ }));
-
-    // Creates the cabinet branch from the pairing, unfolds the section it landed in,
-    // and the offer retires.
-    expect(section('Cabinet + room')).toHaveAttribute('aria-expanded', 'true');
-    expect((screen.getByLabelText('Cabinet') as HTMLSelectElement).value).toMatch(/^https?:/);
-    expect(screen.queryByRole('button', { name: /Use suggested cab/ })).not.toBeInTheDocument();
-  });
-
-  it('applies the suggested cab in ONE draft commit, never touching the seed IR', async () => {
-    // ⚠ WHAT THIS IS ABOUT IS THE AUDIO, not the preset. `playbackService`
-    // subscribes to this store and rebuilds per commit, and the lib's
-    // `sameEffectsShape` compares `cabIR.url` — so a `url` change is a full chain
-    // teardown plus a `loadAudioBuffer`, not a retune. Adding the section and THEN
-    // writing the URL was two commits: the first built the branch from the row's
-    // `fallback` (the FIRST registered IR, which nobody asked for), fetched it,
-    // and the second tore it down again. The seed override exists for this.
-    render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-
-    const seen: VoicePreset[] = [];
-    const stop = subscribeVoiceDrafts(() => {
-      seen.push(draftPreset());
-    });
-    try {
-      await userEvent.click(screen.getByRole('button', { name: /Use suggested cab/ }));
-    } finally {
-      stop();
-    }
-
-    // One commit, and the URL it carries is the suggestion.
-    expect(seen).toHaveLength(1);
-    expect(seen[0].effects?.cabIR?.url).toBe(draftPreset().effects?.cabIR?.url);
-    // The seed IR never appears — in the committed state or on the way there.
-    // Guarded, because the suggestion for the default amp could one day BE the
-    // first registered cab and this assertion would then be vacuous.
-    const seedUrl = CABINET_IRS[0].url;
-    if (draftPreset().effects?.cabIR?.url !== seedUrl) {
-      expect(seen.map((preset) => preset.effects?.cabIR?.url)).not.toContain(seedUrl);
-    }
   });
 
   it('keeps the edit that drags a knob away from a value and back', async () => {
@@ -738,22 +700,22 @@ describe('VoicePane', () => {
     // `voiceDrafts` reads the draft fresh inside every call, which is what makes this
     // pass; it fails the moment a handler here rebuilds a preset from `preset`.
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
-    const drive = screen.getByLabelText('Drive');
-    const start = getAtPath(draftPreset(), 'effects.amp.preDrive');
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
+    const drive = screen.getByLabelText(TONE_KNOB);
+    const start = getAtPath(draftPreset(), TONE_PATH);
 
     // A full 100 px sweep is min→max, so 20 px is a fifth of the range — well clear of
     // the snap step, and back to exactly where it began.
     fireEvent(drive, pointerEvent('pointerdown', { clientY: 100 }));
     fireEvent(window, pointerEvent('pointermove', { clientY: 80 }));
-    const moved = getAtPath(draftPreset(), 'effects.amp.preDrive');
+    const moved = getAtPath(draftPreset(), TONE_PATH);
     expect(moved).not.toBe(start);
 
     fireEvent(window, pointerEvent('pointermove', { clientY: 100 }));
     fireEvent(window, pointerEvent('pointerup', { clientY: 100 }));
 
-    expect(getAtPath(draftPreset(), 'effects.amp.preDrive')).toBe(start);
-    expect(screen.getByLabelText('Drive')).toHaveAttribute('aria-valuenow', String(start));
+    expect(getAtPath(draftPreset(), TONE_PATH)).toBe(start);
+    expect(screen.getByLabelText(TONE_KNOB)).toHaveAttribute('aria-valuenow', String(start));
   });
 
   it('writes a slider edit into the working copy', async () => {
@@ -794,13 +756,13 @@ describe('VoicePane', () => {
     for (const name of ['Source', 'Body filter', 'Pedals']) {
       expect(section(name)).toHaveAttribute('aria-expanded', 'false');
     }
-    for (const name of ['Amp', 'Cabinet + room']) {
+    for (const name of ['Amp (circuit)', 'Cabinet + room']) {
       expect(section(name)).toHaveAttribute('aria-expanded', 'true');
     }
     unmount();
 
     render(<VoicePane collapsedSections={[]} onCollapsedSectionsChange={() => {}} />);
-    for (const name of ['Source', 'Body filter', 'Pedals', 'Amp', 'Cabinet + room']) {
+    for (const name of ['Source', 'Body filter', 'Pedals', 'Amp (circuit)', 'Cabinet + room']) {
       expect(section(name)).toHaveAttribute('aria-expanded', 'true');
     }
   });
@@ -810,8 +772,8 @@ describe('VoicePane', () => {
     render(<VoicePane collapsedSections={undefined} onCollapsedSectionsChange={(next) => folded.push(next)} />);
 
     // Unfolding the pedalboard — folded by default — is a REMOVAL from the folded
-    // list, which is the half "Use suggested cab" also writes. What travels is the
-    // WHOLE list, so the stages nobody touched are still in it.
+    // list, which is the half a caller reporting a diff would get backwards. What
+    // travels is the WHOLE list, so the stages nobody touched are still in it.
     await userEvent.click(section('Pedals'));
     expect(folded).toHaveLength(1);
     expect(folded[0]).not.toContain('pedals');
@@ -925,7 +887,7 @@ describe('VoicePane', () => {
     // the instrument's default, which is the lib resolver's floor and not a
     // document. Nothing to write into, so Save as… is the only way out.
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
 
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     expect(screen.getByText(/no voice of its own/)).toBeInTheDocument();
@@ -936,7 +898,7 @@ describe('VoicePane', () => {
 
   it('Save as… creates a variant, repoints the pattern and clears the working copy', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
 
     await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
     const field = screen.getByLabelText('New name');
@@ -949,7 +911,7 @@ describe('VoicePane', () => {
     // The record and its payload have to agree, or the picker offers a name the engine
     // doesn't build.
     expect(variants[0].preset.name).toBe('My tone');
-    expect(variants[0].preset.effects?.amp).toBeDefined();
+    expect(variants[0].preset.effects?.circuitAmp).toBeDefined();
 
     expect(screen.getByText('Saved')).toBeInTheDocument();
     const picker = screen.getByLabelText('Voice') as HTMLSelectElement;
@@ -964,22 +926,22 @@ describe('VoicePane', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
 
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     // `End` = the knob's max, which is the one edit whose result is a stated number
     // rather than a step count.
-    fireEvent.keyDown(screen.getByLabelText('Drive'), { key: 'End' });
+    fireEvent.keyDown(screen.getByLabelText(TONE_KNOB), { key: 'End' });
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(screen.getByText('Saved')).toBeInTheDocument();
-    expect(useVoiceStore.getState().variants[0].preset.effects?.amp?.preDrive).toBe(1);
+    expect(useVoiceStore.getState().variants[0].preset.effects?.circuitAmp?.controls.tone).toBe(1);
   });
 
   it('a rename while dirty reaches the working copy, so the next Save keeps it', async () => {
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
 
     await userEvent.click(screen.getByRole('button', { name: 'Rename' }));
     const field = screen.getByLabelText('Rename');
@@ -998,13 +960,13 @@ describe('VoicePane', () => {
     const asked = stubConfirm(false);
     const green = seedVoice('karoryfer-green-guitar').key;
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     await pickVoice(green);
 
     expect(asked).toHaveLength(1);
     // Refused, so the edit survives and the voice hasn't moved.
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
-    expect(screen.getByLabelText('Drive')).toBeInTheDocument();
+    expect(screen.getByLabelText(TONE_KNOB)).toBeInTheDocument();
   });
 
   it('discards the working copy when the confirm is accepted', async () => {
@@ -1014,11 +976,11 @@ describe('VoicePane', () => {
     stubConfirm(true);
     const green = seedVoice('karoryfer-green-guitar').key;
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     await pickVoice(green);
 
     expect(screen.getByText('Saved')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Drive')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(TONE_KNOB)).not.toBeInTheDocument();
     expect((screen.getByLabelText('Voice') as HTMLSelectElement).value).toBe(green);
   });
 
@@ -1157,7 +1119,7 @@ describe('VoicePane', () => {
     // FOLLOWING the instrument rather than about an empty list either way.
     seedVoice('karoryfer-green-guitar', 'My guitar tone');
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     expect(screen.getByRole('option', { name: 'My guitar tone' })).toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText('Instrument'), 'bass');
 
@@ -1177,7 +1139,7 @@ describe('VoicePane', () => {
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
 
     // Pulled out from under the pane — a second tab, or another holder of the
@@ -1197,7 +1159,7 @@ describe('VoicePane', () => {
 
   it('clears a refusal once the user is editing again', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
 
     // A refusal that is still reachable from the buttons: the seam rejects a
     // nameless variant, and the pane renders the sentence rather than swallowing
@@ -1209,7 +1171,7 @@ describe('VoicePane', () => {
 
     // A notice describes a write that was rejected. Once knobs are moving again it
     // describes nothing, and it sits directly above the controls.
-    fireEvent.keyDown(screen.getByLabelText('Drive'), { key: 'ArrowUp' });
+    fireEvent.keyDown(screen.getByLabelText(TONE_KNOB), { key: 'ArrowUp' });
     expect(screen.queryByText(/needs a name|Give the variant a name/)).not.toBeInTheDocument();
   });
 
@@ -1234,13 +1196,13 @@ describe('VoicePane', () => {
     // the working key alone; that the *engine's* copy is retired with it is the part the
     // effect at VoicePane.tsx exists for, and it is pinned in `VoicePaneAudio.test.tsx`.
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
 
     act(() => openBlankPattern('Somewhere else'));
 
     expect(screen.getByText('Saved')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Drive')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(TONE_KNOB)).not.toBeInTheDocument();
   });
 
   it('hands focus back to the button that opened the name form', async () => {

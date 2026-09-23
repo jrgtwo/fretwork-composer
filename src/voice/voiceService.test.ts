@@ -34,6 +34,7 @@ import {
 } from './voiceService';
 import { previewNote, refreshVoice, usePlaybackEngine } from '../audio/playbackService';
 import {
+  addVoiceSection,
   clearVoiceDrafts,
   discardVoiceDraft,
   isVoiceDirty,
@@ -760,12 +761,22 @@ describe('an unsaved edit reaching the engine', () => {
     // This slice's headline controls. If the key ever hashed the whole preset instead of
     // the source, every amp knob would re-download the sampler — and nothing about that
     // failure is audible except the silence while it downloads.
+    //
+    // THE CIRCUIT AMP, since 2026-09-23: the five-model classic stage came out of the
+    // app, so `effects.amp.preDrive` is a path no seam accepts any more and a test
+    // written on it would be refused before it was ever classified.
     selectVoice('pattern', openPatternId(), savedVoice('clean-amp').ref);
     const { voice } = startEngine();
-    const amp = editingPreset().effects?.amp;
-    if (!amp) throw new Error('expected clean-amp to ship an amp');
+    // No built-in ships a circuit amp, so the stage is added first — and adding one is
+    // itself a chain-SHAPE change, which is the harder half of what this asserts stays
+    // in place.
+    act(() => {
+      expect(addVoiceSection('pattern', openPatternId(), 'circuit-amp').ok).toBe(true);
+    });
+    const amp = draftPreset().effects?.circuitAmp;
+    if (!amp) throw new Error('expected the added stage to seed a circuit amp');
 
-    act(() => edit('effects.amp.preDrive', Math.min(1, amp.preDrive + 0.2)));
+    act(() => edit('effects.circuitAmp.inputGainDb', amp.inputGainDb + 2));
     // Adding a stage, not just retuning one: `clean-amp` ships no cabinet, and
     // `swapPreset` handles a chain-shape change itself (`_rebuildChain` keeps the
     // synth). Only the *source* needs a new `Voice`.

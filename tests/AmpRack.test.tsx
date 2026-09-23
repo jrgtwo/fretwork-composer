@@ -2,14 +2,26 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useState } from 'react';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { CABINET_IRS, getCabinetIR, useFretworkStore, useVoiceStore } from '@fretwork/lib';
+import {
+  CABINET_IRS,
+  CIRCUIT_AMPS,
+  DEFAULT_CIRCUIT_AMP_ID,
+  getCabinetIR,
+  getCircuitAmp,
+  getDefaultPresetForSlot,
+  useFretworkStore,
+  useVoiceStore,
+} from '@fretwork/lib';
 import { AmpHead } from '../src/voice/rack/AmpHead';
 import { CabinetGraphic } from '../src/voice/rack/CabinetGraphic';
 import { VoicePane } from '../src/voice/VoicePane';
-import { PARAM_SECTIONS, type SectionId } from '../src/voice/paramSchema';
+import { PARAM_SECTIONS, paramApplies, type SectionId } from '../src/voice/paramSchema';
+import { voicePreset } from '../src/voice/voiceDrafts';
+import { getEditingPattern } from '../src/patterns/patternService';
 import { PLACED_CABINET_IRS } from '../src/voice/micPositions';
 import { openBlankPattern } from '../src/patterns/patternService';
 import { clearVoiceDrafts } from '../src/voice/voiceDrafts';
+import { selectVoice } from '../src/voice/voiceService';
 
 /**
  * The graphic rack — `AmpHead`, `CabinetGraphic` and the pane wiring that renders the
@@ -77,19 +89,55 @@ function pointOf(id: string) {
 
 const irUrl = (id: string) => getCabinetIR(id)!.url;
 
-const AMP_SECTION = PARAM_SECTIONS.find((s) => s.id === 'amp')!;
+/**
+ * THE AMP IS THE CIRCUIT AMP. The five-model classic stage came out of the app on
+ * 2026-09-23 and the amp-head face moved onto the one that survived, so this file
+ * follows the face rather than the models — what it is about (the plate, the lamp,
+ * the switch, the knob row, bypass-is-not-dimmed) is the same thing it always was.
+ */
+const AMP_SECTION = PARAM_SECTIONS.find((s) => s.id === 'circuit-amp')!;
+const AMP_STAGE_LABEL = AMP_SECTION.label;
+const DEFAULT_AMP = getCircuitAmp(DEFAULT_CIRCUIT_AMP_ID);
 const CABINET_SECTION = PARAM_SECTIONS.find((s) => s.id === 'cabinet')!;
+
+/**
+ * The amp section's rows that apply to the preset actually on screen.
+ *
+ * Needed here and not for the Cabinet because a circuit amp's knobs are the AMP'S,
+ * not the section's: every control row is gated with `appliesWhen` on the amps that
+ * declare it, so walking `section.params` blind would look for a Deluxe's Bright
+ * switch on a Princeton and fail on a control that is correctly not there.
+ */
+const openPreset = () => voicePreset('pattern', getEditingPattern()!.id)!;
+const applicableParams = (section: typeof AMP_SECTION) =>
+  section.params.filter((param) => paramApplies(openPreset(), param));
+
+/** A stage's own landmark, so a query says which stage it means. */
+const stage = (section: typeof AMP_SECTION) =>
+  within(screen.getByRole('region', { name: `${section.label} stage` }));
+
+/**
+ * What a knob on the AMP'S PLATE answers to.
+ *
+ * ⚠ The amp is the one section whose knobs are scoped by the stage. Its own
+ * "Input gain" and "Volume" are word-for-word the IN/OUT bar's two, and the bar
+ * sits outside every section — so on the pattern page, where there is a single
+ * holder and nothing else to scope by, both pairs would answer to one name.
+ * `renderAmp` puts the stage in the name; the cabinet's knobs collide with
+ * nothing and carry none.
+ */
+const plateName = (label: string) => `${AMP_STAGE_LABEL} ${label}`;
 
 describe('AmpHead', () => {
   it('engraves the model and puts every knob it is handed on the plate', () => {
     render(
-      <AmpHead model="Marshall Plexi" enabled power={{ label: 'Amp Enabled', onChange: vi.fn() }}>
+      <AmpHead model="Princeton 5F2-A" enabled power={{ label: 'Amp Enabled', onChange: vi.fn() }}>
         <button type="button">Bass</button>
         <button type="button">Treble</button>
       </AmpHead>,
     );
 
-    expect(screen.getByText('Marshall Plexi')).toBeInTheDocument();
+    expect(screen.getByText('Princeton 5F2-A')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Bass' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Treble' })).toBeInTheDocument();
   });
@@ -97,7 +145,7 @@ describe('AmpHead', () => {
   it('carries bypass on a named switch, not on the lamp alone', async () => {
     const onChange = vi.fn();
     const { rerender } = render(
-      <AmpHead model="Plexi" enabled power={{ label: 'Amp Enabled', onChange }} />,
+      <AmpHead model="5F2-A" enabled power={{ label: 'Amp Enabled', onChange }} />,
     );
 
     const power = screen.getByRole('switch', { name: 'Amp Enabled' });
@@ -108,7 +156,7 @@ describe('AmpHead', () => {
     await userEvent.click(power);
     expect(onChange).toHaveBeenCalledWith(false);
 
-    rerender(<AmpHead model="Plexi" enabled={false} power={{ label: 'Amp Enabled', onChange }} />);
+    rerender(<AmpHead model="5F2-A" enabled={false} power={{ label: 'Amp Enabled', onChange }} />);
     // The name is the same in both states: the word is the value, `aria-checked` carries
     // it, and a name that moves with the value is not a name.
     const off = screen.getByRole('switch', { name: 'Amp Enabled' });
@@ -117,7 +165,7 @@ describe('AmpHead', () => {
   });
 
   it('drops the switch for a stage with no bypass, the way a rack unit does', () => {
-    render(<AmpHead model="Plexi" enabled />);
+    render(<AmpHead model="5F2-A" enabled />);
     expect(screen.queryByRole('switch')).not.toBeInTheDocument();
   });
 });
@@ -393,7 +441,7 @@ describe('the rack, wired into the pane', () => {
   it('renders one accessible control per declared param, whatever the renderer', async () => {
     render(<Host />);
     // The stock acoustic guitar has no `effects` at all, so both stages start absent.
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: `Add ${AMP_STAGE_LABEL}` }));
     await userEvent.click(screen.getByRole('button', { name: 'Add Cabinet' }));
     // The room is the cabinet section's SUB-BRANCH, added by its own gesture:
     // `addVoiceSection` skips every row under a section's sub-branch outright, so
@@ -403,7 +451,7 @@ describe('the rack, wired into the pane', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Add Room' }));
 
     for (const section of [AMP_SECTION, CABINET_SECTION]) {
-      for (const param of section.params) {
+      for (const param of applicableParams(section)) {
         // A sub-branch's rows are named for the BRANCH, not the section:
         // `renderParam`'s `nameScope`, which is what keeps "Size" and "Mix" from
         // being ambiguous against a second stage that has them. The section's own
@@ -412,22 +460,26 @@ describe('the rack, wired into the pane', () => {
         const inSub = sub ? param.path.startsWith(`${sub.branch}.`) : false;
         const scoped = (label: string) =>
           inSub ? `${sub!.label} ${label}` : `${section.label} ${label}`;
+        // The amp's plate scopes its knobs by the stage; the cabinet's do not.
+        // See `plateName`.
+        const knobName = (label: string) =>
+          inSub || section.id === 'circuit-amp' ? scoped(label) : label;
         switch (param.kind) {
           case 'slider':
             // A knob, not a range row — but still one `role="slider"` with the
             // descriptor's label as its name.
             expect(
-              screen.getByRole('slider', { name: inSub ? scoped(param.label) : param.label }),
+              stage(section).getByRole('slider', { name: knobName(param.label) }),
             ).toBeInTheDocument();
             break;
           case 'toggle':
             expect(
-              screen.getByRole('switch', { name: scoped(param.label) }),
+              stage(section).getByRole('switch', { name: scoped(param.label) }),
             ).toBeInTheDocument();
             break;
           case 'enum':
             expect(
-              screen.getByLabelText(inSub ? scoped(param.label) : param.label),
+              stage(section).getByLabelText(inSub ? scoped(param.label) : param.label),
             ).toBeInTheDocument();
             break;
           case 'sample-pack':
@@ -439,13 +491,37 @@ describe('the rack, wired into the pane', () => {
 
   it('keeps the knobs reading their range from the descriptor', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: `Add ${AMP_STAGE_LABEL}` }));
 
-    for (const param of AMP_SECTION.params) {
+    for (const param of applicableParams(AMP_SECTION)) {
       if (param.kind !== 'slider') continue;
-      const knob = screen.getByRole('slider', { name: param.label });
+      const knob = stage(AMP_SECTION).getByRole('slider', { name: plateName(param.label) });
       expect(knob).toHaveAttribute('aria-valuemin', String(param.min));
       expect(knob).toHaveAttribute('aria-valuemax', String(param.max));
+    }
+
+    // ⚠ AN INDEPENDENT ANCHOR, because everything above walks `paramApplies` —
+    // the same predicate the renderer filters on — so on its own it only says the
+    // renderer agrees with itself. The Princeton's two pots by NAME, and a control
+    // no amp but the Deluxe declares, from the registry rather than from the gate.
+    for (const control of DEFAULT_AMP.controls) {
+      expect(
+        stage(AMP_SECTION).getByLabelText(plateName(control.label)),
+        control.id,
+      ).toBeInTheDocument();
+    }
+    const elsewhere = CIRCUIT_AMPS.flatMap((amp) =>
+      amp.id === DEFAULT_AMP.id
+        ? []
+        : amp.controls.filter((c) => !DEFAULT_AMP.controls.some((own) => own.id === c.id)),
+    );
+    // Guards the guard: with one amp registered there is nothing to be absent.
+    expect(elsewhere.length).toBeGreaterThan(0);
+    for (const control of elsewhere) {
+      expect(
+        stage(AMP_SECTION).queryByLabelText(plateName(control.label)),
+        control.id,
+      ).toBeNull();
     }
   });
 
@@ -487,23 +563,29 @@ describe('the rack, wired into the pane', () => {
 
   it('restores the starting value when a knob is dragged away and back', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: `Add ${AMP_STAGE_LABEL}` }));
 
     // `commit` compares the incoming preset against the live one. The drag transport runs
     // on `window` listeners captured at pointerdown, so comparing against the *captured*
     // preset would make the one edit that returns the knob to where it started — and
     // therefore produces that captured object verbatim — the one edit silently dropped.
-    const bass = screen.getByRole('slider', { name: 'Bass' });
-    expect(bass).toHaveAttribute('aria-valuenow', '0');
+    const gain = stage(AMP_SECTION).getByRole('slider', { name: plateName('Input gain') });
+    expect(gain).toHaveAttribute('aria-valuenow', '0');
 
-    fireEvent(bass, pointerEvent('pointerdown', { clientY: 100 }));
+    fireEvent(gain, pointerEvent('pointerdown', { clientY: 100 }));
     fireEvent(window, pointerEvent('pointermove', { clientY: 80 }));
-    expect(bass).toHaveAttribute('aria-valuenow', '5');
+    // EXACT, not merely "moved": `Knob.DRAG_RANGE_PX` is 100 for the whole
+    // min→max sweep, so 20 px of a -24..24 range at a 0.5 step lands on 9.5 and
+    // nowhere else. An inequality here passes for an inverted drag direction and
+    // for a halved range mapping alike.
+    expect(gain).toHaveAttribute('aria-valuenow', '9.5');
 
     fireEvent(window, pointerEvent('pointermove', { clientY: 100 }));
-    expect(bass).toHaveAttribute('aria-valuenow', '0');
+    expect(gain).toHaveAttribute('aria-valuenow', '0');
     fireEvent(window, pointerEvent('pointerup', { clientY: 100 }));
-    expect(screen.getByRole('slider', { name: 'Bass' })).toHaveAttribute('aria-valuenow', '0');
+    expect(
+      stage(AMP_SECTION).getByRole('slider', { name: plateName('Input gain') }),
+    ).toHaveAttribute('aria-valuenow', '0');
   });
 
   it('names each stage of the rack, so the four sections are landmarks', () => {
@@ -514,13 +596,84 @@ describe('the rack, wired into the pane', () => {
     }
   });
 
-  it('names the model on the plate as the one the chain would really build', async () => {
+  it("lays the plate out in the AMP'S panel order, not the schema's", async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
+    await userEvent.click(screen.getByRole('button', { name: `Add ${AMP_STAGE_LABEL}` }));
 
-    // `addSection` writes no `modelId` — it is optional, so the lib's own fallback
-    // decides, and the faceplate has to say what will be heard rather than nothing.
-    expect((screen.getByLabelText('Model') as HTMLSelectElement).value).toBe('marshall-plexi');
-    expect(screen.getByText('Marshall Plexi')).toBeInTheDocument();
+    for (const amp of CIRCUIT_AMPS) {
+      await userEvent.selectOptions(stage(AMP_SECTION).getByLabelText('Amp'), amp.id);
+
+      // Document order, which is what a faceplate is read in. The schema's rows
+      // are the union of every amp's controls GROUPED BY ID — with the Princeton
+      // registered first, a Deluxe's Tone is declared before its two volumes,
+      // because Tone is the id they share — so declaration order is a grouping
+      // and not any one amp's layout.
+      const drawn = stage(AMP_SECTION)
+        .getAllByRole('slider')
+        .map((el) => el.getAttribute('aria-label'));
+      const expected = [
+        // The section's own row first: it belongs to no circuit and sits where a
+        // boost pedal would, in front of the amp.
+        plateName('Input gain'),
+        ...amp.controls.filter((c) => c.kind === 'pot').map((c) => plateName(c.label)),
+      ];
+      expect(drawn, amp.id).toEqual(expected);
+    }
+  });
+
+  it('falls back to the default circuit — on the plate AND on the knobs', async () => {
+    // ⚠ AUTHORED PAST THE GESTURES ON PURPOSE. `addVoiceSection` always seeds
+    // `ampId`, so nothing a user can do from this app reaches the fallback arm
+    // the faceplate line exists for. What does reach it is a STORED preset
+    // naming an amp the registry no longer has — a variant saved by an older
+    // build, and `useVoiceStore` persists variants.
+    const source = getDefaultPresetForSlot('acoustic-guitar');
+    const name = 'Amp that left the registry';
+    const variantId = useVoiceStore.getState().addVariant({
+      name,
+      instrumentId: source.instrumentId,
+      family: source.family,
+      collectionId: null,
+      preset: {
+        ...source,
+        name,
+        effects: { circuitAmp: { ampId: 'no-such-amp', inputGainDb: 0, controls: {} } },
+      },
+    });
+    expect(variantId).not.toBe('');
+    expect(
+      selectVoice('pattern', getEditingPattern()!.id, { kind: 'user', id: variantId }).ok,
+    ).toBe(true);
+
+    render(<Host />);
+
+    // The engraving names what `wireChain` will really build.
+    expect(
+      stage(AMP_SECTION).getByText(DEFAULT_AMP.name, { selector: 'span' }),
+    ).toBeInTheDocument();
+    // …and so do the knobs, through the same resolver. A plate engraved
+    // "Princeton 5F2-A" holding none of the Princeton's knobs — which is what a
+    // gate comparing the RAW id gives — is the same lie one level down, while the
+    // lib builds a Princeton with every control at its default.
+    for (const control of DEFAULT_AMP.controls) {
+      expect(
+        stage(AMP_SECTION).getByLabelText(plateName(control.label)),
+        control.id,
+      ).toBeInTheDocument();
+    }
+  });
+
+  it('names the amp on the plate as the one the chain would really build', async () => {
+    render(<Host />);
+    await userEvent.click(screen.getByRole('button', { name: `Add ${AMP_STAGE_LABEL}` }));
+
+    // The lib resolves an unknown or missing `ampId` to its default circuit, so the
+    // faceplate has to say what will be heard rather than nothing — which is why the
+    // name goes through `getCircuitAmp` and not through a lookup beside the picker.
+    const picker = stage(AMP_SECTION).getByLabelText('Amp') as HTMLSelectElement;
+    expect(picker.value).toBe(DEFAULT_CIRCUIT_AMP_ID);
+    // By selector, because the picker's own `<option>` carries the same words: the
+    // engraving is the plate's, and it is the one this test is about.
+    expect(stage(AMP_SECTION).getByText(DEFAULT_AMP.name, { selector: 'span' })).toBeInTheDocument();
   });
 });

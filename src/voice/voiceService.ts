@@ -25,7 +25,7 @@
  * different concept from `pattern.voiceRef` and writing it would retune every other
  * pattern in the library.
  *
- * `paramSchema.ts` reads the static registries (`AMP_MODELS`, `CABINET_IRS`,
+ * `paramSchema.ts` reads the static registries (`CIRCUIT_AMPS`, `CABINET_IRS`,
  * `SAMPLE_PACKS`) directly. That is not a hole in this seam: those are frozen option
  * tables with no store behind them, and a descriptor table is the right owner. What
  * lives here is everything with state or resolution order in it.

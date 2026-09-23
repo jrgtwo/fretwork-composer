@@ -99,8 +99,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   detectSamplePack,
-  getAmpModel,
-  getCabinetIR,
+  getCircuitAmp,
   getSamplePack,
   type FretInstrumentId,
 } from '@fretwork/lib';
@@ -127,6 +126,7 @@ import {
   type SliderParam,
   type SourceKindParam,
 } from './paramSchema';
+import { circuitAmpControlId } from './circuitAmpDefaults';
 import { getAtPath } from './presetPaths';
 import { warmSampleBanks, type Banks } from './sampleWarm';
 import { isSourceKind, withSourceKind } from './sourceDefaults';
@@ -198,10 +198,10 @@ import {
  *  dot writes it, and the descriptor beside it is what resolves it. */
 const CAB_URL_PATH = 'effects.cabIR.url';
 
-/** The amp model, read by "Use suggested cab" — the other hand-named path, and
- *  for the same reason: it is the one control that reads one section and writes
- *  another. */
-const AMP_MODEL_PATH = 'effects.amp.modelId';
+/** Which circuit the amp stage is built from — the other hand-named path, and
+ *  for its own reason: the faceplate has to be engraved with the amp the chain
+ *  will really build, which is a question only the lib's resolver answers. */
+const CIRCUIT_AMP_ID_PATH = 'effects.circuitAmp.ampId';
 
 /** `id` on an input, `htmlFor` on its label. Scoped by HOLDER as well as by
  *  path: eight racks would otherwise mint eight elements with the same `id`, and
@@ -715,7 +715,6 @@ export function VoiceEditor({
             ariaLabel={branchName(param.label)}
             value={param.resolve(raw)}
             options={param.options}
-            badgeOf={param.badgeOf}
             mod={param.mod}
             onChange={(value) => write(param.path, value)}
           />
@@ -1044,63 +1043,14 @@ export function VoiceEditor({
     );
   };
 
-  /**
-   * "Use suggested cab" — ours entirely. Every amp model names a cab pairing and
-   * the lib's own comment calls the suggestion *documentary*: nothing in the
-   * engine applies it. Offered only when it would change something.
-   *
-   * ⚠ TWO CALLS, EXACTLY ONE COMMIT, and both halves are load-bearing. The cab
-   * rows are gated on `effects.cabIR` (see the Cabinet section), so on the voice
-   * this button is most useful for — one with no cabinet at all — a bare `write`
-   * is refused by `setVoiceParam` and the press does nothing; hence the add. But
-   * adding and THEN writing over the seed is two draft commits, and
-   * `playbackService` rebuilds off each: a `cabIR.url` change is not an in-place
-   * retune (the lib's `sameEffectsShape` compares it), so that tore the chain
-   * down twice and fetched the seed IR — the first registered cab, not the
-   * suggestion — on the way past. Handing the URL to `addVoiceSection` as its
-   * seed makes the branch arrive correct, and the `write` below is then a no-op
-   * by value: `setAtPath` returns the preset unchanged and `commit` compares by
-   * reference. On a voice that already HAS a cabinet the two swap roles — the add
-   * is the no-op and the write does the work. Neither writes `enabled`, so a
-   * cabinet the user switched off on purpose stays switched off.
-   *
-   * It also UNFOLDS Cabinet: the button lives in the Amp stage but every visible
-   * consequence of pressing it is in another one, so with Cabinet folded the
-   * only feedback would be the button disappearing. That write is an
-   * un-collapse now rather than an open — the list here is the FOLDED one.
-   */
-  const renderSuggestedCab = () => {
-    const modelId = getAtPath(preset, AMP_MODEL_PATH);
-    const model = getAmpModel(typeof modelId === 'string' ? modelId : undefined);
-    const suggested = model.defaultCabIrId ? getCabinetIR(model.defaultCabIrId) : undefined;
-    if (!suggested || getAtPath(preset, CAB_URL_PATH) === suggested.url) return null;
-
-    return (
-      <button
-        type="button"
-        // Built inside the guard rather than handed to `named`, which would
-        // interpolate a null scope into a string it then throws away.
-        aria-label={scope ? `Use suggested cab for ${scope} · ${suggested.label}` : undefined}
-        onClick={() => {
-          report(addVoiceSection(kind, id, 'cabinet', { [CAB_URL_PATH]: suggested.url }));
-          write(CAB_URL_PATH, suggested.url);
-          if (collapsedSections.includes('cabinet')) {
-            onCollapsedSectionsChange?.(
-              collapsedSections.filter((candidate) => candidate !== 'cabinet'),
-            );
-          }
-        }}
-        className={`${buttonClass} self-start`}
-      >
-        Use suggested cab · {suggested.label}
-      </button>
-    );
-  };
-
   /** The amp, as an amp: knobs on the plate, bypass as the power switch, the
-   *  model the chain would really build engraved on the face. Split by `kind` of
-   *  PARAM, so a slider the schema gains appears as a knob without touching
-   *  this. */
+   *  circuit the chain would really build engraved on the face. Split by `kind`
+   *  of PARAM, so a slider the schema gains appears as a knob without touching
+   *  this — which is the whole of why the face survived the classic amp stage
+   *  being taken out of the app (2026-09-23) and moved onto the circuit amp:
+   *  nothing in here or in `AmpHead` names a control. The circuit amp's switch
+   *  and mod rows are not sliders, so they fall out below the plate through
+   *  `renderParam` with no branch of their own. */
   const renderAmp = (section: ParamSection) => {
     // `ownParams`, not `visibleParams`: `renderSubBranch` runs after every stage
     // body, so a renderer asking for all the visible rows would draw a
@@ -1108,14 +1058,34 @@ export function VoiceEditor({
     const rows = ownParams(preset, section);
     const power = enabledParamOf(section);
     const enabled = power ? getAtPath(preset, power.path) !== false : true;
-    const rawModel = getAtPath(preset, AMP_MODEL_PATH);
+    const rawAmpId = getAtPath(preset, CIRCUIT_AMP_ID_PATH);
+    // What the chain would really build. `getCircuitAmp` falls back to the
+    // default circuit for a missing or unknown id, and a faceplate naming
+    // something that isn't loaded would be the one lie the picker already refuses
+    // to tell. The schema's gate resolves the same way, so the plate's knobs are
+    // this amp's too.
+    const amp = getCircuitAmp(typeof rawAmpId === 'string' ? rawAmpId : undefined);
+    /**
+     * Where a knob sits on the plate, in the AMP'S OWN panel order.
+     *
+     * The schema's rows are the union of every amp's controls grouped by control
+     * id, so declaration order is a cross-amp grouping and not any one amp's
+     * layout: with the Princeton registered first, a Deluxe's plate reads Tone
+     * before its two volumes, because Tone is the id they share. A list of rows
+     * may be in any order; a faceplate may not. Still no control named here — the
+     * order comes from the definition, like the ranges and the labels.
+     */
+    const plateOrder = (param: Param) => {
+      const controlId = circuitAmpControlId(param.path);
+      // The section's own rows first (Input gain): they belong to no circuit and
+      // sit where a boost pedal would, in front of the amp.
+      if (controlId === undefined) return -1;
+      return amp.controls.findIndex((control) => control.id === controlId);
+    };
     return (
       <>
         <AmpHead
-          // What the chain would really build. `getAmpModel` falls back to Plexi
-          // for a missing or unknown id, and a faceplate naming something that
-          // isn't loaded would be the one lie the picker already refuses to tell.
-          model={getAmpModel(typeof rawModel === 'string' ? rawModel : undefined).name}
+          model={amp.name}
           enabled={enabled}
           power={
             power
@@ -1128,12 +1098,23 @@ export function VoiceEditor({
         >
           {rows
             .filter((param): param is SliderParam => param.kind === 'slider')
-            .map((param) => renderKnob(param, scale.amp))}
+            // A copy: `filter` already made one, but saying so here is what keeps
+            // a future `rows` that is the schema's own array from being reordered
+            // in place.
+            .slice()
+            .sort((a, b) => plateOrder(a) - plateOrder(b))
+            // SCOPED BY THE STAGE, unlike an ordinary section's knobs. The amp's
+            // own Input gain and Volume are word-for-word the IN/OUT bar's two,
+            // and the bar sits outside every section — so on the pattern page,
+            // where there is one holder and `scope` is null, both pairs would
+            // answer to one name. The bar's `role="group"` does not fold its name
+            // into its descendants' (see `renderParam`), so the disambiguation
+            // has to be on the control.
+            .map((param) => renderKnob(param, scale.amp, scoped(section.label)))}
         </AmpHead>
         {rows
           .filter((param) => param.kind !== 'slider' && param !== power)
           .map((param) => renderParam(section, param))}
-        {renderSuggestedCab()}
       </>
     );
   };
@@ -1329,7 +1310,7 @@ export function VoiceEditor({
           <p className="max-w-[26ch] font-mono text-[8.5px] leading-snug text-ink-mut">
             {`No ${section.absentLabel ?? section.label.toLowerCase()} stage on this voice.`}
           </p>
-        ) : section.id === 'amp' ? (
+        ) : section.id === 'circuit-amp' ? (
           renderAmp(section)
         ) : section.id === 'cabinet' ? (
           renderCabinet(section)

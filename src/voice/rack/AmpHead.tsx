@@ -28,9 +28,9 @@ export function AmpHead({
   power,
   children,
 }: {
-  /** Engraved on the plate. The model the chain would really build, not the raw id —
-   *  the lib silently falls back to Plexi for an unknown one, and the plate has to say
-   *  what will be heard. */
+  /** Engraved on the plate. The amp the chain would really build, not the raw id —
+   *  the lib silently falls back to a default circuit for an unknown one, and the
+   *  plate has to say what will be heard. */
   model: string;
   enabled: boolean;
   /**

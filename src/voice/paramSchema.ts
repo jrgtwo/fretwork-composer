@@ -110,24 +110,21 @@
  *
  * ABSENT vs BYPASSED. Both states are reachable from a stock built-in and they are
  * not the same: `ACOUSTIC_GUITAR_PRESET` has no `effects` object at all, while a
- * preset with `effects.amp.enabled === false` keeps a fully tuned amp out of the
- * chain. `ParamSection.presenceProbe` is what the pane tests for absence; the
+ * preset with `effects.circuitAmp.enabled === false` keeps a fully tuned amp out
+ * of the chain. `ParamSection.presenceProbe` is what the pane tests for absence; the
  * `enabled` toggle inside a stage's params is bypass, one per stage rather than
  * one per pane. `removableBranch` is separate again — a section can be
  * absent-able without being removable (you cannot delete a preset's source).
  */
 
 import {
-  AMP_MODELS,
   CIRCUIT_AMPS,
   type CircuitAmpControl,
   getCircuitAmp,
   DEFAULT_CIRCUIT_AMP_ID,
   CABINET_IRS,
-  DEFAULT_AMP_MODEL_ID,
   SAMPLE_PACKS,
   detectCabinetIR,
-  getAmpModel,
   type EQParams,
   type OscillatorType,
   type VoicePreset,
@@ -189,6 +186,24 @@ export interface SamplePackOption {
 export interface ParamCondition {
   readonly path: string;
   readonly oneOf: readonly string[];
+  /**
+   * How to read the stored value before comparing it — identity when omitted, so
+   * every condition on a plain union discriminant is unaffected.
+   *
+   * ⚠ NOT a predicate language creeping in. It exists because one registry
+   * answers a DIFFERENT id than the one stored: `getCircuitAmp` falls back to the
+   * default circuit for a missing or unknown `ampId`, and the faceplate and the
+   * picker both already say so (`EnumParam.resolve`). Without the same reading
+   * here, a preset naming an amp the registry has lost would render a plate
+   * engraved "Princeton 5F2-A" holding none of the Princeton's knobs, while the
+   * lib really built a Princeton with every control at its default — the exact
+   * lie `resolve` exists to prevent, one level down.
+   *
+   * Shares its shape with `EnumParam.resolve` but not its contract: that one
+   * returns `null` for "the registry has never heard of this" so the picker can
+   * admit it, and a gate has no way to admit anything — it is on or off.
+   */
+  readonly resolve?: (raw: unknown) => string | undefined;
 }
 
 interface ParamCommon {
@@ -315,9 +330,6 @@ export interface EnumParam extends ParamCommon {
    * next enum the schema declares through the wrong one.
    */
   readonly resolve: (raw: unknown) => string | null;
-  /** Extra word after an option's label in the picker — the amp model's category.
-   *  Here for the same reason as `resolve`: it is per-registry, not per-pane. */
-  readonly badgeOf?: (value: string) => string | undefined;
 }
 
 export interface ToggleParam extends ParamCommon {
@@ -403,7 +415,6 @@ export type SectionId =
   | 'source'
   | 'body-filter'
   | 'pedals'
-  | 'amp'
   | 'circuit-amp'
   | 'cabinet'
   | 'final-eq';
@@ -569,12 +580,6 @@ export interface ParamSubBranch {
 
 // ------------------------------------------------------------ option lists ---
 
-const AMP_MODEL_OPTIONS: readonly EnumOption[] = AMP_MODELS.map((model) => ({
-  value: model.id,
-  label: model.name,
-  description: model.description,
-}));
-
 /**
  * The preset stores the IR's URL, not its id, so the URL is the option value and a
  * plain equality check highlights the active cab.
@@ -582,11 +587,12 @@ const AMP_MODEL_OPTIONS: readonly EnumOption[] = AMP_MODELS.map((model) => ({
  * KNOWN LOSS vs. Sound Lab, accepted: it keys the select on the IR id via
  * `detectCabinetIR(url)` and renders a `Custom URL (…)` option when nothing matches,
  * so an unregistered URL stays selectable. Here it renders as nothing-selected. The
- * same applies to `effects.amp.modelId`, where an unknown id shows nothing selected
- * while `getAmpModel` silently builds Plexi. Nothing in this slice can author an
- * unlisted value (custom IRs and custom sample JSON are both deferred), so the only
- * way to reach it is a variant Sound Lab wrote. Closing it means an `allowUnlisted`
- * affordance on `EnumParam`, which belongs with the slice that can create one.
+ * contrast is `effects.circuitAmp.ampId`, which DOES resolve: the lib falls back to
+ * a real circuit for an unknown id, so naming it is the truth rather than a guess.
+ * Nothing in this slice can author an unlisted URL (custom IRs and custom sample
+ * JSON are both deferred), so the only way to reach it is a variant Sound Lab
+ * wrote. Closing it means an `allowUnlisted` affordance on `EnumParam`, which
+ * belongs with the slice that can create one.
  */
 const CABINET_OPTIONS: readonly EnumOption[] = CABINET_IRS.map((ir) => ({
   value: ir.url,
@@ -1329,129 +1335,6 @@ const BODY_FILTER_SECTION: ParamSection = {
     // `SEED_BODY_FILTER.cutoff`) and nothing outside the branch changes them.
     seed: () => SEED_BODY_FILTER_ENVELOPE,
   },
-};
-
-const AMP_SECTION: ParamSection = {
-  id: 'amp',
-  label: 'Amp',
-  presenceProbe: 'effects.amp',
-  removableBranch: 'effects.amp',
-  params: [
-    {
-      kind: 'toggle',
-      path: 'effects.amp.enabled',
-      label: 'Enabled',
-      optional: true,
-      fallback: true,
-    },
-    {
-      kind: 'enum',
-      path: 'effects.amp.modelId',
-      label: 'Model',
-      optional: true,
-      options: AMP_MODEL_OPTIONS,
-      // The lib falls back to Plexi for a missing or unknown id, so the picker has
-      // to show the same thing the chain will actually build. `getAmpModel` rather
-      // than a lookup table for exactly that reason — it *is* the fallback.
-      fallback: DEFAULT_AMP_MODEL_ID,
-      resolve: (raw) => getAmpModel(typeof raw === 'string' ? raw : undefined).id,
-      badgeOf: (id) => getAmpModel(id).category,
-    },
-    {
-      kind: 'slider',
-      path: 'effects.amp.preGainDb',
-      label: 'Pre gain',
-      // -12 is Sound Lab's floor and also exactly `CLEAN_AMP_PRESET.preGainDb`, so
-      // that one built-in sits on the boundary. Kept: the lib documents no bound for
-      // this field, and anything quieter belongs on `inputGainDb` (-80 dB), which is
-      // earlier in the chain and is the control for taming a hot source.
-      min: -12,
-      max: 24,
-      step: 0.5,
-      unit: 'dB',
-      precision: 1,
-      fallback: 0,
-    },
-    {
-      kind: 'slider',
-      path: 'effects.amp.preDrive',
-      label: 'Drive',
-      min: 0,
-      max: 1,
-      step: 0.01,
-      precision: 2,
-      fallback: 0.3,
-    },
-    // Tone stack. Sound Lab's three knobs are cut-only (-12..0); the lib documents
-    // "typical range -12..+12" and the stage is a `Tone.EQ3`, which takes boost as
-    // readily as cut, so the ceiling is opened up here. Every bundled preset sits
-    // in [-9, 0], so widening costs nothing and losing boost would.
-    {
-      kind: 'slider',
-      path: 'effects.amp.bass',
-      label: 'Bass',
-      min: -12,
-      max: 12,
-      step: 0.5,
-      unit: 'dB',
-      precision: 1,
-      fallback: 0,
-    },
-    {
-      kind: 'slider',
-      path: 'effects.amp.mid',
-      label: 'Mid',
-      min: -12,
-      max: 12,
-      step: 0.5,
-      unit: 'dB',
-      precision: 1,
-      fallback: 0,
-    },
-    {
-      kind: 'slider',
-      path: 'effects.amp.treble',
-      label: 'Treble',
-      min: -12,
-      max: 12,
-      step: 0.5,
-      unit: 'dB',
-      precision: 1,
-      fallback: 0,
-    },
-    {
-      kind: 'slider',
-      path: 'effects.amp.presence',
-      label: 'Presence',
-      min: -12,
-      max: 12,
-      step: 0.5,
-      unit: 'dB',
-      precision: 1,
-      fallback: 0,
-    },
-    {
-      kind: 'slider',
-      path: 'effects.amp.powerDrive',
-      label: 'Power',
-      min: 0,
-      max: 1,
-      step: 0.01,
-      precision: 2,
-      fallback: 0.1,
-    },
-    {
-      kind: 'slider',
-      path: 'effects.amp.outputDb',
-      label: 'Output',
-      min: -12,
-      max: 12,
-      step: 0.5,
-      unit: 'dB',
-      precision: 1,
-      fallback: 0,
-    },
-  ],
 };
 
 /**
@@ -2258,13 +2141,32 @@ const CIRCUIT_AMP_OPTIONS: readonly EnumOption[] = CIRCUIT_AMPS.map((amp) => ({
 }));
 
 /**
- * The experimental circuit amp — a second amp implementation, beside the five
- * models in `AMP_SECTION` rather than replacing them.
+ * The circuit amp — the ONLY amp this app offers, since the five-model classic
+ * stage was taken out of the schema on 2026-09-23.
  *
- * `wireChain` builds one or the other: this stage takes the amp's slot while it
- * is present and enabled, and the classic amp is skipped. Removing this stage
- * puts the old one back exactly as it was, which is what you want while
- * comparing them by ear.
+ * ⚠ THE LIB STILL HAS THE CLASSIC AMP, deliberately: `amp-models.ts`, `AmpParams`
+ * and the nodes in `Voice.ts` are all untouched. What went is what the app OFFERS.
+ * `wireChain` builds the classic stage only when a preset carries an
+ * `effects.amp` branch, and with no section declaring one nothing this app can
+ * author FROM NOW ON carries one — `addVoiceSection` is keyed by `SectionId` and
+ * `setVoiceParam` by `PARAM_BY_PATH`, and neither knows the path any more. That is
+ * why hiding was enough and no lib change was needed.
+ *
+ * Not the same as "no voice reaches those nodes". Seven of the lib's own slot
+ * presets still carry `effects.amp`, and `useVoiceStore` persists variants, so a
+ * variant saved from one of them before 2026-09-20 still resolves and still builds
+ * the classic stage — with no control, no bypass and no Remove anywhere in this
+ * app. A narrow, closed window: nothing can widen it, because nothing can author
+ * the branch again.
+ *
+ * ⚠ EVERY ROW DECLARES `requiresBranch`, for `FINAL_EQ_SECTION`'s reason and not
+ * for the pane's. The pane draws no body while the branch is absent either way;
+ * the SEAM is what needs the gate. `setVoiceParam` writes one path at a time, so
+ * an ungated row is a path the seam accepts on a voice that has no amp — minting
+ * `{inputGainDb: 3}`, which `isStageEnabled` reads as a live stage and
+ * `buildCircuitAmpLite` then indexes `params.controls[…]` on, throwing inside the
+ * chain build. The gate leaves `addVoiceSection` — which writes the branch empty
+ * before it seeds — as the only way this branch is born.
  *
  * ── Why `params` is flattened ───────────────────────────────────────────────
  *
@@ -2293,11 +2195,17 @@ const CIRCUIT_AMP_OPTIONS: readonly EnumOption[] = CIRCUIT_AMPS.map((amp) => ({
  * needing a different default needs a different id, which the lib's
  * `tests/circuit-amp-registry.test.ts` enforces.
  */
+/** Named once: it is the presence probe, the removable branch and the
+ *  `requiresBranch` of every row, and three spellings of one path is how they
+ *  drift apart. */
+const CIRCUIT_AMP_BRANCH = 'effects.circuitAmp';
+
 const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
   {
     kind: 'toggle',
     path: 'effects.circuitAmp.enabled',
     label: 'Enabled',
+    requiresBranch: CIRCUIT_AMP_BRANCH,
     optional: true,
     fallback: true,
   },
@@ -2305,6 +2213,7 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
     kind: 'enum',
     path: 'effects.circuitAmp.ampId',
     label: 'Amp',
+    requiresBranch: CIRCUIT_AMP_BRANCH,
     options: CIRCUIT_AMP_OPTIONS,
     // The lib falls back to the default for a missing or unknown id, so the
     // picker shows what the chain will actually build. `getCircuitAmp` rather
@@ -2316,7 +2225,8 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
     kind: 'slider',
     path: 'effects.circuitAmp.inputGainDb',
     label: 'Input gain',
-    // Ungated: every circuit amp has one whatever its topology.
+    requiresBranch: CIRCUIT_AMP_BRANCH,
+    // No `appliesWhen`: every circuit amp has one whatever its topology.
     //
     // This is the level going INTO the amp — a boost pedal or a hot pickup in
     // front of it. NOT the amp's Volume, which on a 5F2-A sits inside the
@@ -2351,7 +2261,15 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
       return byId;
     }, new Map<string, { control: CircuitAmpControl; ampIds: string[] }>()).values(),
   ].map(({ control, ampIds }): Param => {
-    const appliesWhen = { path: 'effects.circuitAmp.ampId', oneOf: ampIds } as const;
+    const appliesWhen = {
+      path: 'effects.circuitAmp.ampId',
+      oneOf: ampIds,
+      // The registry's own reading, the same one the picker and the faceplate
+      // use — see `ParamCondition.resolve`. `requiresBranch` below is what keeps
+      // that from making every Princeton row apply to a voice with no circuit
+      // amp at all, since `getCircuitAmp(undefined)` IS the Princeton.
+      resolve: (raw: unknown) => getCircuitAmp(typeof raw === 'string' ? raw : undefined).id,
+    } as const;
     // The range and the options both come from the amp's own definition, never
     // from this file — a control's shape is a property of the circuit.
     // `mod` rides along on both kinds: a mod can be a knob (a bright-cap lift)
@@ -2363,6 +2281,7 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
         kind: 'enum',
         path: circuitAmpControlPath(ampIds[0], control.id),
         label: control.label,
+        requiresBranch: CIRCUIT_AMP_BRANCH,
         options: control.options.map((o) => ({
           value: o.value,
           label: o.label,
@@ -2383,6 +2302,7 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
       kind: 'slider',
       path: circuitAmpControlPath(ampIds[0], control.id),
       label: control.label,
+      requiresBranch: CIRCUIT_AMP_BRANCH,
       min: control.min,
       max: control.max,
       step: control.step,
@@ -2397,8 +2317,12 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
 export const CIRCUIT_AMP_SECTION: ParamSection = {
   id: 'circuit-amp',
   label: 'Amp (circuit)',
-  presenceProbe: 'effects.circuitAmp',
-  removableBranch: 'effects.circuitAmp',
+  // The absent sentence reads "No amp stage on this voice." — see `absentLabel`.
+  // The default would lowercase the whole label into "no amp (circuit) stage",
+  // which names a distinction from a classic stage this app no longer offers.
+  absentLabel: 'amp',
+  presenceProbe: CIRCUIT_AMP_BRANCH,
+  removableBranch: CIRCUIT_AMP_BRANCH,
   params: CIRCUIT_AMP_SECTION_PARAMS,
 };
 
@@ -2431,15 +2355,14 @@ export const CIRCUIT_AMP_SECTION: ParamSection = {
  * is why the three gain rows here ARE `eqBand`.
  *
  * ⚠ EVERY ROW DECLARES `requiresBranch`, though this probe is a single path and
- * the Amp — the same shape — declares none. The difference is not the pane, which
- * draws neither section's body while its branch is absent; it is the SEAM. All
+ * the pane draws no body while the branch is absent either way. The reason is the
+ * SEAM, not the pane. All
  * five value fields of `EQParams` are required, and `setVoiceParam` writes one
  * path at a time, so an ungated row is a path the seam ACCEPTS on a voice that
  * has no EQ — minting `{low: 3}`, which `isStageEnabled` reads as a live stage
  * and which `buildChain` then hands to `Tone.EQ3` with four `undefined`s. The
  * gate is what leaves `addVoiceSection` as the only way this branch is born.
- * `AmpParams` has the same eight required numbers and the same hole; this section
- * declines to copy it rather than claiming a distinction.
+ * `CIRCUIT_AMP_SECTION` gates every row for the same reason; see its header.
  */
 const SEED_FINAL_EQ: EQParams = {
   // Flat, at Tone's own crossovers: `EQ3.getDefaults()` (15.1.22) returns
@@ -2534,7 +2457,6 @@ export const PARAM_SECTIONS: readonly ParamSection[] = [
   SOURCE_SECTION,
   BODY_FILTER_SECTION,
   PEDALS_SECTION,
-  AMP_SECTION,
   CIRCUIT_AMP_SECTION,
   CABINET_SECTION,
   FINAL_EQ_SECTION,
@@ -2584,7 +2506,7 @@ export const PARAM_SECTIONS: readonly ParamSection[] = [
  * added rather than tuned. Six "not on this voice" cards in every rack is the
  * exact opposite of two tracks being comparable at once.
  */
-export const DEFAULT_OPEN_SECTIONS: readonly SectionId[] = ['amp', 'cabinet'];
+export const DEFAULT_OPEN_SECTIONS: readonly SectionId[] = ['circuit-amp', 'cabinet'];
 
 /**
  * Whether `param` is a row of `preset` at all — the per-row counterpart of
@@ -2600,7 +2522,11 @@ export function paramApplies(preset: VoicePreset, param: Param): boolean {
   if (param.absentBranch && hasBranchAtPath(preset, param.absentBranch)) return false;
   const when = param.appliesWhen;
   if (!when) return true;
-  const value = getAtPath(preset, when.path);
+  const raw = getAtPath(preset, when.path);
+  // Through the condition's own reading of the stored value, so the gate, the
+  // picker and the engraving cannot disagree about which amp is loaded. See
+  // `ParamCondition.resolve`.
+  const value = when.resolve ? when.resolve(raw) : raw;
   return typeof value === 'string' && when.oneOf.includes(value);
 }
 

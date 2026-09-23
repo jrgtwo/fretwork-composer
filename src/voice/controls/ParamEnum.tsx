@@ -1,6 +1,6 @@
 /**
- * One "pick from a registry" voice parameter — the amp model, the cabinet IR and the
- * sample pack all funnel through here.
+ * One "pick from a registry" voice parameter — the circuit amp, the cabinet IR and
+ * the sample pack all funnel through here.
  *
  * A native `<select>`: it is keyboard- and screen-reader-complete out of the box, and
  * it collapses a nine-entry registry into one row of a pane that has three other
@@ -36,7 +36,6 @@ export function ParamEnum({
   value,
   options,
   onChange,
-  badgeOf,
   mod,
   placeholder = 'Not in the registry',
 }: {
@@ -55,8 +54,6 @@ export function ParamEnum({
   value: string | null;
   options: readonly EnumChoice[];
   onChange: (value: string) => void;
-  /** Extra word after an option's label — the amp model's category. */
-  badgeOf?: (value: string) => string | undefined;
   /** Set when this control is not stock — see `ParamCommon.mod`. Deliberately
    *  NOT brass: brass is what every ordinary control already wears, so an
    *  accent here would mark nothing. An engraved chip instead. */
@@ -110,14 +107,11 @@ export function ParamEnum({
               {placeholder}
             </option>
           )}
-          {options.map((option) => {
-            const badge = badgeOf?.(option.value);
-            return (
-              <option key={option.value} value={option.value}>
-                {badge ? `${option.label} · ${badge}` : option.label}
-              </option>
-            );
-          })}
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
         </select>
       </div>
       {selected?.description ? (

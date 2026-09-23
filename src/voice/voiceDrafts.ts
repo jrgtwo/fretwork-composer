@@ -506,14 +506,23 @@ function sectionById(id: string) {
  *
  * `seed` overrides a row's `fallback` for this one call, and exists so a caller
  * that knows the value it wants does not have to add the section and then write
- * over it. "Use suggested cab" is the case: two commits meant two draft
- * notifications, and a `cabIR.url` change is not an in-place retune in the lib
- * (`sameEffectsShape` compares it), so the first commit rebuilt the whole effects
- * chain and fetched an IR nobody asked for before the second replaced it. Keys are
- * row PATHS this loop would have written anyway — anything else is refused rather
- * than dropped, so a seed can never reach somewhere the fallbacks could not. A seeded row is written even when it
- * is `optional`: an explicit value is a value the caller chose, which is exactly
- * what the optional skip is protecting.
+ * over it.
+ *
+ * ⚠ NO PRODUCTION CALLER PASSES ONE TODAY. "Use suggested cab" was the last, and
+ * it went with the classic amp stage on 2026-09-23. The argument for keeping the
+ * parameter is about the SEAM rather than that button: add-then-overwrite is two
+ * commits, so two draft notifications, and `playbackService` rebuilds the effects
+ * chain off each one — a `cabIR.url` change is not an in-place retune in the lib
+ * (`sameEffectsShape` compares it), so the first commit fetched an IR nobody asked
+ * for before the second replaced it. Any caller writing a non-default value into a
+ * stage it is adding meets that again, and the tests in `tests/VoiceMode.test.tsx`
+ * are what keep the route working until one does.
+ *
+ * Keys are row PATHS this loop would have written anyway — anything else is
+ * refused rather than dropped, so a seed can never reach somewhere the fallbacks
+ * could not. A seeded row is written even when it is `optional`: an explicit value
+ * is a value the caller chose, which is exactly what the optional skip is
+ * protecting.
  */
 export function addVoiceSection(
   kind: HolderKind,
