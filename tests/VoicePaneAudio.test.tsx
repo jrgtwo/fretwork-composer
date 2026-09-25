@@ -81,7 +81,7 @@ afterEach(() => {
 describe('VoicePane → the draft store → playbackService', () => {
   it('pushes every knob edit at the live voice', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
 
     // The branch creation is itself an edit and has to land.
     expect(pushed()).toHaveLength(1);
@@ -91,10 +91,10 @@ describe('VoicePane → the draft store → playbackService', () => {
 
     // Tone is a knob, not a range input: `End` drives it to its declared max.
     // Scoped to the stage, because the amp's Volume and the IN/OUT bar's share a name.
-    // "Amp (circuit) Tone", not "Tone": the plate scopes its knobs by the stage
+    // "Amp Tone", not "Tone": the plate scopes its knobs by the stage
     // (`renderAmp`'s `nameScope`), because the amp's own Volume and Input gain are
     // word-for-word the IN/OUT bar's two.
-    fireEvent.keyDown(screen.getByLabelText('Amp (circuit) Tone'), { key: 'End' });
+    fireEvent.keyDown(screen.getByLabelText('Amp Tone'), { key: 'End' });
     expect(pushed()).toHaveLength(2);
     expect(pushed()[1]).toMatchObject({ effects: { circuitAmp: { controls: { tone: 1 } } } });
     // What is pushed is what the pane holds, never a round-trip through `voice.preset` —
@@ -104,10 +104,10 @@ describe('VoicePane → the draft store → playbackService', () => {
 
   it('removing a stage is an edit too, not a rebuild', async () => {
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
     notified.length = 0;
 
-    await userEvent.click(screen.getByRole('button', { name: 'Remove Amp (circuit)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Amp' }));
     expect(pushed()).toHaveLength(1);
     expect(pushed()[0]).not.toBeNull();
     expect(pushed()[0]?.effects?.circuitAmp).toBeUndefined();
@@ -126,7 +126,7 @@ describe('VoicePane → the draft store → playbackService', () => {
     expect(pushed()).toHaveLength(0);
     expect(refreshed).toHaveBeenCalledTimes(1);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
     expect(pushed().at(-1)).toEqual(expect.objectContaining({ effects: expect.anything() }));
 
     // The store now holds it, so the draft has to go — otherwise a later Save against
@@ -136,7 +136,7 @@ describe('VoicePane → the draft store → playbackService', () => {
     expect(pushed().at(-1)).toBeNull();
 
     // And once more with an edit standing when Save as… is pressed.
-    await userEvent.click(screen.getByRole('button', { name: 'Remove Amp (circuit)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Amp' }));
     refreshed.mockClear();
     await userEvent.click(screen.getByRole('button', { name: 'Save as…' }));
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
@@ -151,7 +151,7 @@ describe('VoicePane → the draft store → playbackService', () => {
     // keyed `pattern:<id>` now, so a switch strands nothing: there is nothing to discard
     // and nothing to push, and the first pattern's tone is still there on the way back.
     render(<Host />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
     const first = getEditingPattern()?.id;
     notified.length = 0;
 

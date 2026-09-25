@@ -600,7 +600,7 @@ describe('the library panel', () => {
     const rail = () => within(screen.getByRole('complementary'));
 
     // One click on a voice control is an unsaved edit — on B, which is open.
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
 
     await userEvent.click(rail().getByRole('button', { name: 'Open pattern Riff A' }));
@@ -614,7 +614,7 @@ describe('the library panel', () => {
     expect(isVoiceDirty('pattern', b)).toBe(true);
 
     // Edit A too, so the two drafts are live at once and cannot be one value.
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
     expect(isVoiceDirty('pattern', a)).toBe(true);
     expect(isVoiceDirty('pattern', b)).toBe(true);
 
@@ -635,7 +635,7 @@ describe('the library panel', () => {
     // way. Coming BACK to A is what shows whether A's edit is still there.
     seed('Riff A');
     render(<App />);
-    await userEvent.click(screen.getByRole('button', { name: 'Add Amp (circuit)' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add Amp' }));
     expect(screen.getByText('Unsaved')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Collapse Instrument & Amp' }));

@@ -2316,11 +2316,7 @@ const CIRCUIT_AMP_SECTION_PARAMS: readonly Param[] = [
 
 export const CIRCUIT_AMP_SECTION: ParamSection = {
   id: 'circuit-amp',
-  label: 'Amp (circuit)',
-  // The absent sentence reads "No amp stage on this voice." — see `absentLabel`.
-  // The default would lowercase the whole label into "no amp (circuit) stage",
-  // which names a distinction from a classic stage this app no longer offers.
-  absentLabel: 'amp',
+  label: 'Amp',
   presenceProbe: CIRCUIT_AMP_BRANCH,
   removableBranch: CIRCUIT_AMP_BRANCH,
   params: CIRCUIT_AMP_SECTION_PARAMS,

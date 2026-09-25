@@ -1278,7 +1278,7 @@ describe('the rack in a lane', () => {
         screen.getByRole('button', { name: `Voice rack for ${track.name}` }),
       ).toBeInTheDocument();
       // Every stage of every track is its own landmark, named for the track.
-      for (const section of ['Source', 'Amp (circuit)', 'Cabinet + room']) {
+      for (const section of ['Source', 'Amp', 'Cabinet + room']) {
         expect(
           screen.getByRole('region', { name: `${track.name} ${section}` }),
         ).toBeInTheDocument();
@@ -1582,24 +1582,21 @@ describe('the rack in a lane', () => {
     render(<ArrangementGrid views={viewsOf('voice')} />);
 
     await user.click(
-      screen.getByRole('button', { name: `Remove Amp (circuit) for ${getTracks()[0].name}` }),
+      screen.getByRole('button', { name: `Remove Amp for ${getTracks()[0].name}` }),
     );
 
     expect(getAtPath(presetOf(getTracks()[0]), 'effects.circuitAmp')).toBeUndefined();
     // Absent, not bypassed: the branch is gone and the stage says so in words
     // rather than merely going dark.
-    // The exact sentence, not merely "some stage is absent": `absentLabel` is
-    // what keeps it from reading "No amp (circuit) stage", which would name a
-    // distinction from a classic stage this app no longer offers.
     expect(
-      stage(getTracks()[0], 'Amp (circuit)').getByText(/No amp stage on this voice/i),
+      stage(getTracks()[0], 'Amp').getByText(/No amp stage on this voice/i),
     ).toBeInTheDocument();
     // The other rack took no edit — the buttons are per track, like everything
     // else here.
     expect(dirtyOf(getTracks()[1])).toBe(false);
 
     await user.click(
-      screen.getByRole('button', { name: `Add Amp (circuit) for ${getTracks()[0].name}` }),
+      screen.getByRole('button', { name: `Add Amp for ${getTracks()[0].name}` }),
     );
 
     // Seeded from the SCHEMA's own fallbacks, which is what makes the button a
@@ -1811,10 +1808,10 @@ describe('the rack in a lane', () => {
     expect(
       screen.getByRole('button', { name: `Voice rack for ${tracks[0].name}` }),
     ).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByRole('region', { name: `${tracks[0].name} Amp (circuit)` })).toBeNull();
+    expect(screen.queryByRole('region', { name: `${tracks[0].name} Amp` })).toBeNull();
     // Per TRACK: the other rack is untouched by its neighbour folding.
     expect(
-      screen.getByRole('region', { name: `${tracks[1].name} Amp (circuit)` }),
+      screen.getByRole('region', { name: `${tracks[1].name} Amp` }),
     ).toBeInTheDocument();
 
     // …AND THE STRIP IS NOT JUST THE HEADER ROW. The IN/OUT bar survives the
@@ -2899,7 +2896,7 @@ describe('the stages stack, and the lane holds them', () => {
     // Two levels of disclosure on one page, and the names have to tell them
     // apart — "Voice rack for Rhythm" is the whole rack, this is one stage of it.
     const disclosure = screen.getByRole('button', {
-      name: `Amp (circuit) stage for ${tracks[0].name}`,
+      name: `Amp stage for ${tracks[0].name}`,
     });
     expect(disclosure).toHaveAttribute('aria-expanded', 'true');
     expect(
@@ -2992,21 +2989,21 @@ describe('the stages stack, and the lane holds them', () => {
     );
 
     const button = screen.getByRole('button', {
-      name: `Amp (circuit) stage for ${getTracks()[0].name}`,
+      name: `Amp stage for ${getTracks()[0].name}`,
     });
     expect(button).toHaveAttribute('aria-expanded', 'false');
     // The region stays mounted — `aria-controls` has to point at something that
     // exists — but its controls leave the accessibility tree with it.
-    const region = screen.getByRole('region', { name: `${getTracks()[0].name} Amp (circuit)` });
+    const region = screen.getByRole('region', { name: `${getTracks()[0].name} Amp` });
     expect(document.getElementById(button.getAttribute('aria-controls') ?? '')).not.toBeNull();
     expect(
       within(region).queryByRole('slider', {
-        name: `${getTracks()[0].name} Amp (circuit) Tone`,
+        name: `${getTracks()[0].name} Amp Tone`,
       }),
     ).toBeNull();
     // Per TRACK and per STAGE: the neighbour's amp is open, and this rack's own
     // IN/OUT bar — which folds with nothing — is untouched.
-    expect(plateKnob(getTracks()[1], 'Amp (circuit)', 'Tone')).toBeInTheDocument();
+    expect(plateKnob(getTracks()[1], 'Amp', 'Tone')).toBeInTheDocument();
     expect(barKnob(getTracks()[0], 'Volume')).toBeInTheDocument();
   });
 });
@@ -3380,7 +3377,7 @@ describe('unsaved tone survives the things that unmount it', () => {
     await intoVoiceMode(user);
     const track = getTracks()[0];
     const amp = () =>
-      screen.getByRole('button', { name: `Amp (circuit) stage for ${track.name}` });
+      screen.getByRole('button', { name: `Amp stage for ${track.name}` });
 
     await user.click(amp());
     expect(amp()).toHaveAttribute('aria-expanded', 'false');
@@ -3852,15 +3849,15 @@ describe('ONE editor, two pages', () => {
 
     // Amp is open by default on both surfaces, so no fold gesture is needed.
     const paneDrive = within(
-      screen.getByRole('region', { name: 'Amp (circuit) stage' }),
+      screen.getByRole('region', { name: 'Amp stage' }),
       // Scoped by the stage even with one holder — see `plateKnob`.
-    ).getByRole('slider', { name: 'Amp (circuit) Tone' });
+    ).getByRole('slider', { name: 'Amp Tone' });
     // Literal, for the reason the Volume test states: reading the constant here
     // would make the assertion agree with whatever the constant says.
     expect(diameterOf(paneDrive)).toBe(56);
 
     await intoVoiceMode(user);
-    expect(diameterOf(plateKnob(getTracks()[0], 'Amp (circuit)', 'Tone'))).toBe(42);
+    expect(diameterOf(plateKnob(getTracks()[0], 'Amp', 'Tone'))).toBe(42);
     // The lane's plate is the one sized to fit eight of these across a row.
     expect(PANE_KNOB_SCALE.amp).toBe(56);
     expect(LANE_KNOB_SCALE.amp).toBe(42);
