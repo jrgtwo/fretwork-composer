@@ -107,11 +107,12 @@ import {
   DEFAULT_OPEN_SECTIONS,
   INPUT_GAIN_PARAM,
   PARAM_SECTIONS,
-  PEDALS,
+  PEDAL_SPECS,
   VOLUME_PARAM,
   branchParams,
   enabledParamOf,
   ownParams,
+  pedalsOf,
   removableBranchPresent,
   sectionPresence,
   stageBypassed,
@@ -136,6 +137,7 @@ import {
   addVoiceSubBranch,
   discardVoiceDraft,
   isVoiceDirty,
+  moveVoicePedal,
   removeVoicePedal,
   removeVoiceSection,
   removeVoiceSubBranch,
@@ -172,6 +174,8 @@ import { VoiceSection } from './VoiceSection';
 import { AmpHead } from './rack/AmpHead';
 import { CabinetGraphic } from './rack/CabinetGraphic';
 import { Knob } from './controls/Knob';
+import { DropLine } from '../shell/DropLine';
+import { useDragReorder } from '../shell/useDragReorder';
 // The IN/OUT bar's two meters. `LevelMeter` is a `src/composition` file and this
 // is its first user outside that page: it draws no composition concept, it is the
 // only view of `audio/levelMeters`, and the bar needs it on BOTH pages. Left
@@ -392,6 +396,49 @@ export function VoiceEditor({
     setNotice(null);
     setNameForm(null);
   }, [kind, id, instrumentId, setNameForm]);
+
+  /**
+   * The pedalboard's drag. Called up here, above the early return, because it is
+   * a hook; the board is read from the same `preset` the cards are drawn from.
+   * The drop goes through the seam by id and index like every other write here,
+   * so a drag and the Move buttons are one call.
+   */
+  const pedals = preset ? pedalsOf(preset) : [];
+  const pedalBoardRef = useRef<HTMLDivElement>(null);
+  const pedalDrag = useDragReorder({
+    order: pedals.map((pedal) => pedal.id),
+    containerRef: pedalBoardRef,
+    itemAttribute: 'data-pedal',
+    // `report`'s body, spelt out: `report` is declared below the early return.
+    onDrop: (pedalId, toIndex) => {
+      const result = moveVoicePedal(kind, id, pedalId, toIndex);
+      setNotice(result.ok ? null : result.reason);
+    },
+  });
+
+  /**
+   * The kind the type picker is showing. The picker only CHOOSES and the Add
+   * button appends: on Windows, arrowing through a focused closed `<select>`
+   * fires `change` per keypress, so a picker that appended on change would add
+   * a pedal for every kind a keyboard user browsed past.
+   */
+  const [pedalKind, setPedalKind] = useState<string>(PEDAL_SPECS[0].kind);
+
+  /**
+   * A Move button that takes its pedal to the end of the board disables itself,
+   * and a disabled button drops keyboard focus to the body. Hand it to the same
+   * pedal's opposite button instead, once the move has rendered — found by
+   * attribute because the card's accessible names follow its position.
+   */
+  const pedalRefocus = useRef<{ pedalId: string; move: 'up' | 'down' } | null>(null);
+  useEffect(() => {
+    const want = pedalRefocus.current;
+    if (!want) return;
+    pedalRefocus.current = null;
+    pedalBoardRef.current
+      ?.querySelector<HTMLButtonElement>(`[data-pedal="${want.pedalId}"] [data-move="${want.move}"]`)
+      ?.focus();
+  });
 
   // Unreachable: a wrapper only draws an editor for a holder the draft store can
   // resolve against. Guarded rather than asserted because the alternative is a
@@ -941,72 +988,137 @@ export function VoiceEditor({
   };
 
   /**
-   * The pedalboard, as one stage holding six.
+   * The pedalboard: a list the user assembles, drawn in the board's `order` —
+   * which is the signal order, since `Voice.wireChain` wires the pedals in it.
    *
-   * ── WHY THIS IS NOT SIX SECTIONS ─────────────────────────────────────────
+   * ── WHY THIS IS NOT A SECTION PER PEDAL ──────────────────────────────────
    *
-   * Each pedal is independently present, bypassable and removable, which is
-   * exactly what a `ParamSection` describes — so six sections is the obvious
-   * shape and it is the wrong one. It would put six more stage headers in a rack
-   * whose whole design argument is that TWO TRACKS' settings are comparable at
-   * once, and the pedalboard is one thing a guitarist points at, not six.
+   * Each pedal is independently present, bypassable and removable, which is what
+   * a `ParamSection` describes — and a section per pedal would put a stage header
+   * in the rack for every pedal someone adds, in a rack whose whole design
+   * argument is that TWO TRACKS' settings are comparable at once. The pedalboard
+   * is one thing a guitarist points at.
    *
-   * ── THE ORDER IS THE SIGNAL'S, AND IT IS FIXED ───────────────────────────
+   * ── THE GESTURES ─────────────────────────────────────────────────────────
    *
-   * Top to bottom is `Voice.wireChain`'s build order. Nothing here can change
-   * it: the chain reads no order off the preset, so a drag gesture would move a
-   * card and not a sound.
+   * The type picker and its Add append a pedal at the END; Remove deletes one outright and
+   * nothing remembers the slot it held; dragging a card's header reorders, and
+   * so do its Move up / Move down buttons, which are the path with no pointer
+   * (and the one jsdom can drive — it has no layout to drag across). Every one
+   * is a seam call by holder, pedal id and value, the same as a knob.
    */
-  const renderPedals = () => (
-    <div className="flex w-full flex-col gap-1">
-      {PEDALS.map((pedal) => {
-        const present = sectionPresence(preset, pedal) !== 'absent';
-
-        return (
-          <div
-            key={pedal.id}
-            role="group"
-            // Holder first, for the reason the `RackFace` landmark states: that
-            // is the axis a listener navigating eight racks is moving along.
-            aria-label={scoped(pedal.label)}
-            className="flex flex-wrap items-start gap-x-2 gap-y-1 border-t border-ink-mut/20 pt-1"
+  const renderPedals = () => {
+    const { dragging, dropIndex, others, onHandleDown } = pedalDrag;
+    const dropline = <DropLine />;
+    const move = (pedalId: string, from: number, to: number) => {
+      const result = moveVoicePedal(kind, id, pedalId, to);
+      if (result.ok && (to === 0 || to === pedals.length - 1)) {
+        pedalRefocus.current = { pedalId, move: to < from ? 'down' : 'up' };
+      }
+      report(result);
+    };
+    return (
+      <div ref={pedalBoardRef} className="flex w-full flex-col gap-1">
+        <div className="flex items-center gap-1.5">
+          <select
+            // One picker per board, so the name carries the holder where eight
+            // boards share the page.
+            aria-label={forScope('Pedal type')}
+            value={pedalKind}
+            onChange={(event) => setPedalKind(event.target.value)}
+            className="control w-fit rounded-md px-1 py-0.5 font-mono text-[8.5px] font-bold text-ink"
           >
-            <div className="flex w-full items-center gap-1.5">
-              <span className="font-mono text-[8px] tracking-[0.1em] text-ink-mut uppercase">
-                {pedal.label}
-              </span>
-              {/* No bypassed note — a stage's note exists because the body it
-                  describes may be folded away, and a pedal card cannot fold, so
-                  its own `Enabled` switch is on screen saying it. */}
-              <span className="flex-1" />
-              <button
-                type="button"
-                // Six pedals × up to eight racks, every button saying "Add" — the
-                // name carries the pedal, and the holder where there is more than
-                // one.
-                aria-label={forScope(`${present ? 'Remove' : 'Add'} ${pedal.label}`)}
-                onClick={() =>
-                  report(
-                    present
-                      ? removeVoicePedal(kind, id, pedal.id)
-                      : addVoicePedal(kind, id, pedal.id),
-                  )
-                }
-                className={buttonClass}
+            {PEDAL_SPECS.map((spec) => (
+              <option key={spec.kind} value={spec.kind}>
+                {spec.label}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            aria-label={forScope('Add pedal')}
+            onClick={() => report(addVoicePedal(kind, id, pedalKind))}
+            className={buttonClass}
+          >
+            Add
+          </button>
+        </div>
+        {pedals.length === 0 ? (
+          <p className="font-mono text-[8.5px] leading-snug text-ink-mut">
+            No pedals on this voice.
+          </p>
+        ) : null}
+        {pedals.map((pedal, index) => (
+          <div key={pedal.id} className="contents">
+            {dropIndex !== null && others.indexOf(pedal.id) === dropIndex ? dropline : null}
+            <div
+              data-pedal={pedal.id}
+              role="group"
+              // Holder first, for the reason the `RackFace` landmark states: that
+              // is the axis a listener navigating eight racks is moving along.
+              // The pedal's own label is numbered past the first of its kind, so
+              // two distortions are two names.
+              aria-label={scoped(pedal.label)}
+              className={`flex flex-wrap items-start gap-x-2 gap-y-1 border-t border-ink-mut/20 pt-1 ${
+                dragging === pedal.id ? 'opacity-45 outline outline-dashed outline-brass' : ''
+              }`}
+            >
+              <div
+                // The drag handle is the card's header row; its buttons stay
+                // clickable (`useDragReorder` ignores a press on a button).
+                onMouseDown={onHandleDown(pedal.id)}
+                className="flex w-full cursor-grab items-center gap-1.5 active:cursor-grabbing"
               >
-                {present ? 'Remove' : 'Add'}
-              </button>
+                <span aria-hidden className="flex-none font-mono text-[10px] tracking-tighter text-ink-mut">
+                  ⠿
+                </span>
+                <span className="font-mono text-[8px] tracking-[0.1em] text-ink-mut uppercase">
+                  {pedal.label}
+                </span>
+                {/* No bypassed note — a stage's note exists because the body it
+                    describes may be folded away, and a pedal card cannot fold, so
+                    its own `Enabled` switch is on screen saying it. */}
+                <span className="flex-1" />
+                <button
+                  type="button"
+                  aria-label={forScope(`Move ${pedal.label} up`)}
+                  data-move="up"
+                  disabled={index === 0}
+                  onClick={() => move(pedal.id, index, index - 1)}
+                  className={buttonClass}
+                >
+                  ▲
+                </button>
+                <button
+                  type="button"
+                  aria-label={forScope(`Move ${pedal.label} down`)}
+                  data-move="down"
+                  disabled={index === pedals.length - 1}
+                  onClick={() => move(pedal.id, index, index + 1)}
+                  className={buttonClass}
+                >
+                  ▼
+                </button>
+                <button
+                  type="button"
+                  aria-label={forScope(`Remove ${pedal.label}`)}
+                  onClick={() => report(removeVoicePedal(kind, id, pedal.id))}
+                  className={buttonClass}
+                >
+                  Remove
+                </button>
+              </div>
+              {visibleParams(preset, pedal).map((param) =>
+                renderParam(pedal, param, scoped(pedal.label)),
+              )}
             </div>
-            {present
-              ? visibleParams(preset, pedal).map((param) =>
-                  renderParam(pedal, param, scoped(pedal.label)),
-                )
-              : null}
           </div>
-        );
-      })}
-    </div>
-  );
+        ))}
+        {/* dropping past the last pedal — the loop above only draws BEFORE one */}
+        {dropIndex !== null && dropIndex >= others.length ? dropline : null}
+      </div>
+    );
+  };
 
   /**
    * The stage header's Add / Remove.

@@ -14,8 +14,8 @@
  * `TrackVoiceRack` for one track). It used to be two, and the rule here was that
  * a section with a CUSTOM RENDERER needed one on BOTH sides: without the twin,
  * the second surface fell into its generic branch and dumped the section's rows
- * out flat — for the pedalboard, thirty-eight rows with no way to tell which
- * pedal a "Mix" belongs to and no way to add or remove one. A custom renderer is
+ * out flat — for the pedalboard, every pedal's rows with no way to tell which
+ * pedal a "Mix" belongs to and no way to add, remove or reorder one. A custom renderer is
  * now written once and both pages have it (2026-09-13); the reasoning for the
  * pedalboard being one section is written out on `VoiceEditor`'s `renderPedals`.
  *
@@ -125,8 +125,11 @@ import {
   CABINET_IRS,
   SAMPLE_PACKS,
   detectCabinetIR,
+  legacyToPedals,
+  normalizePedalBoard,
   type EQParams,
   type OscillatorType,
+  type PedalType,
   type VoicePreset,
 } from '@fretwork/lib';
 import { getAtPath, hasBranchAtPath } from './presetPaths';
@@ -444,7 +447,7 @@ export interface ParamStage {
    * and the room it stands in (`effects.reverb`) — and one probe for both took the
    * whole pane off screen the moment the speaker went, leaving the room wired,
    * audible and with no control anywhere to reach it. Every other section and all
-   * six pedals declare a plain string, and `paramSchema.test.ts` pins that: a list
+   * every pedal declare a plain string, and `paramSchema.test.ts` pins that: a list
    * is the answer to "one pane, two independent stages", not a general widening.
    *
    * ⚠ A LISTED STAGE HAS TO GATE ITS OWN ROWS. With one path a row could lean on
@@ -1563,40 +1566,37 @@ export const LEVEL_BAR_PARAMS: readonly SliderParam[] = [INPUT_GAIN_PARAM, VOLUM
 // ------------------------------------------------------------------ pedals ---
 
 /**
- * The pedalboard — six stages between the body filter and the amp.
+ * The pedalboard — a list the user assembles, wired in its own order between the
+ * body filter and the amp (`docs/PLAN-voice.md` §7).
  *
- * ── WHY A SECOND TABLE AND NOT SIX MORE SECTIONS ─────────────────────────────
+ * ── A TABLE OF KINDS, NOT OF PEDALS ──────────────────────────────────────────
  *
- * Every pedal is independently present, bypassable and removable, and a
- * `ParamSection` carries one `removableBranch`. Six sections would express that —
- * a listed `presenceProbe` would not, since it says which branches put the pane
- * on screen and nothing about removing them — and would put six more stages in a
- * rack the
- * composition page already argues should show TWO TRACKS at once. So the
- * pedalboard is ONE section whose body is a list, and this is the list.
+ * The voice holds `pedals: { order, byId }` — the lib's `PedalBoard`. The same
+ * kind may sit on it more than once and in any position, so there is no fixed
+ * set of pedal rows to declare. What IS fixed is each kind's controls, so this
+ * table declares one {@link PedalSpec} per KIND, with every row's path RELATIVE
+ * to the pedal (`drive`, not `effects.distortion.drive`). {@link pedalStage}
+ * puts a spec on one pedal: every row becomes `pedals.byId.<id>.<param>`, gated
+ * on that pedal's own branch. That dotted address is why the saved shape is an id
+ * table plus an order list rather than an array — a pedal's knobs keep the same
+ * path wherever it is dragged, and `presetPaths` reads and writes them with no
+ * new mechanism.
  *
- * ── WHAT A PEDAL IS, AND WHAT IT BORROWS ─────────────────────────────────────
+ * ── WHY STILL ONE SECTION ────────────────────────────────────────────────────
  *
- * Structurally a pedal is a `ParamSection` minus the sub-branch and plus a seed
- * — which is why both share {@link ParamStage} rather than each declaring its
- * own presence fields. `sectionApplies`, `enabledParamOf` and `sectionPresence`
- * all take a stage, so a pedal's lamp is lit by the same function that lights
- * the amp's. Two definitions of "bypassed" is a rack whose lamp disagrees with
- * the ear, and that reasoning is already written on `sectionPresence`. Having no
- * sub-branch, a pedal takes that function's single-stage path — one probe, one
- * `.enabled` row — which is what it has always done.
+ * The pedalboard is one stage in the rack whose body is a list, not a section
+ * per pedal: a rack that has to show two tracks at once cannot grow a stage
+ * header for every pedal someone adds. A pedal is a {@link ParamStage} all the
+ * same, so `sectionPresence` lights its lamp with the function that lights the
+ * amp's — two definitions of "bypassed" is a rack whose lamp disagrees with the
+ * ear.
  *
- * The seed is `ParamSubBranch.seed`'s argument, not `addSection`'s: a pedal
- * arrives as one branch in one write, so it has to be well-formed the instant it
- * lands. It lives in `pedalDefaults.ts`, cited to Tone's own `getDefaults()`.
+ * ── THE ORDER IS THE BOARD'S ─────────────────────────────────────────────────
  *
- * ── THE ORDER IS THE LIB'S, AND IT IS NOT EDITABLE HERE ──────────────────────
- *
- * Declaration order below is `Voice.wireChain`'s fixed sequence — compressor,
- * distortion, chorus, delay, auto-wah, graphic EQ. Nothing reads an order off
- * the preset, so this table cannot reorder anything and does not pretend to; a
- * board the user can rearrange is a lib change (`wireChain` reading an order,
- * `sameEffectsShape` comparing it) and is deliberately not in this slice.
+ * `order` is the signal order: `Voice.wireChain` wires the pedals in it, and the
+ * pane draws them in it (see {@link pedalsOf}). Nothing in this table carries an
+ * order; {@link PEDAL_SPECS} is the order the type picker lists the kinds in and
+ * means nothing to the signal.
  *
  * ── WHERE THE RANGES COME FROM, AND WHY SO MANY ARE ENCODERS ─────────────────
  *
@@ -1619,7 +1619,7 @@ export const LEVEL_BAR_PARAMS: readonly SliderParam[] = [INPUT_GAIN_PARAM, VOLUM
  *     no bound for `gain` at all, which is what makes the whole graphic EQ eight
  *     endless encoders despite the lib's comment suggesting ±15 dB.
  *
- * ── THE ONE CARVE-OUT: `effects.distortion.drive` ────────────────────────────
+ * ── THE ONE CARVE-OUT: the distortion's `drive` ──────────────────────────────
  *
  * That row is prose-only too — "nominal range is between 0 and 1" — and it is a
  * SLIDER anyway. The rule's premise is that a prose range might be someone's
@@ -1632,95 +1632,57 @@ export const LEVEL_BAR_PARAMS: readonly SliderParam[] = [INPUT_GAIN_PARAM, VOLUM
  * gave nowhere to aim. The row states the maths; do not generalise it. A second
  * carve-out needs the same evidence, not the same shape of argument.
  */
-export type PedalId =
-  | 'compressor'
-  | 'distortion'
-  | 'chorus'
-  | 'delay'
-  | 'auto-wah'
-  | 'graphic-eq';
-
-export interface Pedal extends ParamStage {
-  readonly id: PedalId;
-  /**
-   * The one branch this pedal owns — its presence probe, its removal target, and
-   * the `requiresBranch` every one of its rows is gated on.
-   *
-   * Stated once and spread into the two `ParamStage` fields by {@link definePedal},
-   * because a pedal whose probe and removable branch disagreed would be a stage
-   * the pane can see and cannot delete. A section may legitimately have one
-   * without the other — Cabinet probes two branches and removes one — and two
-   * have neither: Source and the pedalboard are always present and cannot be
-   * removed. So the collapse belongs here rather than on `ParamStage`.
-   */
-  readonly branch: string;
-  /**
-   * The complete, well-formed value the Add gesture writes, in one `setAtPath`.
-   * `object` for the reason {@link ParamSubBranch.seed} is: a descriptor table has
-   * no one type for "a branch of a preset". Each is typed as the lib's own params
-   * interface at its declaration in `pedalDefaults.ts`, which is where `tsc`
-   * checks it.
-   *
-   * A constant rather than a function of the preset, unlike a sub-branch's: a
-   * layer's mix level is only meaningful relative to the primary it sits under,
-   * and a pedal's settings are meaningful on their own.
-   */
-  readonly seed: object;
+export interface PedalSpec {
+  readonly kind: PedalType;
+  /** What the type picker offers and what a pedal card is engraved with. A
+   *  second pedal of the same kind is numbered by {@link pedalsOf}. */
+  readonly label: string;
+  /** Rows with paths RELATIVE to the pedal. Never rendered or written as they
+   *  stand — {@link pedalStage} is what gives them an address. */
+  readonly params: readonly Param[];
 }
 
 /**
- * Build a pedal from its one branch, so the branch is written once and the three
- * places that need it cannot drift apart.
+ * One pedal on one preset's board: a {@link PedalSpec} given an address.
+ *
+ * `id` is the lib-minted board id, `label` is the spec's label numbered where the
+ * board holds more than one of the kind ("Distortion 2") — which is what tells
+ * two identical cards apart for a listener and for the tests that query by name.
  */
-const definePedal = (pedal: {
-  id: PedalId;
-  label: string;
-  branch: string;
-  seed: object;
-  params: readonly Param[];
-}): Pedal => ({
-  ...pedal,
-  presenceProbe: pedal.branch,
-  removableBranch: pedal.branch,
-});
+export interface PedalStage extends ParamStage {
+  readonly id: string;
+  readonly kind: PedalType;
+  /** `pedals.byId.<id>` — its presence probe, its removal target, and the
+   *  `requiresBranch` every one of its rows is gated on. */
+  readonly branch: string;
+}
+
+/** Where the board lives on the preset. */
+export const PEDAL_BOARD_PATH = 'pedals';
+
+const PEDAL_BRANCH_PREFIX = `${PEDAL_BOARD_PATH}.byId.`;
+
+/** The branch one pedal's params live under. */
+export const pedalBranch = (id: string): string => `${PEDAL_BRANCH_PREFIX}${id}`;
 
 /**
- * ⚠ EVERY PEDAL ROW IS GATED ON ITS OWN BRANCH, and this is the mechanism that
- * makes one always-present section hold six independently-absent stages.
- *
- * A `ParamSection` normally answers "is this stage here?" once, with
- * `presenceProbe`, and the pane skips the whole body when it says no. The
- * pedalboard's probe is `null` — the board is always there — so without a
- * per-row condition all thirty-two rows would claim to apply to a preset
- * carrying no pedals at all, which is a control writing into a branch that does
- * not exist and a schema test asserting a range on `undefined`.
- *
- * `requiresBranch` is exactly that condition and it already exists: it is what
- * stops a lone `bodyFilter.envelope.attack` write from minting an object
- * matching no type. Both editors and both seams route through `paramApplies`, so
- * declaring it here is the whole of the work — nothing has to remember to check.
+ * The pedal's bypass. `Pedal.enabled` is optional in the lib, `undefined` = on,
+ * as on every other stage.
  */
-const pedalBypass = (branch: string): ToggleParam => ({
+const PEDAL_BYPASS: ToggleParam = {
   kind: 'toggle',
-  path: `${branch}.enabled`,
+  path: 'enabled',
   label: 'Enabled',
-  requiresBranch: branch,
   optional: true,
   fallback: true,
-});
+};
 
 /** A `wet` / `depth` / `feedback` row: `core/type/Units.d.ts` types these
  *  `NormalRange`, "A number that is between [0, 1]". */
-const normalRangeSlider = (
-  branch: string,
-  path: string,
-  label: string,
-  fallback: number,
-): SliderParam => ({
+const normalRangeSlider = (path: string, label: string, fallback: number): SliderParam => ({
   kind: 'slider',
   path,
   label,
-  requiresBranch: branch,
   min: 0,
   max: 1,
   step: 0.01,
@@ -1746,37 +1708,36 @@ const normalRangeSlider = (
  * -12..+12 for the final EQ's low shelf); that is a description of how the
  * control is usually used and not a statement about what the node accepts.
  */
-const eqBand = (path: string, label: string, fallback: number): EncoderParam => ({
-  kind: 'encoder',
-  path,
-  label,
-  // DERIVED, not passed. The gate is the row's own parent branch on all ten of
-  // these and there is no reason it would ever not be, so taking it as a third
-  // adjacent string was a transposed pair away from a row gated on a branch that
-  // does not exist — which typechecks, and renders nowhere, silently.
-  requiresBranch: path.slice(0, path.lastIndexOf('.')),
-  // 0.5 dB per detent is the increment, not a claim about what the filter takes.
-  step: 0.5,
-  precision: 1,
-  unit: 'dB',
-  fallback,
-});
+const eqBand = (path: string, label: string, fallback: number): EncoderParam => {
+  const parent = path.lastIndexOf('.');
+  return {
+    kind: 'encoder',
+    path,
+    label,
+    // DERIVED, not passed. The gate is the row's own parent branch on every
+    // final-EQ band and there is no reason it would ever not be, so taking it as
+    // a third adjacent string was a transposed pair away from a row gated on a
+    // branch that does not exist — which typechecks, and renders nowhere,
+    // silently. A pedal band's path is relative and has no parent here;
+    // `pedalStage` gates it on the pedal.
+    requiresBranch: parent < 0 ? undefined : path.slice(0, parent),
+    // 0.5 dB per detent is the increment, not a claim about what the filter takes.
+    step: 0.5,
+    precision: 1,
+    unit: 'dB',
+    fallback,
+  };
+};
 
-const COMPRESSOR_PEDAL: Pedal = definePedal({
-  id: 'compressor',
+const COMPRESSOR_PEDAL: PedalSpec = {
+  kind: 'compressor',
   label: 'Compressor',
-  // ⚠ THE ONE PEDAL AT THE ROOT OF THE PRESET. `VoicePreset.compressor` is a
-  // top-level field; the other five live under `effects`. That is the lib's
-  // shape and this table follows it rather than inventing a tidier one.
-  branch: 'compressor',
-  seed: SEED_COMPRESSOR,
   params: [
-    pedalBypass('compressor'),
+    PEDAL_BYPASS,
     {
       kind: 'slider',
-      path: 'compressor.threshold',
+      path: 'threshold',
       label: 'Threshold',
-      requiresBranch: 'compressor',
       // Every bound in this stage is a real `@min` / `@max` in
       // `tone/build/esm/component/dynamics/Compressor.d.ts` (15.1.22).
       min: -100,
@@ -1788,9 +1749,8 @@ const COMPRESSOR_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'slider',
-      path: 'compressor.ratio',
+      path: 'ratio',
       label: 'Ratio',
-      requiresBranch: 'compressor',
       min: 1,
       max: 20,
       step: 0.1,
@@ -1799,9 +1759,8 @@ const COMPRESSOR_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'slider',
-      path: 'compressor.attack',
+      path: 'attack',
       label: 'Attack',
-      requiresBranch: 'compressor',
       min: 0,
       max: 1,
       // Tone's own default is 0.003 s, so a coarser detent could not express it.
@@ -1812,9 +1771,8 @@ const COMPRESSOR_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'slider',
-      path: 'compressor.release',
+      path: 'release',
       label: 'Release',
-      requiresBranch: 'compressor',
       min: 0,
       max: 1,
       step: 0.01,
@@ -1824,9 +1782,8 @@ const COMPRESSOR_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'slider',
-      path: 'compressor.knee',
+      path: 'knee',
       label: 'Knee',
-      requiresBranch: 'compressor',
       min: 0,
       max: 40,
       step: 1,
@@ -1835,20 +1792,17 @@ const COMPRESSOR_PEDAL: Pedal = definePedal({
       fallback: SEED_COMPRESSOR.knee,
     },
   ],
-});
+};
 
-const DISTORTION_PEDAL: Pedal = definePedal({
-  id: 'distortion',
+const DISTORTION_PEDAL: PedalSpec = {
+  kind: 'distortion',
   label: 'Distortion',
-  branch: 'effects.distortion',
-  seed: SEED_DISTORTION,
   params: [
-    pedalBypass('effects.distortion'),
+    PEDAL_BYPASS,
     {
       kind: 'slider',
-      path: 'effects.distortion.drive',
+      path: 'drive',
       label: 'Drive',
-      requiresBranch: 'effects.distortion',
       // THE ONE ROW BOUNDED ON PROSE, and the table header names the carve-out.
       // `tone/build/esm/effect/Distortion.d.ts` (15.1.22) says "Nominal range is
       // between 0 and 1" and publishes no `@min`/`@max`, so the header's rule
@@ -1869,12 +1823,11 @@ const DISTORTION_PEDAL: Pedal = definePedal({
       precision: 2,
       fallback: SEED_DISTORTION.drive,
     },
-    normalRangeSlider('effects.distortion', 'effects.distortion.wet', 'Mix', SEED_DISTORTION.wet),
+    normalRangeSlider('wet', 'Mix', SEED_DISTORTION.wet),
     {
       kind: 'enum',
-      path: 'effects.distortion.oversample',
+      path: 'oversample',
       label: 'Oversample',
-      requiresBranch: 'effects.distortion',
       // The complete `OverSampleType` union, which is what the rule about
       // offering every option the API has means here.
       options: [
@@ -1887,20 +1840,17 @@ const DISTORTION_PEDAL: Pedal = definePedal({
         raw === 'none' || raw === '2x' || raw === '4x' ? raw : null,
     },
   ],
-});
+};
 
-const CHORUS_PEDAL: Pedal = definePedal({
-  id: 'chorus',
+const CHORUS_PEDAL: PedalSpec = {
+  kind: 'chorus',
   label: 'Chorus',
-  branch: 'effects.chorus',
-  seed: SEED_CHORUS,
   params: [
-    pedalBypass('effects.chorus'),
+    PEDAL_BYPASS,
     {
       kind: 'encoder',
-      path: 'effects.chorus.frequency',
+      path: 'frequency',
       label: 'Rate',
-      requiresBranch: 'effects.chorus',
       // `Chorus.d.ts` types this `Frequency` and publishes no bound, the same
       // silence `Tone.Filter.frequency` keeps.
       step: 0.1,
@@ -1911,14 +1861,13 @@ const CHORUS_PEDAL: Pedal = definePedal({
       floor: 0,
       fallback: SEED_CHORUS.frequency,
     },
-    normalRangeSlider('effects.chorus', 'effects.chorus.depth', 'Depth', SEED_CHORUS.depth),
-    normalRangeSlider('effects.chorus', 'effects.chorus.wet', 'Mix', SEED_CHORUS.wet),
-    normalRangeSlider('effects.chorus', 'effects.chorus.feedback', 'Feedback', SEED_CHORUS.feedback),
+    normalRangeSlider('depth', 'Depth', SEED_CHORUS.depth),
+    normalRangeSlider('wet', 'Mix', SEED_CHORUS.wet),
+    normalRangeSlider('feedback', 'Feedback', SEED_CHORUS.feedback),
     {
       kind: 'encoder',
-      path: 'effects.chorus.delayTime',
+      path: 'delayTime',
       label: 'Delay',
-      requiresBranch: 'effects.chorus',
       // ⚠ SECONDS, not the node's milliseconds. `Voice.ts` multiplies this field
       // by 1000 into `Tone.Chorus.delayTime`, so what the preset stores is
       // seconds and so is what this row edits. Rendering it as ms would be a
@@ -1935,9 +1884,8 @@ const CHORUS_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'encoder',
-      path: 'effects.chorus.spread',
+      path: 'spread',
       label: 'Spread',
-      requiresBranch: 'effects.chorus',
       // `Degrees`, described as 0 (centred) to 180 (hard left/right) in prose
       // only. Same treatment as every other prose range.
       step: 1,
@@ -1948,9 +1896,8 @@ const CHORUS_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'enum',
-      path: 'effects.chorus.type',
+      path: 'type',
       label: 'LFO wave',
-      requiresBranch: 'effects.chorus',
       // The lib narrows Tone's `ToneOscillatorType` to these four in
       // `ChorusType`, so these four are every option this path accepts.
       options: [
@@ -1966,20 +1913,17 @@ const CHORUS_PEDAL: Pedal = definePedal({
           : null,
     },
   ],
-});
+};
 
-const DELAY_PEDAL: Pedal = definePedal({
-  id: 'delay',
+const DELAY_PEDAL: PedalSpec = {
+  kind: 'delay',
   label: 'Delay',
-  branch: 'effects.delay',
-  seed: SEED_DELAY,
   params: [
-    pedalBypass('effects.delay'),
+    PEDAL_BYPASS,
     {
       kind: 'encoder',
-      path: 'effects.delay.delayTime',
+      path: 'delayTime',
       label: 'Time',
-      requiresBranch: 'effects.delay',
       // SECONDS here, unlike the chorus's: `FeedbackDelay` types this one `Time`
       // and defaults it to 0.25. The two rows differ in unit because the two
       // nodes do.
@@ -1989,23 +1933,20 @@ const DELAY_PEDAL: Pedal = definePedal({
       floor: 0,
       fallback: SEED_DELAY.delayTime,
     },
-    normalRangeSlider('effects.delay', 'effects.delay.feedback', 'Feedback', SEED_DELAY.feedback),
-    normalRangeSlider('effects.delay', 'effects.delay.wet', 'Mix', SEED_DELAY.wet),
+    normalRangeSlider('feedback', 'Feedback', SEED_DELAY.feedback),
+    normalRangeSlider('wet', 'Mix', SEED_DELAY.wet),
   ],
-});
+};
 
-const AUTO_WAH_PEDAL: Pedal = definePedal({
-  id: 'auto-wah',
+const AUTO_WAH_PEDAL: PedalSpec = {
+  kind: 'autoWah',
   label: 'Auto-wah',
-  branch: 'effects.autoWah',
-  seed: SEED_AUTO_WAH,
   params: [
-    pedalBypass('effects.autoWah'),
+    PEDAL_BYPASS,
     {
       kind: 'encoder',
-      path: 'effects.autoWah.baseFrequency',
+      path: 'baseFrequency',
       label: 'Base freq',
-      requiresBranch: 'effects.autoWah',
       // `Frequency`, no published bound.
       step: 10,
       precision: 0,
@@ -2019,9 +1960,8 @@ const AUTO_WAH_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'encoder',
-      path: 'effects.autoWah.octaves',
+      path: 'octaves',
       label: 'Octaves',
-      requiresBranch: 'effects.autoWah',
       step: 0.5,
       precision: 1,
       // Tone multiplies the base frequency by `2^octaves` to find the top of the
@@ -2032,9 +1972,8 @@ const AUTO_WAH_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'encoder',
-      path: 'effects.autoWah.sensitivity',
+      path: 'sensitivity',
       label: 'Sensitivity',
-      requiresBranch: 'effects.autoWah',
       // "Normal range of -40 to 0" is prose in `AutoWah.d.ts`, not a bound. No
       // floor: a sensitivity is a dB threshold and negative IS the working end.
       step: 1,
@@ -2044,9 +1983,8 @@ const AUTO_WAH_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'encoder',
-      path: 'effects.autoWah.q',
+      path: 'q',
       label: 'Resonance',
-      requiresBranch: 'effects.autoWah',
       step: 0.1,
       precision: 1,
       // Tone's own: the node declares `Q` a `Signal<"positive">`, and
@@ -2057,9 +1995,8 @@ const AUTO_WAH_PEDAL: Pedal = definePedal({
     },
     {
       kind: 'encoder',
-      path: 'effects.autoWah.gain',
+      path: 'gain',
       label: 'Gain',
-      requiresBranch: 'effects.autoWah',
       // `Signal<"decibels">` — a unit, not a range, and the page publishes no
       // bound. Negative is legal and useful, so no floor.
       step: 0.5,
@@ -2067,29 +2004,26 @@ const AUTO_WAH_PEDAL: Pedal = definePedal({
       unit: 'dB',
       fallback: SEED_AUTO_WAH.gain,
     },
-    normalRangeSlider('effects.autoWah', 'effects.autoWah.wet', 'Mix', SEED_AUTO_WAH.wet),
+    normalRangeSlider('wet', 'Mix', SEED_AUTO_WAH.wet),
   ],
-});
+};
 
-const GRAPHIC_EQ_PEDAL: Pedal = definePedal({
-  id: 'graphic-eq',
+const GRAPHIC_EQ_PEDAL: PedalSpec = {
+  kind: 'graphicEq',
   label: 'Graphic EQ',
-  branch: 'effects.graphicEq',
-  seed: SEED_GRAPHIC_EQ,
   params: [
-    pedalBypass('effects.graphicEq'),
-    eqBand('effects.graphicEq.band100Hz', '100 Hz', SEED_GRAPHIC_EQ.band100Hz),
-    eqBand('effects.graphicEq.band200Hz', '200 Hz', SEED_GRAPHIC_EQ.band200Hz),
-    eqBand('effects.graphicEq.band400Hz', '400 Hz', SEED_GRAPHIC_EQ.band400Hz),
-    eqBand('effects.graphicEq.band800Hz', '800 Hz', SEED_GRAPHIC_EQ.band800Hz),
-    eqBand('effects.graphicEq.band1_6kHz', '1.6 kHz', SEED_GRAPHIC_EQ.band1_6kHz),
-    eqBand('effects.graphicEq.band3_2kHz', '3.2 kHz', SEED_GRAPHIC_EQ.band3_2kHz),
-    eqBand('effects.graphicEq.band6_4kHz', '6.4 kHz', SEED_GRAPHIC_EQ.band6_4kHz),
+    PEDAL_BYPASS,
+    eqBand('band100Hz', '100 Hz', SEED_GRAPHIC_EQ.band100Hz),
+    eqBand('band200Hz', '200 Hz', SEED_GRAPHIC_EQ.band200Hz),
+    eqBand('band400Hz', '400 Hz', SEED_GRAPHIC_EQ.band400Hz),
+    eqBand('band800Hz', '800 Hz', SEED_GRAPHIC_EQ.band800Hz),
+    eqBand('band1_6kHz', '1.6 kHz', SEED_GRAPHIC_EQ.band1_6kHz),
+    eqBand('band3_2kHz', '3.2 kHz', SEED_GRAPHIC_EQ.band3_2kHz),
+    eqBand('band6_4kHz', '6.4 kHz', SEED_GRAPHIC_EQ.band6_4kHz),
     {
       kind: 'encoder',
-      path: 'effects.graphicEq.levelDb',
+      path: 'levelDb',
       label: 'Level',
-      requiresBranch: 'effects.graphicEq',
       // The lib builds this one as a `Tone.Gain` set from dB. `Gain` publishes no
       // bound either, and a trim that cuts is the whole point, so no floor.
       step: 0.5,
@@ -2098,10 +2032,11 @@ const GRAPHIC_EQ_PEDAL: Pedal = definePedal({
       fallback: SEED_GRAPHIC_EQ.levelDb,
     },
   ],
-});
+};
 
-/** `Voice.wireChain`'s order, which is the order the signal travels in. */
-export const PEDALS: readonly Pedal[] = [
+/** Every kind the board can hold, in the order the type picker lists them.
+ *  A presentation order only — see the table's header. */
+export const PEDAL_SPECS: readonly PedalSpec[] = [
   COMPRESSOR_PEDAL,
   DISTORTION_PEDAL,
   CHORUS_PEDAL,
@@ -2109,6 +2044,71 @@ export const PEDALS: readonly Pedal[] = [
   AUTO_WAH_PEDAL,
   GRAPHIC_EQ_PEDAL,
 ];
+
+/** The spec for a kind, or undefined for anything the table does not declare —
+ *  including a lib stage that is not a pedal, which is the plausible mistake. */
+export function pedalSpecOf(kind: unknown): PedalSpec | undefined {
+  return PEDAL_SPECS.find((spec) => spec.kind === kind);
+}
+
+/**
+ * Put a spec on one pedal: every row addressed `pedals.byId.<id>.<param>` and
+ * gated on that pedal's branch, so a row can never write into a pedal that is not
+ * on the board — the gate that stops a lone `q` write from minting a pedal with
+ * no kind and five fields missing.
+ */
+export function pedalStage(spec: PedalSpec, id: string, label: string = spec.label): PedalStage {
+  const branch = pedalBranch(id);
+  return {
+    id,
+    kind: spec.kind,
+    label,
+    branch,
+    presenceProbe: branch,
+    removableBranch: branch,
+    params: spec.params.map((row) => ({ ...row, path: `${branch}.${row.path}`, requiresBranch: branch })),
+  };
+}
+
+/**
+ * The pedals on `preset`, in signal order, each with its rows addressed.
+ *
+ * Read through the lib's `legacyToPedals` and `normalizePedalBoard` — the two
+ * steps `Voice` runs on every preset it is handed — so the pane draws exactly the
+ * board the engine wires: a pre-v3 voice's named pedal fields are its board, and
+ * an id with no entry, or an entry of a kind the lib cannot build, is dropped
+ * there and so is not drawn here as a card with knobs that reach nothing.
+ *
+ * The first pedal of a kind carries the plain label and later ones are numbered
+ * from 2, counted in board order — so the names follow the positions, which is
+ * what a listener moving through the board hears. A move therefore renames the
+ * cards it passes ("Distortion 2" moved up becomes "Distortion").
+ */
+export function pedalsOf(preset: VoicePreset): readonly PedalStage[] {
+  const board = normalizePedalBoard(legacyToPedals(preset).pedals);
+  const seen = new Map<PedalType, number>();
+  return board.order.flatMap((id) => {
+    const spec = pedalSpecOf(board.byId[id]?.kind);
+    if (!spec) return [];
+    const n = (seen.get(spec.kind) ?? 0) + 1;
+    seen.set(spec.kind, n);
+    return [pedalStage(spec, id, n === 1 ? spec.label : `${spec.label} ${n}`)];
+  });
+}
+
+/**
+ * The row a pedal path addresses on `preset`, or undefined when the path is not
+ * a pedal row or its pedal is not on this board.
+ *
+ * The pedal counterpart of `voiceDrafts`' static path map: a pedal's paths carry
+ * its id, so they exist only per preset and cannot be listed ahead of time.
+ */
+export function pedalParamAt(preset: VoicePreset, path: string): Param | undefined {
+  if (!path.startsWith(PEDAL_BRANCH_PREFIX)) return undefined;
+  const id = path.slice(PEDAL_BRANCH_PREFIX.length).split('.')[0];
+  const pedal = pedalsOf(preset).find((candidate) => candidate.id === id);
+  return pedal?.params.find((row) => row.path === path);
+}
 
 /**
  * The pedalboard as a section of the rack.
@@ -2118,19 +2118,17 @@ export const PEDALS: readonly Pedal[] = [
  * section never renders the "not on this preset" body and carries no Add/Remove
  * of its own.
  *
- * ⚠ `params` IS THE FLATTENED PEDAL ROWS, and that is load-bearing rather than
- * convenient. `voiceDrafts.PARAM_BY_PATH` is built from
- * `PARAM_SECTIONS.flatMap(s => s.params)`, and `paramSchema.test.ts` walks the
- * same list. A pedal row outside it is a control the composition page cannot
- * write, the agent cannot reach, and no test checks the range of. The pane
- * groups them back into pedals through {@link PEDALS}; nothing else has to.
+ * ⚠ `params` IS EMPTY, and on purpose. Every pedal row's path carries a board id,
+ * so the rows exist per preset ({@link pedalsOf}) and cannot be listed here.
+ * `voiceDrafts.setVoiceParam` resolves them with {@link pedalParamAt}, and
+ * `paramSchema.test.ts` walks them off its fixtures' boards.
  */
 const PEDALS_SECTION: ParamSection = {
   id: 'pedals',
   label: 'Pedals',
   presenceProbe: null,
   removableBranch: null,
-  params: PEDALS.flatMap((pedal) => pedal.params),
+  params: [],
 };
 
 /** Signal-chain order: source → body filter → pedals → amp → cabinet → output. */
@@ -2171,8 +2169,8 @@ const CIRCUIT_AMP_OPTIONS: readonly EnumOption[] = CIRCUIT_AMPS.map((amp) => ({
  * ── Why `params` is flattened ───────────────────────────────────────────────
  *
  * It is the union of EVERY amp's declared controls, grouped by control id and
- * each row gated with `appliesWhen` on the amps that declare it. That flattening is load-bearing,
- * exactly as it is for `PEDALS_SECTION`: `PARAM_BY_PATH` and the schema
+ * each row gated with `appliesWhen` on the amps that declare it. That flattening is load-bearing:
+ * `PARAM_BY_PATH` and the schema
  * tripwire are both built from `PARAM_SECTIONS.flatMap(s => s.params)`, so a
  * row declared only on one amp would be a control the composition page cannot
  * write and no test checks the range of.
@@ -2462,7 +2460,7 @@ export const PARAM_SECTIONS: readonly ParamSection[] = [
  * Signal-chain order: source → body filter → amp → cabinet → final EQ → output.
  *
  * The body filter sits where `Voice.wireChain` puts it — immediately after the
- * input gain and before the compressor, so ahead of the amp and everything the
+ * input gain and before the first pedal, so ahead of the amp and everything the
  * pedalboard does. Listing it anywhere else would be a rack whose order is not
  * the order the signal travels in.
  */
@@ -2497,8 +2495,8 @@ export const PARAM_SECTIONS: readonly ParamSection[] = [
  * open a stage that says "not on this preset" almost every time.
  *
  * `pedals` is not in it for the strongest version of the same argument. It is one
- * stage holding six, so unfolding it costs six cards rather than one stage's
- * rows — and it is the section most likely to be entirely empty, since a pedal is
+ * stage holding a card per pedal, so unfolding it costs every card rather than one
+ * stage's rows — and it is the section most likely to be entirely empty, since a pedal is
  * added rather than tuned. Six "not on this voice" cards in every rack is the
  * exact opposite of two tracks being comparable at once.
  */
@@ -2577,7 +2575,7 @@ export function probePaths(stage: ParamStage): readonly string[] {
  *
  * ANY of the listed paths, for the reason `presenceProbe` gives: a pane holding
  * two independent stages is on screen while either one exists. With one path
- * declared — every section but the Cabinet, and all six pedals — this is the same
+ * declared — every section but the Cabinet, and every pedal — this is the same
  * single `hasBranchAtPath` it always was.
  */
 export function sectionApplies(preset: VoicePreset, section: ParamStage): boolean {
@@ -2651,7 +2649,7 @@ export function enabledParamOf(section: ParamStage): ToggleParam | undefined {
  * out, active otherwise.
  *
  * For every stage without an `independent` sub-branch — every other section, and
- * all six pedals — that reduces to exactly the single `enabledParamOf` read it has
+ * every pedal — that reduces to exactly the single `enabledParamOf` read it has
  * always been, and `paramSchema.test.ts` asserts the equivalence rather than
  * trusting this paragraph.
  */
@@ -2676,7 +2674,7 @@ export function stageBypassed(preset: VoicePreset, rows: readonly Param[]): bool
  * The stage's `independent` sub-branch, if it has one.
  *
  * The parameter is "a stage that MAY carry a sub-branch" rather than
- * `ParamSection`, so a `Pedal` — a stage with no sub-branch to declare, see the
+ * `ParamSection`, so a `PedalStage` — a stage with no sub-branch to declare, see the
  * pedal table's header — passes on its own terms. An optional member is satisfied
  * by its absence, so this needs no assertion to read a field the narrower type
  * does not have.

@@ -92,8 +92,17 @@
  * and is not one: it patches the name INSIDE an unsaved copy so the next Save
  * does not undo a rename, and creates nothing.
  */
-import { useSyncExternalStore } from 'react';
-import { getSamplePack, type VoicePreset } from '@fretwork/lib';
+import { useMemo, useSyncExternalStore } from 'react';
+import {
+  addPedal,
+  getSamplePack,
+  movePedal,
+  legacyToPedals,
+  normalizePedalBoard,
+  removePedal,
+  type PedalBoard,
+  type VoicePreset,
+} from '@fretwork/lib';
 import { subscribeRemovedPatterns } from '../patterns/patternService';
 import type { Result } from '../composition/compositionService';
 import {
@@ -105,18 +114,18 @@ import {
 import {
   LEVEL_BAR_PARAMS,
   PARAM_SECTIONS,
-  PEDALS,
+  PEDAL_BOARD_PATH,
   paramApplies,
+  pedalParamAt,
+  pedalSpecOf,
   removableBranchPresent,
-  sectionApplies,
   subBranchApplies,
   type Param,
   type ParamSection,
   type ParamSubBranch,
-  type Pedal,
-  type PedalId,
   type SectionId,
 } from './paramSchema';
+import { PEDAL_SEEDS } from './pedalDefaults';
 import { removeAtPath, setAtPath } from './presetPaths';
 import { isSourceKind, withLayerSourceKind, withSourceKind } from './sourceDefaults';
 
@@ -184,7 +193,7 @@ subscribeRemovedPatterns((patternId) => {
 });
 
 /** The refusal for an id that names nothing, in the holder's own words. */
-const noHolder = (kind: HolderKind): Result => ({
+const noHolder = <T = void>(kind: HolderKind): Result<T> => ({
   ok: false,
   reason: kind === 'track' ? 'No such track.' : 'No such pattern.',
 });
@@ -249,7 +258,12 @@ export function useVoiceWorkingPreset(kind: HolderKind, id: string): VoicePreset
     () => drafts.get(key),
     () => drafts.get(key),
   );
-  const stored = useHolderVoicePreset(kind, id);
+  const resolved = useHolderVoicePreset(kind, id);
+  // In the board shape for `holderOf`'s reason, so the editor draws and gates
+  // exactly the board a write would start from. Memoised because the conversion
+  // mints a new object for a legacy preset, and a fresh preset per render would
+  // re-render every knob on the rack.
+  const stored = useMemo(() => (resolved ? legacyToPedals(resolved) : null), [resolved]);
   return entry && entry.tag === holderVoiceTag(kind, id) ? entry.preset : stored;
 }
 
@@ -300,7 +314,14 @@ function holderOf(kind: HolderKind, id: string): DraftHolder | null {
   // Unreachable: a tag resolved, so the holder did. Guarded rather than asserted
   // because the alternative is a non-null assertion on a lib resolution.
   if (!stored) return null;
-  return { key, tag, preset: stored };
+  // Every write starts from the board shape. The lib's store converts pre-v3
+  // pedal fields only on its storage read, and `Voice` converts every preset it
+  // is handed; a legacy-shaped preset reaching a write here otherwise gets a
+  // `pedals` board written beside its named fields, which `legacyToPedals` then
+  // treats as authoritative — the user's old pedals dropped without a word.
+  // Returns the same object for a preset already in the new shape, so
+  // `commit`'s identity guard is untouched.
+  return { key, tag, preset: legacyToPedals(stored) };
 }
 
 /**
@@ -331,7 +352,10 @@ function commit(
  *  ⚠ THE BAR'S TWO ROWS ARE UNIONED IN BY HAND, and they have to be: they are
  *  declared outside `PARAM_SECTIONS` because the IN/OUT bar is not a foldable
  *  stage (see `paramSchema.LEVEL_BAR_PARAMS`), and a row this map has never heard
- *  of is a row no knob and no agent can write. */
+ *  of is a row no knob and no agent can write.
+ *
+ *  ⚠ NO PEDAL ROW IS IN IT. A pedal's paths carry its board id, so they exist
+ *  per preset; {@link setVoiceParam} falls back to `paramSchema.pedalParamAt`. */
 const PARAM_BY_PATH: ReadonlyMap<string, Param> = new Map<string, Param>([
   ...PARAM_SECTIONS.flatMap((section) =>
     section.params.map((param): [string, Param] => [param.path, param]),
@@ -376,10 +400,12 @@ export function setVoiceParam(
   const holder = holderOf(kind, id);
   if (!holder) return noHolder(kind);
 
-  const param = PARAM_BY_PATH.get(path);
-  if (!param) return { ok: false, reason: `“${path}” is not an editable voice parameter.` };
-
   const preset = holder.preset;
+  // A pedal's rows carry its board id, so they exist only per preset — the
+  // static map cannot hold them and `pedalParamAt` resolves them against the
+  // board this holder has now.
+  const param = PARAM_BY_PATH.get(path) ?? pedalParamAt(preset, path);
+  if (!param) return { ok: false, reason: `“${path}” is not an editable voice parameter.` };
 
   // A row the current source does not have is refused rather than written: an FM
   // param on a sampler would widen the preset with a field `Voice` never reads,
@@ -704,68 +730,110 @@ export function removeVoiceSubBranch(kind: HolderKind, id: string, subBranchId: 
 }
 
 /**
- * The pedal `pedalId` names. Looked up rather than passed, for the reason
- * `sectionById` and `subBranchById` are: a caller names something the schema
- * knows, so an id the table no longer declares is refused in words instead of
- * writing a path nothing renders.
+ * The board a write starts from, as the engine reads it — through the lib's
+ * `normalizePedalBoard`, so an id the pane cannot draw is not one a seam can
+ * address either.
  */
-function pedalById(id: string): Pedal | undefined {
-  return PEDALS.find((pedal) => pedal.id === id);
-}
+const boardOf = (preset: VoicePreset): PedalBoard => normalizePedalBoard(preset.pedals);
 
 /**
- * Put one pedal on a holder's board.
+ * Write a board back. An emptied board comes OFF the preset rather than staying
+ * as `{ order: [], byId: {} }` — the shape the lib's `legacyToPedals` gives a
+ * voice that never had a pedal, so "no pedals" has one spelling.
+ */
+const withBoard = (preset: VoicePreset, board: PedalBoard): VoicePreset =>
+  board.order.length === 0
+    ? removeAtPath(preset, PEDAL_BOARD_PATH)
+    : setAtPath(preset, PEDAL_BOARD_PATH, board);
+
+/** The refusal for a pedal id this holder's board does not carry. */
+const noPedal = (pedalId: string): Result => ({
+  ok: false,
+  reason: `There is no pedal “${pedalId}” on this voice.`,
+});
+
+/**
+ * Append a pedal of `pedalKind` at the END of a holder's board, seeded with
+ * `pedalDefaults.PEDAL_SEEDS` — the value the type picker writes. Answers the id
+ * the lib minted, which is the address every later write to it needs.
  *
- * ⚠ WITHOUT THIS, every pedal is unreachable to a caller with no pointer, and in
- * a way no other seam covers. {@link addVoiceSection} names a SECTION, and the
- * pedalboard section is `presenceProbe: null` — always present, nothing to add —
- * so it can neither name a pedal nor create one. Meanwhile every `compressor.*`
- * and `effects.<pedal>.*` write is refused by {@link setVoiceParam} while the
- * branch is absent, because each row declares `requiresBranch`. So a holder
- * without a distortion could never gain one and one with one could never lose
- * it. Adding a pedal is its own gesture because a pedal is its own stage.
+ * ⚠ WITHOUT THIS, a pedal is unreachable to a caller with no pointer.
+ * {@link addVoiceSection} names a SECTION, and the pedalboard section is
+ * `presenceProbe: null` — always present, nothing to add — while every
+ * `pedals.byId.<id>.*` write is refused by {@link setVoiceParam} until that id is
+ * on the board. Adding a pedal is its own gesture because a pedal is its own
+ * stage.
  *
- * Seeded in ONE write from `Pedal.seed`, not row by row from fallbacks the way
- * {@link addVoiceSection} builds a section. A pedal's params interface is
- * required in full the moment the branch exists — `Voice.buildChain` reads every
- * field straight into a Tone constructor — so a half-built branch is a node
+ * Seeded in ONE write, not row by row from fallbacks the way
+ * {@link addVoiceSection} builds a section: `Voice.buildChain` reads every field
+ * of a pedal straight into a Tone constructor, so a half-built one is a node
  * built with `undefined`s rather than a stage waiting to be finished.
  *
- * Adding what is already there is a no-op rather than a refusal, the contract
- * both sibling adds have, and the one that makes the call idempotent for a caller
- * that cannot see the rack. Note it is a no-op even for a BYPASSED pedal: that
- * pedal is on the board with the user's tuning intact, and re-seeding it would
- * throw that away to answer a question nobody asked.
+ * NOT idempotent, and that is the design: the same kind may sit on the board more
+ * than once (`docs/PLAN-voice.md` §7), so a second add is a second pedal.
  */
-export function addVoicePedal(kind: HolderKind, id: string, pedalId: PedalId | string): Result {
+export function addVoicePedal(kind: HolderKind, id: string, pedalKind: string): Result<string> {
   const holder = holderOf(kind, id);
-  if (!holder) return noHolder(kind);
-  const pedal = pedalById(pedalId);
-  if (!pedal) return { ok: false, reason: `“${pedalId}” is not a pedal.` };
+  if (!holder) return noHolder<string>(kind);
+  const spec = pedalSpecOf(pedalKind);
+  if (!spec) return { ok: false, reason: `“${pedalKind}” is not a pedal.` };
 
-  const preset = holder.preset;
-  if (sectionApplies(preset, pedal)) return { ok: true, value: undefined };
-  return commit(kind, id, holder, setAtPath(preset, pedal.branch, pedal.seed));
+  const added = addPedal(boardOf(holder.preset), spec.kind, PEDAL_SEEDS[spec.kind]);
+  const result = commit(kind, id, holder, withBoard(holder.preset, added.board));
+  return result.ok ? { ok: true, value: added.id } : result;
 }
 
 /**
- * Take one pedal off a holder's board.
+ * Take one pedal off a holder's board, tuning and all. Nothing remembers the
+ * place it held.
  *
- * ABSENT, not bypassed, and the difference is the user's tuning: bypass keeps it
- * for when they switch the pedal back on, this throws it away. Both states are
- * reachable and they are not the same — `sectionPresence` is what tells them
- * apart, and both editors offer both gestures for that reason.
+ * ABSENT, not bypassed, and the difference is the user's tuning: bypass
+ * (`pedals.byId.<id>.enabled`) keeps it for when the pedal is switched back on,
+ * this throws it away. Both editors offer both gestures for that reason.
  *
- * Removing what is not there is a no-op, matching the add and for the same
- * reason: `removeAtPath` on an absent branch returns the same preset, `commit`
- * sees an unchanged reference, and nothing is marked dirty.
+ * An id the board does not carry is REFUSED rather than ignored: an id is a
+ * specific pedal, so a stale one is a caller acting on something that is not
+ * there — not the "remove the distortion, whether or not there is one" a kind
+ * name could mean.
  */
-export function removeVoicePedal(kind: HolderKind, id: string, pedalId: PedalId | string): Result {
+export function removeVoicePedal(kind: HolderKind, id: string, pedalId: string): Result {
   const holder = holderOf(kind, id);
   if (!holder) return noHolder(kind);
-  const pedal = pedalById(pedalId);
-  if (!pedal) return { ok: false, reason: `“${pedalId}” is not a pedal.` };
-  return commit(kind, id, holder, removeAtPath(holder.preset, pedal.branch));
+  const board = boardOf(holder.preset);
+  if (!board.order.includes(pedalId)) return noPedal(pedalId);
+  return commit(kind, id, holder, withBoard(holder.preset, removePedal(board, pedalId)));
+}
+
+/**
+ * Move one pedal so it ends up at `toIndex` in the board's order — the signal
+ * order. `toIndex` counts the board WITHOUT the moving pedal, the lib's
+ * `movePedal` semantics and `shell/paneLayout.reorder`'s, and is clamped to the
+ * ends; so the drag's drop slot and a Move up / Move down button are the same
+ * call.
+ *
+ * A move that leaves the order as it was is a no-op, not an edit: `movePedal`
+ * hands back a fresh board either way, and committing it would mark the holder
+ * dirty and rebuild its chain for nothing. Permanent adapter work, not a lib gap:
+ * the lib promises `===` only for an unknown id, and "is this an edit" is the
+ * draft store's question — the same one `commit`'s identity guard answers for
+ * every other write.
+ */
+export function moveVoicePedal(
+  kind: HolderKind,
+  id: string,
+  pedalId: string,
+  toIndex: number,
+): Result {
+  const holder = holderOf(kind, id);
+  if (!holder) return noHolder(kind);
+  if (!Number.isInteger(toIndex)) return { ok: false, reason: 'A pedal position is a whole number.' };
+  const board = boardOf(holder.preset);
+  if (!board.order.includes(pedalId)) return noPedal(pedalId);
+  const moved = movePedal(board, pedalId, toIndex);
+  if (moved.order.every((pedal, index) => pedal === board.order[index])) {
+    return { ok: true, value: undefined };
+  }
+  return commit(kind, id, holder, withBoard(holder.preset, moved));
 }
 
 /**

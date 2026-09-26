@@ -54,6 +54,8 @@ import type {
   DelayParams,
   DistortionParams,
   GraphicEqParams,
+  PedalParamsOf,
+  PedalType,
   VoiceReverbParams,
 } from '@fretwork/lib';
 
@@ -155,6 +157,22 @@ export const SEED_GRAPHIC_EQ: GraphicEqParams = {
   band3_2kHz: 0,
   band6_4kHz: 0,
   levelDb: 0,
+};
+
+/**
+ * Every pedal kind's seed, by the lib's `PedalType` — what the pedalboard's type
+ * picker appends. A mapped type rather than six loose constants so a seventh kind
+ * in the lib is a `tsc` failure here instead of a picker entry that seeds nothing,
+ * and so each seed is checked against `PedalParamsOf` for ITS kind, which is the
+ * shape `addPedal` stores.
+ */
+export const PEDAL_SEEDS: { readonly [K in PedalType]: PedalParamsOf<K> } = {
+  compressor: SEED_COMPRESSOR,
+  distortion: SEED_DISTORTION,
+  chorus: SEED_CHORUS,
+  delay: SEED_DELAY,
+  autoWah: SEED_AUTO_WAH,
+  graphicEq: SEED_GRAPHIC_EQ,
 };
 
 /**

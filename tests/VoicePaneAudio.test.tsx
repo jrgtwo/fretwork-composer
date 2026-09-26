@@ -281,21 +281,36 @@ describe('VoicePane → the draft store → playbackService', () => {
   // REMOVED 2026-09-01, see docs/HANDOFF.md — same reason: it switched to a shipped
   // voice by id purely to make the voice underneath change.
   it('pushes a pedal at the engine the moment it is added or removed', async () => {
-    // A pedal is a CHAIN-SHAPE change, not a value change — `Voice.updateEffects`
-    // compares `sameEffectsShape` and rebuilds the graph rather than retuning a
-    // node — so an add that never reaches the seam is a board with a pedal drawn
+    // A pedal is a CHAIN-SHAPE change, not a value change — `Voice.updatePedals`
+    // rebuilds the board unless the ids, their order and every bypass are
+    // unchanged — so an add that never reaches the seam is a board with a pedal drawn
     // on it and nothing in the signal path. jsdom cannot hear that, and no
     // assertion in `VoicePane.test.tsx` would notice.
     render(<Host />);
     await userEvent.click(screen.getByRole('button', { name: 'Pedals' }));
 
-    await userEvent.click(screen.getByRole('button', { name: 'Add Distortion' }));
+    const add = async (label: string) => {
+      await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Pedal type' }), label);
+      await userEvent.click(screen.getByRole('button', { name: 'Add pedal' }));
+    };
+    await add('Distortion');
     expect(pushed()).toHaveLength(1);
-    expect(pushed()[0]?.effects?.distortion?.drive).toBe(0.4);
+    const board = pushed()[0]?.pedals;
+    expect(board?.byId[board.order[0]]).toMatchObject({ kind: 'distortion', drive: 0.4 });
 
     await userEvent.click(screen.getByRole('button', { name: 'Remove Distortion' }));
     expect(pushed()).toHaveLength(2);
-    expect(pushed()[1]?.effects?.distortion).toBeUndefined();
+    expect(pushed()[1]?.pedals).toBeUndefined();
+
+    // A reorder is the one pedal edit whose ONLY effect is the sound — nothing
+    // about any single pedal changes — so it has to reach the engine as well.
+    await add('Delay');
+    await add('Chorus');
+    expect(pushed()).toHaveLength(4);
+    const before = pushed()[3]?.pedals?.order ?? [];
+    await userEvent.click(screen.getByRole('button', { name: 'Move Chorus up' }));
+    expect(pushed()).toHaveLength(5);
+    expect(pushed()[4]?.pedals?.order).toEqual([...before].reverse());
   });
 
 });

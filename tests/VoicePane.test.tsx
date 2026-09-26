@@ -1571,53 +1571,48 @@ describe('VoicePane', () => {
   // ---------------------------------------------------------- the pedalboard ---
 
   /** One pedal's card. Every pedal is a named group inside the one Pedals stage,
-   *  which is what makes six identically-shaped units addressable at all. */
+   *  which is what makes identically-shaped units addressable at all. */
   const pedal = (name: string) => within(screen.getByRole('group', { name }));
 
-  it('draws six pedals on one board, in the order the signal travels', async () => {
+  /** The board's type picker chooses a kind; Add appends it at the end. */
+  const addPedal = async (label: string) => {
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Pedal type' }), label);
+    await userEvent.click(screen.getByRole('button', { name: 'Add pedal' }));
+  };
+
+  /** The id of the pedal at `index` on the draft's board. */
+  const pedalIdAt = (index: number): string => {
+    const id = draftPreset().pedals?.order[index];
+    if (!id) throw new Error(`no pedal at ${index}`);
+    return id;
+  };
+
+  it('starts with an empty board and a picker offering all six kinds', async () => {
     render(<Host />);
     await userEvent.click(section('Pedals'));
-    // ONE stage disclosure, not six — the design decision this renderer exists for.
+    // ONE stage disclosure, not one per pedal — the design decision this renderer
+    // exists for — and the stock acoustic guitar has no pedals on it.
     const board = screen.getByRole('region', { name: 'Pedals stage' });
-    const names = within(board)
-      .getAllByRole('group')
-      .map((group) => group.getAttribute('aria-label'));
-    expect(names).toEqual([
-      'Compressor',
-      'Distortion',
-      'Chorus',
-      'Delay',
-      'Auto-wah',
-      'Graphic EQ',
-    ]);
+    expect(within(board).queryAllByRole('group')).toEqual([]);
+    expect(within(board).getByText('No pedals on this voice.')).toBeInTheDocument();
+    const picker = within(board).getByRole('combobox', { name: 'Pedal type' });
+    expect(
+      within(picker)
+        .getAllByRole('option')
+        .filter((option) => !(option as HTMLOptionElement).disabled)
+        .map((option) => option.textContent),
+    ).toEqual(['Compressor', 'Distortion', 'Chorus', 'Delay', 'Auto-wah', 'Graphic EQ']);
   });
 
   it('adds a pedal with its maker`s values, then removes it', async () => {
     render(<Host />);
     await userEvent.click(section('Pedals'));
-    // The stock acoustic guitar has no `effects` object at all, so every pedal
-    // starts absent and the branch has to be created by the gesture.
-    // All six — the board is present and empty, which is a state of its own. Said
-    // by the six Add buttons rather than by six paragraphs: the rack's vocabulary
-    // won when the two editors merged, and up to eight boards are on screen at
-    // once on the composition page.
-    const board = screen.getByRole('region', { name: 'Pedals stage' });
-    expect(
-      within(board)
-        .getAllByRole('button', { name: /^Add / })
-        .map((button) => button.getAttribute('aria-label')),
-    ).toEqual([
-      'Add Compressor',
-      'Add Distortion',
-      'Add Chorus',
-      'Add Delay',
-      'Add Auto-wah',
-      'Add Graphic EQ',
-    ]);
 
-    await userEvent.click(pedal('Chorus').getByRole('button', { name: 'Add Chorus' }));
-    // Tone's own defaults, complete — not a subset assembled from row fallbacks.
-    expect(draftPreset().effects?.chorus).toEqual({
+    await addPedal('Chorus');
+    // Tone's own defaults, complete — not a subset assembled from row fallbacks —
+    // tagged with the kind the lib's board stores.
+    expect(draftPreset().pedals?.byId[pedalIdAt(0)]).toEqual({
+      kind: 'chorus',
       frequency: 1.5,
       depth: 0.7,
       wet: 0.5,
@@ -1627,50 +1622,50 @@ describe('VoicePane', () => {
       delayTime: 0.0035,
       spread: 180,
     });
-    // …and its controls are now on screen, named by the pedal so the four "Mix"
-    // rows across this board can be told apart.
+    // …and its controls are now on screen, named by the pedal so the "Mix" rows
+    // across a board can be told apart.
     expect(pedal('Chorus').getByLabelText('Chorus Mix')).toBeInTheDocument();
     expect(pedal('Chorus').getByLabelText('Chorus Depth')).toBeInTheDocument();
 
     await userEvent.click(pedal('Chorus').getByRole('button', { name: 'Remove Chorus' }));
-    expect(draftPreset().effects?.chorus).toBeUndefined();
+    // The last pedal off takes the board with it — one spelling for "no pedals".
+    expect(draftPreset().pedals).toBeUndefined();
   });
 
   it('keeps a bypassed pedal on the board with its tuning', async () => {
     // Bypassed is not absent, and the pane has to show the difference: the tuning
-    // is still there, the Remove button is still the lossy one, and the card says
-    // which state it is in — the same three-state rule the stages follow.
+    // is still there and the Remove button is still the lossy one.
     render(<Host />);
     await userEvent.click(section('Pedals'));
-    await userEvent.click(pedal('Delay').getByRole('button', { name: 'Add Delay' }));
+    await addPedal('Delay');
+    const id = pedalIdAt(0);
 
     // A knob, like every other `SliderParam` here now — `End` is its max, which
     // is the one edit whose result is a stated number rather than a step count.
     const feedback = pedal('Delay').getByRole('slider', { name: 'Delay Feedback' });
     fireEvent.keyDown(feedback, { key: 'End' });
-    expect(draftPreset().effects?.delay?.feedback).toBe(1);
+    expect(getAtPath(draftPreset(), `pedals.byId.${id}.feedback`)).toBe(1);
 
     await userEvent.click(pedal('Delay').getByRole('switch', { name: 'Delay Enabled' }));
-    expect(draftPreset().effects?.delay?.enabled).toBe(false);
+    expect(getAtPath(draftPreset(), `pedals.byId.${id}.enabled`)).toBe(false);
     // Still on the board, still tuned, and saying so.
-    expect(draftPreset().effects?.delay?.feedback).toBe(1);
-    // The switch itself is what says so — a pedal card cannot fold, so there is no
-    // second note in its header to fall out of step with it.
+    expect(getAtPath(draftPreset(), `pedals.byId.${id}.feedback`)).toBe(1);
+    expect(draftPreset().pedals?.order).toEqual([id]);
     expect(pedal('Delay').getByRole('switch', { name: 'Delay Enabled' })).toHaveTextContent(
       'Bypassed',
     );
     expect(pedal('Delay').getByRole('button', { name: 'Remove Delay' })).toBeInTheDocument();
   });
 
-  it('puts the compressor at the root of the preset, not under effects', async () => {
-    // The one pedal whose branch is not `effects.<name>`. A renderer assembling
-    // the path from the id would work for the other five and silently write
-    // `effects.compressor`, which the engine reads nothing from.
+  it('puts the compressor on the board like any other pedal', async () => {
+    // It used to be the one pedal at the root of the preset. The lib moved it onto
+    // the board with the other five, and a write to the old field is a field the
+    // engine no longer reads.
     render(<Host />);
     await userEvent.click(section('Pedals'));
-    await userEvent.click(pedal('Compressor').getByRole('button', { name: 'Add Compressor' }));
-    expect(draftPreset().compressor?.ratio).toBe(12);
-    expect(getAtPath(draftPreset(), 'effects.compressor')).toBeUndefined();
+    await addPedal('Compressor');
+    expect(getAtPath(draftPreset(), `pedals.byId.${pedalIdAt(0)}.ratio`)).toBe(12);
+    expect(getAtPath(draftPreset(), 'compressor')).toBeUndefined();
   });
 
   it('gives the graphic EQ seven bands and a level, all of them endless', async () => {
@@ -1680,7 +1675,7 @@ describe('VoicePane', () => {
     // be indistinguishable from drawing one to a real limit.
     render(<Host />);
     await userEvent.click(section('Pedals'));
-    await userEvent.click(pedal('Graphic EQ').getByRole('button', { name: 'Add Graphic EQ' }));
+    await addPedal('Graphic EQ');
 
     for (const band of ['100 Hz', '200 Hz', '400 Hz', '800 Hz', '1.6 kHz', '3.2 kHz', '6.4 kHz']) {
       const control = pedal('Graphic EQ').getByRole('spinbutton', {
@@ -1700,7 +1695,7 @@ describe('VoicePane', () => {
     // published a `@min`/`@max`. `Compressor.d.ts` does, on all five.
     render(<Host />);
     await userEvent.click(section('Pedals'));
-    await userEvent.click(pedal('Compressor').getByRole('button', { name: 'Add Compressor' }));
+    await addPedal('Compressor');
 
     // A bounded control rather than an endless encoder — which is the claim, and
     // it survives the row being drawn as a knob: the bounds moved from a range

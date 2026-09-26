@@ -3,8 +3,12 @@ import {
   CABINET_IRS,
   DEFAULT_CIRCUIT_AMP_ID,
   CIRCUIT_AMPS,
+  PEDAL_TYPES,
   SAMPLE_PACKS,
+  addPedal,
   detectSamplePack,
+  legacyToPedals,
+  type LegacyVoicePreset,
   type ADSREnvelope,
   type CircuitAmpParams,
   type AutoWahParams,
@@ -15,6 +19,8 @@ import {
   type EQParams,
   type EffectsConfig,
   type GraphicEqParams,
+  type PedalBoard,
+  type PedalType,
   type BodyFilterEnvelope,
   type BodyFilterParams,
   type CabIRParams,
@@ -30,12 +36,16 @@ import {
 import {
   LEVEL_BAR_PARAMS,
   PARAM_SECTIONS,
-  PEDALS,
+  PEDAL_SPECS,
   branchParams,
   enabledParamIn,
   enabledParamOf,
   ownParams,
   paramApplies,
+  pedalBranch,
+  pedalParamAt,
+  pedalStage,
+  pedalsOf,
   probePaths,
   removableBranchPresent,
   sectionApplies,
@@ -56,7 +66,7 @@ import {
   SEED_LAYER,
   SOURCE_KINDS,
 } from './sourceDefaults';
-import { SEED_VOICE_REVERB } from './pedalDefaults';
+import { PEDAL_SEEDS, SEED_VOICE_REVERB } from './pedalDefaults';
 import { circuitAmpControlPath } from './circuitAmpDefaults';
 import { getAtPath, hasBranchAtPath, hasPath, removeAtPath, setAtPath } from './presetPaths';
 
@@ -105,30 +115,41 @@ import { getAtPath, hasBranchAtPath, hasPath, removeAtPath, setAtPath } from './
  */
 
 /**
- * Every row the table declares — the sections' AND the IN/OUT bar's.
+ * The id the fixtures give a kind's pedal — the one `legacyToPedals` would mint
+ * for it, so a fixture reads like a converted saved voice.
+ */
+const fixturePedalId = (kind: PedalType): string => `p_${kind}`;
+
+/**
+ * Every pedal kind once, addressed on the fixtures' board.
+ *
+ * ⚠ A PEDAL'S ROWS EXIST PER BOARD. Their paths carry the board id, so the
+ * pedalboard section declares none and there is no static list of them to walk;
+ * this is the fixtures' board, and a test below pins that `pedalsOf` on a fixture
+ * produces exactly these stages — so a walk over them IS a walk over what the
+ * pane draws for a fixture.
+ */
+const FIXTURE_PEDAL_STAGES = PEDAL_SPECS.map((spec) => pedalStage(spec, fixturePedalId(spec.kind)));
+
+/** The pedalboard's rows, on the fixtures' board. */
+const ALL_PEDAL_PARAMS: readonly Param[] = FIXTURE_PEDAL_STAGES.flatMap((pedal) => pedal.params);
+
+/**
+ * Every row the table declares — the sections', the IN/OUT bar's, and every pedal
+ * kind's on the fixtures' board.
  *
  * ⚠ THE BAR'S TWO ROWS ARE NOT IN ANY SECTION and they are still rows: the bar is
  * not a foldable stage, so `PARAM_SECTIONS` does not carry them, and everything
  * this file checks about a row (its path resolves on a fixture, its range holds,
  * its value type is guarded, nothing declares it twice) has to reach them anyway.
- * `voiceDrafts.PARAM_BY_PATH` unions them in for the same reason.
+ * `voiceDrafts.PARAM_BY_PATH` unions them in for the same reason. The pedal rows
+ * are in no section either — see {@link FIXTURE_PEDAL_STAGES}.
  */
 const ALL_PARAMS: readonly Param[] = [
   ...PARAM_SECTIONS.flatMap((section) => section.params),
   ...LEVEL_BAR_PARAMS,
+  ...ALL_PEDAL_PARAMS,
 ];
-
-/**
- * The pedalboard's rows, reached through {@link PEDALS} rather than through the
- * section.
- *
- * Both routes must reach the same rows and the assertion below pins that: the
- * section's `params` is the flattened pedal rows precisely so
- * `voiceDrafts.PARAM_BY_PATH` and this file's walks pick them up with no
- * special case, and a pedal whose rows were declared only on the pedal would be
- * a control the composition page cannot write.
- */
-const ALL_PEDAL_PARAMS: readonly Param[] = PEDALS.flatMap((pedal) => pedal.params);
 
 /** Every sub-branch the table declares, with the section it hangs off. */
 const SUB_BRANCHES: readonly { section: ParamSection; sub: ParamSubBranch }[] = PARAM_SECTIONS.flatMap(
@@ -227,6 +248,77 @@ const PLUCK_LAYER: VoiceLayer = {
   detuneCents: 0,
 };
 
+/**
+ * The fixtures' pedalboard: one pedal of every kind, in `PEDAL_SPECS` order, at
+ * the ids {@link FIXTURE_PEDAL_STAGES} addresses.
+ *
+ * Values are inside the declared ranges on purpose, and deliberately NOT Tone's
+ * defaults: a fixture equal to the seed cannot tell "the row reads the preset"
+ * from "the row fell back".
+ */
+const FIXTURE_PEDALS: PedalBoard = {
+  order: PEDAL_SPECS.map((spec) => fixturePedalId(spec.kind)),
+  byId: {
+    [fixturePedalId('compressor')]: {
+      kind: 'compressor',
+      enabled: false,
+      threshold: -18,
+      ratio: 4,
+      attack: 0.01,
+      release: 0.2,
+      knee: 6,
+    },
+    [fixturePedalId('distortion')]: {
+      kind: 'distortion',
+      enabled: false,
+      drive: 0.25,
+      wet: 0.4,
+      oversample: '2x',
+    },
+    [fixturePedalId('chorus')]: {
+      kind: 'chorus',
+      enabled: false,
+      frequency: 1.2,
+      depth: 0.4,
+      wet: 0.3,
+      type: 'triangle',
+      feedback: 0.1,
+      // SECONDS, like the field it stands in for — 4 ms.
+      delayTime: 0.004,
+      spread: 120,
+    },
+    [fixturePedalId('delay')]: {
+      kind: 'delay',
+      enabled: false,
+      delayTime: 0.3,
+      feedback: 0.2,
+      wet: 0.15,
+    },
+    [fixturePedalId('autoWah')]: {
+      kind: 'autoWah',
+      enabled: false,
+      baseFrequency: 120,
+      octaves: 4,
+      sensitivity: -20,
+      q: 1.5,
+      gain: 3,
+      wet: 0.6,
+    },
+    [fixturePedalId('graphicEq')]: {
+      kind: 'graphicEq',
+      enabled: false,
+      band100Hz: 2,
+      band200Hz: -1,
+      band400Hz: 0,
+      band800Hz: 1.5,
+      band1_6kHz: -2.5,
+      band3_2kHz: 3,
+      band6_4kHz: -0.5,
+      levelDb: -1,
+    },
+  },
+};
+
 const POPULATED_CHASSIS: Omit<VoicePreset, 'id' | 'name' | 'source'> = {
   instrumentId: 'guitar',
   family: 'electric',
@@ -246,50 +338,13 @@ const POPULATED_CHASSIS: Omit<VoicePreset, 'id' | 'name' | 'source'> = {
       octaves: 1.5,
     },
   },
-  // ⚠ EVERY PEDAL, on every fixture. The pedalboard section's probe is `null`,
-  // so a pedal's presence is a per-ROW `requiresBranch` and nothing else — which
-  // means a pedal absent from the fixtures is thirty-eight rows this file walks
-  // over and silently skips. `applies every declared row to at least one fixture`
-  // is the assertion that says so, and this block is what answers it.
-  //
-  // Values are inside the declared ranges on purpose, and deliberately NOT Tone's
-  // defaults: a fixture equal to the seed cannot tell "the row reads the preset"
-  // from "the row fell back".
-  compressor: { enabled: false, threshold: -18, ratio: 4, attack: 0.01, release: 0.2, knee: 6 },
+  // ⚠ EVERY PEDAL KIND, on every fixture. The pedalboard section's probe is
+  // `null` and its rows exist per board, so a kind absent from the fixtures' board
+  // is a set of rows this file never walks. `applies every declared row to at
+  // least one fixture` is the assertion that says so, and this board is what
+  // answers it.
+  pedals: FIXTURE_PEDALS,
   effects: {
-    distortion: { enabled: false, drive: 0.25, wet: 0.4, oversample: '2x' },
-    chorus: {
-      enabled: false,
-      frequency: 1.2,
-      depth: 0.4,
-      wet: 0.3,
-      type: 'triangle',
-      feedback: 0.1,
-      // SECONDS, like the field it stands in for — 4 ms.
-      delayTime: 0.004,
-      spread: 120,
-    },
-    delay: { enabled: false, delayTime: 0.3, feedback: 0.2, wet: 0.15 },
-    autoWah: {
-      enabled: false,
-      baseFrequency: 120,
-      octaves: 4,
-      sensitivity: -20,
-      q: 1.5,
-      gain: 3,
-      wet: 0.6,
-    },
-    graphicEq: {
-      enabled: false,
-      band100Hz: 2,
-      band200Hz: -1,
-      band400Hz: 0,
-      band800Hz: 1.5,
-      band1_6kHz: -2.5,
-      band3_2kHz: 3,
-      band6_4kHz: -0.5,
-      levelDb: -1,
-    },
     // ⚠ NO `amp` BRANCH, and its absence is the fixture agreeing with the app.
     // The five-model classic stage came out of the schema on 2026-09-23: no
     // section declares a row under `effects.amp`, so nothing here can author one
@@ -1257,7 +1312,7 @@ describe('section presence', () => {
 
   it('never calls a probe-less section absent', () => {
     // Source has no probe because a voice always has one, and the pedalboard has
-    // none because the stage is always there — it is the six pedals inside it that
+    // none because the stage is always there — it is the pedals on it that
     // come and go. Level was the third and is not a section any more: its two rows
     // are the IN/OUT bar, which nothing can fold or remove.
     expect(PARAM_SECTIONS.filter((section) => section.presenceProbe === null).map((s) => s.id)).toEqual(
@@ -1362,7 +1417,7 @@ describe('section presence', () => {
         section.id,
       ).toBe(true);
     }
-    for (const pedal of PEDALS) {
+    for (const pedal of FIXTURE_PEDAL_STAGES) {
       expect(typeof pedal.presenceProbe, pedal.id).toBe('string');
     }
   });
@@ -1469,8 +1524,8 @@ const CONDITIONAL_ROW_COUNT =
   // writes to. Counted separately because it is not under the sub-branch.
   1 +
   // EVERY pedal row, without exception. The pedalboard section is always present,
-  // so a pedal's absence has nowhere to live but the row — see `pedalBypass`'s
-  // note in `paramSchema`. A pedal row that lost its gate would drop this count
+  // so a pedal's absence has nowhere to live but the row — see `pedalStage` in
+  // `paramSchema`. A pedal row that lost its gate would drop this count
   // and fail here rather than becoming a control writing into a missing branch.
   ALL_PEDAL_PARAMS.length +
   // Every circuit-amp CONTROL row. The section's probe answers "is there a
@@ -1519,7 +1574,7 @@ const creatableBranches = [
     section.removableBranch === null ? [] : [section.removableBranch],
   ),
   ...SUB_BRANCHES.map(({ sub }) => sub.branch),
-  ...PEDALS.map((pedal) => pedal.branch),
+  ...FIXTURE_PEDAL_STAGES.map((pedal) => pedal.branch),
 ];
 
 /** The deepest creatable branch `path` sits inside, or `undefined` for a row in
@@ -1793,26 +1848,16 @@ describe('descriptor invariants', () => {
     expect(leavesUnder(ALL_PARAMS, 'effects.finalEq')).toEqual(
       Object.keys(FINAL_EQ_LEAVES).sort(),
     );
-    // The pedals, each against its own lib interface. Reached through `PEDALS` so
-    // a pedal dropped from the section's flattened `params` fails here too.
-    expect(leavesUnder(ALL_PEDAL_PARAMS, 'compressor')).toEqual(
-      Object.keys(COMPRESSOR_LEAVES).sort(),
-    );
-    expect(leavesUnder(ALL_PEDAL_PARAMS, 'effects.distortion')).toEqual(
-      Object.keys(DISTORTION_LEAVES).sort(),
-    );
-    expect(leavesUnder(ALL_PEDAL_PARAMS, 'effects.chorus')).toEqual(
-      Object.keys(CHORUS_LEAVES).sort(),
-    );
-    expect(leavesUnder(ALL_PEDAL_PARAMS, 'effects.delay')).toEqual(
-      Object.keys(DELAY_LEAVES).sort(),
-    );
-    expect(leavesUnder(ALL_PEDAL_PARAMS, 'effects.autoWah')).toEqual(
-      Object.keys(AUTO_WAH_LEAVES).sort(),
-    );
-    expect(leavesUnder(ALL_PEDAL_PARAMS, 'effects.graphicEq')).toEqual(
-      Object.keys(GRAPHIC_EQ_LEAVES).sort(),
-    );
+    // The pedals, each kind against its own lib interface, on the fixtures'
+    // board. `kind` is the board's tag rather than a param, so no row writes it.
+    const pedalLeaves = (kind: PedalType) =>
+      leavesUnder(ALL_PEDAL_PARAMS, pedalBranch(fixturePedalId(kind)));
+    expect(pedalLeaves('compressor')).toEqual(Object.keys(COMPRESSOR_LEAVES).sort());
+    expect(pedalLeaves('distortion')).toEqual(Object.keys(DISTORTION_LEAVES).sort());
+    expect(pedalLeaves('chorus')).toEqual(Object.keys(CHORUS_LEAVES).sort());
+    expect(pedalLeaves('delay')).toEqual(Object.keys(DELAY_LEAVES).sort());
+    expect(pedalLeaves('autoWah')).toEqual(Object.keys(AUTO_WAH_LEAVES).sort());
+    expect(pedalLeaves('graphicEq')).toEqual(Object.keys(GRAPHIC_EQ_LEAVES).sort());
     expect(leavesUnder(ALL_PARAMS, 'level')).toEqual(Object.keys(LEVEL_LEAVES).sort());
 
     // Per source kind, because the rows are per source kind. `visibleParams` is
@@ -2169,7 +2214,7 @@ describe('descriptor invariants', () => {
 describe('scope', () => {
   it('declares exactly this slice`s sections, in signal-chain order', () => {
     // `body-filter` sits where `Voice.wireChain` puts the node: after the input
-    // gain, before the compressor and everything the pedalboard does.
+    // gain, before the first pedal and everything the pedalboard does.
     expect(PARAM_SECTIONS.map((s) => s.id)).toEqual([
       'source',
       'body-filter',
@@ -2204,7 +2249,8 @@ describe('scope', () => {
     //
     // `source.kind` and `source.params` came OFF this list with the Source panel;
     // `layer` and `bodyFilter` came off with this one; and the whole pedalboard —
-    // `compressor` and the five under `effects` — came off with the Pedals section.
+    // `pedals`, which the lib's board replaced the six named fields with — came off
+    // with the Pedals section.
     //
     // `effects.reverb` came OFF this list on 2026-09-16, with the lib change that
     // moved it after the cab. What deferred it was that a stage between the amp
@@ -2227,11 +2273,6 @@ describe('scope', () => {
     // assertion then says each one is either reached by a declared row or named on
     // `deferred` as deliberately not yet honoured.
     const EFFECTS_STAGES: Record<keyof EffectsConfig, true> = {
-      distortion: true,
-      chorus: true,
-      delay: true,
-      autoWah: true,
-      graphicEq: true,
       amp: true,
       circuitAmp: true,
       cabIR: true,
@@ -2240,7 +2281,7 @@ describe('scope', () => {
     };
     // Not "not yet", in the `amp` case: not at all. See the note above.
     const deferred: readonly (keyof EffectsConfig)[] = ['amp'];
-    const paths = [...ALL_PARAMS, ...ALL_PEDAL_PARAMS].map((p) => p.path);
+    const paths = ALL_PARAMS.map((p) => p.path);
     for (const stage of Object.keys(EFFECTS_STAGES) as (keyof EffectsConfig)[]) {
       const reached = paths.some((path) => path.startsWith(`effects.${stage}.`));
       expect(reached, `effects.${stage}`).toBe(!deferred.includes(stage));
@@ -2249,12 +2290,12 @@ describe('scope', () => {
     // The other half of the same rule, and the half the old walk was actually
     // written for: nothing declared here reaches OUTSIDE the preset's known
     // branches. `source.kind` and `source.params` came off with the Source panel,
-    // `layer` and `bodyFilter` with this one, `compressor` with the Pedals section.
+    // `layer` and `bodyFilter` with this one, `pedals` with the Pedals section.
     const known = [
       'source.',
       'layer.',
       'bodyFilter.',
-      'compressor.',
+      'pedals.',
       'effects.',
       'level.',
       'inputGainDb',
@@ -2287,20 +2328,27 @@ describe('scope', () => {
 /**
  * The pedalboard.
  *
- * Six stages inside ONE always-present section, which is a shape nothing else in
- * this table has. The assertions here are the ones that shape depends on: that
- * both routes to a pedal's rows reach the same rows, that a pedal's absence is
- * carried by every one of its rows, and that the value the Add gesture writes is
- * complete enough to render.
+ * A list the user assembles inside ONE always-present section, which is a shape
+ * nothing else in this table has. The assertions here are the ones that shape
+ * depends on: that the rows the pane draws come off the board and nowhere else,
+ * that a pedal's absence is carried by every one of its rows, that two pedals of
+ * a kind are two addresses and two names, and that the value the type picker
+ * writes is complete enough to render.
  */
 describe('the pedalboard', () => {
-  /** A preset with no pedalboard at all — the state every pedal starts absent in.
-   *  Not a degenerate fixture: an `effects` object with an amp and no pedals is a
+  /** A preset with no pedalboard at all — the state a new voice starts in. Not a
+   *  degenerate fixture: an `effects` object with an amp and no pedals is a
    *  perfectly ordinary voice. */
-  const NO_PEDALS: VoicePreset = PEDALS.reduce(
-    (preset, pedal) => removeAtPath(preset, pedal.branch),
-    FULLY_POPULATED_SAMPLER,
-  );
+  const NO_PEDALS: VoicePreset = removeAtPath(FULLY_POPULATED_SAMPLER, 'pedals');
+
+  /** `NO_PEDALS` with one freshly seeded pedal of `kind` — what the type picker
+   *  writes — and that pedal's stage. */
+  const seededWith = (kind: PedalType) => {
+    const { board } = addPedal(undefined, kind, PEDAL_SEEDS[kind]);
+    const preset = setAtPath(NO_PEDALS, 'pedals', board);
+    const [stage] = pedalsOf(preset);
+    return { preset, stage };
+  };
 
   it('is one section, and it is never absent', () => {
     // The board is always there; an empty one has no pedals on it. If this ever
@@ -2312,36 +2360,39 @@ describe('the pedalboard', () => {
     expect(sectionApplies(NO_PEDALS, section)).toBe(true);
   });
 
-  it('declares the same rows on the section as on the pedals, in chain order', () => {
-    // ⚠ THE LOAD-BEARING ONE. `voiceDrafts.PARAM_BY_PATH` is built from
-    // `PARAM_SECTIONS.flatMap(s => s.params)`, so a row declared on a pedal and
-    // not reachable there is a control the composition page cannot write and the
-    // agent cannot call — the failure `agent-reachable` exists to catch, and one
-    // no other test in this file would see.
-    expect(sectionAt('pedals').params).toEqual(ALL_PEDAL_PARAMS);
+  it('declares no rows on the section; a fixture`s board yields the stages walked here', () => {
+    // ⚠ THE LOAD-BEARING ONE. The section's `params` is empty because a pedal's
+    // paths carry its board id; `voiceDrafts.setVoiceParam` resolves them through
+    // `pedalParamAt`, and this file walks `FIXTURE_PEDAL_STAGES`. That walk means
+    // something only if it IS what the pane draws for a fixture.
+    expect(sectionAt('pedals').params).toEqual([]);
+    for (const fixture of ALL_FIXTURES) {
+      expect(pedalsOf(fixture), fixture.id).toEqual(FIXTURE_PEDAL_STAGES);
+    }
   });
 
-  it('lists the pedals in the order `Voice.wireChain` builds them', () => {
-    // Named rather than derived: the lib's order is not readable from here, so
-    // this is a pinned claim about `wireChain`, and reordering the table without
-    // reordering the chain would put the pane's board out of step with the sound.
-    expect(PEDALS.map((pedal) => pedal.id)).toEqual([
-      'compressor',
-      'distortion',
-      'chorus',
-      'delay',
-      'auto-wah',
-      'graphic-eq',
+  it('offers every kind the lib`s board can hold, once each', () => {
+    // The lib's `PEDAL_TYPES` is the vocabulary a `Pedal.kind` can take; a kind
+    // missing here is a pedal no picker can add and a saved one no card can draw.
+    expect(PEDAL_SPECS.map((spec) => spec.kind)).toEqual([...PEDAL_TYPES]);
+    expect(PEDAL_SPECS.map((spec) => spec.label)).toEqual([
+      'Compressor',
+      'Distortion',
+      'Chorus',
+      'Delay',
+      'Auto-wah',
+      'Graphic EQ',
     ]);
   });
 
   it('owns one branch per pedal, and gates every one of its rows on it', () => {
-    for (const pedal of PEDALS) {
+    for (const pedal of FIXTURE_PEDAL_STAGES) {
+      expect(pedal.branch, pedal.id).toBe(`pedals.byId.${pedal.id}`);
       expect(pedal.presenceProbe, pedal.id).toBe(pedal.branch);
       expect(pedal.removableBranch, pedal.id).toBe(pedal.branch);
       for (const param of pedal.params) {
         // Under the branch AND gated on it. The first alone would let a row sit
-        // in a missing branch; the second alone would let a row of one pedal be
+        // in a missing pedal; the second alone would let a row of one pedal be
         // gated on another's.
         expect(param.path.startsWith(`${pedal.branch}.`), param.path).toBe(true);
         expect(param.requiresBranch, param.path).toBe(pedal.branch);
@@ -2349,27 +2400,81 @@ describe('the pedalboard', () => {
     }
   });
 
-  it('hides every pedal row while its branch is absent', () => {
+  it('hides every pedal row while its pedal is off the board', () => {
     // The consequence of the gate, stated against a preset rather than against the
-    // descriptors — this is what stops the pane drawing thirty-eight controls over
-    // nothing on a voice with no pedals.
+    // descriptors — this is what stops a write minting a pedal with no kind.
     for (const param of ALL_PEDAL_PARAMS) {
       expect(paramApplies(NO_PEDALS, param), param.path).toBe(false);
+      expect(pedalParamAt(NO_PEDALS, param.path), param.path).toBeUndefined();
     }
-    expect(visibleParams(NO_PEDALS, sectionAt('pedals'))).toEqual([]);
+    expect(pedalsOf(NO_PEDALS)).toEqual([]);
+  });
+
+  it('draws the board in its own order, which is the signal order', () => {
+    const reversed = setAtPath(FULLY_POPULATED_SAMPLER, 'pedals', {
+      ...FIXTURE_PEDALS,
+      order: [...FIXTURE_PEDALS.order].reverse(),
+    });
+    expect(pedalsOf(reversed).map((pedal) => pedal.kind)).toEqual([...PEDAL_TYPES].reverse());
+  });
+
+  it('numbers a second pedal of a kind, and addresses each by its own id', () => {
+    const first = addPedal(undefined, 'distortion', PEDAL_SEEDS.distortion);
+    const second = addPedal(first.board, 'distortion', { ...PEDAL_SEEDS.distortion, drive: 0.9 });
+    const preset = setAtPath(NO_PEDALS, 'pedals', second.board);
+    const stages = pedalsOf(preset);
+    expect(stages.map((stage) => stage.label)).toEqual(['Distortion', 'Distortion 2']);
+    expect(stages.map((stage) => stage.id)).toEqual([first.id, second.id]);
+
+    // One address per pedal, and each resolves to a row gated on ITS pedal.
+    const drive = (id: string) => pedalParamAt(preset, `pedals.byId.${id}.drive`);
+    expect(drive(first.id)?.requiresBranch).toBe(pedalBranch(first.id));
+    expect(drive(second.id)?.requiresBranch).toBe(pedalBranch(second.id));
+    expect(getAtPath(preset, `pedals.byId.${second.id}.drive`)).toBe(0.9);
+    // Nothing outside the board resolves: not an unknown id, not another stage.
+    expect(pedalParamAt(preset, 'pedals.byId.p_nope.drive')).toBeUndefined();
+    expect(pedalParamAt(preset, `pedals.byId.${first.id}.q`)).toBeUndefined();
+    expect(pedalParamAt(preset, 'effects.cabIR.url')).toBeUndefined();
+  });
+
+  it('reads a legacy-shaped voice`s pedals in the old wiring order', () => {
+    // The lib converts the pre-v3 named fields on read (`legacyToPedals`), in the
+    // order they were wired. Asserted here against the app's reading of the
+    // result, because a pane that drew the board in any other order would be a
+    // rack whose order is not the order the signal travels in.
+    const legacy: LegacyVoicePreset = {
+      ...removeAtPath(BARE_SAMPLER, 'pedals'),
+      compressor: { threshold: -20, ratio: 3, attack: 0.01, release: 0.2, knee: 10 },
+      effects: {
+        graphicEq: { ...PEDAL_SEEDS.graphicEq },
+        delay: { ...PEDAL_SEEDS.delay, enabled: false },
+        distortion: { ...PEDAL_SEEDS.distortion },
+      },
+    };
+    const converted = legacyToPedals(legacy);
+    expect(pedalsOf(converted).map((pedal) => pedal.label)).toEqual([
+      'Compressor',
+      'Distortion',
+      'Delay',
+      'Graphic EQ',
+    ]);
+    // A bypassed pedal came across bypassed, not dropped.
+    const delay = pedalsOf(converted)[2];
+    expect(sectionPresence(converted, delay)).toBe('bypassed');
   });
 
   it('seeds a pedal into something every one of its rows can render', () => {
     // The mutation-worthy assertion in this block: a seed missing one required
     // field yields a pedal the engine builds with an `undefined` where a number
-    // belongs, and every other test here still passes. Adding the branch has to
+    // belongs, and every other test here still passes. Adding the pedal has to
     // produce a stage that is complete, in range, and visible.
-    for (const pedal of PEDALS) {
-      const seeded = setAtPath(NO_PEDALS, pedal.branch, pedal.seed);
-      const visible = visibleParams(seeded, sectionAt('pedals')).map((p) => p.path);
-      expect(visible, pedal.id).toEqual(pedal.params.map((p) => p.path));
-      for (const param of pedal.params) {
-        expect(violationsFor(seeded, param)).toEqual([]);
+    for (const kind of PEDAL_TYPES) {
+      const { preset, stage } = seededWith(kind);
+      expect(stage.kind, kind).toBe(kind);
+      const visible = visibleParams(preset, stage).map((p) => p.path);
+      expect(visible, kind).toEqual(stage.params.map((p) => p.path));
+      for (const param of stage.params) {
+        expect(violationsFor(preset, param)).toEqual([]);
       }
     }
   });
@@ -2380,9 +2485,9 @@ describe('the pedalboard', () => {
     // `enabled` is `optional` everywhere — the lib documents `undefined` as
     // implicit-on — so this asserts the seed does not go out of its way to say
     // false, which is what a copy-paste from a fixture would do.
-    for (const pedal of PEDALS) {
-      const seeded = setAtPath(NO_PEDALS, pedal.branch, pedal.seed);
-      expect(sectionPresence(seeded, pedal), pedal.id).toBe('active');
+    for (const kind of PEDAL_TYPES) {
+      const { preset, stage } = seededWith(kind);
+      expect(sectionPresence(preset, stage), kind).toBe('active');
     }
   });
 
@@ -2390,11 +2495,11 @@ describe('the pedalboard', () => {
     // Three states per pedal, from the same function that lights the amp's lamp —
     // which is the whole reason `ParamStage` exists rather than a second copy of
     // this logic for pedals.
-    for (const pedal of PEDALS) {
-      const seeded = setAtPath(NO_PEDALS, pedal.branch, pedal.seed);
-      const off = setAtPath(seeded, `${pedal.branch}.enabled`, false);
-      expect(sectionPresence(off, pedal), pedal.id).toBe('bypassed');
-      expect(sectionPresence(NO_PEDALS, pedal), pedal.id).toBe('absent');
+    for (const kind of PEDAL_TYPES) {
+      const { preset, stage } = seededWith(kind);
+      const off = setAtPath(preset, `${stage.branch}.enabled`, false);
+      expect(sectionPresence(off, stage), kind).toBe('bypassed');
+      expect(sectionPresence(NO_PEDALS, stage), kind).toBe('absent');
     }
   });
 });
@@ -2566,7 +2671,7 @@ describe('the cabinet and the room, as two stages of one pane', () => {
     // path; every stage without an `independent` sub-branch has to keep taking the
     // first, and "has to" is not a comment. The old definition is restated here in
     // full and the two are compared over every preset this file has — including
-    // the pedalboard, whose six `.enabled` rows would be read very differently by
+    // every pedal, each with its own `.enabled` row, which would be read differently by
     // a rule that looked at all the applicable toggles instead of the first.
     const legacy = (preset: VoicePreset, stage: ParamStage): SectionPresence => {
       if (!sectionApplies(preset, stage)) return 'absent';
@@ -2576,7 +2681,7 @@ describe('the cabinet and the room, as two stages of one pane', () => {
 
     const stages: readonly ParamStage[] = [
       ...PARAM_SECTIONS.filter((section) => section.subBranch?.independent !== true),
-      ...PEDALS,
+      ...FIXTURE_PEDAL_STAGES,
     ];
     // The Cabinet is the one stage left out, and nothing else may be: a second
     // independent sub-branch has to come here and argue for itself.

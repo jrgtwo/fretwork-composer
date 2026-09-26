@@ -1,5 +1,7 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 import { reorder, type PaneSpec } from './paneLayout';
+import { DropLine } from './DropLine';
+import { useDragReorder } from './useDragReorder';
 
 export interface Pane extends PaneSpec {
   /** Right-aligned controls in the pane header. */
@@ -24,8 +26,6 @@ export interface PaneLayoutControl {
   onCollapsedChange: (collapsed: readonly string[]) => void;
 }
 
-const DRAG_THRESHOLD = 5;
-
 /**
  * A vertical stack of collapsible, reorderable panes.
  *
@@ -46,8 +46,6 @@ export function PaneStack({
   onCollapsedChange,
 }: { panes: Pane[] } & PaneLayoutControl) {
   const specs = panes;
-  const [dragging, setDragging] = useState<string | null>(null);
-  const [dropIndex, setDropIndex] = useState<number | null>(null);
   const stackRef = useRef<HTMLDivElement>(null);
 
   // The order is caller-owned, so it can disagree with the pane list — the two
@@ -60,60 +58,22 @@ export function PaneStack({
   ];
 
   const paneById = (id: string) => specs.find((p) => p.id === id)!;
-  // Panes the dragged one could land between. A drop index equal to this length
-  // means "after the last pane", which needs its own indicator below the stack.
-  const others = dragging ? order.filter((id) => id !== dragging) : [];
+  // Header drag to reorder. `others` is the panes the dragged one could land
+  // between; a drop index equal to its length means "after the last pane", which
+  // needs its own indicator below the stack.
+  const { dragging, dropIndex, others, onHandleDown } = useDragReorder({
+    order,
+    containerRef: stackRef,
+    itemAttribute: 'data-pane',
+    onDrop: (id, toIndex) => onOrderChange(reorder(order, id, toIndex)),
+  });
 
-  const dropline = (
-    <div
-      data-testid="dropline"
-      className="my-0.5 h-1 flex-none rounded-sm bg-brass-hi shadow-[0_0_10px_rgb(208_168_102/0.6)]"
-    />
-  );
+  const dropline = <DropLine />;
 
   const toggleCollapse = (id: string) => {
     onCollapsedChange(
       collapsed.includes(id) ? collapsed.filter((paneId) => paneId !== id) : [...collapsed, id],
     );
-  };
-
-  // ---- header drag to reorder ---------------------------------------------
-  const onHeaderDown = (id: string) => (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('button')) return; // controls stay clickable
-    e.preventDefault();
-    const startY = e.clientY;
-    let moved = false;
-    let target = order.indexOf(id);
-
-    const move = (ev: MouseEvent) => {
-      if (!moved && Math.abs(ev.clientY - startY) < DRAG_THRESHOLD) return;
-      if (!moved) {
-        moved = true;
-        setDragging(id);
-      }
-      const others = order.filter((o) => o !== id);
-      let next = others.length;
-      for (let i = 0; i < others.length; i++) {
-        const el = stackRef.current?.querySelector<HTMLElement>(`[data-pane="${others[i]}"]`);
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        if (ev.clientY < r.top + r.height / 2) {
-          next = i;
-          break;
-        }
-      }
-      target = next;
-      setDropIndex(next);
-    };
-    const up = () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-      if (moved) onOrderChange(reorder(order, id, target));
-      setDragging(null);
-      setDropIndex(null);
-    };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
   };
 
   return (
@@ -137,7 +97,7 @@ export function PaneStack({
               }`}
             >
               <header
-                onMouseDown={onHeaderDown(id)}
+                onMouseDown={onHandleDown(id)}
                 className="flex flex-none cursor-grab items-center gap-1.5 border-b border-rim-dark bg-linear-to-b from-[#464a54] to-[#3b3f47] px-2 py-1 active:cursor-grabbing"
               >
                 <span aria-hidden className="flex-none px-px font-mono text-[10px] tracking-tighter text-ink-mut">
